@@ -84,6 +84,7 @@ function evidence(over: Partial<PublicationReviewEvidence> = {}): PublicationRev
       lineage: "absent",
       coverage: "absent",
       resubmission_note: "absent",
+      previous_denial: "absent",
     },
     lineage: null,
     ...over,

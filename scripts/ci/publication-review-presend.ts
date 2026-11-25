@@ -678,6 +678,9 @@ function prepareInput(input: ReviewInput, body: ReviewInputsBody): Prepared {
           id: s.id,
           resolver: s.resolver,
           resource_type: s.resource_type,
+          title: s.title,
+          creators: s.creators,
+          publisher: s.publisher,
           license: s.license,
           license_version: s.license_version,
           url: s.evidence_url,
@@ -730,6 +733,13 @@ function prepareInput(input: ReviewInput, body: ReviewInputsBody): Prepared {
         keysShown: 0,
         keysNotShown: 0,
       };
+    }
+    case "previous_denial": {
+      // Closed reason codes and a boolean: the denial's own words never reach this section.
+      if (body.previous_denial === null) return ABSENT;
+      const object = jsonSection(body.previous_denial, cap);
+      if (object === null) return UNREADABLE;
+      return sectionOf(object, cap, scanJsonSection(object));
     }
   }
 }

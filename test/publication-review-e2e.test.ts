@@ -615,7 +615,7 @@ describe("a request whose review passes", () => {
       expect(reviews()[0]).toMatchObject({
         scanner_id: "identifier-scan@abcdef1",
         prompt_version: "publication-review-prompt/2",
-        resolver_version: "license-lineage/1",
+        resolver_version: "license-lineage/2",
         models: JSON.stringify([{ model: "claude-haiku-5-5", effort: "high" }]),
       });
       expect(String(reviews()[0]?.input_digest)).toMatch(/^[0-9a-f]{64}$/);

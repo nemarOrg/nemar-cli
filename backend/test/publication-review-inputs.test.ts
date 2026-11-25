@@ -244,6 +244,61 @@ describe("POST /webhooks/publication-review-inputs", () => {
   });
 });
 
+describe("the previous denial, as codes", () => {
+  /** A denied earlier request of the dataset, then the current request linked to it. */
+  function linked(o: { deniedReason: string; withdrawn?: boolean; automated?: boolean }) {
+    const { requestId, reviewId } = review();
+    const user = h.requestRow(requestId).requested_by as number;
+    const previous = h.db
+      .query(
+        `INSERT INTO publication_requests (dataset_id, requested_by, status, denied_reason, withdrawn_at)
+         VALUES (?, ?, 'denied', ?, ?) RETURNING id`,
+      )
+      .get(PROD_DATASET, user, o.deniedReason, o.withdrawn ? "2026-11-20 10:00:00" : null) as {
+      id: number;
+    };
+    h.db.run("UPDATE publication_requests SET previous_request_id = ? WHERE id = ?", [
+      previous.id,
+      requestId,
+    ]);
+    if (o.automated) {
+      h.db.run(
+        `INSERT INTO audit_log (action, resource_type, resource_id, details)
+         VALUES ('auto_deny', 'dataset', ?, ?)`,
+        [PROD_DATASET, JSON.stringify({ request_id: previous.id })],
+      );
+    }
+    return reviewId;
+  }
+
+  test("an automated denial gives its codes and says it was automated", async () => {
+    const reviewId = linked({
+      deniedReason: '["question_failed","text_withheld"]',
+      automated: true,
+    });
+    const res = await inputs(reviewId);
+    expect(parseReviewInputs(res.body).previous_denial).toEqual({
+      automated: true,
+      reasons: ["question_failed", "text_withheld"],
+    });
+  });
+
+  test("an administrator's words give no codes and are never served", async () => {
+    const words = "The README does not describe the recordings";
+    const reviewId = linked({ deniedReason: words });
+    const res = await inputs(reviewId);
+    expect(parseReviewInputs(res.body).previous_denial).toEqual({ automated: false, reasons: [] });
+    expect(JSON.stringify(res.body)).not.toContain("README does not");
+  });
+
+  test("a withdrawal is not a denial, and a first request has none", async () => {
+    const reviewId = linked({ deniedReason: "question_failed", withdrawn: true });
+    expect(parseReviewInputs((await inputs(reviewId)).body).previous_denial).toBeNull();
+    h.db.run("UPDATE publication_requests SET previous_request_id = NULL");
+    expect(parseReviewInputs((await inputs(reviewId)).body).previous_denial).toBeNull();
+  });
+});
+
 describe("the coverage counts, read from either screen report version", () => {
   const v2 = (over: Record<string, unknown> = {}) =>
     JSON.stringify({

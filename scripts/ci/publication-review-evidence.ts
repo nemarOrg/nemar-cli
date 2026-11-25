@@ -612,6 +612,7 @@ export const NO_INPUTS: EvidenceInputs = {
       lineage: "absent",
       coverage: "absent",
       resubmission_note: "absent",
+      previous_denial: "absent",
     },
     withheld_findings: {},
   },

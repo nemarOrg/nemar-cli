@@ -35,6 +35,7 @@ import {
   parsePublicationReviewEvidence,
   parsePublicationReviewReport,
   parseReviewInputs,
+  previousDenialReasonsOf,
   reasonStatement,
   reportReasons,
   verdictOf,
@@ -526,5 +527,56 @@ describe("a stored version-1 report reads as it always did", () => {
     expect(() =>
       parsePublicationReviewReport({ ...JSON.parse(JSON.stringify(v1)), note_answer: "pass" }),
     ).toThrow();
+  });
+});
+
+describe("the previous denial: closed codes only (ADR 0139, decision 5)", () => {
+  test("a denial's column gives its reason codes only when it holds nothing but codes", () => {
+    expect(previousDenialReasonsOf('["question_failed","text_withheld"]')).toEqual([
+      "question_failed",
+      "text_withheld",
+    ]);
+    expect(previousDenialReasonsOf("text_withheld, question_failed question_failed")).toEqual([
+      "question_failed",
+      "text_withheld",
+    ]);
+    // An administrator's own words, or codes mixed with words, give nothing: no free text.
+    for (const free of [
+      "Please expand the README",
+      "question_failed because the README is thin",
+      '["question_failed","see /Users/jdoe"]',
+      "",
+      null,
+    ]) {
+      expect(previousDenialReasonsOf(free)).toEqual([]);
+    }
+  });
+
+  test("the section is sent as codes, judged by the note's question, and absent with no denial", () => {
+    const body = fullInputs();
+    const r = presendInputs(body);
+    expect(r.states.previous_denial).toBe("sent");
+    const user = userOf(body);
+    expect(user).toContain(`<untrusted-${NONCE} kind="previous_denial">`);
+    expect(r.cleared.previous_denial).toBe(
+      JSON.stringify({ automated: true, reasons: ["question_failed"] }, null, 2),
+    );
+    expect(presendInputs(fullInputs({ previous_denial: null })).states.previous_denial).toBe(
+      "absent",
+    );
+    expect(userOf(fullInputs({ previous_denial: null }))).not.toContain('kind="previous_denial"');
+  });
+
+  test("the job refuses a body whose previous denial holds anything but codes", () => {
+    for (const bad of [
+      { automated: true, reasons: ["Please expand the README"] },
+      { automated: "yes", reasons: [] },
+      { automated: false, reasons: ["question_failed", "question_failed"] },
+      { automated: false, reasons: [], note: "x" },
+    ]) {
+      expect(() => parseReviewInputs({ ...emptyInputs(), previous_denial: bad })).toThrow(
+        ReviewInputsError,
+      );
+    }
   });
 });

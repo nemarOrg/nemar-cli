@@ -32,9 +32,10 @@ import {
   MAX_INPUT_SOURCES,
   REVIEW_INPUTS_VERSION,
   type ReviewInputsBody,
+  previousDenialReasonsOf,
 } from "../../../shared/publication-review.js";
 import { README_CANDIDATES } from "../../../shared/readme-candidates.js";
-import { readResubmissionNote } from "../../../shared/resubmission-note.js";
+import { AUTO_DENY_AUDIT_ACTION, readResubmissionNote } from "../../../shared/resubmission-note.js";
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getFileContent } from "./github.js";
@@ -235,6 +236,49 @@ export function enrichmentFieldsOf(
 }
 
 // ---------------------------------------------------------------------------------------------
+// The previous denial
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The denial a request answers (`previous_request_id`, migration 0151), as codes: whether an
+ * automated agent made it (an `auto_deny` audit row names the request, ADR 0139 decision 2) and the
+ * closed reason codes its `denied_reason` names. Null when there is no previous request, or it was
+ * not a denial (a withdrawal is stored as denied with `withdrawn_at` set, and is not one). An
+ * administrator's free-text reason gives no codes; its words are never read into the inputs.
+ */
+export async function previousDenialOf(
+  db: D1Database,
+  datasetId: string,
+  previousRequestId: number | null,
+): Promise<ReviewInputsBody["previous_denial"]> {
+  if (previousRequestId === null) return null;
+  const previous = await db
+    .prepare(
+      `SELECT id, status, withdrawn_at, denied_reason FROM publication_requests
+        WHERE id = ? AND dataset_id = ?`,
+    )
+    .bind(previousRequestId, datasetId)
+    .first<{
+      id: number;
+      status: string;
+      withdrawn_at: string | null;
+      denied_reason: string | null;
+    }>();
+  if (!previous || previous.status !== "denied" || previous.withdrawn_at !== null) return null;
+  // `json_valid` guards `json_extract`, which throws on an audit payload that is not JSON.
+  const agent = await db
+    .prepare(
+      `SELECT 1 AS hit FROM audit_log
+        WHERE action = ? AND resource_type = 'dataset' AND resource_id = ?
+          AND CASE WHEN json_valid(details) THEN json_extract(details, '$.request_id') END = ?
+        LIMIT 1`,
+    )
+    .bind(AUTO_DENY_AUDIT_ACTION, datasetId, previous.id)
+    .first<{ hit: number }>();
+  return { automated: agent !== null, reasons: previousDenialReasonsOf(previous.denied_reason) };
+}
+
+// ---------------------------------------------------------------------------------------------
 // The answer
 // ---------------------------------------------------------------------------------------------
 
@@ -274,12 +318,13 @@ export async function publicationReviewInputs(
 
   const request = await db
     .prepare(
-      `SELECT resubmission_note, identifier_screen_report, anonymous
+      `SELECT resubmission_note, previous_request_id, identifier_screen_report, anonymous
          FROM publication_requests WHERE id = ? AND dataset_id = ?`,
     )
     .bind(row.requestId, datasetId)
     .first<{
       resubmission_note: string | null;
+      previous_request_id: number | null;
       identifier_screen_report: string | null;
       anonymous: number;
     }>();
@@ -362,6 +407,9 @@ export async function publicationReviewInputs(
         id: s.id,
         resolver: s.resolver,
         resource_type: s.resource_type,
+        title: s.title,
+        creators: s.creators,
+        publisher: s.publisher,
         license: s.license,
         license_version: s.license_version,
         evidence_url: s.evidence_url,
@@ -372,6 +420,7 @@ export async function publicationReviewInputs(
       resolver_version: lineage.resolver_version,
     },
     resubmission_note: note.note,
+    previous_denial: await previousDenialOf(db, datasetId, request.previous_request_id),
     coverage: coverageOf(readNarrowScreenReport(request.identifier_screen_report), row.headSha),
   };
   return { kind: "ok", body };

@@ -35,7 +35,7 @@
 
 import type { FindingKind } from "./identifier-scan.js";
 import { FINDING_KINDS, KNOWN_FORMATS, type ScreenGate } from "./identifier-screen-report.js";
-import { LINEAGE_OUTCOMES, type LineageOutcome } from "./license-lineage.js";
+import { LINEAGE_OUTCOMES, type LineageOutcome, MAX_CREATORS } from "./license-lineage.js";
 import { SEMVER, isOneOf } from "./pr-review.js";
 import { PUBLICATION_DATASET_ID_RE } from "./publication-limits.js";
 import { MINIMUM_FAILURES, MIN_NAME_LENGTH, type MinimumFailure } from "./submission-minimums.js";
@@ -256,6 +256,8 @@ export function isWithheld(state: DocumentState): boolean {
  *  - `lineage`: the lineage outcome and each source's normalized license.
  *  - `coverage`: the identifier screen's counts per format (files, read, partial, failed).
  *  - `resubmission_note`: the depositor's note (ADR 0139, decision 5), when the request has one.
+ *  - `previous_denial`: when the request follows a denial, the closed reason codes it was denied
+ *    for and whether an automated agent denied it. Codes only: never the denial's free text.
  */
 export const REVIEW_INPUTS = [
   "enrichment",
@@ -263,6 +265,7 @@ export const REVIEW_INPUTS = [
   "lineage",
   "coverage",
   "resubmission_note",
+  "previous_denial",
 ] as const;
 export type ReviewInput = (typeof REVIEW_INPUTS)[number];
 
@@ -273,6 +276,7 @@ export const INPUT_CHAR_CAPS: Record<ReviewInput, number> = {
   lineage: 2_000,
   coverage: 1_000,
   resubmission_note: 2_000,
+  previous_denial: 1_000,
 };
 
 /** The fields of the enrichment the model is shown; every other field is left out unread. */
@@ -565,6 +569,10 @@ export interface InputSource {
   id: string;
   resolver: string | null;
   resource_type: string | null;
+  /** The registry record's title, creators (at most ten names) and publisher. */
+  title: string | null;
+  creators: string[];
+  publisher: string | null;
   license: string | null;
   license_version: string | null;
   evidence_url: string | null;
@@ -597,6 +605,12 @@ export interface ReviewInputsBody {
   };
   /** The request's resubmission note (ADR 0139, decision 5), or null. */
   resubmission_note: string | null;
+  /**
+   * The denial the request answers (`previous_request_id`), when it was a denial and not a
+   * withdrawal: whether an automated agent made it, and the closed reason codes it named
+   * ({@link previousDenialReasonsOf}). Null when the request follows no denial.
+   */
+  previous_denial: { automated: boolean; reasons: ReasonCode[] } | null;
   coverage: { source: CoverageSource; formats: Record<string, CoverageTally> };
 }
 
@@ -624,7 +638,16 @@ const strOrNullIn = (v: unknown): string | null =>
 export function parseReviewInputs(raw: unknown): ReviewInputsBody {
   if (!isRecord(raw)) badInputs();
   const r = raw as Record<string, unknown>;
-  if (!hasExactKeys(r, ["v", "enrichment", "lineage", "resubmission_note", "coverage"])) {
+  if (
+    !hasExactKeys(r, [
+      "v",
+      "enrichment",
+      "lineage",
+      "resubmission_note",
+      "coverage",
+      "previous_denial",
+    ])
+  ) {
     badInputs();
   }
   if (r.v !== REVIEW_INPUTS_VERSION) badInputs();
@@ -659,10 +682,20 @@ export function parseReviewInputs(raw: unknown): ReviewInputsBody {
     if (typeof x.id !== "string" || typeof x.status !== "string" || typeof x.origin !== "string") {
       badInputs();
     }
+    if (
+      !Array.isArray(x.creators) ||
+      x.creators.length > MAX_CREATORS ||
+      !x.creators.every((c) => typeof c === "string")
+    ) {
+      badInputs();
+    }
     return {
       id: x.id as string,
       resolver: strOrNullIn(x.resolver),
       resource_type: strOrNullIn(x.resource_type),
+      title: strOrNullIn(x.title),
+      creators: [...(x.creators as string[])],
+      publisher: strOrNullIn(x.publisher),
       license: strOrNullIn(x.license),
       license_version: strOrNullIn(x.license_version),
       evidence_url: strOrNullIn(x.evidence_url),
@@ -699,8 +732,26 @@ export function parseReviewInputs(raw: unknown): ReviewInputsBody {
     formats[key] = out;
   }
 
+  let previous_denial: ReviewInputsBody["previous_denial"] = null;
+  if (r.previous_denial !== null) {
+    const p = r.previous_denial;
+    if (!isRecord(p) || !hasExactKeys(p, ["automated", "reasons"])) badInputs();
+    const d = p as Record<string, unknown>;
+    if (typeof d.automated !== "boolean" || !Array.isArray(d.reasons)) badInputs();
+    const reasons = d.reasons as unknown[];
+    if (
+      reasons.length > REASON_CODES.length ||
+      !reasons.every((c) => isOneOf(REASON_CODES, c)) ||
+      new Set(reasons).size !== reasons.length
+    ) {
+      badInputs();
+    }
+    previous_denial = { automated: d.automated as boolean, reasons: reasons as ReasonCode[] };
+  }
+
   return {
     v: REVIEW_INPUTS_VERSION,
+    previous_denial,
     enrichment,
     lineage: {
       outcome: l.outcome as LineageOutcome,
@@ -711,6 +762,26 @@ export function parseReviewInputs(raw: unknown): ReviewInputsBody {
     resubmission_note: strOrNullIn(r.resubmission_note),
     coverage: { source: coverage.source as CoverageSource, formats },
   };
+}
+
+/**
+ * The closed reason codes a denial named, from its `denied_reason` column: a JSON array of codes,
+ * or codes separated by commas or spaces. Codes only: a column holding anything that is not a
+ * reason code (an administrator's own words) gives none, so no free text can reach the model. Each
+ * code once, in {@link REASON_CODES} order.
+ */
+export function previousDenialReasonsOf(deniedReason: string | null): ReasonCode[] {
+  if (deniedReason === null) return [];
+  let tokens: unknown[];
+  try {
+    const parsed: unknown = JSON.parse(deniedReason);
+    tokens = Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    tokens = deniedReason.split(/[\s,]+/).filter((t) => t !== "");
+  }
+  if (tokens.length === 0 || !tokens.every((t) => isOneOf(REASON_CODES, t))) return [];
+  const named = new Set(tokens as ReasonCode[]);
+  return REASON_CODES.filter((c) => named.has(c));
 }
 
 /** Whether a lineage's attribution is declared where the DOI's IsDerivedFrom is made from. */
@@ -2163,6 +2234,7 @@ export const INPUT_LABEL: Record<ReviewInput, string> = {
   lineage: "the license lineage",
   coverage: "the identifier screen's coverage counts",
   resubmission_note: "the resubmission note",
+  previous_denial: "the previous denial's reasons",
 };
 
 /** A lineage outcome that needs action, as the detail of `license_lineage_unconfirmed` says it. */

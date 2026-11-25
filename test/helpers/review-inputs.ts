@@ -19,6 +19,7 @@ export function emptyInputs(over: Partial<ReviewInputsBody> = {}): ReviewInputsB
       resolver_version: RESOLVER_VERSION,
     },
     resubmission_note: null,
+    previous_denial: null,
     coverage: { source: "none", formats: {} },
     ...over,
   };
@@ -53,6 +54,9 @@ export function fullInputs(over: Partial<ReviewInputsBody> = {}): ReviewInputsBo
           id: "10.18112/openneuro.ds000001.v1.0.0",
           resolver: "datacite",
           resource_type: "Dataset",
+          title: "A source dataset of resting EEG",
+          creators: ["Doe, J.", "Roe, R."],
+          publisher: "OpenNeuro",
           license: "cc-by",
           license_version: "4.0",
           evidence_url: "https://api.datacite.org/dois/10.18112/openneuro.ds000001.v1.0.0",
@@ -64,6 +68,7 @@ export function fullInputs(over: Partial<ReviewInputsBody> = {}): ReviewInputsBo
       resolver_version: RESOLVER_VERSION,
     },
     resubmission_note: "We expanded the README and added the ethics approval number.",
+    previous_denial: { automated: true, reasons: ["question_failed"] },
     coverage: {
       source: "screen_v2",
       formats: { edf: { files: 60, read: 58, partial: 1, failed: 1 } },
