@@ -5,11 +5,15 @@
  *
  * What it reports:
  *
- * - `nirx-subject-name` (identifier): the subject's `Name=` in an `.inf` (or NIRSport2's
- *   `experiment_subject=`) when it is not empty, reads as a name, and is not the BIDS subject label
- *   of the file's path.
- * - `nirx-demographics` (review): a birth date finer than the year, or an `Age=` that holds a value
- *   other than empty, `0` or a placeholder.
+ * - `nirx-subject-name` (identifier): a person field (the subject's `Name=` in an `.inf`,
+ *   NIRSport2's `experiment_subject=`, an operator or experimenter) that is not empty, reads as a
+ *   name, and is not the BIDS subject label of the file's path.
+ * - `nirx-demographics`: a birth date, by A4's rule: to the day it is an identifier; a year or a
+ *   year and month is review; empty or a placeholder is nothing. An age alone is nothing (ages are
+ *   routinely public in participants.tsv).
+ * - `nirx-freetext` (review) and `local-user-path`: an email address, a phone number or a
+ *   home-directory path in a contact or notes field (`Contact Information`, `Notes`, and
+ *   NIRSport2's `experiment_subject_contact_info` and `experiment_remarks`).
  * - `nirx-header-date` (a date kind, ADR 0090): the header's acquisition `Date=`, unless it is
  *   empty or a year-only date. A date in a layout the scanner cannot parse is reported too: the
  *   field holds nothing but the acquisition date.
@@ -17,17 +21,29 @@
  * **Companions are paired by name** (lead ruling, phase A2): an `.hdr` needs `<base>.wl1` and
  * `<base>.wl2` beside it and claims `<base>.dat`, `.evt` and `.inf` when they are there (NIRSport2's
  * base drops `_config`); an `.inf` needs `<base>.hdr`. A NIRStar header whose `FileName=` is not its
- * own base name is read `partial` with reason `companion-missing`.
+ * own base name carries the note `companion-name-mismatch` (never a gap).
+ *
+ * A file with the extension that does not start like a NIRx text header (an Analyze `.hdr` of an
+ * MRI, a Windows driver `.inf`) is `not-applicable`: counted as unscreened, never `unchecked`.
  */
 
 import type { FormatReader, RangeSource, ReaderResult } from "../identifier-readers";
-import { type Finding, hasDateFinerThanYear, isNameLike, shapeOf } from "../identifier-scan";
+import {
+  type Finding,
+  datePrecision,
+  hasDateFinerThanYear,
+  isNameLike,
+  scanTextForLocalPaths,
+  shapeOf,
+} from "../identifier-scan";
 import {
   type IniSection,
   TEXT_HEADER_LIMITS,
   checkReference,
+  contactIn,
   decodeHeader,
   entryValue,
+  isPersonField,
   pairByName,
   parseIni,
   readHeader,
@@ -48,8 +64,13 @@ function nirxBase(path: string): string {
     : withoutExt;
 }
 
-/** `Age=` values that mean nothing was entered. */
-const EMPTY_AGE = /^(|0+(\.0+)?|-|n\/?a|none|unknown|x+|\?+)$/i;
+/** Values that mean nothing was entered. */
+const PLACEHOLDER = /^(|0+(\.0+)?|-+|n\/?a|none|unknown|x+|\?+|00[./-]00[./-]0{2,4})$/i;
+
+/** A birth-date field. */
+const BIRTH_FIELD = /birth|\bdob\b/i;
+/** A free-text field that may hold contact details. */
+const FREE_TEXT_FIELD = /contact|notes|remarks/i;
 
 /** The BIDS subject label of a path (`sub-<label>`), lowercased, or null. */
 function subjectLabel(path: string): string | null {
@@ -109,46 +130,51 @@ function isSubjectLabel(name: string, path: string): boolean {
   return bare === label;
 }
 
-/** A demographics entry: the section and the keys its subject name, age and birth date use. */
-interface Demographics {
-  section: IniSection | undefined;
-  name: string;
-  age: string;
-}
-
-/** Findings from a subject block (the `.inf`'s demographics, or NIRSport2's experiment notes). */
-function screenDemographics(d: Demographics, path: string, findings: Finding[]): void {
-  const name = entryValue(d.section, d.name);
-  if (name !== undefined && name !== "" && nameIsNameLike(name) && !isSubjectLabel(name, path)) {
-    findings.push({
-      kind: "nirx-subject-name",
-      severity: "identifier",
-      field: d.name,
-      shape: shapeOf(name),
-    });
-  }
-  let flagged = false;
-  for (const { key, value } of d.section?.entries ?? []) {
-    if (flagged) break;
-    if (/birth|\bdob\b/i.test(key) && hasDateFinerThanYear(value)) {
-      flagged = true;
-      findings.push({
+/**
+ * Findings from a subject block (an `.inf`'s demographics, or NIRSport2's or NIRStar's experiment
+ * notes): person fields, birth dates, and contact or notes text.
+ */
+function screenSubjectBlock(
+  section: IniSection | undefined,
+  path: string,
+  findings: Finding[],
+): void {
+  const seen = new Set<string>();
+  const once = (finding: Finding) => {
+    if (seen.has(finding.kind)) return;
+    seen.add(finding.kind);
+    findings.push(finding);
+  };
+  for (const { key, value } of section?.entries ?? []) {
+    const v = value.trim();
+    if (v === "") continue;
+    if (BIRTH_FIELD.test(key)) {
+      if (PLACEHOLDER.test(v)) continue;
+      const precision = datePrecision(v);
+      once({
         kind: "nirx-demographics",
-        severity: "review",
+        severity: precision === "day" ? "identifier" : "review",
         field: "birth date",
-        shape: shapeOf(value),
+        shape: shapeOf(v),
       });
+    } else if (FREE_TEXT_FIELD.test(key)) {
+      const local = scanTextForLocalPaths(v);
+      if (local.length > 0) once({ ...(local[0] as Finding), field: key });
+      if (contactIn(v) !== null) {
+        once({ kind: "nirx-freetext", severity: "review", field: key, shape: shapeOf(v) });
+      }
+    } else if (isPersonField(key)) {
+      if (PLACEHOLDER.test(v) || !nameIsNameLike(v) || isSubjectLabel(v, path)) continue;
+      once({ kind: "nirx-subject-name", severity: "identifier", field: key, shape: shapeOf(v) });
     }
   }
-  const age = entryValue(d.section, d.age);
-  if (!flagged && age !== undefined && !EMPTY_AGE.test(age.trim())) {
-    findings.push({
-      kind: "nirx-demographics",
-      severity: "review",
-      field: d.age,
-      shape: shapeOf(age),
-    });
-  }
+}
+
+/** The first section a text holds, lowercased, or null: how a NIRx file must start. */
+function firstSection(text: string): string | null {
+  const line = text.split(/\r\n|\r|\n/).find((l) => l.trim() !== "");
+  const m = line === undefined ? null : /^\s*\[([^\]]*)\]\s*$/.exec(line);
+  return m ? (m[1] as string).trim().toLowerCase() : null;
 }
 
 /**
@@ -157,16 +183,17 @@ function screenDemographics(d: Demographics, path: string, findings: Finding[]):
  */
 export function scanNirxText(text: string, path: string, whole: boolean): ReaderResult {
   const findings: Finding[] = [];
-  const sections = parseIni(text);
   const isHeader = path.toLowerCase().endsWith(HDR);
+  // An `.hdr` that is not a NIRx header (an Analyze image header) or an `.inf` that is not NIRx's
+  // (a Windows driver file) is not this reader's: unscreened, never a gap in a NIRx read.
+  if (firstSection(text) !== (isHeader ? "generalinfo" : "subject demographics")) {
+    return { findings, coverage: "not-applicable" };
+  }
+  const sections = parseIni(text);
   let unmatched = false;
 
   if (isHeader) {
     const general = sections.get("generalinfo");
-    if (!general) {
-      // An `.hdr` that is not a NIRx header (an Analyze image header, say): nothing here is read.
-      return { findings, coverage: "partial", incomplete: "unsupported-version" };
-    }
     const date = entryValue(general, "Date");
     if (date !== undefined && date !== "" && !isYearOnlyDate(date)) {
       findings.push({
@@ -182,27 +209,15 @@ export function scanNirxText(text: string, path: string, whole: boolean): Reader
       const { name } = splitPath(nirxBase(path));
       if (checkReference(fileName, name, name) !== "match") unmatched = true;
     }
-    // NIRSport2 keeps the subject in the header's experiment notes.
-    screenDemographics(
-      {
-        section: sections.get("experimentnotes"),
-        name: "experiment_subject",
-        age: "experiment_subject_age",
-      },
-      path,
-      findings,
-    );
+    // NIRSport2 keeps the subject in the header's experiment notes; NIRStar keeps notes there.
+    screenSubjectBlock(sections.get("experimentnotes"), path, findings);
   } else {
-    const demographics = sections.get("subject demographics");
-    if (!demographics) {
-      return { findings, coverage: "partial", incomplete: "unsupported-version" };
-    }
-    screenDemographics({ section: demographics, name: "Name", age: "Age" }, path, findings);
+    screenSubjectBlock(sections.get("subject demographics"), path, findings);
   }
 
-  if (!whole) return { findings, coverage: "partial", incomplete: "limit" };
-  if (unmatched) return { findings, coverage: "partial", incomplete: "companion-missing" };
-  return { findings, coverage: "complete" };
+  const notes = unmatched ? { notes: ["companion-name-mismatch" as const] } : {};
+  if (!whole) return { findings, coverage: "partial", incomplete: "limit", ...notes };
+  return { findings, coverage: "complete", ...notes };
 }
 
 /**

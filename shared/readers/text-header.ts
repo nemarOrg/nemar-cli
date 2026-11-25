@@ -12,12 +12,21 @@ import type { CompanionCheck, RangeSource } from "../identifier-readers";
 /** A text header is read whole up to this many bytes; past it the read is `partial` (`limit`). */
 export const TEXT_HEADER_MAX_BYTES = 1024 * 1024;
 
+/** A BrainVision marker file is read whole up to this many bytes (lead ruling, phase A2). */
+export const MARKER_FILE_MAX_BYTES = 16 * 1024 * 1024;
+
 /** The limits of a text-header reader: one file of at most {@link TEXT_HEADER_MAX_BYTES}. */
 export const TEXT_HEADER_LIMITS = {
   maxBytes: TEXT_HEADER_MAX_BYTES,
   maxReads: 4,
   maxInflatedBytes: 0,
   timeMs: 60_000,
+} as const;
+
+/** The limits of a BrainVision marker file: as a header's, up to {@link MARKER_FILE_MAX_BYTES}. */
+export const MARKER_FILE_LIMITS = {
+  ...TEXT_HEADER_LIMITS,
+  maxBytes: MARKER_FILE_MAX_BYTES,
 } as const;
 
 /** A header file's bytes, and whether they are all of it. */
@@ -170,4 +179,40 @@ export function checkReference(
   if (/[\\/]/.test(v) || v === ".." || v === ".") return "elsewhere";
   const resolved = v.replace(/\$b/gi, headerBase);
   return resolved.toLowerCase() === expected.toLowerCase() ? "match" : "mismatch";
+}
+
+/**
+ * Field names that hold a person: the list phase A4 uses for its free-text name rule (`name`,
+ * `subject`, `patient`, `operator`, `experimenter`), defined here too because A4 has not merged;
+ * the two must stay equal. Fields that describe the person rather than name them, and fields that
+ * name a thing (the experiment, a file, a device, a montage), are excluded.
+ */
+export const PERSON_FIELD = /name|subject|patient|operator|experimenter/i;
+const NOT_A_NAME_FIELD =
+  /age|gender|sex|birth|dob|contact|info|type|history|notes|remarks|date|experiment_name|file_?name|device|study|probe|montage|paradigm|task/i;
+
+/** True for a field that names a person (and not one that describes them). */
+export const isPersonField = (key: string): boolean =>
+  PERSON_FIELD.test(key) && !NOT_A_NAME_FIELD.test(key);
+
+/** An email address. */
+const EMAIL = /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+/u;
+
+/**
+ * A phone number: seven to fifteen digits in groups, written with a leading `+` or after a word
+ * that says so (`tel`, `phone`, `mobile`). A bare run of grouped digits is not one, because marker
+ * codes, dates and amplifier settings look the same.
+ */
+const PHONE =
+  /(?:\+|\b(?:tel|telephone|phone|fon|mobile|cell)\b\.?:?\s*)\(?\d[\d\s().-]{5,}\d(?![\d])/i;
+
+/** Whether some free text holds an email address or a phone number, and which (email first). */
+export function contactIn(text: string): "email" | "phone" | null {
+  if (EMAIL.test(text)) return "email";
+  const phone = PHONE.exec(text);
+  if (phone) {
+    const digits = phone[0].replace(/\D/g, "").length;
+    if (digits >= 7 && digits <= 15) return "phone";
+  }
+  return null;
 }

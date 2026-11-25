@@ -17,23 +17,28 @@ License: BSD-3-Clause (the MNE-Python license).
 | `test.vmrk` | A `New Segment` marker with a timestamp: `brainvision-segment-date` |
 | `test_old_layout_latin1_software_filter.vhdr` | An older layout with no `Codepage` line (its bytes are ASCII): clean |
 | `test_old_layout_latin1_software_filter.vmrk` | Two dated `New Segment` markers: one finding per file |
-| `testv2.vhdr` | Names `DataFile=test.eeg`, not its own base name: `partial` with `companion-missing` |
+| `testv2.vhdr` | Names `DataFile=test.eeg`, not its own base name: the note `companion-name-mismatch` on a complete read |
 | `testv2.vmrk` | A `New Segment` marker without a timestamp: no finding (it names `test.eeg` too) |
 
 ## NIRx (`nirx/`)
 
 From the MNE testing data (`mne-tools/mne-testing-data`, directory `NIRx/`), at commit `20cc221d737a` (fetched 2026-11-25).
-That repository carries no license file for `NIRx/`;
-its README asks contributors to add one and prefers CC0,
-and the data is distributed for MNE-Python's tests (BSD-3-Clause).
-The license question is recorded in the A2 pull request.
+License: BSD-3-Clause, the license of the MNE project whose testing-data repository this is
+(the lead's ruling of 2026-11-25 on the A2 pull request; the repository itself carries no separate license file).
 
 | File | Source path | What it is used for |
 |---|---|---|
 | `NIRS-2019-10-02_003.hdr` | `nirscout/nirx_15_2_recording/` | NIRStar header: `nirx-header-date`; `FileName` matches its base name |
-| `NIRS-2019-10-02_003.inf` | `nirscout/nirx_15_2_recording/` | An `Age=` that is filled in: `nirx-demographics`; its `Name=` is a test label, not a name |
+| `NIRS-2019-10-02_003.inf` | `nirscout/nirx_15_2_recording/` | An `Age=` that is filled in: no finding (an age alone is nothing); its `Name=` is a test label, not a name |
 | `NIRS-2020-12-02_018.inf` | `nirsport_v1/nirx_15_3_recording_wo_saturation/` | A clean `.inf` (a test label, `Age=0`): no finding |
-| `2025-10-29_002_config.hdr` | `nirsport_v2/aurora_2025_2/` | A NIRSport2 header: date and the age in its experiment notes |
+| `2025-10-29_002_config.hdr` | `nirsport_v2/aurora_2025_2/` | A NIRSport2 header: the date only (its experiment notes hold an age and an experiment name, neither a finding) |
+
+## Analyze (`analyze/`)
+
+`analyze.hdr` is `nibabel/tests/data/analyze.hdr` from NiBabel (`nipy/nibabel`) at commit `db81c605e9c5` (fetched 2026-11-25),
+a 348-byte Analyze 7.5 image header.
+License: MIT (NiBabel's `COPYING`; the file is not among the test files it lists under other licenses).
+It is the `.hdr` that is not NIRx: the NIRx reader must call it `not-applicable`.
 
 ## Edited fixtures
 
@@ -52,6 +57,7 @@ Other edits a test needs (an absolute `DataFile`, a missing companion) are made 
 ## SHA-256
 
 ```
+e4f069fda1f7309160cc74ca76836c394723f152a62574ff8ef79c336539a331  analyze/analyze.hdr
 b719d106612d78a913ebec53244845857df1e80cf135f16223ea739fb83b35c2  brainvision/edited-comment-name.vhdr
 3543c87998599ffa49c4eb32bcfa1666904464ab756c023b9b168f87eda4b153  brainvision/test_old_layout_latin1_software_filter.vhdr
 65e3a8eaf6c5efe041aa0b88534b17cd1c61498b21af5065cfd999cdf0888d0c  brainvision/test_old_layout_latin1_software_filter.vmrk

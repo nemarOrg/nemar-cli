@@ -13,23 +13,33 @@ import {
   bufferSource,
   cachedSource,
   formatCoverage,
+  limitsFor,
   readerFor,
 } from "../shared/identifier-readers";
-import { classifyDataset, readRecordings } from "../shared/identifier-report-builder";
+import {
+  classifyDataset,
+  coverageFields,
+  readRecordings,
+} from "../shared/identifier-report-builder";
 import { DATE_KINDS, DIRECT_KINDS, OTHER_RECORDING_EXTENSIONS } from "../shared/identifier-scan";
-import { KIND_COPY } from "../shared/identifier-screen-copy";
+import { KIND_COPY, NOTE_COPY } from "../shared/identifier-screen-copy";
 import { BRAINVISION_READER } from "../shared/readers/brainvision";
-import { TEXT_HEADER_MAX_BYTES, decodeHeader } from "../shared/readers/text-header";
+import {
+  MARKER_FILE_MAX_BYTES,
+  TEXT_HEADER_MAX_BYTES,
+  decodeHeader,
+} from "../shared/readers/text-header";
 
 const DIR = join(import.meta.dir, "fixtures/text-headers/brainvision");
 const fixture = (name: string) => new Uint8Array(readFileSync(join(DIR, name)));
 const text = (name: string) => new TextDecoder().decode(fixture(name));
 const encode = (s: string) => new TextEncoder().encode(s);
 
-/** Scan bytes as if they were the file at `path`, through the reader's own limits. */
+/** Scan bytes as if they were the file at `path`, under the limits the registry gives that path. */
 async function scan(bytes: Uint8Array, path: string) {
   const r = BRAINVISION_READER;
-  return r.scan(cachedSource(bufferSource(bytes), r.limits), path, r.limits);
+  const limits = limitsFor(r, path);
+  return r.scan(cachedSource(bufferSource(bytes), limits), path, limits);
 }
 
 const kinds = (result: { findings: { kind: string }[] }) => result.findings.map((f) => f.kind);
@@ -136,24 +146,26 @@ describe("brainvision-segment-date", () => {
   });
 });
 
-describe("DataFile and MarkerFile resolve to the companion beside the header", () => {
-  test("a file name that is not the header's own base name is partial (companion-missing)", async () => {
+const NOTE = { notes: ["companion-name-mismatch" as const] };
+
+describe("DataFile and MarkerFile name the companion beside the header (a note, never a gap)", () => {
+  test("a file name that is not the header's own base name is a note on a complete read", async () => {
     const r = await scan(fixture("testv2.vhdr"), "sub-01/eeg/testv2.vhdr");
-    expect(r).toEqual({ findings: [], coverage: "partial", incomplete: "companion-missing" });
+    expect(r).toEqual({ findings: [], coverage: "complete", ...NOTE });
   });
 
-  test("another directory or .. is partial, not a finding", async () => {
+  test("another directory or .. is a note, not a finding", async () => {
     const base = text("test.vhdr");
     for (const value of ["../test.eeg", "raw/test.eeg", "raw\\test.eeg"]) {
       const r = await scan(
         encode(base.replace("DataFile=test.eeg", `DataFile=${value}`)),
         "test.vhdr",
       );
-      expect(r).toEqual({ findings: [], coverage: "partial", incomplete: "companion-missing" });
+      expect(r).toEqual({ findings: [], coverage: "complete", ...NOTE });
     }
   });
 
-  test("an absolute or home-directory path is local-user-path, and partial", async () => {
+  test("an absolute or home-directory path is local-user-path, with the note", async () => {
     const base = text("test.vhdr");
     for (const value of [
       "C:\\Users\\Quintavius\\test.eeg",
@@ -164,8 +176,8 @@ describe("DataFile and MarkerFile resolve to the companion beside the header", (
         encode(base.replace("DataFile=test.eeg", `DataFile=${value}`)),
         "test.vhdr",
       );
-      expect(r.coverage).toBe("partial");
-      expect(r.incomplete).toBe("companion-missing");
+      expect(r.coverage).toBe("complete");
+      expect(r.notes).toEqual(["companion-name-mismatch"]);
       expect(r.findings.map((f) => [f.kind, f.severity, f.field])).toEqual([
         ["local-user-path", "review", "DataFile"],
       ]);
@@ -185,19 +197,59 @@ describe("DataFile and MarkerFile resolve to the companion beside the header", (
     expect(await scan(encode(base), "test.vhdr")).toEqual({ findings: [], coverage: "complete" });
   });
 
-  test("a header with no DataFile is partial", async () => {
+  test("a header with no DataFile is a note", async () => {
     const r = await scan(encode(text("test.vhdr").replace("DataFile=test.eeg\n", "")), "test.vhdr");
-    expect(r).toEqual({ findings: [], coverage: "partial", incomplete: "companion-missing" });
+    expect(r).toEqual({ findings: [], coverage: "complete", ...NOTE });
+  });
+});
+
+describe("marker descriptions", () => {
+  const marker = (description: string) =>
+    encode(
+      text("test.vmrk")
+        .replace("20131113161403794232", "00000000000000000000")
+        .replace(/Mk2=[^\n]*/, `Mk2=Comment,${description},100,1,0`),
+    );
+
+  test("an email address or a phone number is brainvision-marker-text (review)", async () => {
+    for (const description of [
+      "mail q.hollberry@example.org",
+      "call +1 858 555 0100",
+      "Tel: 0858 555 0100",
+    ]) {
+      const r = await scan(marker(description), "test.vmrk");
+      expect(r.findings.map((f) => [f.kind, f.severity, f.field])).toEqual([
+        ["brainvision-marker-text", "review", "Marker"],
+      ]);
+      expect(JSON.stringify(r)).not.toContain("hollberry");
+    }
+  });
+
+  test("a home-directory path is local-user-path", async () => {
+    const r = await scan(marker("C:\\Users\\Quintavius\\stim.txt"), "test.vmrk");
+    expect(r.findings.map((f) => [f.kind, f.field])).toEqual([["local-user-path", "Marker"]]);
+  });
+
+  test("stimulus codes, digits and words fire nothing, and no name rule runs here", async () => {
+    for (const description of [
+      "S  1",
+      "R128",
+      "1 2 3 4 5 6 7 8 9",
+      "Quintavius Hollberry",
+      "2019-10-02",
+    ]) {
+      expect(kinds(await scan(marker(description), "test.vmrk"))).toEqual([]);
+    }
   });
 });
 
 describe("what is not a BrainVision file, and what is too long", () => {
-  test("an AppleDouble or other non-header file is partial, never clean", async () => {
+  test("an AppleDouble or other non-header file is not-applicable", async () => {
     const appledouble = new Uint8Array(4096);
     appledouble.set([0x00, 0x05, 0x16, 0x07], 0);
     appledouble.set(encode("Mac OS X        "), 8);
     const r = await scan(appledouble, "sub-01/eeg/._test.vhdr");
-    expect(r).toEqual({ findings: [], coverage: "partial", incomplete: "unsupported-version" });
+    expect(r).toEqual({ findings: [], coverage: "not-applicable" });
   });
 
   test("Analyzer's Core Data Exchange header is read", async () => {
@@ -208,10 +260,27 @@ describe("what is not a BrainVision file, and what is too long", () => {
     expect(await scan(encode(core), "test.vhdr")).toEqual({ findings: [], coverage: "complete" });
   });
 
-  test("past 1 MiB the read is partial (limit) and keeps what it found", async () => {
+  test("a header past 1 MiB is partial (limit) and keeps what it found", async () => {
+    const edited = text("edited-comment-name.vhdr");
+    const pad = `${edited}\n${"; padding\n".repeat(Math.ceil(TEXT_HEADER_MAX_BYTES / 10))}`;
+    const r = await scan(encode(pad), "test.vhdr");
+    expect(r.coverage).toBe("partial");
+    expect(r.incomplete).toBe("limit");
+    expect(kinds(r)).toEqual(["brainvision-comment-name"]);
+  });
+
+  test("a marker file is read whole up to 16 MiB, and partial past it", async () => {
+    expect(MARKER_FILE_MAX_BYTES).toBe(16 * 1024 * 1024);
+    expect(limitsFor(BRAINVISION_READER, "a.vmrk").maxBytes).toBe(MARKER_FILE_MAX_BYTES);
+    expect(limitsFor(BRAINVISION_READER, "a.VMRK").maxBytes).toBe(MARKER_FILE_MAX_BYTES);
+    expect(limitsFor(BRAINVISION_READER, "a.vhdr").maxBytes).toBe(TEXT_HEADER_MAX_BYTES);
     const head = text("test.vmrk");
-    const pad = `${head}\n${"; padding\n".repeat(Math.ceil(TEXT_HEADER_MAX_BYTES / 10))}`;
-    const r = await scan(encode(pad), "test.vmrk");
+    const twoMiB = `${head}\n${"; padding\n".repeat(Math.ceil((2 * TEXT_HEADER_MAX_BYTES) / 10))}`;
+    const whole = await scan(encode(twoMiB), "test.vmrk");
+    expect(whole.coverage).toBe("complete");
+    expect(kinds(whole)).toEqual(["brainvision-segment-date"]);
+    const over = `${head}\n${"; padding\n".repeat(Math.ceil(MARKER_FILE_MAX_BYTES / 10))}`;
+    const r = await scan(encode(over), "test.vmrk");
     expect(r.coverage).toBe("partial");
     expect(r.incomplete).toBe("limit");
     expect(kinds(r)).toEqual(["brainvision-segment-date"]);
@@ -275,6 +344,43 @@ describe("companions and coverage", () => {
     });
   });
 
+  test("a header naming another file is read complete: a counted note, still clean", async () => {
+    // The real header as it is: it names test.eeg and test.vmrk, not this recording's names.
+    files[VHDR] = fixture("test.vhdr");
+    try {
+      const out = await read([VHDR, VMRK, EEG]);
+      expect(out.tallies.brainvision).toEqual({ files: 2, read: 2, partial: 0, failed: 0 });
+      expect(out.companionNameMismatch).toBe(1);
+      expect([...out.reasons]).toEqual([]);
+      expect(coverageFields(out).companion_name_mismatch).toBe(1);
+      const status = classifyDataset({
+        findings: out.findings,
+        recordings: 2,
+        recordingsRead: out.tallies.brainvision.read,
+        unscreenedCount: 0,
+        incompleteReasons: [...out.reasons],
+      });
+      expect(status).toBe("clean");
+    } finally {
+      files[VHDR] = encode(
+        text("test.vhdr")
+          .replace("DataFile=test.eeg", "DataFile=sub-01_task-rest_eeg.eeg")
+          .replace("MarkerFile=test.vmrk", "MarkerFile=sub-01_task-rest_eeg.vmrk"),
+      );
+    }
+    expect(coverageFields(await read([VHDR, VMRK, EEG]))).not.toHaveProperty(
+      "companion_name_mismatch",
+    );
+  });
+
+  test("an AppleDouble file is unscreened under its extension, never a gap", async () => {
+    files["sub-01/eeg/._x.vhdr"] = new Uint8Array(4096);
+    const out = await read([VHDR, VMRK, EEG, "sub-01/eeg/._x.vhdr"]);
+    expect(out.tallies.brainvision).toEqual({ files: 2, read: 2, partial: 0, failed: 0 });
+    expect(out.notApplicable).toEqual({ ".vhdr": 1 });
+    expect([...out.reasons]).toEqual([]);
+  });
+
   test("a missing .eeg is companion_missing, never clean", async () => {
     const out = await read([VHDR, VMRK]);
     expect(out.companionMissing).toBe(1);
@@ -316,12 +422,25 @@ describe("companions and coverage", () => {
 
 describe("every new kind has its words", () => {
   test("statement, read, remedy and anchor", () => {
-    for (const kind of ["brainvision-comment-name", "brainvision-segment-date"] as const) {
+    for (const kind of [
+      "brainvision-comment-name",
+      "brainvision-segment-date",
+      "brainvision-marker-text",
+    ] as const) {
       const copy = KIND_COPY[kind];
       expect(copy.statement.length).toBeGreaterThan(20);
       expect(copy.read).toContain("BrainVision");
       expect(copy.remedy.length).toBeGreaterThan(10);
       expect(copy.anchor).toBe(`kind-${kind}`);
     }
+  });
+});
+
+describe("the note has its words", () => {
+  test("statement, read, remedy and anchor; the remedy names the entry to correct", () => {
+    const copy = NOTE_COPY["companion-name-mismatch"];
+    expect(copy.statement).toContain("does not change the verdict");
+    expect(copy.remedy).toContain("DataFile or MarkerFile");
+    expect(copy.anchor).toBe("note-companion-name-mismatch");
   });
 });

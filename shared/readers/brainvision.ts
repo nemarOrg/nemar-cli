@@ -14,11 +14,15 @@
  * - `local-user-path` (review): a `DataFile` or `MarkerFile` given as an absolute path or a path
  *   into a home directory.
  *
- * **Companions are paired by name** (lead ruling, phase A2): a `.vhdr` needs `<base>.eeg` and
+ * - `brainvision-marker-text` (review) and `local-user-path`: an email address, a phone number or
+ *   a home-directory path in a marker description.
+ *
+ * **Companions are paired by name** (lead rulings, phase A2): a `.vhdr` needs `<base>.eeg` and
  * `<base>.vmrk` beside it, and a `.vmrk` needs `<base>.vhdr`, so an orphan is never clean. Inside
  * the file, a `DataFile` or `MarkerFile` that does not name that companion by its bare file name
- * (another name, another directory, an absolute path) makes the read `partial` with reason
- * `companion-missing`: the screen could not match the file the header names.
+ * is the note `companion-name-mismatch`: counted and printed with its remedy, never a gap, since
+ * the header was read in full and the `.eeg` is never read. Marker files are read up to 16 MiB,
+ * headers up to 1 MiB.
  */
 
 import type { FormatReader, RangeSource, ReaderResult } from "../identifier-readers";
@@ -31,8 +35,10 @@ import {
 } from "../identifier-scan";
 import {
   type IniSection,
+  MARKER_FILE_LIMITS,
   TEXT_HEADER_LIMITS,
   checkReference,
+  contactIn,
   decodeHeader,
   entryValue,
   pairByName,
@@ -332,6 +338,24 @@ function commentNameTokens(sections: Map<string, IniSection>): string[] {
   return out;
 }
 
+/** The first marker description with a home-directory path, and the first with contact details. */
+function markerText(markers: IniSection | undefined): {
+  path: string | null;
+  contact: string | null;
+} {
+  let path: string | null = null;
+  let contact: string | null = null;
+  for (const { key, value } of markers?.entries ?? []) {
+    if (path !== null && contact !== null) break;
+    if (!/^mk\d+$/i.test(key)) continue;
+    const description = (value.split(",")[1] ?? "").replace(/\\1/g, ",").trim();
+    if (description === "") continue;
+    if (path === null && scanTextForLocalPaths(description).length > 0) path = description;
+    if (contact === null && contactIn(description) !== null) contact = description;
+  }
+  return { path, contact };
+}
+
 /** The first `New Segment` marker whose timestamp is a date that is not 1 January, or null. */
 function segmentDate(markers: IniSection | undefined): string | null {
   for (const { key, value } of markers?.entries ?? []) {
@@ -367,15 +391,16 @@ export function scanBrainVisionText(text: string, path: string, whole: boolean):
   const findings: Finding[] = [];
   const firstLine = text.slice(0, 200).trimStart();
   if (!(isHeader ? VHDR_MAGIC : VMRK_MAGIC).test(firstLine)) {
-    // Not the text this reader reads, so nothing it says can be checked.
-    return { findings, coverage: "partial", incomplete: "unsupported-version" };
+    // Not a BrainVision file (an AppleDouble `._` file, say): unscreened, never a gap in a read.
+    return { findings, coverage: "not-applicable" };
   }
   const sections = parseIni(text);
   const common = sections.get("common infos");
   const { name } = splitPath(path);
   const base = stem(name, isHeader ? VHDR : VMRK);
 
-  // The companions the file names must be the ones beside it, by their bare file names.
+  // The companions the file names should be the ones beside it, by their bare file names. When
+  // they are not, the header was still read in full: a note, not a gap.
   let unmatched = false;
   const references: [string, string][] = isHeader
     ? [
@@ -412,7 +437,25 @@ export function scanBrainVisionText(text: string, path: string, whole: boolean):
       });
     }
   } else {
-    const stamp = segmentDate(sections.get("marker infos"));
+    const markers = sections.get("marker infos");
+    const text = markerText(markers);
+    if (text.path !== null && !pathFlagged) {
+      findings.push({
+        kind: "local-user-path",
+        severity: "review",
+        field: "Marker",
+        shape: shapeOf(text.path),
+      });
+    }
+    if (text.contact !== null) {
+      findings.push({
+        kind: "brainvision-marker-text",
+        severity: "review",
+        field: "Marker",
+        shape: shapeOf(text.contact),
+      });
+    }
+    const stamp = segmentDate(markers);
     if (stamp !== null) {
       findings.push({
         kind: "brainvision-segment-date",
@@ -423,15 +466,16 @@ export function scanBrainVisionText(text: string, path: string, whole: boolean):
     }
   }
 
-  if (!whole) return { findings, coverage: "partial", incomplete: "limit" };
-  if (unmatched) return { findings, coverage: "partial", incomplete: "companion-missing" };
-  return { findings, coverage: "complete" };
+  const notes = unmatched ? { notes: ["companion-name-mismatch" as const] } : {};
+  if (!whole) return { findings, coverage: "partial", incomplete: "limit", ...notes };
+  return { findings, coverage: "complete", ...notes };
 }
 
 export const BRAINVISION_READER: FormatReader = {
   id: "brainvision",
   extensions: [VHDR, VMRK],
   limits: TEXT_HEADER_LIMITS,
+  extensionLimits: { [VMRK]: MARKER_FILE_LIMITS },
   version: "1",
   companions(path, siblings) {
     const lower = path.toLowerCase();

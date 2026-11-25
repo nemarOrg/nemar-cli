@@ -2,20 +2,23 @@
 /**
  * False-positive measurement for a format reader (the owner's merge gate for every reader).
  *
- *   bun scripts/dev/reader-fp-measure.ts --root <dir> [--reader <id>] [--json <out>]
+ *   bun scripts/dev/reader-fp-measure.ts --root <dir> [--reader <id>] [--listing <dir>] [--json <out>]
  *
  * Runs the registered readers over every file under `--root` that a reader parses, through the
  * screen's own `readRecordings` (the same limits, timers and companion pairing as the publication
  * screen), and prints the findings per kind per 100 files, the read outcomes and the incomplete
  * reasons. `--reader` keeps one reader's files. Each top-level directory under the root is one
  * dataset (an OpenNeuro accession, say), so the companion pairing sees that dataset's paths.
+ * `--listing <dir>` names a directory of `<dataset>.txt` files, one root-relative path per line
+ * (the dataset's full file list), so companions that were not downloaded still pair; a dataset
+ * whose readers fell short anyway (a partial or failed read) is counted in `incompleteDatasets`.
  *
  * **It prints no value.** Only kinds, counts, and the dataset directories that produced a kind,
  * so its output can go in a pull request. The files it reads are the caller's: download public
  * headers into the OS temp directory, run this, and delete them.
  */
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -24,6 +27,7 @@ import {
   type ReaderId,
   bufferSource,
   cachedSource,
+  limitsFor,
   readerFor,
 } from "../../shared/identifier-readers";
 import { readRecordings } from "../../shared/identifier-report-builder";
@@ -36,11 +40,27 @@ interface Measured {
   partial: number;
   failed: number;
   reasons: Record<string, number>;
+  /** Datasets whose recordings did not all read completely (the screen would say `unchecked`). */
+  incompleteDatasets: number;
+  /** Headers that name a companion other than their own base name (a note). */
+  companionNameMismatch: number;
+  /** Files a reader found not to be its format, by extension (counted as unscreened). */
+  notApplicable: Record<string, number>;
   /** Files whose own read ended `partial`, by the reason the reader gave (companions aside). */
   fileReasons: Record<string, number>;
   failures: Record<string, number>;
   /** Findings per kind, with the severity they carry. */
   kinds: Record<string, { severity: string; findings: number; per100: number; datasets: string[] }>;
+}
+
+/** A dataset's full path list from `<listing>/<dataset>.txt`, or null when there is none. */
+function listingOf(listing: string | undefined, dataset: string): string[] | null {
+  if (!listing) return null;
+  const file = join(listing, `${dataset}.txt`);
+  if (!existsSync(file)) return null;
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter((line) => line !== "");
 }
 
 function walk(dir: string): string[] {
@@ -57,6 +77,7 @@ function walk(dir: string): string[] {
 export async function measure(
   root: string,
   readers: readonly FormatReader[] = READERS,
+  listing?: string,
 ): Promise<Measured> {
   const all = walk(root).map((full) => relative(root, full).split("\\").join("/"));
   const byDataset = new Map<string, string[]>();
@@ -72,6 +93,9 @@ export async function measure(
     partial: 0,
     failed: 0,
     reasons: {},
+    incompleteDatasets: 0,
+    companionNameMismatch: 0,
+    notApplicable: {},
     fileReasons: {},
     failures: {},
     kinds: {},
@@ -84,7 +108,7 @@ export async function measure(
     result.datasets++;
     const outcome = await readRecordings({
       entries,
-      paths,
+      paths: listingOf(listing, dataset) ?? paths,
       readers,
       open: (entry) => bufferSource(new Uint8Array(readFileSync(join(root, entry.path)))),
       concurrency: 8,
@@ -92,6 +116,11 @@ export async function measure(
       datasetTimeMs: 20 * 60_000,
       failureClass: (error) => (error instanceof Error ? error.name : "unknown"),
     });
+    result.companionNameMismatch += outcome.companionNameMismatch;
+    for (const [ext, n] of Object.entries(outcome.notApplicable)) {
+      result.notApplicable[ext] = (result.notApplicable[ext] ?? 0) + n;
+    }
+    if (outcome.reasons.size > 0) result.incompleteDatasets++;
     for (const reader of readers) {
       const t = outcome.tallies[reader.id];
       result.files += t.files;
@@ -104,11 +133,8 @@ export async function measure(
       const reader = readerFor(entry.path, readers) as FormatReader;
       const bytes = new Uint8Array(readFileSync(join(root, entry.path)));
       try {
-        const r = await reader.scan(
-          cachedSource(bufferSource(bytes), reader.limits),
-          entry.path,
-          reader.limits,
-        );
+        const limits = limitsFor(reader, entry.path);
+        const r = await reader.scan(cachedSource(bufferSource(bytes), limits), entry.path, limits);
         if (r.coverage === "partial") {
           const key = r.incomplete ?? "unstated";
           result.fileReasons[key] = (result.fileReasons[key] ?? 0) + 1;
@@ -124,7 +150,9 @@ export async function measure(
       result.failures[key] = (result.failures[key] ?? 0) + n;
     }
     for (const f of outcome.findings) {
-      const k = result.kinds[f.kind] ?? {
+      // A kind can carry two severities (a birth date to the day, or only a year).
+      const key = `${f.kind} (${f.severity})`;
+      const k = result.kinds[key] ?? {
         severity: f.severity,
         findings: 0,
         per100: 0,
@@ -132,7 +160,7 @@ export async function measure(
       };
       k.findings++;
       if (!k.datasets.includes(dataset)) k.datasets.push(dataset);
-      result.kinds[f.kind] = k;
+      result.kinds[key] = k;
     }
   }
   for (const k of Object.values(result.kinds)) {
@@ -146,11 +174,14 @@ if (import.meta.main) {
     options: {
       root: { type: "string" },
       reader: { type: "string" },
+      listing: { type: "string" },
       json: { type: "string" },
     },
   });
   if (!values.root) {
-    console.error("usage: bun scripts/dev/reader-fp-measure.ts --root <dir> [--reader <id>]");
+    console.error(
+      "usage: bun scripts/dev/reader-fp-measure.ts --root <dir> [--reader <id>] [--listing <dir>] [--json <out>]",
+    );
     process.exit(2);
   }
   const readers = values.reader ? READERS.filter((r) => r.id === values.reader) : READERS;
@@ -158,16 +189,19 @@ if (import.meta.main) {
     console.error("no registered reader has that id");
     process.exit(2);
   }
-  const m = await measure(values.root, readers);
+  const m = await measure(values.root, readers, values.listing);
   if (values.json) await Bun.write(values.json, `${JSON.stringify(m, null, 2)}\n`);
   console.log(`reader ${m.reader}: ${m.files} files in ${m.datasets} datasets`);
   console.log(`read ${m.read}, partial ${m.partial}, failed ${m.failed}`);
   console.log(`incomplete reasons (datasets): ${JSON.stringify(m.reasons)}`);
+  console.log(`datasets with an incomplete read: ${m.incompleteDatasets} of ${m.datasets}`);
+  console.log(`companion-name-mismatch notes: ${m.companionNameMismatch}`);
+  console.log(`not-applicable (counted unscreened): ${JSON.stringify(m.notApplicable)}`);
   console.log(`partial files by the reader's own reason: ${JSON.stringify(m.fileReasons)}`);
   console.log(`failures: ${JSON.stringify(m.failures)}`);
-  console.log("| kind | severity | findings | per 100 files | datasets |");
-  console.log("|---|---|---|---|---|");
+  console.log("| kind (severity) | findings | per 100 files | datasets |");
+  console.log("|---|---|---|---|");
   for (const [kind, k] of Object.entries(m.kinds).sort()) {
-    console.log(`| ${kind} | ${k.severity} | ${k.findings} | ${k.per100} | ${k.datasets.length} |`);
+    console.log(`| ${kind} | ${k.findings} | ${k.per100} | ${k.datasets.length} |`);
   }
 }

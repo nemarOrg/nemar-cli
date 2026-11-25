@@ -85,39 +85,92 @@ describe("nirx-subject-name", () => {
   });
 });
 
-describe("nirx-demographics", () => {
-  test("an Age= that is filled in is review", async () => {
+describe("nirx-demographics: birth dates by precision; an age alone is nothing", () => {
+  const withBirth = (value: string) =>
+    encode(text(CLEAN_INF).replace("Age=0", `Age=0\nDate of Birth="${value}"`));
+
+  test("an Age= that is filled in fires nothing", async () => {
+    expect(text(INF)).toContain("Age=30");
     const r = await scan(fixture(INF), `sourcedata/sub-01/${INF}`);
-    expect(r.findings.map((f) => [f.kind, f.severity, f.field])).toEqual([
-      ["nirx-demographics", "review", "Age"],
-    ]);
-    expect(DIRECT_KINDS.has("nirx-demographics")).toBe(false);
+    expect(r).toEqual({ findings: [], coverage: "complete" });
   });
 
-  test("Age= empty, 0 or a placeholder fires nothing", async () => {
-    const base = text(INF);
-    for (const age of ["", "0", "0.0", "n/a", "-"]) {
-      const r = await scan(encode(base.replace("Age=30", `Age=${age}`)), "x.inf");
-      expect(kinds(r)).toEqual([]);
+  test("a birth date to the day is an identifier, and direct", async () => {
+    for (const value of ["14.03.1993", "1993-03-14", "14 Mar 1993"]) {
+      const r = await scan(withBirth(value), "x.inf");
+      expect(r.findings.map((f) => [f.kind, f.severity, f.field])).toEqual([
+        ["nirx-demographics", "identifier", "birth date"],
+      ]);
+    }
+    expect(DIRECT_KINDS.has("nirx-demographics")).toBe(true);
+  });
+
+  test("a year, or a year and month, is review", async () => {
+    for (const value of ["1993", "01.01.1993", "1993-03", "March 1993"]) {
+      const r = await scan(withBirth(value), "x.inf");
+      expect(r.findings.map((f) => [f.kind, f.severity])).toEqual([
+        ["nirx-demographics", "review"],
+      ]);
     }
   });
 
-  test("a birth date finer than the year fires; a year-only one does not", async () => {
-    const base = text(CLEAN_INF);
-    const dated = base.replace("Age=0", 'Age=0\nDate of Birth="14.03.1993"');
-    expect(kinds(await scan(encode(dated), "x.inf"))).toEqual(["nirx-demographics"]);
-    const year = base.replace("Age=0", 'Age=0\nDate of Birth="01.01.1993"');
-    expect(kinds(await scan(encode(year), "x.inf"))).toEqual([]);
+  test("an empty or placeholder birth date fires nothing", async () => {
+    for (const value of ["", "0", "n/a", "unknown", "00.00.0000"]) {
+      expect(kinds(await scan(withBirth(value), "x.inf"))).toEqual([]);
+    }
   });
 
-  test("NIRSport2 keeps the subject's age in the header's experiment notes", async () => {
+  test("NIRSport2's age in the header's experiment notes fires nothing", async () => {
     const name = "2025-10-29_002_config.hdr";
+    expect(text(name)).toContain("experiment_subject_age=36");
     const r = await scan(fixture(name), `sourcedata/sub-01/${name}`);
     expect(r.coverage).toBe("complete");
+    expect(r.findings.map((f) => [f.kind, f.field])).toEqual([["nirx-header-date", "Date"]]);
+  });
+});
+
+describe("contact and notes text", () => {
+  test("an email address or a phone number in Contact Information is nirx-freetext (review)", async () => {
+    for (const value of ["q.hollberry@example.org", "+1 858 555 0100", "phone: 858 555 0100"]) {
+      const edited = text(CLEAN_INF).replace(
+        'Contact Information=""',
+        `Contact Information="${value}"`,
+      );
+      const r = await scan(encode(edited), "x.inf");
+      expect(r.findings.map((f) => [f.kind, f.severity, f.field])).toEqual([
+        ["nirx-freetext", "review", "Contact Information"],
+      ]);
+      expect(JSON.stringify(r)).not.toContain("hollberry");
+    }
+  });
+
+  test("a home path in the header's Notes is local-user-path", async () => {
+    const edited = text(HDR).replace(
+      'Notes="[Type notes here]"',
+      'Notes="see C:\\Users\\Quintavius\\notes.txt"',
+    );
+    const r = await scan(encode(edited), `sourcedata/sub-01/${HDR}`);
     expect(r.findings.map((f) => [f.kind, f.field])).toEqual([
       ["nirx-header-date", "Date"],
-      ["nirx-demographics", "experiment_subject_age"],
+      ["local-user-path", "Notes"],
     ]);
+  });
+
+  test("a name in a notes field is not a person field's, so it fires nothing", async () => {
+    const edited = text(CLEAN_INF).replace(
+      'Additional Notes=""',
+      'Additional Notes="Quintavius Hollberry"',
+    );
+    expect(kinds(await scan(encode(edited), "x.inf"))).toEqual([]);
+  });
+
+  test("an operator is a person field; the experiment's name is not", async () => {
+    const operator = text(CLEAN_INF).replace("Age=0", 'Age=0\nOperator="Quintavius Hollberry"');
+    expect(kinds(await scan(encode(operator), "x.inf"))).toEqual(["nirx-subject-name"]);
+    const nirsport = text("2025-10-29_002_config.hdr");
+    expect(nirsport).toContain("experiment_name=Fingertapping");
+    const r = await scan(fixture("2025-10-29_002_config.hdr"), "x_config.hdr");
+    expect(kinds(r)).toEqual(["nirx-header-date"]);
   });
 });
 
@@ -156,25 +209,24 @@ describe("nirx-header-date", () => {
 });
 
 describe("FileName, companions and coverage", () => {
-  test("a FileName= that is not the header's own base name is partial (companion-missing)", async () => {
+  test("a FileName= that is not the header's own base name is a note on a complete read", async () => {
     const r = await scan(fixture(HDR), "sourcedata/sub-01/sub-01_task-tap_nirs.hdr");
-    expect(r.coverage).toBe("partial");
-    expect(r.incomplete).toBe("companion-missing");
+    expect(r.coverage).toBe("complete");
+    expect(r.notes).toEqual(["companion-name-mismatch"]);
     expect(kinds(r)).toEqual(["nirx-header-date"]);
   });
 
-  test("an .hdr that is not a NIRx header is partial, never clean", async () => {
-    const analyze = new Uint8Array(348);
-    new DataView(analyze.buffer).setInt32(0, 348, true);
+  test("a real Analyze .hdr (nibabel) and a non-NIRx .inf are not-applicable", async () => {
+    const analyze = new Uint8Array(readFileSync(join(DIR, "../analyze/analyze.hdr")));
+    expect(analyze.length).toBe(348);
     expect(await scan(analyze, "sourcedata/anat/t1.hdr")).toEqual({
       findings: [],
-      coverage: "partial",
-      incomplete: "unsupported-version",
+      coverage: "not-applicable",
     });
-    expect(await scan(encode("[Other]\nx=1\n"), "x.inf")).toEqual({
+    const driver = '[Version]\nSignature="$Windows NT$"\n';
+    expect(await scan(encode(driver), "x.inf")).toEqual({
       findings: [],
-      coverage: "partial",
-      incomplete: "unsupported-version",
+      coverage: "not-applicable",
     });
   });
 
@@ -216,6 +268,16 @@ describe("FileName, companions and coverage", () => {
     expect(formatCoverage(all)).toEqual({ byReader: { nirx: 2 }, unscreened: {} });
   });
 
+  test("an Analyze .hdr is unscreened under .hdr: in no tally, no companions, never unchecked", async () => {
+    const t1 = "sourcedata/anat/t1.hdr";
+    files[t1] = new Uint8Array(readFileSync(join(DIR, "../analyze/analyze.hdr")));
+    const out = await read([t1, "sourcedata/anat/t1.img"]);
+    expect(out.tallies.nirx).toEqual({ files: 0, read: 0, partial: 0, failed: 0 });
+    expect(out.notApplicable).toEqual({ ".hdr": 1 });
+    expect(out.companionMissing).toBe(0);
+    expect([...out.reasons]).toEqual([]);
+  });
+
   test("a missing .wl2 is companion_missing, never clean", async () => {
     const out = await read([`${B}.hdr`, `${B}.inf`, `${B}.wl1`]);
     expect(out.companionMissing).toBe(1);
@@ -250,7 +312,12 @@ describe("FileName, companions and coverage", () => {
 
 describe("every new kind has its words", () => {
   test("statement, read, remedy and anchor", () => {
-    for (const kind of ["nirx-subject-name", "nirx-demographics", "nirx-header-date"] as const) {
+    for (const kind of [
+      "nirx-subject-name",
+      "nirx-demographics",
+      "nirx-header-date",
+      "nirx-freetext",
+    ] as const) {
       const copy = KIND_COPY[kind];
       expect(copy.statement.length).toBeGreaterThan(20);
       expect(copy.read).toContain("NIRx");
