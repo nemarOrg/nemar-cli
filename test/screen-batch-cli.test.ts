@@ -235,6 +235,22 @@ describe("the dry run", () => {
     });
   });
 
+  test("--all-active leaves a request that is being approved alone, however it is named", async () => {
+    seedRequest("nm000501");
+    seedRequest("nm000504", "approving");
+    const idsFile = join(configDir, "named.txt");
+    writeFileSync(idsFile, "nm000501\nnm000504\n");
+    for (const args of [["--all-active"], ["--ids", idsFile]]) {
+      const r = await runCli(args);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Would re-screen 1 publication request:");
+      expect(r.stdout).toContain("nm000501  requested");
+      expect(r.stdout).not.toContain("nm000504  ");
+      expect(r.stdout).toContain("1 request is being approved and left alone: nm000504");
+    }
+    expect(writes()).toEqual([]);
+  });
+
   test("--all-active takes the blocked ones too, and an --ids file names its own", async () => {
     seedRequest("nm000501");
     seedRequest("nm000502", "blocked");

@@ -56,6 +56,8 @@ interface Selection {
   ids: string[];
   /** Ids asked for that have no open request (an `--ids` file can name any). */
   noOpenRequest: string[];
+  /** Ids named (or active) whose request is being approved: left alone. */
+  beingApproved: string[];
   rows: Map<string, { status: string; screen: string | null }>;
 }
 
@@ -107,17 +109,28 @@ async function select(options: Options): Promise<Selection | null> {
   const statuses = options.status !== undefined ? [options.status] : ACTIVE;
   const list = await listPublishRequests({ statuses });
   const rows = new Map<string, { status: string; screen: string | null }>();
+  // A request being approved is never re-screened by a batch: its approval is running or waiting
+  // on the screen it passed. Seen, named, and left out.
+  const beingApprovedSet = new Set<string>();
   // Newest first, so the first row of a dataset is its active request.
+  const seenIds = new Set<string>();
   for (const r of list.requests) {
-    if (!rows.has(r.dataset_id)) {
-      rows.set(r.dataset_id, {
-        status: r.status,
-        screen: r.identifier_screen ? plain(r.identifier_screen.headline) : null,
-      });
+    if (seenIds.has(r.dataset_id)) continue;
+    seenIds.add(r.dataset_id);
+    if (r.status === "approving") {
+      beingApprovedSet.add(r.dataset_id);
+      continue;
     }
+    rows.set(r.dataset_id, {
+      status: r.status,
+      screen: r.identifier_screen ? plain(r.identifier_screen.headline) : null,
+    });
   }
   const ids = wanted ?? [...rows.keys()];
-  const noOpenRequest = ids.filter((id) => !rows.has(id));
+  const beingApproved = wanted
+    ? wanted.filter((id) => beingApprovedSet.has(id))
+    : [...beingApprovedSet];
+  const noOpenRequest = ids.filter((id) => !rows.has(id) && !beingApprovedSet.has(id));
   const open = ids.filter((id) => rows.has(id));
   if (open.length > SCREEN_BATCH_MAX_SIZE) {
     failMessage(
@@ -126,7 +139,7 @@ async function select(options: Options): Promise<Selection | null> {
     );
     return null;
   }
-  return { ids: open, noOpenRequest, rows };
+  return { ids: open, noOpenRequest, beingApproved, rows };
 }
 
 export function registerScreenBatchCommand(group: Command): void {
@@ -137,7 +150,10 @@ export function registerScreenBatchCommand(group: Command): void {
     )
     .option("--ids <file>", "Dataset ids to screen, one per line (# starts a comment)")
     .option("--status <status>", "Screen every request in this status (requested or blocked)")
-    .option("--all-active", "Screen every active request (requested, blocked or approving)")
+    .option(
+      "--all-active",
+      "Screen every request that is requested or blocked (one being approved is left alone)",
+    )
     .option(
       "--per-minute <n>",
       `Screens dispatched per minute (default ${SCREEN_BATCH_DEFAULT_PER_MINUTE}, at most ${SCREEN_BATCH_MAX_PER_MINUTE})`,
@@ -152,14 +168,21 @@ Description:
   and the automated review start as for a single screen. The batch sends no
   per-request mail to the administrators and no mail to the depositors; when it
   ends the administrators get ONE digest, which names the requests whose state
-  changed, the requests the batch blocked (their depositors are not mailed) and the
-  requests that did not report.
+  changed, the requests the batch blocked (their depositors are not mailed), the
+  requests that were already blocked (still blocked, with the new result), the
+  requests that could not start or were refused, and the requests that did not report.
 
   Without --apply nothing is dispatched: the selection and its count are printed.
   With --apply the CLI dispatches the screens itself, --per-minute apart, because
   each is a GitHub Actions run. Ctrl-C stops dispatching; screens already started
   still report, and the digest follows them. A request that was blocked stays
-  blocked after its screen, whatever the result.
+  blocked after its screen, whatever the result, and its depositor is not mailed
+  (neither is the depositor of a request the batch blocks; the digest names those).
+  A request being approved is left alone.
+
+  A report that arrives after the digest was sent is mailed to the administrators
+  on its own, as for any single screen; one that arrives while the digest is being
+  sent is named in it as not reported and is not mailed separately.
 
   The digest is sent when every request has reported, or two hours after the
   last dispatch, whichever comes first. A batch holds at most ${SCREEN_BATCH_MAX_SIZE} requests.
@@ -220,6 +243,13 @@ function printSelection(
       ),
     );
   }
+  if (selection.beingApproved.length > 0) {
+    console.log(
+      chalk.yellow(
+        `${selection.beingApproved.length} request${selection.beingApproved.length === 1 ? " is" : "s are"} being approved and left alone: ${selection.beingApproved.map(plain).join(", ")}`,
+      ),
+    );
+  }
   const minutes = Math.ceil(((selection.ids.length - 1) * gapMs) / 60_000);
   console.log(
     chalk.dim(
@@ -242,7 +272,7 @@ async function applyBatch(selection: Selection, gapMs: number): Promise<void> {
   if (skipped.size > 0) {
     console.log(
       chalk.yellow(
-        `  Left out by the Worker (no screened open request): ${[...skipped].map(plain).join(", ")}`,
+        `  Left out by the Worker (no open request, or a sandbox dataset, which is never screened): ${[...skipped].map(plain).join(", ")}`,
       ),
     );
   }

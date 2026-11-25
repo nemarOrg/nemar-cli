@@ -14,6 +14,7 @@ import {
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { escapeHtml } from "../lib/escape";
 import { htmlToText } from "../lib/html-to-text";
+import { SCREEN_REPORT_DEADLINE_MINUTES } from "./identifier-screen-stored";
 import { STALENESS_LIMIT_DAYS } from "./staleness";
 
 /** Fallback sender when FROM_EMAIL env var is unset. Mirrors the FROM_EMAIL set
@@ -2276,8 +2277,12 @@ export interface ScreenBatchDigest {
   changed: { datasetId: string; from: string; to: string; nowBlocked: boolean }[];
   /** Requests the batch blocked; their depositors were NOT mailed. */
   blocked: string[];
+  /** Requests that were blocked before the batch and still are, with the result the screen found. */
+  stillBlocked: { datasetId: string; from: string; to: string }[];
   /** Requests that could not start, or whose dispatch was refused, or was never made, with the reason. */
   notStarted: { datasetId: string; reason: string }[];
+  /** Requests screened again outside the batch while it ran (their latest screen is not the batch's). */
+  rescreened: string[];
   /** Requests dispatched whose screen did not report by the deadline, by dataset id. */
   notReported: string[];
 }
@@ -2290,8 +2295,10 @@ export const SCREEN_BATCH_REFUSAL_TEXT = {
   "no-request": "it has no active publication request",
   "request-changed": "its request changed after the batch selected it",
   "publishing-started": "its approval had already started publishing",
-  "screen-running": "a screen dispatched less than 50 minutes before had not reported",
+  "screen-running": `it could not be started now (a recent screen may still be running; one dispatched less than ${SCREEN_REPORT_DEADLINE_MINUTES} minutes before had not reported)`,
   "write-failed": "the database refused the write",
+  "already-screened": "this batch had already screened it and counted the result",
+  rescreened: "it was screened again outside the batch",
   "not-dispatched":
     "the batch never dispatched it (it was stopped first, or the request was screened again since)",
 } as const;
@@ -2305,11 +2312,12 @@ export type ScreenBatchRefusal = keyof typeof SCREEN_BATCH_REFUSAL_TEXT;
 const SCREEN_BATCH_DIGEST_COPY = {
   subject: (d: ScreenBatchDigest): string => {
     const parts =
-      d.notStarted.length + d.notReported.length === 0
+      d.notStarted.length + d.notReported.length + d.rescreened.length === 0
         ? `all ${d.total} reported`
         : [
             `${d.reported} of ${d.total} reported`,
             ...(d.notStarted.length > 0 ? [`${d.notStarted.length} not started`] : []),
+            ...(d.rescreened.length > 0 ? [`${d.rescreened.length} screened again elsewhere`] : []),
             ...(d.notReported.length > 0 ? [`${d.notReported.length} did not report`] : []),
           ].join(", ");
     return `[NEMAR] Re-screen batch ${d.batchId} finished: ${parts}`;
@@ -2317,6 +2325,8 @@ const SCREEN_BATCH_DIGEST_COPY = {
   heading: (d: ScreenBatchDigest): string => `Re-screen batch ${d.batchId}`,
   intro: (d: ScreenBatchDigest): string =>
     `${d.reported} of ${d.total} publication requests reported. This batch sent no per-request mail to administrators and no mail to depositors; everything it would have said is below.`,
+  lateNote:
+    "A report that arrives while this digest is being sent is named above as not reported and is not mailed separately. One that arrives after it is mailed to the administrators on its own, as for any single screen.",
   beforeHeading: "Screen states before",
   afterHeading: "Screen states after",
   kindsHeading: "Findings by kind",
@@ -2325,6 +2335,10 @@ const SCREEN_BATCH_DIGEST_COPY = {
   noChanges: "None.",
   nowBlockedSuffix: "now blocked",
   blockedHeading: "Blocked by this batch; the depositor was not mailed",
+  stillBlockedHeading: "Still blocked (a batch never changes a block), with the new result",
+  rescreenedHeading: "Screened again outside the batch",
+  rescreenedNext:
+    "A single re-screen replaced the batch's screen of these requests, so their result is not in this digest; it is mailed as for any single screen.",
   blockedNext:
     "Each depositor still has to be told what to fix. A request blocked on findings is released by a clear screen after the data is fixed.",
   notStartedHeading: "Could not start, or refused (not screened by this batch)",
@@ -2332,7 +2346,7 @@ const SCREEN_BATCH_DIGEST_COPY = {
     "These were not screened. Re-run one with: nemar admin repo publish screen <dataset-id>.",
   notReportedHeading: "Did not report by the deadline",
   notReportedNext:
-    "Their screens were dispatched and no result is stored. A report that arrives late is mailed as usual; to run one again: nemar admin repo publish screen <dataset-id>.",
+    "Their screens were dispatched and no result is stored. To run one again: nemar admin repo publish screen <dataset-id>.",
   none: "None.",
 } as const;
 
@@ -2379,6 +2393,15 @@ export async function sendScreenBatchDigestEmail(
               }</li>`,
           )
           .join("")}</ul>`;
+  const stillBlockedHtml =
+    digest.stillBlocked.length === 0
+      ? `<p>${copy.none}</p>`
+      : `<ul style="margin: 8px 0 16px 0; padding-left: 20px;">${digest.stillBlocked
+          .map(
+            (b) =>
+              `<li><code>${escapeHtml(b.datasetId)}</code>: ${escapeHtml(b.from)} to ${escapeHtml(b.to)}</li>`,
+          )
+          .join("")}</ul>`;
   const notStartedHtml =
     digest.notStarted.length === 0
       ? `<p>${copy.none}</p>`
@@ -2405,15 +2428,22 @@ export async function sendScreenBatchDigestEmail(
 
   <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.changedHeading}</h2>
   ${changedHtml}
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.stillBlockedHeading}</h2>
+  ${stillBlockedHtml}
   <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.blockedHeading}</h2>
   ${digestIds(digest.blocked)}
   ${digest.blocked.length > 0 ? `<p>${copy.blockedNext}</p>` : ""}
   <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.notStartedHeading}</h2>
   ${notStartedHtml}
   ${digest.notStarted.length > 0 ? `<p>${escapeHtml(copy.notStartedNext)}</p>` : ""}
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.rescreenedHeading}</h2>
+  ${digestIds(digest.rescreened)}
+  ${digest.rescreened.length > 0 ? `<p>${escapeHtml(copy.rescreenedNext)}</p>` : ""}
   <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.notReportedHeading}</h2>
   ${digestIds(digest.notReported)}
   ${digest.notReported.length > 0 ? `<p>${escapeHtml(copy.notReportedNext)}</p>` : ""}
+
+  <p style="color: #666; font-size: 14px;">${escapeHtml(copy.lateNote)}</p>
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
   <p style="color: #999; font-size: 12px;">

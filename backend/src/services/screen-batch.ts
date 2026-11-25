@@ -16,11 +16,15 @@
  *     changed and the ones that never reported. A mail is never dropped without the digest saying
  *     so.
  *
- * The digest is due when every request has settled (`reported >= total`) or two hours after the
- * last dispatch (the watchdog, {@link sweepScreenBatchDigests}). It is claimed with a lease in one
- * conditional UPDATE, so of two callbacks racing for the last report exactly one sends. Once the
- * digest has gone out, a report that arrives late is an ordinary one and is mailed as before:
- * the digest told the administrators it had not reported.
+ * A request SETTLES once: one conditional UPDATE sets `identifier_screen_batch_settled_at` and only
+ * a row it returns is counted in `reported`, so a repeated call or a replayed callback never counts
+ * a request twice ({@link settleBatchEntry}). The digest is due when the batch is closed or every
+ * request has settled, and no request the batch dispatched is still unsettled (so a result stored
+ * between a close and its settle is waited for), or two hours after the last dispatch (the
+ * watchdog, {@link sweepScreenBatchDigests}). It is claimed with a lease in one conditional UPDATE,
+ * so of two callbacks racing for the last report exactly one sends. Once the digest has gone out,
+ * a report that arrives late is an ordinary one and is mailed as before: the digest told the
+ * administrators it had not reported.
  *
  * The digest says counts, kinds and dataset ids, nothing a workflow wrote beyond what
  * `parseScreenReport` accepted.
@@ -75,6 +79,18 @@ export const BATCH_DIGEST_OPEN_SQL = `EXISTS (SELECT 1 FROM screen_batches b
  * is owed, as for any screen) otherwise, which includes a request with no batch.
  */
 export const MAIL_COVERED_BY_DIGEST_SQL = `CASE WHEN ${BATCH_DIGEST_OPEN_SQL} THEN datetime('now') ELSE NULL END`;
+
+/**
+ * When a batch's digest is due, as a condition on `screen_batches` (an UPDATE's or a SELECT's WHERE):
+ * closed, or every request settled, with no request the batch dispatched still unsettled; or two
+ * hours since the last dispatch. A module constant of fixed text, never input.
+ */
+const DIGEST_DUE_SQL = `(
+  ((closed_at IS NOT NULL OR reported >= total)
+    AND NOT EXISTS (SELECT 1 FROM publication_requests pr
+                     WHERE pr.identifier_screen_batch_id = screen_batches.id
+                       AND pr.identifier_screen_batch_settled_at IS NULL))
+  OR last_dispatch_at < datetime('now', '-${DIGEST_AFTER_LAST_DISPATCH_MINUTES} minutes'))`;
 
 /** One request of a batch, as stored: [request id, dataset id, screen state before, status before]. */
 export type SelectionEntry = [number, string, string | null, string];
@@ -190,28 +206,35 @@ export async function noteBatchDispatch(env: Bindings, batchId: number): Promise
 }
 
 /**
- * One request of the batch has settled (a stored report, a screen that could not start, a
- * dispatch the Worker refused): count it, and send the digest if that was the last. Never throws.
+ * One request the batch dispatched has settled (a stored report, or a screen that could not
+ * start): count it once, and send the digest if that was the last. The statement that marks it
+ * settled is the dedupe: it matches only a row of THIS batch that is not yet settled, so a second
+ * call for the same request (a replayed callback, a repeated dispatch) counts nothing. A request
+ * the batch had already counted as refused is not counted again. Never throws.
  */
 export async function settleBatchEntry(
   env: Bindings,
   batchId: number,
-  refusal?: { datasetId: string; reason: ScreenBatchRefusal },
+  requestId: number,
 ): Promise<void> {
   try {
-    // A refused dispatch is recorded with its reason, so the digest can say it apart from a
-    // screen that could not start and from one that never reported.
-    await env.DB.prepare(
-      refusal
-        ? `UPDATE screen_batches
-              SET reported = reported + 1,
-                  refused = json_insert(COALESCE(refused, '[]'), '$[#]', json(?))
-            WHERE id = ?`
-        : "UPDATE screen_batches SET reported = reported + 1 WHERE id = ?",
+    const settled = await env.DB.prepare(
+      `UPDATE publication_requests SET identifier_screen_batch_settled_at = datetime('now')
+        WHERE id = ? AND identifier_screen_batch_id = ?
+          AND identifier_screen_batch_settled_at IS NULL
+        RETURNING dataset_id`,
     )
-      .bind(
-        ...(refusal ? [JSON.stringify([refusal.datasetId, refusal.reason]), batchId] : [batchId]),
-      )
+      .bind(requestId, batchId)
+      .first<{ dataset_id: string }>();
+    if (!settled) return;
+    await env.DB.prepare(
+      `UPDATE screen_batches
+          SET reported = reported + CASE WHEN EXISTS (
+                SELECT 1 FROM json_each(COALESCE(refused, '[]'))
+                 WHERE json_extract(value, '$[0]') = ?) THEN 0 ELSE 1 END
+        WHERE id = ?`,
+    )
+      .bind(settled.dataset_id, batchId)
       .run();
   } catch (err) {
     console.error(`[screen-batch] could not count a report of batch ${batchId}: ${errorText(err)}`);
@@ -221,16 +244,48 @@ export async function settleBatchEntry(
 }
 
 /**
- * The administrator stopped dispatching: the batch now waits only for the screens that were
- * started. The requests never dispatched are named by the digest as not having reported.
- * Returns false when the batch does not exist or its digest has gone out.
+ * A request of the batch will not be screened by it, or was screened again outside it: record the
+ * reason once per dataset, count it settled (unless it was already counted, as a request that had
+ * reported before it was screened again), and send the digest if that was the last. The digest
+ * says each reason apart from a screen that could not start and from one that never reported.
+ * Never throws.
+ */
+export async function settleBatchRefusal(
+  env: Bindings,
+  batchId: number,
+  datasetId: string,
+  reason: ScreenBatchRefusal,
+  alreadyCounted = false,
+): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `UPDATE screen_batches
+          SET reported = reported + ?,
+              refused = json_insert(COALESCE(refused, '[]'), '$[#]', json(?))
+        WHERE id = ? AND digest_sent_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(refused, '[]'))
+                           WHERE json_extract(value, '$[0]') = ?)`,
+    )
+      .bind(alreadyCounted ? 0 : 1, JSON.stringify([datasetId, reason]), batchId, datasetId)
+      .run();
+  } catch (err) {
+    console.error(
+      `[screen-batch] could not record a refusal in batch ${batchId}: ${errorText(err)}`,
+    );
+    return;
+  }
+  await sendDigestIfDue(env, batchId);
+}
+
+/**
+ * The administrator stopped dispatching. Records `closed_at` and leaves `total` alone: the digest
+ * is then due once no request the batch dispatched is unsettled, so a result stored after the
+ * close but not yet settled is still waited for. A batch with nothing dispatched is due at once.
+ * Returns false when the batch does not exist or its digest has gone out; closing twice is fine.
  */
 export async function closeScreenBatch(env: Bindings, batchId: number): Promise<boolean> {
   const res = await env.DB.prepare(
-    `UPDATE screen_batches
-        SET total = MAX(1, reported + (SELECT COUNT(*) FROM publication_requests
-                                        WHERE identifier_screen_batch_id = screen_batches.id
-                                          AND identifier_screen_status IN ('pending', 'unreported')))
+    `UPDATE screen_batches SET closed_at = COALESCE(closed_at, datetime('now'))
       WHERE id = ? AND digest_sent_at IS NULL`,
   )
     .bind(batchId)
@@ -259,8 +314,7 @@ export async function sendDigestIfDue(env: Bindings, batchId: number): Promise<D
             SET digest_claimed_at = ${LEASE_NOW_SQL}
           WHERE id = ? AND digest_sent_at IS NULL
             AND (digest_claimed_at IS NULL OR digest_claimed_at < ${LEASE_EXPIRED_SQL})
-            AND (reported >= total
-                 OR last_dispatch_at < datetime('now', '-${DIGEST_AFTER_LAST_DISPATCH_MINUTES} minutes'))
+            AND ${DIGEST_DUE_SQL}
         RETURNING digest_claimed_at AS claim, selection, refused`,
       )
       .bind(batchId)
@@ -387,6 +441,7 @@ async function buildDigest(
 
   const NO_SCREEN = "no screen on record";
   const NOT_STARTED = "not started";
+  const RESCREENED = "screened again outside the batch";
   const beforeCounts = new Map<string, number>();
   const afterCounts = new Map<string, number>();
   const kinds: Partial<Record<FindingKind, number>> = {};
@@ -394,6 +449,8 @@ async function buildDigest(
   const blocked: string[] = [];
   const notReported: string[] = [];
   const notStarted: ScreenBatchDigest["notStarted"] = [];
+  const rescreened: string[] = [];
+  const stillBlocked: ScreenBatchDigest["stillBlocked"] = [];
   const bump = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
   let reported = 0;
 
@@ -405,12 +462,16 @@ async function buildDigest(
     const state: ScreenState | null = row ? readStoredState(row.screen) : null;
     const inBatch = row !== undefined && row.batch === batchId;
     if (!row || !inBatch) {
-      // Never dispatched by this batch: refused (with the reason the route gave) or not reached.
-      bump(afterCounts, NOT_STARTED);
-      notStarted.push({
-        datasetId,
-        reason: SCREEN_BATCH_REFUSAL_TEXT[refused.get(datasetId) ?? "not-dispatched"],
-      });
+      // Not (or no longer) this batch's screen: screened again outside it, refused with the reason
+      // the route gave, or never reached.
+      const why = refused.get(datasetId) ?? "not-dispatched";
+      if (why === "rescreened") {
+        bump(afterCounts, RESCREENED);
+        rescreened.push(datasetId);
+      } else {
+        bump(afterCounts, NOT_STARTED);
+        notStarted.push({ datasetId, reason: SCREEN_BATCH_REFUSAL_TEXT[why] });
+      }
       continue;
     }
     if (state === null || state === "pending" || state === "unreported") {
@@ -433,15 +494,17 @@ async function buildDigest(
     }
     const nowBlocked = row.status === "blocked" && beforeStatus !== "blocked";
     if (nowBlocked) blocked.push(datasetId);
-    if (after !== before || nowBlocked) {
+    if (row.status === "blocked" && beforeStatus === "blocked") {
+      // A batch never changes a block, so whatever the screen found, the request is still blocked.
+      stillBlocked.push({ datasetId, from: before, to: after });
+    } else if (after !== before || nowBlocked) {
       changed.push({ datasetId, from: before, to: after, nowBlocked });
     }
   }
 
   return {
     batchId,
-    // The requests the batch was made for, not `screen_batches.total`: stopping a batch lowers
-    // that to the screens that were started, and the digest still answers for all of them.
+    // The requests the batch was made for: the digest answers for every one of them.
     total: selection.length,
     reported,
     before: [...beforeCounts],
@@ -449,7 +512,9 @@ async function buildDigest(
     kinds: kindsPhrase(kinds),
     changed,
     blocked,
+    stillBlocked,
     notStarted,
+    rescreened,
     notReported,
   };
 }
@@ -472,8 +537,7 @@ export async function sweepScreenBatchDigests(env: Bindings): Promise<{
         `SELECT id FROM screen_batches
           WHERE digest_sent_at IS NULL
             AND (digest_claimed_at IS NULL OR digest_claimed_at < ${LEASE_EXPIRED_SQL})
-            AND (reported >= total
-                 OR last_dispatch_at < datetime('now', '-${DIGEST_AFTER_LAST_DISPATCH_MINUTES} minutes'))
+            AND ${DIGEST_DUE_SQL}
           ORDER BY id LIMIT ?`,
       )
         .bind(DIGEST_SWEEP_LIMIT)

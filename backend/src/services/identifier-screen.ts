@@ -127,7 +127,8 @@ export const RESET_SCREEN_COLUMNS_SQL = `identifier_screen_status = NULL,
        identifier_screen_ack_by = NULL,
        identifier_screen_ack_reason = NULL,
        identifier_screen_ack_at = NULL,
-       identifier_screen_batch_id = NULL`;
+       identifier_screen_batch_id = NULL,
+       identifier_screen_batch_settled_at = NULL`;
 
 /**
  * The admin re-run's claim guard: only an active request that can still be
@@ -578,8 +579,9 @@ export async function startIdentifierScreen(
 // ============================================================================
 
 export type StoreOutcome =
-  | { stored: true; state: ScreenState; blocked: boolean }
-  | { stored: false };
+  // `batchId` is present only for a screen of a paced re-screen (`services/screen-batch.ts`), read
+  // from the statement that stored the result, so the caller settles that batch and no other.
+  { stored: true; state: ScreenState; blocked: boolean; batchId?: number } | { stored: false };
 
 /**
  * Store a verified callback's report on the row it was issued for.
@@ -664,7 +666,12 @@ export async function storeScreenResult(
       .bind(args.requestId, IDENTIFIER_SCREEN_BLOCK_REASON)
       .run();
   }
-  return { stored: true, state, blocked };
+  return {
+    stored: true,
+    state,
+    blocked,
+    ...(inBatch ? { batchId: stored.batch_id as number } : {}),
+  };
 }
 
 /**

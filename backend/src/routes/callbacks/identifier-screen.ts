@@ -145,18 +145,25 @@ export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
     // there instead.
     //
     // A screen of a paced re-screen (`services/screen-batch.ts`) was stored with its mail covered
-    // by the batch's digest, so `notifyAdminsOfScreen` claims nothing for it; it is counted last,
+    // by the batch's digest, so `notifyAdminsOfScreen` claims nothing for it; it is counted first,
     // and the report that completes the batch sends the digest.
     const afterAnswer = (async () => {
+      // Settled FIRST, in a fault of its own: the batch counts this request from the statement
+      // that stored it (`stored.batchId`), and a fault in the count must not stop the review or
+      // the mail below, nor be silent (only the dataset id and the error's class are logged).
+      if (stored.batchId !== undefined) {
+        try {
+          await settleBatchEntry(c.env, stored.batchId, requestId);
+        } catch (err) {
+          console.error(
+            `[identifier-screen-result] could not settle ${datasetId} in its batch: ${
+              err instanceof Error ? err.name : "unknown error"
+            }`,
+          );
+        }
+      }
       await startPublicationReviewForScreen(c.env, { requestId, datasetId });
       await notifyAdminsOfScreen(c.env, requestId);
-      const batch = await c.env.DB.prepare(
-        "SELECT identifier_screen_batch_id AS batch FROM publication_requests WHERE id = ?",
-      )
-        .bind(requestId)
-        .first<{ batch: number | null }>()
-        .catch(() => null);
-      if (batch?.batch != null) await settleBatchEntry(c.env, batch.batch);
     })();
     if (!deferAfterAnswer(c)(afterAnswer)) await afterAnswer;
     return c.json({
