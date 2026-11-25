@@ -43,11 +43,15 @@ type Loose = Record<string, any>;
 
 const ENTRY = fixtureEntry();
 
-function seedDataset(id: string, over: { visibility?: string; anonymous?: number } = {}): void {
+function seedDataset(
+  id: string,
+  over: { visibility?: string; anonymous?: number; withdrawnAt?: string } = {},
+): void {
   db.run(
-    `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox, anonymous, modalities)
-     VALUES (?, ?, -1, 'active', ?, 0, ?, 'eeg')`,
-    [id, id, over.visibility ?? "public", over.anonymous ?? 0],
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox, anonymous, modalities,
+                           withdrawn_at)
+     VALUES (?, ?, -1, 'active', ?, 0, ?, 'eeg', ?)`,
+    [id, id, over.visibility ?? "public", over.anonymous ?? 0, over.withdrawnAt ?? null],
   );
 }
 
@@ -286,6 +290,23 @@ describe("the dataset's gate", () => {
   });
 });
 
+describe("a withdrawn dataset (owner ruling of 2026-11-25)", () => {
+  test("shows no dataQuality on either document, whatever its visibility (MUTATION: drop the withdrawn term)", async () => {
+    // A withdrawal flips the dataset private first; a row still public with `withdrawn_at` set is the case
+    // the read must refuse on its own, as the view route does.
+    seedDataset("nm000922", { withdrawnAt: "2026-11-24 10:00:00" });
+    await run("nm000922");
+    const meta = await metadata("nm000922");
+    expect(meta.status).toBe(200);
+    expect(meta.body?.extensions).not.toHaveProperty("dataQuality");
+    const bundle = await bundleMetadata("nm000922");
+    expect(bundle.data?.extensions).not.toHaveProperty("dataQuality");
+    seedDataset("nm000923", { visibility: "private", withdrawnAt: "2026-11-24 10:00:00" });
+    await run("nm000923");
+    expect((await metadata("nm000923")).status).toBe(404);
+    expect((await bundleMetadata("nm000923")).status).toBe(404);
+  });
+});
 describe("metadata.json and the page bundle agree (#2331)", () => {
   test("processing, signalJourney with an in_progress link, and dataQuality (MUTATION: drop the bundle's read)", async () => {
     seedDataset("nm000930");

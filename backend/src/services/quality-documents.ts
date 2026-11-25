@@ -356,19 +356,22 @@ export const CURRENT_PUBLIC_DERIVATIVE_SQL = (d: string): string =>
 /**
  * The dataset summary of each recipe's current public derivative of a dataset (`?1`): the derivative is
  * picked first and its run's summary joined, so a current derivative without a summary shows none rather
- * than an older run's. The dataset is bound on both rows; nothing is read from the entry.
+ * than an older run's. The dataset is bound on both rows; nothing is read from the entry. A withdrawn
+ * dataset (`withdrawn_at` set, whatever its visibility) shows none, as the view route refuses it (owner
+ * ruling of 2026-11-25).
  */
 export const CURRENT_QUALITY_DOCUMENTS_SQL = `SELECT d.recipe, q.entry
   FROM compute_derivatives d
   JOIN compute_quality_documents q
     ON q.stamp_id = d.stamp_id AND q.dataset_id = d.dataset_id AND q.recipe = d.recipe
+  JOIN datasets ds ON ds.dataset_id = d.dataset_id AND ds.withdrawn_at IS NULL
   WHERE d.dataset_id = ?1 AND ${CURRENT_PUBLIC_DERIVATIVE_SQL("d")}
   ORDER BY d.recipe`;
 
 /**
  * The `recipes` of a dataset's `dataQuality` at `level: dataset`: the summary of each recipe's current
- * public derivative. A stored entry that does not parse as an object is left out with a log line. The
- * caller gates the dataset (public, not concealed) before it calls this.
+ * public derivative, none for a withdrawn dataset. A stored entry that does not parse as an object is left
+ * out with a log line. The caller gates the dataset (public, not concealed) before it calls this.
  */
 export async function currentQualityDocuments(
   db: D1Database,
