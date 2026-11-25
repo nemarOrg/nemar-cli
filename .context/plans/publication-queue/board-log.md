@@ -31,3 +31,6 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T14:03-08:00 | PR #2373 r1 done: settle redesign sent |
 | 2026-11-25T14:04-08:00 | D2 merged (#2371 -> 4ae05b17); CP-D1 already answered; D3 waits on D1 |
 | 2026-11-25T14:07-08:00 | PR #2374 r1 done: fixes sent (range-ignored, limit safeguard, 3 mutants) |
+| 2026-11-25T14:20-08:00 | Local pure tier replaced by remote CI (faster under load); killed local run |
+| 2026-11-25T14:35-08:00 | D4 green but conflicting after D1 merge; base merge sent |
+| 2026-11-25T14:42-08:00 | A1 merged (#2374 -> 5c3d65d5): A2, A6, A9 ready |

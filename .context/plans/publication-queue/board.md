@@ -48,7 +48,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 12 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 18 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -63,11 +63,11 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | O1 | Approve the 3 clean requests (checkpoints.md O1) |  | owner |  |  | owner |  |  |  |  |  | owner runs the O1 commands |
 | O3 | 37 blocked on ethics statement: depositor remedy (O3) |  | owner |  |  | owner |  |  |  |  |  | owner tells the depositor |
-| D1 | [License lineage](cards/D1.md) |  | worker-hard |  | claude-worker | review |  | 2372 |  | 2026-11-25T11:12 | 2d | r1: 3 important + 6 suggestions sent to D1; 1 rejected (ODbL version) |
+| D1 | [License lineage](cards/D1.md) |  | worker-hard |  | claude-worker | done |  | 2372 | r1 panel (code+tests, errors+comments): 3 important + 6 sugg fixed, 1 rejected; r2 delta clean, 2 sugg fixed | 2026-11-25T11:12 | 2d | merged 442ce5ca; flaky CI filed #2377 |
 | D2 | [Measure every blocker, HEAD+history](cards/D2.md) |  | worker |  | claude-worker | done |  | 2371 | r1 code+comments (1 reviewer): 0 important, 4 suggestions fixed; no r2 | 2026-11-25T11:12 | 1d | merged 4ae05b17 |
-| A1 | [Coverage contract and registry](cards/A1.md) |  | worker-hard |  | claude-worker | review |  | 2374 |  | 2026-11-25T11:12 | 3d | r1: 1 important + 7 items sent; then merge |
-| D4 | [Quiet paced re-screen](cards/D4.md) |  | worker |  | claude-worker | review |  | 2373 |  | 2026-11-25T11:25 | 1d | r1: 6 important + 7 suggestions sent to D4 (settle redesign) |
-| A3 | [Pure-TS HDF5 metadata reader](cards/A3.md) |  | worker-hard |  |  | todo |  |  |  |  | 2d | dispatch |
+| A1 | [Coverage contract and registry](cards/A1.md) |  | worker-hard |  | claude-worker | done |  | 2374 | r1 panel: 1 important + 7 fixed; r2 delta: 1 important (copy unwired) + 1 sugg sent | 2026-11-25T11:12 | 3d | merged 5c3d65d5 |
+| D4 | [Quiet paced re-screen](cards/D4.md) |  | worker |  | claude-worker | review |  | 2373 | r1 panel: 6 important + 7 sugg fixed (settle redesign); r2 delta clean, 2 sugg fixed | 2026-11-25T11:25 | 1d | CI green at 93df0bc8; conflicts with D1 merge -> D4 merging base |
+| A3 | [Pure-TS HDF5 metadata reader](cards/A3.md) |  | worker-hard |  | claude-worker | active |  |  |  | 2026-11-25T14:10 | 2d | implementer running |
 | D0 | [Review in prod, shadow 20](cards/D0.md) |  | lead |  |  | owner |  | 2370 | r1 code+tests+comments: 0 important, 2 suggestions fixed |  | 4h | draft #2370; owner checklist, then owner merges and releases |
 | B2 | ADR 0139 auto-deny (draft on decide branch) |  | lead |  |  | done |  |  |  |  |  | accepted 2026-11-25 |
 | A2 | [BrainVision and NIRx](cards/A2.md) |  | worker-hard |  |  | todo | A1 |  |  |  | 1d | after A1 |
@@ -75,8 +75,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  |  | todo | A1 |  |  |  | 1d | after A1 |
 | A9 | [nemar dataset screen](cards/A9.md) |  | worker |  |  | todo | A1 |  |  |  | 1d | after A1 |
 | A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  |  | todo | A1, A4 |  |  |  | 2d | after A4 |
-| D3 | [Batch ack on public upstream](cards/D3.md) |  | worker-hard |  |  | todo | D1, D2 |  |  |  | 2d | after D1 and D2 merge |
-| B3 | [Resubmission note](cards/B3.md) |  | worker |  |  | todo | B2 |  |  |  | 1d | ready (B2 done) |
+| D3 | [Batch ack on public upstream](cards/D3.md) |  | worker-hard |  | claude-worker | active | D1, D2 |  |  | 2026-11-25T14:32 | 2d | implementer running |
+| B3 | [Resubmission note](cards/B3.md) |  | worker |  | claude-worker | active | B2 |  |  | 2026-11-25T14:10 | 1d | implementer running |
 | B4 | [Review inputs and record](cards/B4.md) |  | worker-hard |  |  | todo | D1, B2 |  |  |  | 2d | after D1 |
 | B5 | [Auto-deny and ready mail](cards/B5.md) |  | worker-hard |  |  | todo | B2, B3, B4, D4 |  |  |  | 2.5d | after B3, B4, D4 |
 | CPD3 | Seam review; decide epic to dev; release D |  | lead |  |  | outline | D1, D3, D4, B3, B4, B5 |  |  |  |  | CP-D3 |
@@ -100,11 +100,11 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Agent | Role | Slot | Model | Step | Started | State |
 |---|---|---|---|---|---|---|
-| D1 | implementer | claude-worker | Opus 5.5 | D1 | 2026-11-25T11:12 | running |
+| D1 | implementer | claude-worker | Opus 5.5 | D1 | 2026-11-25T11:12 | done |
 | D2 | implementer | claude-worker | Sonnet 5.5 | D2 | 2026-11-25T11:12 | done |
-| A1 | implementer | claude-worker | Opus 5.5 | A1 | 2026-11-25T11:12 | running |
+| A1 | implementer | claude-worker | Opus 5.5 | A1 | 2026-11-25T11:12 | done |
 | rev-2370 | reviewer | claude-worker | Sonnet 5.5 | D0 | 2026-11-25T11:22 | done |
-| D4 | implementer | claude-worker | Sonnet 5.5 | D4 | 2026-11-25T11:25 | running |
+| D4 | implementer | claude-worker | Sonnet 5.5 | D4 | 2026-11-25T11:25 | done |
 | rev-2371 | reviewer | claude-worker | Sonnet 5.5 | D2 | 2026-11-25T11:25 | done |
 | rev-2372a | reviewer | claude-worker | Sonnet 5.5 | D1 | 2026-11-25T14:01 | done |
 | rev-2372b | reviewer | claude-worker | Sonnet 5.5 | D1 | 2026-11-25T14:01 | done |
@@ -112,3 +112,9 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-2374b | reviewer | claude-worker | Sonnet 5.5 | A1 | 2026-11-25T14:01 | done |
 | rev-2373a | reviewer | claude-worker | Sonnet 5.5 | D4 | 2026-11-25T14:02 | done |
 | rev-2373b | reviewer | claude-worker | Sonnet 5.5 | D4 | 2026-11-25T14:02 | done |
+| rev-2372-r2 | reviewer | claude-worker | Sonnet 5.5 | D1 | 2026-11-25T14:10 | done |
+| rev-2373-r2 | reviewer | claude-worker | Sonnet 5.5 | D4 | 2026-11-25T14:10 | done |
+| A3 | implementer | claude-worker | Opus 5.5 | A3 | 2026-11-25T14:10 | running |
+| B3 | implementer | claude-worker | Sonnet 5.5 | B3 | 2026-11-25T14:10 | running |
+| rev-2374-r2 | reviewer | claude-worker | Sonnet 5.5 | A1 | 2026-11-25T14:14 | done |
+| D3 | implementer | claude-worker | Opus 5.5 | D3 | 2026-11-25T14:32 | running |
