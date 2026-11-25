@@ -27,3 +27,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T11:16-08:00 | CP-D2 done: cards B3, B4, B5 written after ADR 0139 accepted |
 | 2026-11-25T11:23-08:00 | PR #2370 reviewed (r1), suggestions fixed |
 | 2026-11-25T11:25-08:00 | D2 report: images-only ack empties 1 more request; 349 held by unread formats only; 2 empty repos |
+| 2026-11-25T14:02-08:00 | PR #2372 r1 done: fixes sent |
+| 2026-11-25T14:03-08:00 | PR #2373 r1 done: settle redesign sent |
+| 2026-11-25T14:04-08:00 | D2 merged (#2371 -> 4ae05b17); CP-D1 already answered; D3 waits on D1 |
+| 2026-11-25T14:07-08:00 | PR #2374 r1 done: fixes sent (range-ignored, limit safeguard, 3 mutants) |
