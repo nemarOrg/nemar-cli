@@ -8,6 +8,7 @@
  *   `reconcilePipelineProgress`   ended runs reconciled from their recordings tables, `stored` resolved,
  *                                 and a succeeded run's dataset quality summary checked and kept
  *   `liveSignalJourneyLinks`      the `in_progress` links of a dataset's reporting runs, worked out on read
+ *   `readPipelineExtensions`      a dataset's `processing`, `signalJourney` and `dataQuality`, for its pages
  *
  * THE GATE. A report is one D1 batch whose FIRST statement upserts the run row of the stamp
  * (`compute_pipeline_progress_runs`) only when, in that same statement: the stamp is still dispatched and
@@ -63,7 +64,12 @@ import { DATA_QUALITY_MAX_BYTES } from "../../../shared/contract/data-quality.js
 import { sha256HexOfBytes } from "../../../shared/contract/view-digest.js";
 import type { Bindings } from "../types/bindings.js";
 import { RECORD_READ_MAX_BYTES, TABLE_READ_MAX_BYTES } from "./compute-derivatives.js";
-import { checkDatasetQualityDocument } from "./quality-documents.js";
+import {
+  type PipelineDocumentRow,
+  type PipelineExtensions,
+  pipelineExtensions,
+} from "./data-router.js";
+import { checkDatasetQualityDocument, currentQualityDocuments } from "./quality-documents.js";
 
 /** The job states in which a job on the supercomputer may report (its state in D1 lags Tapis). */
 export const PROGRESS_TAPIS_STATES = ["submitted", "queued", "running"] as const;
@@ -345,6 +351,25 @@ export async function liveSignalJourneyLinks(
     links[r.recipe] = signalJourneyLink({ recipeVersion: r.recipe_version, status: "in_progress" });
   }
   return links;
+}
+
+/** A dataset's stored pipeline documents (migration 0150), for `/<id>/metadata.json` and the page bundle. */
+export const PIPELINE_DOCUMENTS_SQL =
+  "SELECT namespace, recipe, entry FROM compute_pipeline_documents WHERE dataset_id = ?1 ORDER BY recipe";
+
+/**
+ * The pipeline's namespaces of a dataset document (`processing`, `signalJourney` and `dataQuality`), as
+ * `/<id>/metadata.json` and the page bundle both serve them: one read, so the two documents cannot differ.
+ * The caller gates the dataset first (public, and never a concealed deposit). A failed read throws.
+ */
+export async function readPipelineExtensions(
+  db: D1Database,
+  datasetId: string,
+): Promise<PipelineExtensions> {
+  const docs = await db.prepare(PIPELINE_DOCUMENTS_SQL).bind(datasetId).all<PipelineDocumentRow>();
+  const live = await liveSignalJourneyLinks(db, datasetId);
+  const quality = await currentQualityDocuments(db, datasetId);
+  return pipelineExtensions(docs.results ?? [], live, quality);
 }
 
 // --- Reconciliation ---------------------------------------------------------------------------------

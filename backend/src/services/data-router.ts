@@ -901,6 +901,11 @@ export interface NeuroschemaDataset {
     processing?: { level: "dataset"; recipes: Record<string, unknown> };
     /** neuroschema `signalJourney` (ADR 0134): a link to each recipe's latest signalJourney record. */
     signalJourney?: { recipes: Record<string, unknown> };
+    /**
+     * neuroschema `dataQuality`, dataset level (ADR 0137 decision 8): the quality summary of each recipe's
+     * current public derivative.
+     */
+    dataQuality?: { level: "dataset"; recipes: Record<string, unknown> };
   };
 }
 
@@ -911,20 +916,26 @@ export interface PipelineDocumentRow {
   entry: string;
 }
 
+/** The pipeline's namespaces of a dataset document's `extensions`. */
+export interface PipelineExtensions {
+  processing?: { level: "dataset"; recipes: Record<string, unknown> };
+  signalJourney?: { recipes: Record<string, unknown> };
+  dataQuality?: { level: "dataset"; recipes: Record<string, unknown> };
+}
+
 /**
- * The neuroschema `processing` and `signalJourney` extensions of a dataset (ADR 0134, epic #2324 phase 2):
- * the final entries of each recipe's latest ended run, and, for a recipe whose run is reporting now, the
- * `in_progress` link worked out on read (`live`), which stands in front of the last final link without
- * replacing it in storage. An entry that does not parse as a JSON object is left out. Each namespace is
- * present only when it has an entry.
+ * The neuroschema `processing`, `signalJourney` and `dataQuality` extensions of a dataset (ADR 0134 and
+ * ADR 0137 decision 8, epic #2324): the final entries of each recipe's latest ended run; for a recipe whose
+ * run is reporting now, the `in_progress` link worked out on read (`live`), which stands in front of the
+ * last final link without replacing it in storage; and the quality summary of each recipe's current public
+ * derivative (`quality`, already parsed). An entry that does not parse as a JSON object is left out. Each
+ * namespace is present only when it has an entry.
  */
 export function pipelineExtensions(
   rows: readonly PipelineDocumentRow[],
   live: Readonly<Record<string, unknown>> = {},
-): {
-  processing?: { level: "dataset"; recipes: Record<string, unknown> };
-  signalJourney?: { recipes: Record<string, unknown> };
-} {
+  quality: Readonly<Record<string, unknown>> = {},
+): PipelineExtensions {
   const processing: Record<string, unknown> = {};
   const signalJourney: Record<string, unknown> = {};
   for (const row of rows) {
@@ -944,6 +955,9 @@ export function pipelineExtensions(
       ? { processing: { level: "dataset" as const, recipes: processing } }
       : {}),
     ...(Object.keys(signalJourney).length > 0 ? { signalJourney: { recipes: signalJourney } } : {}),
+    ...(Object.keys(quality).length > 0
+      ? { dataQuality: { level: "dataset" as const, recipes: { ...quality } } }
+      : {}),
   };
 }
 

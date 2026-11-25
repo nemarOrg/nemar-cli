@@ -28,6 +28,7 @@
  */
 import type { Bindings } from "../types/bindings";
 import { withheldWhileAnonymous } from "./anonymity";
+import { readPipelineExtensions } from "./compute-pipeline-progress";
 import {
   type DatasetVersionRow,
   type LandingArchive,
@@ -284,6 +285,13 @@ async function loadEnrichedMetadata(
     latestManifest: null,
     githubOrg: ORG_NAME,
   });
+  // The pipeline's `processing`, `signalJourney` and `dataQuality` namespaces (ADR 0134, ADR 0137 decision
+  // 8, #2331), by the very read `/<id>/metadata.json` serves, behind the same gate: the caller admitted a
+  // public dataset, and a concealed deposit gets none. A failed read fails this component, so a bundle
+  // without them is never cached as complete.
+  if (row.anonymous !== 1) {
+    Object.assign(metadata.extensions, await readPipelineExtensions(env.DB, datasetId));
+  }
   return { metadata, enrichment_degraded: enrichmentDegraded };
 }
 

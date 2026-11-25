@@ -1,7 +1,8 @@
 /**
  * A run's dataset quality summary (ADR 0137 decision 8, epic #2324 phase B1), from its product in the
- * results bucket to D1, through the real entry point: `reconcilePipelineProgress` over Miniflare's R2 and a
- * real migrated database. The product is
+ * results bucket to a dataset's pages, through the real entry points: `reconcilePipelineProgress` over
+ * Miniflare's R2 and a real migrated database, `promoteDerivative` (the admin route's promotion), and
+ * `readPipelineExtensions`, the one read `/<id>/metadata.json` and the page bundle serve. The product is
  * nemar-ica's own, copied from nemar-process P7 (`test/fixtures/quality/ica-views`). nemar-ica is a
  * placeholder the dispatch refuses, so its succeeded stamp is seeded with SQL the table accepts, and its
  * product is put where the launcher uploads it.
@@ -12,33 +13,64 @@
  *  - a summary that names another record, counts other recordings, or names a plugin the recipe does not
  *    run is not kept, with a fixed-word log line, and the run is reconciled all the same;
  *  - a run with no summary, and a failed run, keep none; a summary that cannot be read now leaves the run
- *    for a later call.
+ *    for a later call;
+ *  - a page shows a summary only once its derivative is promoted: canary shows nothing.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { Miniflare } from "miniflare";
 import { recipeQualityDocumentPath, recipeRequiredOutputs } from "../../shared/compute-recipes";
 import { resultsOutputKey } from "../../shared/contract/compute-launch";
-import { reconcilePipelineProgress } from "../src/services/compute-pipeline-progress";
+import {
+  compileNeuroschemaValidator,
+  formatAjvErrors,
+} from "../../test/contract/neuroschema-validator";
+import { promoteDerivative } from "../src/services/compute-derivatives";
+import {
+  readPipelineExtensions,
+  reconcilePipelineProgress,
+} from "../src/services/compute-pipeline-progress";
 import type { Bindings } from "../src/types/bindings";
 import { type ComputeHarness, startComputeHarness } from "./helpers/compute-harness";
 import { seedEegDataset } from "./helpers/compute-pipeline-fixture";
 import { logged } from "./helpers/logs";
-import { ICA, fixtureEntry, newJobId, productFiles, seedIcaStamp } from "./helpers/quality-fixture";
+import {
+  ICA,
+  fixtureEntry,
+  newJobId,
+  productFiles,
+  seedDerivative,
+  seedIcaStamp,
+} from "./helpers/quality-fixture";
 
 let harness: ComputeHarness;
+let derivativesHost: Miniflare;
+let derivatives: R2Bucket;
 let env: Bindings;
 
 beforeAll(async () => {
   harness = await startComputeHarness();
+  derivativesHost = new Miniflare({
+    modules: true,
+    script: "export default { fetch() { return new Response('ok') } }",
+    compatibilityDate: "2024-12-01",
+    r2Buckets: ["COMPUTE_DERIVATIVES"],
+  });
+  derivatives = (await derivativesHost.getR2Bucket("COMPUTE_DERIVATIVES")) as unknown as R2Bucket;
 }, 120_000);
 
 beforeEach(async () => {
   await harness.reset();
-  env = harness.env();
+  env = harness.env({
+    // The promotion reads only D1; the store must be bound and named for it, as in production.
+    COMPUTE_DERIVATIVES: derivatives,
+    COMPUTE_DERIVATIVES_BUCKET_NAME: "nemar-compute-derivatives",
+  });
 });
 
 afterAll(async () => {
   await harness?.dispose();
+  await derivativesHost?.dispose();
 }, 30_000);
 
 // biome-ignore lint/suspicious/noExplicitAny: rows are read field by field
@@ -206,5 +238,39 @@ describe("a succeeded run's dataset summary", () => {
       table: `product/${TABLE}`,
     });
     expect(recipeQualityDocumentPath(ICA)).toBe(`product/${DOCUMENT}`);
+  });
+});
+
+describe("a page shows a summary once its derivative is promoted", () => {
+  const validateExtensions = compileNeuroschemaValidator(
+    "nsc:/extensions/extensionsContainer.schema.json",
+  );
+
+  test("no derivative and a canary show nothing; the real promotion shows it (MUTATION: drop the retention term)", async () => {
+    const run = await finishedRun();
+    await reconcilePipelineProgress(env);
+    expect(await kept(run.stampId)).not.toBeNull();
+    expect((await readPipelineExtensions(env.DB, run.datasetId)).dataQuality).toBeUndefined();
+
+    const key = await seedDerivative(env.DB, {
+      datasetId: run.datasetId,
+      stampId: run.stampId,
+      jobId: run.jobId,
+    });
+    expect((await readPipelineExtensions(env.DB, run.datasetId)).dataQuality).toBeUndefined();
+
+    const promoted = await promoteDerivative(env, {
+      key,
+      to: "catalog",
+      userId: 1,
+      role: "admin",
+    });
+    expect(promoted.ok).toBe(true);
+    const extensions = await readPipelineExtensions(env.DB, run.datasetId);
+    expect(extensions.dataQuality).toEqual({
+      level: "dataset",
+      recipes: { "nemar-ica": fixtureEntry() },
+    });
+    if (!validateExtensions(extensions)) throw new Error(formatAjvErrors(validateExtensions));
   });
 });
