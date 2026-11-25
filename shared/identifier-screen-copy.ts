@@ -44,6 +44,12 @@ const HEADER = "the identification fields of the EDF/BDF header (its first 256 b
 const EDF_REMEDY =
   "Blank the field or replace it with a code (for EDF/BDF, the patient and recording fields of the header) and upload again.";
 
+const SNIRF_TAGS = "the metaDataTags group of every nirs group in a SNIRF file";
+const HDF5_TEXT =
+  "every string attribute and string dataset of the file that the HDF5 reader returns (signal data is never read)";
+const HDF5_REMEDY =
+  "Blank the value or replace it with a code in the file (h5py or MATLAB can edit it in place) and upload again.";
+
 const kind = (statement: string, read: string, remedy: string, name: FindingKind): Copy => ({
   statement,
   read,
@@ -177,6 +183,42 @@ export const KIND_COPY: Record<FindingKind, Copy> = {
     "small code and text files under code/ and sourcedata/",
     "Replace the path with a relative one and upload again.",
     "local-user-path",
+  ),
+  "snirf-subject-name": kind(
+    "The SubjectID tag of a SNIRF file holds a name.",
+    SNIRF_TAGS,
+    "Replace the SubjectID with the BIDS subject label or another code and upload again.",
+    "snirf-subject-name",
+  ),
+  "snirf-subject-freetext": kind(
+    "The SubjectID tag of a SNIRF file holds text that is neither the BIDS subject label nor a short code.",
+    SNIRF_TAGS,
+    "Check that it names nobody; replace it with the BIDS subject label if in doubt.",
+    "snirf-subject-freetext",
+  ),
+  "snirf-measurement-date": kind(
+    "The MeasurementDate tag of a SNIRF file is an acquisition date finer than year and month.",
+    SNIRF_TAGS,
+    "Remove or coarsen the date if it could identify someone.",
+    "snirf-measurement-date",
+  ),
+  "hdf5-freetext": kind(
+    "A text value in an HDF5 or SNIRF file holds a path into someone's home directory, or text that may name someone.",
+    HDF5_TEXT,
+    HDF5_REMEDY,
+    "hdf5-freetext",
+  ),
+  "hdf5-freetext-name": kind(
+    "A text value in an HDF5 or SNIRF file, in a field meant for a person (a name, a subject, a patient, an operator or an experimenter), holds a name.",
+    HDF5_TEXT,
+    HDF5_REMEDY,
+    "hdf5-freetext-name",
+  ),
+  "hdf5-identifier-field": kind(
+    "An HDF5 or SNIRF file has a field named for an identifier (a name, a birth date, a record number or a contact) that holds a value.",
+    HDF5_TEXT,
+    "Scrub the field (blank it, or for a birth date keep the year only) in every file that has it, and resubmit.",
+    "hdf5-identifier-field",
   ),
 };
 

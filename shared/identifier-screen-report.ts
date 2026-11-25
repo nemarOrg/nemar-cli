@@ -65,6 +65,12 @@ const KIND_TABLE: Record<FindingKind, true> = {
   "image-or-document-file": true,
   "tooling-debris": true,
   "local-user-path": true,
+  "snirf-subject-name": true,
+  "snirf-subject-freetext": true,
+  "snirf-measurement-date": true,
+  "hdf5-freetext": true,
+  "hdf5-freetext-name": true,
+  "hdf5-identifier-field": true,
 };
 export const FINDING_KINDS: readonly FindingKind[] = Object.keys(KIND_TABLE) as FindingKind[];
 const KIND_SET: ReadonlySet<string> = new Set(FINDING_KINDS);
