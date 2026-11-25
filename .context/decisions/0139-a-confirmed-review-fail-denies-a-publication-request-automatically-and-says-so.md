@@ -1,6 +1,6 @@
 # ADR 0139: A confirmed review fail denies a publication request automatically, and says so
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-25
 **Owner:** maintainer (decisions of 2026-11-25), drafted by the epic #2182 lead
 
