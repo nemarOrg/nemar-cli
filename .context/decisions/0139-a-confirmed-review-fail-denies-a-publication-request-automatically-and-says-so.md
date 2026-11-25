@@ -112,3 +112,7 @@ ADR 0102 §2's ban on data content, header values, `.tsv` files, identifier find
 - Plan `.context/plans/publication-queue/plan.md`.
 - ADR 0102, ADR 0093, ADR 0086.
 - Queue measurement of 2026-11-25, in the plan.
+
+## Amendment 2026-11-25 (lead, epic #2182)
+
+Decision 7 also covers the lineage outcomes `redistribution_prohibited` and `source_is_publication`, which the license-lineage resolver added after this ADR was written; each needs action and never denies automatically.
