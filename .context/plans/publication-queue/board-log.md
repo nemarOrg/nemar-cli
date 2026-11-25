@@ -17,6 +17,9 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T11:22-08:00 | D1: fourth resolver (OpenNeuro GraphQL, PhysioNet API) since registries hold no license for them; README DOIs only for data-repository prefixes; no openapi entry | lead |  |
 | 2026-11-25T14:00-08:00 | CP-D1: batch acknowledgment rests on a confirmed public upstream (owner); card D3 written | owner |  |
 | 2026-11-25T14:00-08:00 | Empty repos nm000589, nm000978: deny, ask the depositor to re-upload (owner) | owner |  |
+| 2026-11-25T14:48-08:00 | A2: companions paired by BIDS basename; header-named files checked in scan(); mismatch = partial/companion-missing; .vmrk/.inf read; no contract change | lead |  |
+| 2026-11-25T14:52-08:00 | A2 FP gate: NIRx runs on all public headers found (>=20, count stated); 200-file gate waived for NIRx only; thresholds unchanged | lead |  |
+| 2026-11-25T14:56-08:00 | A3: walker logical read cap 20,000; real bounds are source fetches (page cache), bytes and time, declared per reader by A4/A5 | lead |  |
 
 ## Log
 
