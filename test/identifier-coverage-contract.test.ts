@@ -42,6 +42,7 @@ import { shapeOf } from "../shared/identifier-scan";
 import {
   INCOMPLETE_COPY,
   KIND_COPY,
+  READ_FAILURE_COPY,
   SCREEN_DOCS_URL,
   STATUS_COPY,
   docsLink,
@@ -51,6 +52,7 @@ import {
   DATASET_STATUSES,
   type DatasetStatus,
   INCOMPLETE_REASONS,
+  READ_FAILURE_CLASSES,
   REPORT_VERSION,
   ReportError,
   type ScreenGate,
@@ -685,5 +687,44 @@ describe("review round 1", () => {
         }),
       ).scan?.status,
     ).toBe("unchecked");
+  });
+});
+
+describe("review round 2: read failures have words", () => {
+  const failedRead = () =>
+    v2({
+      status: "unchecked",
+      incomplete: true,
+      incomplete_reasons: ["edf-headers-unread"],
+      files: { total: 10, edf_bdf: 2, header_read: 1, header_read_failed: 1 },
+      read_by_format: { edf: { files: 2, read: 1, partial: 0, failed: 1 } },
+      read_failures: { "edf/range-ignored": 1, "edf/http-503": 2 },
+    });
+
+  test("a v2 report with a range-ignored failure passes the door, not folded to internal", () => {
+    const parsed = parseScreenReport(failedRead());
+    expect(parsed.scan?.read_failures).toEqual({ "edf/range-ignored": 1, "edf/http-503": 2 });
+    const folded = foldOddFailures({ read_failures: { "edf/range-ignored": 1 } });
+    expect(folded.read_failures).toEqual({ "edf/range-ignored": 1 });
+  });
+
+  test("each failure prints its statement, then its remedy and docs link", () => {
+    const lines = describeScreen("unchecked", parseScreenReport(failedRead())).lines;
+    for (const [key, n, copy] of [
+      ["edf/range-ignored", 1, READ_FAILURE_COPY["range-ignored"]],
+      ["edf/http-503", 2, READ_FAILURE_COPY.http],
+    ] as const) {
+      const at = lines.indexOf(`Read failed (${key} x${n}): ${copy.statement}`);
+      expect([key, at >= 0]).toEqual([key, true]);
+      expect(lines[at + 1]).toBe(`What to do: ${copy.remedy}`);
+      expect(lines[at + 2]).toBe(`More: ${docsLink(copy)}`);
+    }
+  });
+
+  test("every closed failure class has its words", () => {
+    for (const cls of [...READ_FAILURE_CLASSES, "http"] as const) {
+      const copy = READ_FAILURE_COPY[cls];
+      expect([cls, copy.statement.length > 0 && copy.remedy.length > 0]).toEqual([cls, true]);
+    }
   });
 });

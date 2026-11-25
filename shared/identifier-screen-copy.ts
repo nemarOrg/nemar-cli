@@ -17,6 +17,7 @@ import type { ReaderId } from "./identifier-readers";
 import type { FindingKind } from "./identifier-scan";
 import type {
   IncompleteReason,
+  ReadFailureClass,
   ScreenDescription,
   ScreenError,
   ScreenState,
@@ -490,18 +491,120 @@ export const INCOMPLETE_COPY: Record<IncompleteReason, Copy> = {
   ),
 };
 
+const failure = (statement: string, read: string, remedy: string, name: string): Copy => ({
+  statement,
+  read,
+  remedy,
+  anchor: `failure-${name}`,
+});
+const THROWN = (name: ReadFailureClass) =>
+  failure(
+    "The scanner's own code failed while reading a file, so that file was not read.",
+    "the file, until the error",
+    "Report it, so the scanner is fixed; then run the screen again.",
+    name,
+  );
+
 /**
- * Read-failure classes that a person may need explained. A failure is counted in
- * `read_failures` and makes its file `failed`; the count lines name the class.
+ * Why a read failed, per failure class (`read_failures` keys are `<what>/<class>`; every
+ * `http-<status>` is `http`). A failed read makes its file unread; these say why and what helps.
  */
-export const READ_FAILURE_COPY: Record<"range-ignored", Copy> = {
-  "range-ignored": {
-    statement:
-      "The storage server ignored a request for part of a file and sent the whole file, so that part was not read.",
-    read: "nothing from that file past its first bytes",
-    remedy: READ_AGAIN,
-    anchor: "failure-range-ignored",
-  },
+export const READ_FAILURE_COPY: Record<ReadFailureClass, Copy> = {
+  timeout: failure("A read timed out.", "nothing from that file", READ_AGAIN, "timeout"),
+  network: failure("A read lost its connection.", "nothing from that file", READ_AGAIN, "network"),
+  deadline: failure(
+    "The screen's deadline passed before this file was read.",
+    "nothing from that file",
+    READ_AGAIN,
+    "deadline",
+  ),
+  "credentials-missing": failure(
+    "The screen had no storage credentials for this file.",
+    "nothing from that file",
+    READ_AGAIN,
+    "credentials-missing",
+  ),
+  "header-truncated": failure(
+    "A table's header row was longer than the bytes the scanner reads.",
+    "the first bytes of the table",
+    "Shorten the header row, or check the table by hand.",
+    "header-truncated",
+  ),
+  "json-parse": failure(
+    "A JSON file is not valid JSON.",
+    "the file's text",
+    "Fix the file so it parses and upload it again.",
+    "json-parse",
+  ),
+  "no-body": failure(
+    "The storage server answered with no content.",
+    "nothing from that file",
+    READ_AGAIN,
+    "no-body",
+  ),
+  "short-body": failure(
+    "A file was shorter than its format's header, or than the storage server said.",
+    "what the file held",
+    "Check that the file is complete and upload it again.",
+    "short-body",
+  ),
+  "unreadable-entry": failure(
+    "A file could not be opened (a broken link, a special file, or no permission).",
+    "nothing from that file",
+    "Fix the file or its permissions and run it again.",
+    "unreadable-entry",
+  ),
+  "superseded-absent": failure(
+    "A recording from an earlier commit is gone from storage; it leaks nothing and is not counted.",
+    "nothing; the store has no such object",
+    "Nothing to do.",
+    "superseded-absent",
+  ),
+  limit: failure(
+    "A read went past the reader's limits.",
+    "the file, up to its reader's limits",
+    "Check that recording by hand, or report it so the limit can be reviewed.",
+    "limit",
+  ),
+  "range-ignored": failure(
+    "The storage server ignored a request for part of a file and sent the whole file, so that part was not read.",
+    "nothing from that file past its first bytes",
+    READ_AGAIN,
+    "range-ignored",
+  ),
+  "blob-missing": failure(
+    "A file's content is missing from the repository clone.",
+    "nothing from that file",
+    READ_AGAIN,
+    "blob-missing",
+  ),
+  "blob-closed": failure(
+    "The repository reader stopped before this file was read.",
+    "nothing from that file",
+    READ_AGAIN,
+    "blob-closed",
+  ),
+  internal: failure(
+    "A read failed in a way the scanner has no word for.",
+    "nothing from that file",
+    "Report it, so the scanner is fixed; then run the screen again.",
+    "internal",
+  ),
+  "error-error": THROWN("error-error"),
+  "error-rangeerror": THROWN("error-rangeerror"),
+  "error-typeerror": THROWN("error-typeerror"),
+  "error-syntaxerror": THROWN("error-syntaxerror"),
+  "error-referenceerror": THROWN("error-referenceerror"),
+  "error-evalerror": THROWN("error-evalerror"),
+  "error-urierror": THROWN("error-urierror"),
+  "error-aborterror": THROWN("error-aborterror"),
+  "error-timeouterror": THROWN("error-timeouterror"),
+  http: failure(
+    "The storage server refused a read or failed (an HTTP error status).",
+    "nothing from that file",
+    READ_AGAIN,
+    "http",
+  ),
 };
 
 /** Why a screen produced no scan, as a person reads it. */
@@ -574,6 +677,8 @@ export const LINES = {
   companionMissing: (count: number) => `Companion files missing: ${count}.`,
   incomplete: (reasons: string) => `Incomplete: ${reasons}.`,
   reason: (name: string, copy: Copy) => `Incomplete (${name}): ${copy.statement}`,
+  readFailure: (key: string, count: number, copy: Copy) =>
+    `Read failed (${key} x${count}): ${copy.statement}`,
   state: (copy: StateCopy) => `${copy.statement} Read: ${copy.read}.`,
   ackPrompt: "Acknowledged by the uploader at the prompt.",
   ackFlag: "Acknowledged by the uploader with --acknowledge-identifier-preflight.",

@@ -28,6 +28,7 @@ import {
   KIND_COPY,
   LINES,
   READER_LABEL,
+  READ_FAILURE_COPY,
   STATUS_COPY,
   remedyLines,
 } from "./identifier-screen-copy";
@@ -249,7 +250,11 @@ const READ_WHAT: ReadonlySet<string> = new Set([
   "text",
   "internal",
 ]);
-const READ_CLASS: ReadonlySet<string> = new Set([
+/**
+ * The closed classes a failed read can have, besides `http-<status>` (which {@link
+ * ReadFailureClass} names `http`). Each has its words in `READ_FAILURE_COPY`.
+ */
+export const READ_FAILURE_CLASSES = [
   "timeout",
   "network",
   "deadline",
@@ -276,8 +281,17 @@ const READ_CLASS: ReadonlySet<string> = new Set([
   "error-urierror",
   "error-aborterror",
   "error-timeouterror",
-]);
+] as const;
+export type ReadFailureClass = (typeof READ_FAILURE_CLASSES)[number] | "http";
+const READ_CLASS: ReadonlySet<string> = new Set(READ_FAILURE_CLASSES);
 const HTTP_CLASS = /^http-[1-5]\d\d$/;
+
+/** The class of a `<what>/<class>` failure key, as the copy table names it; null outside the vocabulary. */
+export function readFailureClassOf(key: string): ReadFailureClass | null {
+  if (!isReadFailureKey(key)) return null;
+  const cls = key.slice(key.indexOf("/") + 1);
+  return HTTP_CLASS.test(cls) ? "http" : (cls as ReadFailureClass);
+}
 
 /** Is this a `<what>/<class>` failure key from the closed vocabulary? */
 export function isReadFailureKey(key: string): boolean {
@@ -831,6 +845,7 @@ type ScanLineInput = Pick<
   | "incomplete_reasons"
   | "read_by_format"
   | "companion_missing"
+  | "read_failures"
 >;
 
 /** The counts of a version-1 scan as lines of fixed words, as they always read. */
@@ -889,6 +904,12 @@ function scanLinesV2(scan: ScanLineInput): string[] {
     lines.push(LINES.notScreened(formats.map(([f, n]) => `${f} x${n}`).join(", ")));
   }
   if (scan.companion_missing) lines.push(LINES.companionMissing(scan.companion_missing));
+  for (const [key, n] of Object.entries(scan.read_failures ?? {})) {
+    const cls = readFailureClassOf(key);
+    if (!cls) continue;
+    const copy = READ_FAILURE_COPY[cls];
+    lines.push(LINES.readFailure(key, n, copy), ...remedyLines(copy));
+  }
   if (scan.incomplete_reasons.length > 0) {
     lines.push(LINES.incomplete(scan.incomplete_reasons.join(", ")));
     for (const name of scan.incomplete_reasons as IncompleteReason[]) {
