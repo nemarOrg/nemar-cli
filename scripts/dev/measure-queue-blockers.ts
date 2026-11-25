@@ -31,7 +31,12 @@ import {
   scanPaths,
 } from "../../shared/identifier-scan";
 import { KNOWN_FORMATS } from "../../shared/identifier-screen-report";
+import { NAME_CLASSES, type NameClass, nameClass, nameTokens } from "../../shared/image-name-class";
 import { MINIMUM_FAILURES, minimumFailureSentence } from "../../shared/submission-minimums";
+
+// The name classes live in shared/image-name-class.ts, one rule for this script and the
+// batch acknowledgment route (card D3); re-exported for this script's importers.
+export { NAME_CLASSES, type NameClass, nameClass, nameTokens };
 
 // ---------------------------------------------------------------------------------------
 // Grouping (pure, no I/O)
@@ -48,20 +53,6 @@ export const LOCATION_CLASSES = [
   "other",
 ] as const;
 export type LocationClass = (typeof LOCATION_CLASSES)[number];
-
-export const NAME_CLASSES = [
-  "consent",
-  "questionnaire",
-  "form",
-  "photo-face",
-  "figure",
-  "logo",
-  "manual",
-  "montage-layout-cap",
-  "screenshot",
-  "other",
-] as const;
-export type NameClass = (typeof NAME_CLASSES)[number];
 
 export const EXTENSION_CLASSES = ["raster-image", "pdf", "office-document"] as const;
 export type ExtensionClass = (typeof EXTENSION_CLASSES)[number];
@@ -98,39 +89,6 @@ export function extensionClass(ext: string): ExtensionClass {
   if (ext === "pdf") return "pdf";
   if (/^(docx?|xlsx?|pptx?|rtf|odt)$/.test(ext)) return "office-document";
   return "raster-image";
-}
-
-/** Whole-word tokens of a basename: camelCase and every non-alphanumeric run are boundaries. */
-export function nameTokens(path: string): string[] {
-  const base = path.slice(path.lastIndexOf("/") + 1);
-  const dot = base.lastIndexOf(".");
-  const stem = dot > 0 ? base.slice(0, dot) : base;
-  return stem
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t !== "");
-}
-
-const NAME_CLASS_WORDS: ReadonlyArray<readonly [NameClass, readonly string[]]> = [
-  ["consent", ["consent"]],
-  ["questionnaire", ["questionnaire"]],
-  ["form", ["form"]],
-  ["photo-face", ["photo", "face"]],
-  ["figure", ["figure", "fig"]],
-  ["logo", ["logo"]],
-  ["manual", ["manual"]],
-  ["montage-layout-cap", ["montage", "layout", "cap"]],
-  ["screenshot", ["screenshot"]],
-];
-
-/** First class, in the card's order, with a whole-word token (an optional plural `s` is allowed). */
-export function nameClass(path: string): NameClass {
-  const tokens = nameTokens(path);
-  for (const [cls, words] of NAME_CLASS_WORDS) {
-    if (tokens.some((t) => words.some((w) => t === w || t === `${w}s`))) return cls;
-  }
-  return "other";
 }
 
 /** A directory pattern with digit runs replaced by `#` and subject or session labels folded away. */
