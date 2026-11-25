@@ -226,3 +226,12 @@ None blocks the release. Each is a place where the words promise a little more t
 
 ADR 0125 retires `PATCH /admin/datasets/:id/visibility`, which this ADR names as a way a dataset changes visibility; it now answers 409 and points at `nemar admin repo unpublish` (and, for the other direction, publication).
 The screen and its verdicts are unchanged.
+
+## Amendment 2026-11-25 (epic #2182, card D3): batch acknowledgment on a public upstream
+
+An administrator may acknowledge many screens in one act when each request is a conversion of a public, redistributable upstream dataset whose license NEMAR read from the source's own record.
+Such an acknowledgment covers only formats the scanner does not read and image or document files; a content finding, a direct identifier, an unchecked or stale screen, or a request holding a photo or questionnaire file is never acknowledged this way.
+Each acknowledgment records a reason naming the upstream, its license and the unread formats, and is the calling administrator's own act.
+The weekly re-screen (ADR 0088) reads these datasets again as readers are added.
+
+The rule, the recorded reason and the copy every outcome prints are `shared/upstream-ack.ts`; the act is `POST /admin/publish/acknowledge-batch` and `nemar admin dataset publish acknowledge-batch`, a dry run unless `--apply`.
