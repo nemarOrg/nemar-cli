@@ -22,6 +22,7 @@ import { APPROVAL_DISPATCH_TOKEN_HEADER } from "../../../shared/contract/publica
 import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import { isExactIdMatch, matchesListSearch } from "../../../shared/publish-list-search.js";
+import type { AckBatchRequest, AckBatchResponse } from "../../../shared/upstream-ack.js";
 import type { IdentifierScreenView } from "../identifier-screen-display.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
@@ -357,6 +358,18 @@ export async function rerunIdentifierScreen(datasetId: string): Promise<{
   identifier_screen: IdentifierScreenView;
 }> {
   return request(`/admin/publish/${datasetId}/identifier-screen`, { method: "POST" }, true);
+}
+
+/**
+ * One call of the batch acknowledgment on a public upstream (card D3):
+ * `POST /admin/publish/acknowledge-batch`, a dry run unless the body says `apply: true`.
+ */
+export async function acknowledgeBatch(body: AckBatchRequest): Promise<AckBatchResponse> {
+  return request<AckBatchResponse>(
+    "/admin/publish/acknowledge-batch",
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
 }
 
 /**
