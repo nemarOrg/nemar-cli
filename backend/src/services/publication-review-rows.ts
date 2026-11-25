@@ -67,13 +67,24 @@ export interface PublicationReviewRow {
   overrideReasons: string | null;
   createdAt: string;
   decidedAt: string | null;
+  /**
+   * The reproducibility record (migration 0152; ADR 0139, decision 9), as stored: text the Worker
+   * wrote, read back unparsed. `readers` and `models` are JSON. All null on a row that has none.
+   */
+  scannerId: string | null;
+  readerVersions: string | null;
+  resolverVersion: string | null;
+  models: string | null;
+  promptVersion: string | null;
+  inputDigest: string | null;
 }
 
 /** Every column but `nonce`, which never leaves the callback module. */
 export const ROW_COLUMNS =
   "id, request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, verdict, " +
   "detail, report, claimed_at, attempts, override_by, override_at, override_reasons, " +
-  "created_at, decided_at";
+  "created_at, decided_at, scanner_id, reader_versions, resolver_version, models, " +
+  "prompt_version, input_digest";
 
 const num = (v: unknown): number => Number(v);
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
@@ -100,6 +111,12 @@ export function toRow(raw: Record<string, unknown>): PublicationReviewRow {
     overrideReasons: strOrNull(raw.override_reasons),
     createdAt: String(raw.created_at),
     decidedAt: strOrNull(raw.decided_at),
+    scannerId: strOrNull(raw.scanner_id),
+    readerVersions: strOrNull(raw.reader_versions),
+    resolverVersion: strOrNull(raw.resolver_version),
+    models: strOrNull(raw.models),
+    promptVersion: strOrNull(raw.prompt_version),
+    inputDigest: strOrNull(raw.input_digest),
   };
 }
 

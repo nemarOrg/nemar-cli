@@ -7,9 +7,16 @@
  *                                     changed since the dispatch, a review switched off, or an
  *                                     unsettled claim is refused with 409 before the workflow reads
  *                                     anything or calls a model.
+ *   POST /publication-review-inputs   after the claim, before the job examines anything: the
+ *                                     widened inputs of ADR 0139 (decision 6) for this one review,
+ *                                     the enrichment, the lineage, the resubmission note and the
+ *                                     screen's coverage counts. Read-only. Only a claimed review
+ *                                     that has not reported is answered (409 otherwise); a read the
+ *                                     inputs need that fails answers 502, and the job then reports
+ *                                     `inputs_unavailable` rather than review on part of them.
  *   POST /publication-review-result   the report (or the word for why there is none).
  *
- * Both are authed like the pull-request review's callbacks: a per-review HMAC token in
+ * All three are authed like the pull-request review's callbacks: a per-review HMAC token in
  * X-Webhook-Token, signed over {dataset_id, review_id, nonce} with PRESCREEN_CALLBACK_SECRET under
  * the `publication-review` domain tag, whose nonce is recovered from the row the token was issued
  * for. The token is spent by the RESULT: the row is found only while it waits for its report
@@ -34,6 +41,7 @@
 import { parsePublicationCallbackOutcome } from "../../../../shared/publication-review.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyPublicationReviewCallbackToken } from "../../services/github/callback-tokens.js";
+import { publicationReviewInputs } from "../../services/publication-review-inputs.js";
 import { errorWords } from "../../services/publication-review-log.js";
 import {
   claimPublicationReview,
@@ -129,6 +137,32 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
     console.log(`[publication-review-claim] review ${v.reviewId} (${v.datasetId}): ${claim}`);
     if (claim === "claimed") return c.json({ ok: true, claimed: true });
     return c.json({ ok: false, claimed: false, reason: claim }, 409);
+  });
+
+  webhooks.post("/publication-review-inputs", async (c) => {
+    const v = await verify(c, "publication-review-inputs");
+    if (v instanceof Response) return v;
+    let answer: Awaited<ReturnType<typeof publicationReviewInputs>>;
+    try {
+      answer = await publicationReviewInputs(c.env, v.reviewId, v.datasetId);
+    } catch (err) {
+      // Nothing was written, so the job may try again. The words of the error, never the error.
+      console.error(
+        `[publication-review-inputs] review ${v.reviewId} (${v.datasetId}): read failed (${errorWords(err)})`,
+      );
+      return c.json({ error: "The review's inputs could not be read; try again" }, 500);
+    }
+    // Fixed words only: the body is the dataset's metadata and is never logged.
+    console.log(
+      `[publication-review-inputs] review ${v.reviewId} (${v.datasetId}): ${answer.kind}`,
+    );
+    if (answer.kind === "not_claimed") {
+      return c.json({ ok: false, reason: "not_claimed" }, 409);
+    }
+    if (answer.kind === "unavailable") {
+      return c.json({ error: "The review's inputs could not be read" }, 502);
+    }
+    return c.json(answer.body);
   });
 
   webhooks.post("/publication-review-result", async (c) => {

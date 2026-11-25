@@ -52,6 +52,7 @@ import {
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
   type PublicationCallbackOutcome,
   type PublicationDeclineDetail,
+  type PublicationReviewReport,
   type PublicationReviewState,
   reportReasons,
   verdictOf,
@@ -66,6 +67,7 @@ import { approvalDispatchEnvironment, triggerPublicationReviewRun } from "./gith
 import { readStoredReport, readStoredState } from "./identifier-screen-stored.js";
 import { notifyAdminsOfScreen } from "./identifier-screen.js";
 import { ownedHere } from "./pr-review-queue.js";
+import { screenRecordOf } from "./publication-review-inputs.js";
 import { SHA40, errorWords } from "./publication-review-log.js";
 import {
   type PublicationReviewRow,
@@ -947,7 +949,11 @@ export const STORE_RESULT_SQL_MARKER = "SET state = ?, verdict = ?";
  * against the row in the same statement (so a claim that lands between the read and the write is
  * seen) and a claimed row records `workflow_failed` instead, which counts.
  *
- * Binds, in order: the state, the verdict, the detail (twice), the report, then `waitingRow`'s.
+ * The reproducibility record (ADR 0139, decision 9) is written in the same statement, so a stored
+ * report and its record cannot part: the six columns of migration 0152, NULL for a run error.
+ *
+ * Binds, in order: the state, the verdict, the detail (twice), the report, the record's six
+ * columns ({@link RECORD_COLUMNS}), then `waitingRow`'s.
  */
 function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): string {
   return `UPDATE publication_reviews
@@ -955,8 +961,47 @@ function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): strin
           detail = CASE WHEN claimed_at IS NOT NULL AND ? = 'stale_head'
                         THEN 'workflow_failed' ELSE ? END,
           report = ?, nonce = NULL,
+          ${RECORD_COLUMNS.map((c) => `${c} = ?`).join(", ")},
           decided_at = datetime('now')
     WHERE ${waitingRow([from], needsClaim)}`;
+}
+
+/** The record's columns, in the order {@link storeSql} binds them. */
+const RECORD_COLUMNS = [
+  "scanner_id",
+  "reader_versions",
+  "resolver_version",
+  "models",
+  "prompt_version",
+  "input_digest",
+] as const;
+
+/**
+ * The record of a stored report, in {@link RECORD_COLUMNS} order: the job's part from the report's
+ * own record (none for a version-1 report) and the screen's part from the request's stored screen
+ * report, read by the Worker, of the reviewed commit only. All NULL for a run error.
+ */
+async function recordBinds(
+  db: Db,
+  requestId: number,
+  head: string,
+  report: PublicationReviewReport | null,
+): Promise<(string | null)[]> {
+  if (report === null) return RECORD_COLUMNS.map(() => null);
+  const request = await db
+    .prepare("SELECT identifier_screen_report FROM publication_requests WHERE id = ?")
+    .bind(requestId)
+    .first<{ identifier_screen_report: string | null }>();
+  const screen = screenRecordOf(request?.identifier_screen_report ?? null, head);
+  const r = report.record;
+  return [
+    screen.scanner_id,
+    screen.reader_versions,
+    r?.resolver_version ?? null,
+    r === null ? null : JSON.stringify(r.models),
+    r?.prompt_version ?? null,
+    r?.input_digest ?? null,
+  ];
 }
 
 /**
@@ -1021,6 +1066,7 @@ export async function storePublicationReviewResult(
     outcomeToStore.kind === "error" ? outcomeToStore.error : null,
     outcomeToStore.kind === "error" ? outcomeToStore.error : null,
     reported ? JSON.stringify(reported) : null,
+    ...(await recordBinds(db, row.requestId, row.headSha, reported)),
     reviewId,
     datasetId,
     nonce,
