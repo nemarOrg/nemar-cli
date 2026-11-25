@@ -228,8 +228,10 @@ export function writerRuleBroken(
  * Why a run's dataset summary is not kept, a fixed word for the log (`quality_not_written reason=`):
  * besides {@link WRITER_RULE_WORDS}, the document is over its size, is not UTF-8 I-JSON, breaks the schema,
  * is not one entry of the stamp's recipe, states another identity than the stamp's, names another dataset
- * record than the one the run wrote, counts other recordings than its recordings table, or names a metric
- * of a plugin the recipe does not run.
+ * record than the one the run wrote, counts other recordings than its recordings table, names a metric of
+ * a plugin the recipe does not run, or, written again as the entry D1 keeps, is longer than the column takes
+ * (`entry_too_large`: `JSON.stringify` prints a number such as `1000e17` in 21 characters, so an entry can
+ * outgrow the document it came from, and a row the CHECK refuses would fail the whole reconciliation).
  */
 export const QUALITY_DOCUMENT_REFUSALS = [
   "document_too_large",
@@ -241,6 +243,7 @@ export const QUALITY_DOCUMENT_REFUSALS = [
   "record_digest_mismatch",
   "counts_mismatch",
   "metric_unknown_plugin",
+  "entry_too_large",
 ] as const;
 export type QualityDocumentRefusal = (typeof QUALITY_DOCUMENT_REFUSALS)[number];
 
@@ -320,7 +323,10 @@ export function checkDatasetQualityDocument(
   }
   const names = [...Object.keys(entry.distributions), ...Object.keys(entry.observed_range)];
   if (metricNameOutsideRecipe(names, ctx.plugins) !== null) return refuse("metric_unknown_plugin");
-  return { ok: true, entry, entryText: JSON.stringify(raw[ctx.stamp.recipe]) };
+  const entryText = JSON.stringify(raw[ctx.stamp.recipe]);
+  // The column holds at most this many characters (migration 0151); a UTF-16 length is never fewer.
+  if (entryText.length > DATA_QUALITY_MAX_BYTES) return refuse("entry_too_large");
+  return { ok: true, entry, entryText };
 }
 
 // --- Reading the current summaries ----------------------------------------------------------------------

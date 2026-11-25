@@ -41,6 +41,7 @@ import {
   productFiles,
   seedDerivative,
   seedIcaStamp,
+  wideEdgesDocument,
 } from "./helpers/quality-fixture";
 
 let harness: ComputeHarness;
@@ -194,6 +195,20 @@ describe("a succeeded run's dataset summary", () => {
     expect(await kept(run.stampId)).toBeNull();
     expect(lines).toContain(
       `[compute-pipeline-progress] quality_not_written stamp=${run.stampId} reason=metric_unknown_plugin`,
+    );
+  });
+
+  test("that outgrows the column when written again is not kept, and the run is reconciled (MUTATION: drop the entry size check)", async () => {
+    // The review's construction (#2375): 62,641 bytes, every rule kept, edges written `1000e17, ...`, an
+    // entry of over 146,000 characters that the 0151 CHECK would refuse, failing the whole batch.
+    const run = await finishedRun((files) => files.set(DOCUMENT, wideEdgesDocument()));
+    const lines = await logged(async () => {
+      expect(await reconcilePipelineProgress(env)).toMatchObject({ reconciled: 1, errored: 0 });
+    });
+    expect((await runRow(run.stampId))?.outcome).toBe("reconciled");
+    expect(await kept(run.stampId)).toBeNull();
+    expect(lines).toContain(
+      `[compute-pipeline-progress] quality_not_written stamp=${run.stampId} reason=entry_too_large`,
     );
   });
 

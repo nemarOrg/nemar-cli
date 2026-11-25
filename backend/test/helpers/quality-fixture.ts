@@ -129,3 +129,50 @@ export async function seedDerivative(
     .run();
   return key;
 }
+
+/**
+ * The review's construction of a summary that outgrows the column (#2375): the fixture's document with one
+ * more distribution, of no value, whose histogram edges are written `1000e17, 1001e17, ...`. Each such edge
+ * is 7 characters as written and 21 as `JSON.stringify` prints it (`100000000000000000000`), so a document of
+ * `bytes` bytes, under the 65,536 a recipe writes, becomes an entry far over the 65,536 characters D1 keeps.
+ * Every rule holds: no value (n 0, null summary and range), edges that rise, no integer literal.
+ */
+export function wideEdgesDocument(bytes = 62_641): Uint8Array {
+  const doc = JSON.parse(
+    readFileSync(join(QUALITY_PRODUCT, "desc-nemarica_dataquality.json"), "utf8"),
+  ) as { recipes: Record<string, Record<string, Record<string, unknown>>> };
+  const entry = doc.recipes["nemar-ica"] as Record<string, Record<string, unknown>>;
+  const build = (edges: number, pad: number): string => {
+    entry.distributions.wideEdges = {
+      description: `Edges written short${".".repeat(pad + 1)}`,
+      histogram: {
+        counts: "__COUNTS__",
+        edges: "__EDGES__",
+        missing: 0,
+        overflow: 0,
+        underflow: 0,
+      },
+      max: null,
+      median: null,
+      min: null,
+      n: 0,
+      unit: "count",
+    };
+    entry.observed_range.wideEdges = { max: null, min: null };
+    const written = Array.from({ length: edges }, (_, i) => `${1000 + i}e17`).join(",");
+    return JSON.stringify(doc)
+      .replace('"__EDGES__"', `[${written}]`)
+      .replace(
+        '"__COUNTS__"',
+        `[${Array(edges - 1)
+          .fill(0)
+          .join(",")}]`,
+      );
+  };
+  const base = build(2, 0).length;
+  // Ten bytes an edge ("1000e17," and "0,"); the remainder pads the description.
+  const edges = Math.floor((bytes - base) / 10) + 2;
+  const text = build(edges, bytes - build(edges, 0).length);
+  if (text.length !== bytes) throw new Error(`built ${text.length} bytes, not ${bytes}`);
+  return new TextEncoder().encode(text);
+}

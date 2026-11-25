@@ -30,6 +30,7 @@ import {
   recordQualityEntry,
   writerRuleBroken,
 } from "../backend/src/services/quality-documents";
+import { wideEdgesDocument } from "../backend/test/helpers/quality-fixture";
 import { findRecipe, recipeQualityPlugins } from "../shared/compute-recipes";
 import {
   DATA_QUALITY_MAX_BYTES,
@@ -674,6 +675,18 @@ describe("checkDatasetQualityDocument, against the fixture's run", () => {
     ).toBe("metric_unknown_plugin");
   });
 
+  test("an entry that outgrows the column, written again, is refused (MUTATION: drop the entry size check)", async () => {
+    // The review's construction (#2375): 62,641 bytes as written, every rule kept, edges `1000e17, ...`.
+    const bytes = wideEdgesDocument();
+    expect(bytes.byteLength).toBe(62_641);
+    expect(bytes.byteLength).toBeLessThanOrEqual(DATA_QUALITY_MAX_BYTES);
+    const entry = (JSON.parse(new TextDecoder().decode(bytes)) as Loose).recipes["nemar-ica"];
+    expect(JSON.stringify(entry).length).toBeGreaterThan(DATA_QUALITY_MAX_BYTES);
+    if (!validateDocument(JSON.parse(new TextDecoder().decode(bytes)))) {
+      throw new Error(formatAjvErrors(validateDocument));
+    }
+    expect(await refusal(bytes)).toBe("entry_too_large");
+  });
   test("the recipe's plugins are its quality checkpoint's plugin steps", () => {
     expect(recipeQualityPlugins(ICA)).toEqual(["nemar-quality", "nemar-spectrum"]);
     expect(recipeQualityPlugins(FLOOR)).toEqual([]);
