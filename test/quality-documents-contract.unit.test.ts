@@ -79,6 +79,57 @@ async function fixtureContext(): Promise<QualityDocumentContext> {
   };
 }
 
+/** Git run against a nemar-process checkout: never fetching a missing object, and bounded in time. */
+function git(dir: string, args: string[], input?: string) {
+  return spawnSync("git", ["-C", dir, ...args], {
+    input,
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 20_000,
+    // A sparse CI checkout is a partial clone: without this, asking for an object it lacks fetches it
+    // from GitHub, one round trip per file (the 5-second timeout of #2375's first CI run).
+    env: { ...process.env, GIT_NO_LAZY_FETCH: "1" },
+  });
+}
+
+/**
+ * The pinned nemar-process files the fixture copies, read from a checkout in one `git cat-file --batch`,
+ * or why they cannot be: no `NEMAR_PROCESS_DIR`, a checkout that does not hold the pinned commit (CI's
+ * `dev` checkout), or one that lacks a file's object (a blob-less partial clone).
+ */
+function pinnedCopies(
+  dir: string | undefined,
+  commit: string,
+  files: readonly { source: string }[],
+): { ok: true; blobs: Map<string, Buffer> } | { ok: false; reason: string } {
+  if (dir === undefined || dir === "") return { ok: false, reason: "NEMAR_PROCESS_DIR is not set" };
+  if (!existsSync(dir)) return { ok: false, reason: `NEMAR_PROCESS_DIR ${dir} does not exist` };
+  if (git(dir, ["cat-file", "-e", `${commit}^{commit}`]).status !== 0) {
+    return { ok: false, reason: `the checkout does not hold ${commit.slice(0, 8)}` };
+  }
+  const specs = files.map((f) => `${commit}:${f.source}`);
+  const read = git(dir, ["cat-file", "--batch"], `${specs.join("\n")}\n`);
+  if (read.status !== 0 || read.stdout === null) {
+    return {
+      ok: false,
+      reason: `git cat-file --batch failed (${read.error?.message ?? read.status})`,
+    };
+  }
+  const out = read.stdout as Buffer;
+  const blobs = new Map<string, Buffer>();
+  let at = 0;
+  for (const [i, spec] of specs.entries()) {
+    const eol = out.indexOf(0x0a, at);
+    const header = out.subarray(at, eol).toString("utf8");
+    if (header.endsWith(" missing")) {
+      return { ok: false, reason: `the checkout lacks ${spec.slice(commit.length + 1)}` };
+    }
+    const size = Number(header.split(" ")[2]);
+    blobs.set(files[i].source, out.subarray(eol + 1, eol + 1 + size));
+    at = eol + 1 + size + 1;
+  }
+  return { ok: true, blobs };
+}
+
 describe("the fixture is nemar-process's product, byte for byte", () => {
   const sums = jsonOf(join(FIXTURE, "SHA256SUMS.json")) as {
     source_commit: string;
@@ -97,24 +148,19 @@ describe("the fixture is nemar-process's product, byte for byte", () => {
     }
   });
 
-  const processDir = process.env.NEMAR_PROCESS_DIR;
-  const haveCommit =
-    processDir !== undefined &&
-    existsSync(processDir) &&
-    spawnSync("git", ["-C", processDir, "cat-file", "-e", `${sums.source_commit}^{commit}`])
-      .status === 0;
-  test.skipIf(!haveCommit)(
-    "each copy is the nemar-process file at the pinned commit (needs NEMAR_PROCESS_DIR holding it)",
+  const held = pinnedCopies(process.env.NEMAR_PROCESS_DIR, sums.source_commit, sums.files);
+  // A skipped test's title is not printed by every reporter: the reason is logged as well.
+  if (!held.ok)
+    console.log(`[quality fixture] byte comparison with nemar-process skipped: ${held.reason}`);
+  test.skipIf(!held.ok)(
+    `each copy is the nemar-process file at the pinned commit${held.ok ? "" : ` (skipped: ${held.reason})`}`,
     () => {
+      if (!held.ok) return;
       for (const f of sums.files) {
-        const shown = spawnSync(
-          "git",
-          ["-C", processDir as string, "show", `${sums.source_commit}:${f.source}`],
-          { maxBuffer: 16 * 1024 * 1024 },
-        );
-        expect(shown.status, f.source).toBe(0);
+        const pinned = held.blobs.get(f.source);
+        expect(pinned, f.source).toBeDefined();
         expect(
-          Buffer.compare(shown.stdout, Buffer.from(bytesOf(join(FIXTURE, f.path)))),
+          Buffer.compare(pinned as Buffer, Buffer.from(bytesOf(join(FIXTURE, f.path)))),
           f.path,
         ).toBe(0);
       }
