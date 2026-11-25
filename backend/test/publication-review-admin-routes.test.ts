@@ -1181,8 +1181,11 @@ describe("GET /admin/publish/:id/review", () => {
         "findings",
         "summary",
         "evidence",
+        // ADR 0139, decision 9; null for a review reported before the record existed.
+        "reproducibility",
       ].sort(),
     );
+    expect(d.review?.reproducibility).toBeNull();
     expect(Object.keys(d.history[0]).sort()).toEqual(
       ["id", "head_sha", "anonymous", "state", "stored_verdict", "created_at", "decided_at"].sort(),
     );
