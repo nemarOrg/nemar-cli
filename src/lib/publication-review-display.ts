@@ -30,6 +30,7 @@ import {
   REVIEW_DOCUMENTS,
   type ReviewDocument,
   effectiveVersionOf,
+  reproducibilityLines,
 } from "../../shared/publication-review.js";
 import {
   RESUBMISSION_NOTE_LABEL,
@@ -421,6 +422,12 @@ export function reviewDetailLines(d: PublicationReviewDetail): string[] {
       out.push(`  ${evidenceLine(review.evidence)}`, `  ${shownLine(review.evidence)}`);
       const withheld = withheldLine(review.evidence);
       if (withheld !== null) out.push(`  ${withheld}`);
+    }
+    if (review.reproducibility !== null && review.reproducibility !== undefined) {
+      out.push(
+        "  Review record:",
+        ...reproducibilityLines(review.reproducibility).map((l) => `    ${plain(l)}`),
+      );
     }
     if (review.override !== null) {
       out.push(

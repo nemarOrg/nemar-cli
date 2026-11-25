@@ -16,6 +16,11 @@ import {
 } from "../../../../shared/contract/publication.js";
 import { publicationRequestNotice } from "../../../../shared/identifier-screen-report.js";
 import {
+  type PublicationReviewReproducibility,
+  reproducibilityLines,
+  reproducibilityOf,
+} from "../../../../shared/publication-review.js";
+import {
   PRE_PUBLICATION_STEPS,
   publishingHasStarted,
 } from "../../../../shared/publication-steps.js";
@@ -61,6 +66,8 @@ import {
 } from "../../services/identifier-screen";
 import { readReviewIntent } from "../../services/pr-review-eligibility";
 import { ownedHere } from "../../services/pr-review-queue";
+import { errorWords } from "../../services/publication-review-log";
+import { ROW_COLUMNS, toRow } from "../../services/publication-review-rows";
 import {
   publicationReviewApplies,
   publicationReviewEmailSection,
@@ -920,6 +927,26 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       }
     }
 
+    // The reproducibility record of the request's newest reported review (ADR 0139, decision 9):
+    // what a depositor needs to see what the review was given and to recompute the evidence.
+    // Checked values and fixed words only; a read that fails is no record, never a failed status.
+    let reviewRecord: PublicationReviewReproducibility | null = null;
+    try {
+      const row = await db
+        .prepare(
+          `SELECT ${ROW_COLUMNS} FROM publication_reviews
+            WHERE request_id = ? AND dataset_id = ? AND state = 'reported'
+            ORDER BY id DESC LIMIT 1`,
+        )
+        .bind(request.id, datasetId)
+        .first<Record<string, unknown>>();
+      reviewRecord = row ? reproducibilityOf(toRow(row)) : null;
+    } catch (err) {
+      console.error(
+        `[publish-status] could not read the review record of request ${request.id}: ${errorWords(err)}`,
+      );
+    }
+
     return c.json({
       dataset_id: datasetId,
       status: request.status,
@@ -966,6 +993,9 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       current_step: request.current_step,
       last_error: request.last_error,
       updated_at: request.updated_at,
+      // The record of the newest reported review, with the lines every surface prints for it.
+      review_record: reviewRecord,
+      review_record_lines: reviewRecord === null ? [] : reproducibilityLines(reviewRecord),
     });
   });
 

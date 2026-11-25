@@ -88,6 +88,13 @@ export interface PublishStatusResponse {
   // unknown, never "no".
   anonymous?: boolean;
   identifier_screen?: IdentifierScreenView;
+  /**
+   * The reproducibility record of the request's newest reported review (ADR 0139, decision 9),
+   * and the lines every surface prints for it, fixed words and checked values. Absent from an
+   * older server.
+   */
+  review_record?: unknown;
+  review_record_lines?: string[];
 }
 
 export interface PublishRequestsResponse {

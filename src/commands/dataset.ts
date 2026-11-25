@@ -271,6 +271,7 @@ import {
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
+import { plain } from "../lib/terminal-text.js";
 import { clip } from "../lib/terminal-text.js";
 import { theme } from "../lib/theme.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
@@ -4879,6 +4880,13 @@ Examples:
       if (screenLines.length > 0) {
         console.log();
         for (const line of screenLines) console.log(line);
+      }
+
+      // ADR 0139, decision 9: the record of the newest automated review, in the server's words.
+      const recordLines = result.review_record_lines ?? [];
+      if (recordLines.length > 0) {
+        console.log(`\n  ${chalk.cyan("Automated review record:")}`);
+        for (const line of recordLines) console.log(`    ${plain(line)}`);
       }
 
       // Blocked requests: surface WHY (e.g. BIDS validation pending/failed) plus
