@@ -479,26 +479,37 @@ export const RecordRecipeResultsSchema = z
   .refine(storesNameEntryProfile);
 
 /**
- * Why a recording's entry is not projected, a fixed word: the record is not UTF-8 I-JSON, or not in the
+ * Why a recording's entry is not projected, a fixed word: the record is not UTF-8 I-JSON, or holds an
+ * integer literal beyond 2^53 - 1 (`integer_unsafe`: every neuroschema integer is capped there, and the
+ * reader's flag covers the whole record, as it covers the whole dataset document), or is not in the
  * shape a recipe writes; it names another recipe or version than the stamp's; a recipe metric carries a
  * plugin's prefix, a plugin step's metric does not carry its plugin's, or a metric names a plugin the recipe
  * does not run; the entry breaks the schema (a metric name that is not a `metricName` is refused before it
- * is copied); or `nemar.record-checks.v1` finds something.
+ * is copied); a view's source names a plugin the recipe version does not run at its `quality` checkpoint
+ * (`view_unknown_plugin`: `nemar.record-checks.v1` leaves a plugin's view to its plugin, so the backend
+ * holds the plugin to the recipe); or `nemar.record-checks.v1` finds something.
  */
 export const RECORD_ENTRY_REFUSALS = [
   "record_unreadable",
+  "integer_unsafe",
   "record_shape",
   "identity_mismatch",
   "metric_not_bare",
   "metric_not_prefixed",
   "metric_unknown_plugin",
   "entry_invalid",
+  "view_unknown_plugin",
   "record_checks",
 ] as const;
 export type RecordEntryRefusal = (typeof RECORD_ENTRY_REFUSALS)[number];
 
 export type RecordEntry =
-  | { ok: true; entry: Record<string, unknown> }
+  | {
+      ok: true;
+      entry: Record<string, unknown>;
+      /** What the record says it is of: `extensions.nemar.dataset.id` and `.recording.path`, as written. */
+      of: { dataset: unknown; recording: unknown };
+    }
   | { ok: false; reason: RecordEntryRefusal; findings?: RecordFinding[] };
 
 const objectOf = (v: unknown): Record<string, unknown> | null =>
@@ -538,6 +549,7 @@ export async function recordQualityEntry(
   const textOf = utf8(bytes);
   const read = textOf === null ? null : readIJson(textOf);
   if (read === null || !read.ok) return refuse("record_unreadable");
+  if (read.unsafeInteger) return refuse("integer_unsafe");
   const record = objectOf(read.value);
   const nemar = objectOf(objectOf(record?.extensions)?.nemar);
   const recipe = objectOf(nemar?.recipe);
@@ -587,7 +599,17 @@ export async function recordQualityEntry(
     ...(nemar.views_skipped === undefined ? {} : { views_skipped: nemar.views_skipped }),
   };
   if (!RecordRecipeResultsSchema.safeParse(entry).success) return refuse("entry_invalid");
+  for (const view of entry.views as { source: { plugin?: { name: string } } }[]) {
+    const plugin = view.source.plugin;
+    if (plugin !== undefined && !stamp.plugins.includes(plugin.name)) {
+      return refuse("view_unknown_plugin");
+    }
+  }
   const findings = recordChecks(stamp.recipe, entry);
   if (findings.length > 0) return refuse("record_checks", findings);
-  return { ok: true, entry };
+  return {
+    ok: true,
+    entry,
+    of: { dataset: objectOf(nemar.dataset)?.id, recording: objectOf(nemar.recording)?.path },
+  };
 }
