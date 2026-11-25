@@ -8,7 +8,6 @@
 import {
   CACHE_TTL_SECONDS,
   type LineageCache,
-  RESOLVER_VERSION,
   type SourceRecord,
 } from "../../../shared/license-lineage.js";
 
@@ -19,10 +18,8 @@ const CACHE_ORIGIN = "https://license-lineage.cache.invalid/";
 export function workerLineageCache(): LineageCache | undefined {
   if (typeof caches === "undefined" || !("default" in caches)) return undefined;
   const cache = (caches as unknown as { default: Cache }).default;
-  // The resolver's version is in the key: a record cached by an older resolver lacks the fields
-  // a newer one reads, so it is never served to it.
-  const keyOf = (k: string) =>
-    new Request(`${CACHE_ORIGIN}${encodeURIComponent(RESOLVER_VERSION)}/${encodeURIComponent(k)}`);
+  // The resolver puts its own version in every key, so an older record is never served.
+  const keyOf = (k: string) => new Request(`${CACHE_ORIGIN}${encodeURIComponent(k)}`);
   return {
     async get(k) {
       const hit = await cache.match(keyOf(k));

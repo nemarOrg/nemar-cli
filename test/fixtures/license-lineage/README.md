@@ -8,6 +8,7 @@ with two edits, both recorded in `index.json` (`edited`):
 - in `03-datacite-openneuro-latest.json` and `04-datacite-openneuro-latest.json`, the personal name of one NEMAR curator listed as a contributor is replaced by `REDACTED, contributor`, and that curator's ORCID iD is removed.
   The names and ORCID iDs of third-party authors are kept as recorded.
   The other curator names in fixtures 03 and 04 are public DataCite contributor metadata of that OpenNeuro record, kept on purpose so the fixtures stay the registry's real answer.
+Resolver version 2 (epic #2182, card B4) also reads each record's title, creators and publisher from these same recordings; nothing was recorded again for it.
 `index.json` lists every recording with its method, URL, HTTP status, file and fetch time;
 `stand-in.ts` serves them to the tests from a local server.
 

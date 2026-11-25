@@ -28,8 +28,12 @@
 
 import { normalizeDoiKey } from "./never-data-paper.js";
 
-/** Stamped on every result, so two results can be compared. Bump it when a rule changes. */
-export const RESOLVER_VERSION = "license-lineage/1";
+/**
+ * Stamped on every result, so two results can be compared. Bump it when a rule changes, or when a
+ * record gains a field (version 2: each source's title, creators and publisher, epic #2182 card B4);
+ * the cache key carries it, so a record of an older version is never served.
+ */
+export const RESOLVER_VERSION = "license-lineage/2";
 
 /** The User-Agent of every registry request. It carries no contact details on purpose. */
 export const LICENSE_CHECK_USER_AGENT = "nemar-license-check/1";
@@ -156,14 +160,15 @@ const anchor = (id: LineageOutcome | null) =>
 /** What each resolver reads from its record. */
 export const RESOLVER_READ: Record<Resolver, string> = {
   datacite:
-    "DataCite: rightsList (access-rights statements dropped) and types.resourceTypeGeneral.",
+    "DataCite: rightsList (access-rights statements dropped), types.resourceTypeGeneral, and titles, creators and publisher.",
   crossref:
-    "Crossref: license[] (only the vor or unspecified content version, never TDM or STM-ASF terms) and type.",
-  openalex: "OpenAlex: primary_location.license and type.",
+    "Crossref: license[] (only the vor or unspecified content version, never TDM or STM-ASF terms), type, and title, author and publisher.",
+  openalex:
+    "OpenAlex: primary_location.license, type, title, the authorships' names and the primary location's host.",
   openneuro:
-    "OpenNeuro: the snapshot's dataset_description.json License, read through its GraphQL API.",
+    "OpenNeuro: the snapshot's dataset_description.json License, read through its GraphQL API; the title, creators and publisher are DataCite's.",
   physionet:
-    "PhysioNet: the published project's license name and access policy, read through its API.",
+    "PhysioNet: the published project's license name, access policy and title, read through its API.",
 };
 
 const READ_SOURCES = `The upstream sources declared in dataset_description.json (SourceDatasets), .nemar/metadata.json (IsDerivedFrom and IsIdenticalTo), the deposit attestation and the README (data-repository DOIs and OpenNeuro, Zenodo or PhysioNet URLs only). Then, per source: ${Object.values(
@@ -759,12 +764,79 @@ export interface SourceRecord {
   id: string;
   resolver: Resolver | null;
   resource_type: string | null;
+  /** The record's title, as the registry gave it; null when it gave none. */
+  title: string | null;
+  /** The record's creators' names, in the registry's order, at most {@link MAX_CREATORS}. */
+  creators: string[];
+  /** The record's publisher (a repository, a journal's publisher); null when it gave none. */
+  publisher: string | null;
   license: NormalizedLicense | null;
   license_version: string | null;
   /** The license text exactly as the record gave it (joined when several). */
   raw: string | null;
   evidence_url: string | null;
   status: SourceStatus;
+}
+
+/** The most creators' names a record keeps. */
+export const MAX_CREATORS = 10;
+
+/** A record's descriptive fields: title, creators and publisher. */
+type Described = Pick<SourceRecord, "title" | "creators" | "publisher">;
+
+const NOT_DESCRIBED: Described = { title: null, creators: [], publisher: null };
+
+function text(v: unknown): string | null {
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+}
+
+function names(list: unknown, nameOf: (entry: Record<string, unknown>) => string | null): string[] {
+  if (!Array.isArray(list)) return [];
+  const out: string[] = [];
+  for (const entry of list) {
+    if (out.length >= MAX_CREATORS) break;
+    const n = isRecord(entry) ? nameOf(entry) : null;
+    if (n !== null) out.push(n);
+  }
+  return out;
+}
+
+/** DataCite's `titles`, `creators` and `publisher` (a string, or `{ name }` in the newer form). */
+export function dataciteDescribed(a: Record<string, unknown>): Described {
+  const titles = Array.isArray(a.titles) ? a.titles : [];
+  const first = titles.find((t) => isRecord(t) && text(t.title) !== null);
+  const pub = isRecord(a.publisher) ? text(a.publisher.name) : text(a.publisher);
+  return {
+    title: isRecord(first) ? text(first.title) : null,
+    creators: names(a.creators, (c) => text(c.name)),
+    publisher: pub,
+  };
+}
+
+/** Crossref's `title[]`, `author[]` (given and family, or a name) and `publisher`. */
+export function crossrefDescribed(m: Record<string, unknown>): Described {
+  const titles = Array.isArray(m.title) ? m.title : [];
+  return {
+    title: text(titles.find((t) => text(t) !== null)),
+    creators: names(m.author, (a) => {
+      const full = [text(a.given), text(a.family)].filter((x) => x !== null).join(" ");
+      return full !== "" ? full : text(a.name);
+    }),
+    publisher: text(m.publisher),
+  };
+}
+
+/** OpenAlex's `title`, its authorships' names, and the host of its primary location. */
+export function openalexDescribed(w: Record<string, unknown>): Described {
+  const pl = isRecord(w.primary_location) ? w.primary_location : {};
+  const src = isRecord(pl.source) ? pl.source : {};
+  return {
+    title: text(w.title) ?? text(w.display_name),
+    creators: names(w.authorships, (a) =>
+      isRecord(a.author) ? text(a.author.display_name) : null,
+    ),
+    publisher: text(src.host_organization_name) ?? text(src.display_name),
+  };
 }
 
 /** A per-DOI answer cache: the Worker passes one over `caches.default`; the CLI a Map. */
@@ -832,6 +904,7 @@ function failedRecord(id: string, status: SourceStatus, evidence: string | null)
     id,
     resolver: null,
     resource_type: null,
+    ...NOT_DESCRIBED,
     license: null,
     license_version: null,
     raw: null,
@@ -907,6 +980,8 @@ async function resolveOpenNeuro(
   ds: string,
   version: string,
   resourceType: string | null,
+  /** The DataCite record's title, creators and publisher: OpenNeuro's answer holds only the license. */
+  described: Described,
   o: Required<Omit<ResolveOptions, "cache" | "now">>,
 ): Promise<SourceRecord> {
   const evidence = `https://openneuro.org/datasets/${ds}/versions/${version}`;
@@ -928,7 +1003,13 @@ async function resolveOpenNeuro(
   const lic = snap.description.License;
   const raw = typeof lic === "string" && lic.trim() ? lic.trim() : null;
   return withLicense(
-    { id, resolver: "openneuro", resource_type: resourceType ?? "Dataset", evidence_url: evidence },
+    {
+      id,
+      resolver: "openneuro",
+      resource_type: resourceType ?? "Dataset",
+      ...described,
+      evidence_url: evidence,
+    },
     raw ? [normalizeLicense(raw)] : [],
     raw ? [raw] : [],
     (resourceType ?? "Dataset") === "Dataset",
@@ -965,6 +1046,8 @@ async function resolvePhysioNet(
   slug: string,
   version: string | null,
   o: Required<Omit<ResolveOptions, "cache" | "now">>,
+  /** The DataCite record's creators and publisher, when it led here; PhysioNet's API names none. */
+  described: Described = NOT_DESCRIBED,
 ): Promise<SourceRecord> {
   const api = `${o.bases.physionet}/api/v1/project/published/${encodeURIComponent(slug)}/`;
   let ver = version;
@@ -1000,7 +1083,15 @@ async function resolvePhysioNet(
         : null;
   const raws = [name, p.access_policy].filter((x): x is string => typeof x === "string" && !!x);
   return withLicense(
-    { id, resolver: "physionet", resource_type: resourceType, evidence_url: url },
+    {
+      id,
+      resolver: "physionet",
+      resource_type: resourceType,
+      title: text(p.title) ?? described.title,
+      creators: described.creators,
+      publisher: described.publisher ?? "PhysioNet",
+      evidence_url: url,
+    },
     [value],
     raws,
     resourceType === "Dataset",
@@ -1032,15 +1123,29 @@ async function resolveDoiUncached(
       const onLanding = OPENNEURO_URL.exec(landing);
       const ds = on?.[1] ?? onLanding?.[1];
       const ver = on?.[2] ?? onLanding?.[2];
-      if (ds && ver) return resolveOpenNeuro(doi, ds.toLowerCase(), ver, rtg, o);
+      if (ds && ver) {
+        return resolveOpenNeuro(doi, ds.toLowerCase(), ver, rtg, dataciteDescribed(a), o);
+      }
       const pn = PHYSIONET_URL.exec(landing);
       if (pn) {
-        const rec = await resolvePhysioNet(doi, pn[1].toLowerCase(), pn[2] ?? null, o);
+        const rec = await resolvePhysioNet(
+          doi,
+          pn[1].toLowerCase(),
+          pn[2] ?? null,
+          o,
+          dataciteDescribed(a),
+        );
         return { ...rec, id: doi };
       }
     }
     return withLicense(
-      { id: doi, resolver: "datacite", resource_type: rtg, evidence_url: dcUrl },
+      {
+        id: doi,
+        resolver: "datacite",
+        resource_type: rtg,
+        ...dataciteDescribed(a),
+        evidence_url: dcUrl,
+      },
       values,
       raws,
       isDataset,
@@ -1056,7 +1161,13 @@ async function resolveDoiUncached(
     const type = typeof msg.type === "string" ? msg.type : null;
     const { values, raws } = crossrefLicenses(msg.license);
     return withLicense(
-      { id: doi, resolver: "crossref", resource_type: type, evidence_url: crUrl },
+      {
+        id: doi,
+        resolver: "crossref",
+        resource_type: type,
+        ...crossrefDescribed(msg),
+        evidence_url: crUrl,
+      },
       values,
       raws,
       type !== null && CROSSREF_DATA_TYPES.has(type),
@@ -1073,7 +1184,13 @@ async function resolveDoiUncached(
   const pl = isRecord(w.primary_location) ? w.primary_location : {};
   const lic = typeof pl.license === "string" && pl.license ? pl.license : null;
   return withLicense(
-    { id: doi, resolver: "openalex", resource_type: type, evidence_url: oaUrl },
+    {
+      id: doi,
+      resolver: "openalex",
+      resource_type: type,
+      ...openalexDescribed(w),
+      evidence_url: oaUrl,
+    },
     lic ? [normalizeLicense(lic)] : [],
     lic ? [lic] : [],
     type === "dataset",
@@ -1089,6 +1206,7 @@ export function isValidCachedRecord(hit: unknown): hit is SourceRecord {
     isRecord(hit) &&
     typeof hit.id === "string" &&
     typeof hit.status === "string" &&
+    Array.isArray(hit.creators) &&
     (SOURCE_STATUSES as readonly string[]).includes(hit.status) &&
     CACHEABLE.has(hit.status as SourceStatus) &&
     (hit.license === null ||
