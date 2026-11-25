@@ -1235,7 +1235,8 @@ export interface LineageResult {
   outcome: LineageOutcome;
   /** How each input file read. */
   inputs: InputReadStates;
-  target_license: NormalizedLicense;
+  /** The declared target license, normalized; null when the description could not be read. */
+  target_license: NormalizedLicense | null;
   /** The License value as the dataset declares it. */
   target_license_raw: string | null;
   sources: LineageSource[];
@@ -1274,7 +1275,7 @@ export async function resolveLicenseLineage(
     return {
       outcome: "unresolved",
       inputs: states,
-      target_license: "none",
+      target_license: null,
       target_license_raw: null,
       sources: unreadable,
       resolver_version: RESOLVER_VERSION,
@@ -1329,7 +1330,7 @@ export function lineageLines(result: LineageResult): string[] {
   const lines = [
     `License lineage: ${result.outcome}`,
     `  ${copy.statement}`,
-    `Target license: ${result.target_license}${result.target_license_raw ? ` (declared "${result.target_license_raw}")` : ""}`,
+    `Target license: ${result.target_license ?? "unknown"}${result.target_license_raw ? ` (declared "${result.target_license_raw}")` : ""}`,
     `Sources (${result.sources.length}):`,
   ];
   for (const s of result.sources) {

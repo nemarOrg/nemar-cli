@@ -6313,21 +6313,30 @@ Examples:
   )
   .action(async (path: string, options: { json?: boolean }) => {
     const root = resolve(path);
-    let inputs: LineageInputs;
+    // Each step records a failure message; the exit happens outside every `try`, so an exit can
+    // never be caught and reported as a read error.
+    let failure: string | null = null;
+    let inputs: LineageInputs | null = null;
     try {
-      if (!statSync(root).isDirectory()) licenseCheckFail(`Not a directory: ${path}`);
-      if (!existsSync(join(root, "dataset_description.json"))) {
-        licenseCheckFail(`No dataset_description.json in ${path}`);
+      if (!statSync(root).isDirectory()) failure = `Not a directory: ${path}`;
+      else if (!existsSync(join(root, "dataset_description.json"))) {
+        failure = `No dataset_description.json in ${path}`;
       }
-      inputs = localLineageInputs(root);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      licenseCheckFail(
+      failure =
         code === "ENOENT"
           ? `Path not found: ${path}`
-          : `Could not read ${path} (${code ?? "error"})`,
-      );
+          : `Could not read ${path} (${code ?? "error"})`;
     }
+    if (failure === null) {
+      try {
+        inputs = localLineageInputs(root);
+      } catch (error) {
+        failure = `Could not read ${path} (${(error as NodeJS.ErrnoException).code ?? "error"})`;
+      }
+    }
+    if (failure !== null || inputs === null) licenseCheckFail(failure ?? `Could not read ${path}`);
     // A file that is there but cannot be parsed is not a lineage: name it and stop.
     const { states } = readLineageInputs(inputs);
     if (states.dataset_description === "unparseable") {

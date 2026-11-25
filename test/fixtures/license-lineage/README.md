@@ -7,6 +7,7 @@ with two edits, both recorded in `index.json` (`edited`):
 - the email addresses in `19-openalex-article.json` are replaced by `redacted@example.org`;
 - in `03-datacite-openneuro-latest.json` and `04-datacite-openneuro-latest.json`, the personal name of one NEMAR curator listed as a contributor is replaced by `REDACTED, contributor`, and that curator's ORCID iD is removed.
   The names and ORCID iDs of third-party authors are kept as recorded.
+  The other curator names in fixtures 03 and 04 are public DataCite contributor metadata of that OpenNeuro record, kept on purpose so the fixtures stay the registry's real answer.
 `index.json` lists every recording with its method, URL, HTTP status, file and fetch time;
 `stand-in.ts` serves them to the tests from a local server.
 
