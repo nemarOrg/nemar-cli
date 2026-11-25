@@ -12,6 +12,10 @@ import {
   type CommunityMailPreferences,
 } from "../../../shared/contract/mail-categories.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
+import {
+  RESUBMISSION_NOTE_LABEL,
+  RESUBMISSION_NOTE_PROVENANCE,
+} from "../../../shared/resubmission-note.js";
 import { escapeHtml } from "../lib/escape";
 import { htmlToText } from "../lib/html-to-text";
 import { STALENESS_LIMIT_DAYS } from "./staleness";
@@ -2052,6 +2056,22 @@ function sectionHtml(section: PublicationScreenSection | PublicationReviewSectio
 }
 
 /**
+ * The depositor's resubmission note, as a labeled, quoted block (ADR 0139, decision 5). The label
+ * and the provenance sentence come from the one copy (`shared/resubmission-note.ts`); the note is
+ * the depositor's text, so it is escaped whole, its line breaks are kept by `white-space`, and it
+ * sits in a block that reads as a quotation, never as part of the mail's own words. This is the
+ * ADMINISTRATORS' mail: no mail to the depositor carries the note.
+ */
+export function resubmissionNoteHtml(note: string): string {
+  return `
+  <div style="border-left: 4px solid #6b7280; background: #f9fafb; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
+    <strong>${escapeHtml(RESUBMISSION_NOTE_LABEL)}</strong>
+    <p style="margin: 4px 0 8px 0; color: #666; font-size: 13px;">${escapeHtml(RESUBMISSION_NOTE_PROVENANCE)}</p>
+    <blockquote style="margin: 0; padding: 8px 12px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: monospace; font-size: 13px;">${escapeHtml(note)}</blockquote>
+  </div>`;
+}
+
+/**
  * The verdict as it appears at the end of the subject line:
  * "IDENTIFIER SCREEN: FOUND IDENTIFIERS", "IDENTIFIER SCREEN: clean". The
  * prefix is shouted so the verdict survives an inbox that truncates subjects.
@@ -2083,6 +2103,8 @@ export async function sendPublicationRequestEmail(
     anonymous?: boolean;
     screen?: PublicationScreenSection;
     review?: PublicationReviewSection;
+    /** The depositor's resubmission note (ADR 0139, decision 5), already read by the one rule. */
+    resubmissionNote?: string | null;
   },
 ): Promise<AdminNotificationOutcome> {
   // #1408: an anonymous release and a publication are different runs with
@@ -2105,6 +2127,7 @@ export async function sendPublicationRequestEmail(
   // Placed on the screen's own line below: with no review the mail is byte for byte what it was
   // before the review existed.
   const reviewSection = opts?.review ? sectionHtml(opts.review) : "";
+  const noteSection = opts?.resubmissionNote ? resubmissionNoteHtml(opts.resubmissionNote) : "";
   const html = `
 <!DOCTYPE html>
 <html>
@@ -2117,7 +2140,7 @@ export async function sendPublicationRequestEmail(
 
   <p>User <strong>${escapeHtml(username)}</strong> has requested ${anonymous ? "an anonymous release" : "publication"} of dataset <strong>${escapeHtml(datasetId)}</strong>.</p>
 ${anonymousNotice}
-${screenSection}${reviewSection}
+${screenSection}${reviewSection}${noteSection}
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review the dataset and approve or deny the request:</p>

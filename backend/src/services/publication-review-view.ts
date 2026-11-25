@@ -876,6 +876,14 @@ export async function publicationReviewDetail(
   if (!ctx) return null;
   const d = await derivePublicationReview({ env, nowMs, ...ctx });
   const past = await listReviewsOfRequest(env.DB, ctx.request.id, HISTORY_LIMIT + 1);
+  // The depositor's note and the denial this request answers (ADR 0139, decision 5). Read apart
+  // from the review context: they decide nothing the review derives, and keeping them out of the
+  // context's fields leaves every other reader of that context as it was.
+  const resub = await env.DB.prepare(
+    "SELECT resubmission_note, previous_request_id FROM publication_requests WHERE id = ?",
+  )
+    .bind(ctx.request.id)
+    .first<{ resubmission_note: string | null; previous_request_id: number | null }>();
   return {
     environment: isNonProductionEnv(env) ? "non-production" : "production",
     enabled: d.enabled,
@@ -898,6 +906,8 @@ export async function publicationReviewDetail(
     // Not read from the reasons: with the review off they are empty, and a blocked request must
     // still be told apart.
     block_reason: shownBlockReason(ctx.request),
+    resubmission_note: resub?.resubmission_note ?? null,
+    previous_request_id: resub?.previous_request_id ?? null,
     started_publishing: publishingStanding(ctx.request) === "publishing",
     total_files: ctx.dataset?.total_files ?? null,
     applies: d.applies,

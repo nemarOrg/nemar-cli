@@ -385,7 +385,7 @@ describe("anonymity is requested at publication, not refused there", () => {
   test("the intent is persisted, because approval runs a different publication", () => {
     // At request time the dataset is not anonymous yet -- asking is what makes
     // it so, later. So the approval step cannot re-derive this from the row.
-    expect(PUBLICATION).toMatch(/INSERT INTO publication_requests[^`"]*anonymous\)/);
+    expect(PUBLICATION).toMatch(/INSERT INTO publication_requests[^`"]*\banonymous\b/);
     expect(PUBLICATION).toContain("anonymousRequested ? 1 : 0");
   });
 

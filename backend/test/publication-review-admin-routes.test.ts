@@ -1145,6 +1145,8 @@ describe("GET /admin/publish/:id/review", () => {
         "identifier_screen",
         "screen_acknowledgment",
         "block_reason",
+        "resubmission_note",
+        "previous_request_id",
         "started_publishing",
         "total_files",
         "applies",
