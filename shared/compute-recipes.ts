@@ -390,6 +390,26 @@ export function recipeRequiredOutputs(recipe: Pick<ComputeRecipe, "name">): {
 }
 
 /**
+ * Where a finished run of the recipe writes its dataset `dataQuality` summary, relative to the job's
+ * outputs directory: beside its dataset record, at most 65,536 bytes (ADR 0137 decision 8, nemar-process
+ * `common/dataquality.py`). Not a required output: a run of a recipe that predates it has none.
+ */
+export function recipeQualityDocumentPath(recipe: Pick<ComputeRecipe, "name">): string {
+  return `${RECIPE_PRODUCT_OUTPUT_PREFIX}desc-${recipeLabel(recipe)}_dataquality.json`;
+}
+
+/**
+ * The quality plugins a recipe version runs: the steps of its `quality` checkpoint that are plugins
+ * ({@link RECIPE_PLUGIN_STEPS}), in order. A plugin's metrics are named `<plugin>:<name>`, so these are the
+ * only prefixes a run's metrics may carry; a recipe without plugins reports bare names only.
+ */
+export function recipeQualityPlugins(recipe: Pick<ComputeRecipe, "checkpoints">): string[] {
+  const plugins: readonly string[] = RECIPE_PLUGIN_STEPS;
+  const quality = recipe.checkpoints.find((c) => c.checkpoint === "quality");
+  return (quality?.steps ?? []).filter((s) => plugins.includes(s));
+}
+
+/**
  * The command a recipe job runs; the arguments follow it. A BIDS run, the recipe's default input, is
  * `nemar-recipe run <name>`, byte for byte what it was before a recipe had two inputs; any other input adds
  * `--input <input>` after the name (`nemar-recipe run nemar-floor --input zarr`). The input is in the command
