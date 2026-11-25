@@ -18,6 +18,7 @@
  * subcommands alphabetically, so the order of registration does not show in `--help`.
  */
 
+import { readFileSync } from "node:fs";
 import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
@@ -26,9 +27,15 @@ import { lineageExitCode, lineageLines } from "../../shared/license-lineage.js";
 import { DENIAL_REASON_MAX_LENGTH } from "../../shared/publication-limits.js";
 import { searchLimitProblem } from "../../shared/publish-list-search.js";
 import { RESUBMISSION_NOTE_LABEL } from "../../shared/resubmission-note.js";
+import { UPSTREAM_ACK_COPY } from "../../shared/upstream-ack.js";
 import { checkedDatasetId, failMessage, failWith, requireSignedIn } from "../lib/admin-command.js";
 import { getLicenseLineage } from "../lib/api/admin.js";
-import { denyPublication, listPublishRequests, rerunIdentifierScreen } from "../lib/api/publish.js";
+import {
+  acknowledgeBatch,
+  denyPublication,
+  listPublishRequests,
+  rerunIdentifierScreen,
+} from "../lib/api/publish.js";
 import {
   type ConfirmOptions,
   NO_DESCRIPTION,
@@ -53,6 +60,14 @@ import {
   resolveListStatuses,
 } from "../lib/publish-list-filter.js";
 import { plain } from "../lib/terminal-text.js";
+import {
+  type AckSelection,
+  applyEligible,
+  dryRun,
+  parseIdsFile,
+  policyLines,
+  resultLines,
+} from "../lib/upstream-ack-batch.js";
 import { printable, registerApproveCommand, requestNumber } from "./admin-publish-approve.js";
 import { registerNextCommand } from "./admin-publish-next.js";
 import { registerReviewCommands } from "./admin-publish-review.js";
@@ -532,6 +547,83 @@ Examples:
       });
     }
   });
+
+// `nemar admin dataset publish acknowledge-batch` (epic #2182 card D3; ADR 0086, amendment
+// 2026-11-25): one documented act acknowledging the screens of conversions of a public upstream.
+publishCommand
+  .command("acknowledge-batch")
+  .description(
+    "Acknowledge the identifier screens of requests converted from a public upstream (dry run unless --apply)",
+  )
+  .option("--all-requested", "Every request awaiting an administrator")
+  .option("--ids <file>", "A file of dataset ids, one per line")
+  .option("--apply", "Record the acknowledgments the dry run reports eligible, as your own act")
+  .option("--json", "Print the results as one JSON document")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Reads each selected request's identifier screen, the dataset's license
+  lineage and the publication-queue measurement, and reports per request:
+  eligible, not_eligible:<reason>, or (with --apply) acknowledged,
+  state_moved, or not_recorded:write_failed (nothing written; repeat the run). A request is eligible only when it is a conversion of a
+  public, redistributable upstream whose license was read from the source's
+  own record, and its screen found nothing but unread formats and image,
+  document or tooling files. Nothing is approved.
+
+  The dry run always runs and prints first. With --apply, only what it
+  reported eligible is recorded, each with a reason naming the upstream, its
+  license and the unread formats, linked to the policy. The acknowledgment
+  counts for your own approval only. A request that changed after the dry run
+  is reported as state_moved and nothing is recorded for it.
+
+  ${UPSTREAM_ACK_COPY["never-acknowledged"].statement}
+
+Examples:
+  $ nemar admin dataset publish acknowledge-batch --all-requested
+  $ nemar admin dataset publish acknowledge-batch --ids queue.txt --apply`,
+  )
+  .action(
+    async (options: { allRequested?: boolean; ids?: string; apply?: boolean; json?: boolean }) => {
+      if (!requireSignedIn(options.json)) return;
+      if (Boolean(options.allRequested) === Boolean(options.ids)) {
+        failMessage(UPSTREAM_ACK_COPY["cli:selection"].statement, {
+          json: options.json,
+          answered: true,
+        });
+        return;
+      }
+      let selection: AckSelection = { all: true };
+      if (options.ids) {
+        try {
+          selection = { ids: parseIdsFile(readFileSync(options.ids, "utf-8")) };
+        } catch (error) {
+          failMessage(
+            `${UPSTREAM_ACK_COPY["cli:ids_unreadable"].statement} ${error instanceof Error ? error.message : String(error)}.`,
+            { json: options.json, answered: true },
+          );
+          return;
+        }
+      }
+      try {
+        const dry = await dryRun(acknowledgeBatch, selection);
+        const applied = options.apply ? await applyEligible(acknowledgeBatch, dry) : null;
+        if (options.json) {
+          console.log(JSON.stringify({ dry_run: dry, applied }, null, 2));
+        } else {
+          for (const line of resultLines("Dry run:", dry)) console.log(plain(line));
+          for (const line of policyLines()) console.log(plain(line));
+          if (applied)
+            for (const line of resultLines("Applied:", applied)) console.log(plain(line));
+          else console.log(UPSTREAM_ACK_COPY["cli:nothing_recorded"].statement);
+        }
+      } catch (error) {
+        failWith(error, null, UPSTREAM_ACK_COPY["cli:failed"].statement, undefined, {
+          json: options.json,
+        });
+      }
+    },
+  );
 
 registerApproveCommand(publishCommand);
 registerNextCommand(publishCommand);

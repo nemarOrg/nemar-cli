@@ -44,7 +44,7 @@ import {
   screenGate,
   stateOf,
 } from "../../../shared/identifier-screen-report.js";
-import { auditLogStatement } from "../db/audit-log.js";
+import { auditLogParams, auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import {
   type PublicationReviewSection,
@@ -1036,6 +1036,13 @@ export async function verifyScreenHead(
  * Record an admin's acknowledgment of a screen that needed one, and audit it.
  * Conditional on the state the gate read, so an acknowledgment can only attach
  * to the result the admin was shown. Returns false when the state moved.
+ *
+ * `shown` narrows the condition further, for a caller that acknowledges without
+ * approving (the batch acknowledgment, card D3): the exact stored report the
+ * administrator was shown, a request still `requested`, and no acknowledgment
+ * already recorded. `details` is added to the audit row's details. On that path the
+ * acknowledgment and its audit row are one transaction (`recordShownAcknowledgment`); the approval
+ * path keeps an acknowledgment whose audit write failed, as the approval it rides on is decided.
  */
 export async function recordScreenAcknowledgment(
   db: D1Database,
@@ -1045,8 +1052,17 @@ export async function recordScreenAcknowledgment(
     adminUserId: number;
     reason: string;
     state: string;
+    shown?: { report: string };
+    details?: Record<string, unknown>;
   },
 ): Promise<boolean> {
+  const details = JSON.stringify({
+    ...args.details,
+    request_id: args.requestId,
+    screen_state: args.state,
+    reason: args.reason,
+  });
+  if (args.shown) return recordShownAcknowledgment(db, args, args.shown.report, details);
   const res = await db
     .prepare(
       `UPDATE publication_requests
@@ -1063,11 +1079,7 @@ export async function recordScreenAcknowledgment(
       action: "identifier_screen_acknowledged",
       resourceType: "dataset",
       resourceId: args.datasetId,
-      details: JSON.stringify({
-        request_id: args.requestId,
-        screen_state: args.state,
-        reason: args.reason,
-      }),
+      details,
     }).run();
   } catch (err) {
     // The acknowledgment itself is on the request row; the audit row is the
@@ -1077,6 +1089,59 @@ export async function recordScreenAcknowledgment(
     );
   }
   return true;
+}
+
+/** The row an acknowledgment without an approval may attach to: exactly the one shown. */
+const SHOWN_GUARD = `id = ? AND identifier_screen_status = ? AND identifier_screen_report = ?
+                     AND status = 'requested' AND identifier_screen_ack_at IS NULL`;
+
+/**
+ * The batch path (card D3): the audit INSERT and the acknowledgment UPDATE in one `db.batch`,
+ * which D1 runs as one transaction, so both land or neither does. Both carry the same guard and
+ * the INSERT runs first, so in one transaction they see the same row: when the guard does not
+ * hold, neither writes, and an acknowledgment is never left without its audit row. A failed
+ * write rolls the batch back and throws.
+ */
+async function recordShownAcknowledgment(
+  db: D1Database,
+  args: {
+    requestId: number;
+    datasetId: string;
+    adminUserId: number;
+    reason: string;
+    state: string;
+  },
+  report: string,
+  details: string,
+): Promise<boolean> {
+  const guardBinds = [args.requestId, args.state, report];
+  const [, update] = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+         SELECT ?, ?, ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM publication_requests WHERE ${SHOWN_GUARD})`,
+      )
+      .bind(
+        ...auditLogParams({
+          userId: args.adminUserId,
+          action: "identifier_screen_acknowledged",
+          resourceType: "dataset",
+          resourceId: args.datasetId,
+          details,
+        }),
+        ...guardBinds,
+      ),
+    db
+      .prepare(
+        `UPDATE publication_requests
+            SET identifier_screen_ack_by = ?, identifier_screen_ack_reason = ?,
+                identifier_screen_ack_at = datetime('now')
+          WHERE ${SHOWN_GUARD}`,
+      )
+      .bind(args.adminUserId, args.reason, ...guardBinds),
+  ]);
+  return (update.meta.changes ?? 0) === 1;
 }
 
 /**

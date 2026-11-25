@@ -23,6 +23,7 @@ import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import { isExactIdMatch, matchesListSearch } from "../../../shared/publish-list-search.js";
 import type { PreviousDenialBy } from "../../../shared/resubmission-note.js";
+import type { AckBatchRequest, AckBatchResponse } from "../../../shared/upstream-ack.js";
 import type { IdentifierScreenView } from "../identifier-screen-display.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
@@ -413,6 +414,18 @@ export async function createScreenBatch(datasetIds: string[]): Promise<{
 /** Stop a batch's dispatching: its digest follows when the screens already started report. */
 export async function closeScreenBatch(batchId: number): Promise<{ closed: boolean }> {
   return request(`/admin/publish/screen-batches/${batchId}/close`, { method: "POST" }, true);
+}
+
+/**
+ * One call of the batch acknowledgment on a public upstream (card D3):
+ * `POST /admin/publish/acknowledge-batch`, a dry run unless the body says `apply: true`.
+ */
+export async function acknowledgeBatch(body: AckBatchRequest): Promise<AckBatchResponse> {
+  return request<AckBatchResponse>(
+    "/admin/publish/acknowledge-batch",
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
 }
 
 /**
