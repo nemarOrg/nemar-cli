@@ -234,7 +234,7 @@ invisible one — which is why it is checked rather than trusted.
   (nothing for a blocked request, a failed minimum, direct identifiers, a screen that did not run or is stale,
   or a named publication that keeps an anonymous release's version; the screen's recorded acknowledgment for its reason;
   the administrator's recorded override for everything else, bound to the review and the reasons shown);
-  `publication_reviews` with a one-shot claim, a callback, a production-only watchdog, caps of 5 per depositor and 50 per platform per day,
+  `publication_reviews` with a one-shot claim, a callback, a production-only watchdog, caps of 5 per depositor and 50 per platform per day (150 per platform from 2026-11-25, amendment),
   and no write to GitHub; the admin mail waits for the review;
   `nemar admin dataset publish list|show|next|start|approve` follow ADR 0093, except that every non-pass needs the force path;
   the Worker is the gate in `/approve` and `approve-dispatch`; the approver is the administrator who passed the gate, made exact in Phase 3;
