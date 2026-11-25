@@ -19,7 +19,7 @@
 import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
-import { AUTO_DENY_AUDIT_ACTION } from "../../shared/resubmission-note";
+import { AUTO_DENY_AUDIT_ACTION, resubmissionNoteUnreadable } from "../../shared/resubmission-note";
 import { mailPublicationRequest } from "../src/services/identifier-screen";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings } from "../src/types/bindings";
@@ -29,6 +29,7 @@ import {
   type PublicationReviewApp,
   makePublicationReviewApp,
 } from "./helpers/publication-review-app";
+import { hookedD1 } from "./helpers/publication-review-harness";
 import { asSend, sendsTo, withFakeResend } from "./helpers/resend";
 
 const OWNER_KEY = "note-owner-key-0123456789abcdef0123456789abcdef0123";
@@ -399,28 +400,28 @@ describe("administrators see the note where they see the request", () => {
 });
 
 describe("the administrators' mail", () => {
-  async function mailFor(note: string | undefined): Promise<string> {
-    const html = await withFakeResend(async (calls) => {
+  async function mailFor(note: string | undefined): Promise<{ html: string; text?: string }> {
+    const mail = await withFakeResend(async (calls) => {
       await requestWith(note);
       // The mail of a screened request goes when the screen reports; a request made for a
       // dataset the screen could not start is mailed at once. Either way it is the real mail
       // function, so read it through the reminder route when none went yet.
       await app.settled();
       const first = sendsTo(calls, ADMIN_EMAIL)[0];
-      if (first) return first.html;
+      if (first) return first;
       db.run(
         `UPDATE publication_requests SET identifier_screen_status = 'clean',
                 updated_at = datetime('now', '-2 hours')`,
       );
       const resent = await call("POST", `/datasets/${DATASET}/publish/resend`);
       expect(resent.status).toBe(200);
-      return sendsTo(calls, ADMIN_EMAIL)[0].html;
+      return sendsTo(calls, ADMIN_EMAIL)[0];
     });
-    return html;
+    return mail;
   }
 
   test("a note is a labeled, quoted block, escaped whole", async () => {
-    const html = await mailFor(
+    const { html } = await mailFor(
       "Fixed. <script>alert(1)</script> **not bold** [link](https://example.org) & <img src=x>",
     );
     expect(html).toContain("Depositor&#39;s note");
@@ -433,9 +434,50 @@ describe("the administrators' mail", () => {
   });
 
   test("control: a request with no note has no note block", async () => {
-    const html = await mailFor(undefined);
+    const { html, text } = await mailFor(undefined);
     expect(html).not.toContain("Depositor");
     expect(html).not.toContain("<blockquote");
+    // No note, no text part of our own: the mail is what it was before the note existed.
+    expect(text).toBeUndefined();
+  });
+
+  test("the plain-text part quotes the note line by line, between a label line and a blank line", async () => {
+    const { text } = await mailFor("Line one <b>kept</b>\n\nLine three & more");
+    expect(text).toBeDefined();
+    expect(text).toContain(
+      "Depositor's note (Written by the depositor. It is not verified and it is not NEMAR's.)\n> Line one <b>kept</b>\n>\n> Line three & more\n\n",
+    );
+    // Plain text: the characters as typed, not HTML escapes.
+    expect(text).not.toContain("&lt;");
+    expect(text).not.toContain("NEMAR-RESUBMISSION-NOTE-HERE");
+  });
+
+  test("a note that could not be read is said so in a fixed sentence, and the mail still goes", async () => {
+    await requestWith("Words that cannot be read now");
+    const id = lastRow().id;
+    const failing: Bindings = {
+      ...env(),
+      DB: hookedD1(realD1(db), {
+        statement: (sql) => {
+          if (sql.includes("SELECT resubmission_note FROM publication_requests")) {
+            throw new Error("simulated read failure");
+          }
+        },
+      }),
+    };
+    const mail = await withFakeResend(async (calls) => {
+      await mailPublicationRequest(failing, {
+        requestId: id,
+        datasetId: DATASET,
+        username: "noteowner",
+        anonymous: false,
+        screen: { headline: "Identifier screen: clean", tone: "ok", lines: [] },
+      });
+      return sendsTo(calls, ADMIN_EMAIL)[0];
+    });
+    expect(mail.html).toContain(resubmissionNoteUnreadable(DATASET));
+    expect(mail.html).not.toContain("Words that cannot be read now");
+    expect(mail.html).not.toContain("<blockquote");
   });
 
   test("mailPublicationRequest reads the note from the row whichever caller sends the mail", async () => {
@@ -481,6 +523,7 @@ describe("the administrators' mail", () => {
     for (const mail of sent) {
       expect(mail.subject).not.toContain("Private words");
       expect(mail.html).not.toContain("Private words for the reviewer");
+      expect(mail.text ?? "").not.toContain("Private words for the reviewer");
     }
   });
 });

@@ -51,10 +51,15 @@ import { stepsForRelease } from "../../shared/publication-steps.js";
 import { RangeParseError } from "../../shared/range.js";
 import { README_CANDIDATES } from "../../shared/readme-candidates.js";
 import {
+  RESUBMISSION_NOTE_CANCELLED,
+  RESUBMISSION_NOTE_FLAGS_EXCLUSIVE,
+  RESUBMISSION_NOTE_NOT_CONFIRMED,
+  RESUBMISSION_NOTE_NOT_REQUESTED,
   RESUBMISSION_NOTE_OFFER,
   RESUBMISSION_NOTE_RECORDED,
   RESUBMISSION_NOTE_REFUSAL_SENTENCES,
   readResubmissionNote,
+  resubmissionNoteFileUnreadable,
   resubmissionPrompt,
 } from "../../shared/resubmission-note.js";
 import { isAnswered } from "../lib/admin-command.js";
@@ -4523,7 +4528,7 @@ interface NoteOptions {
 /** A refusal of what was typed for the note: said plainly, nothing is sent, and it is no bug. */
 function refuseNote(sentence: string): never {
   console.log(chalk.red(`Error: ${sentence}`));
-  console.log(chalk.dim("  Nothing was requested."));
+  console.log(chalk.dim(`  ${RESUBMISSION_NOTE_NOT_REQUESTED}`));
   markUsageExit();
   process.exit(1);
 }
@@ -4542,14 +4547,14 @@ async function settleResubmissionNote(
   options: NoteOptions,
 ): Promise<string | undefined> {
   if (options.note !== undefined && options.noteFile !== undefined) {
-    refuseNote("Give either --note or --note-file, not both.");
+    refuseNote(RESUBMISSION_NOTE_FLAGS_EXCLUSIVE);
   }
   let given = options.note;
   if (options.noteFile !== undefined) {
     try {
       given = readFileSync(options.noteFile, "utf8");
     } catch {
-      refuseNote(`Could not read the note file ${clip(options.noteFile, 200)}.`);
+      refuseNote(resubmissionNoteFileUnreadable(clip(options.noteFile, 200)));
     }
   }
   if (given !== undefined) {
@@ -4570,19 +4575,33 @@ async function settleResubmissionNote(
     return undefined;
   }
   const day = (previous.denied_at ?? "").slice(0, 10) || "an earlier date";
-  const { value } = await inquirer.prompt<{ value: string }>([
+  // A rule-breaking answer is asked again by the prompt itself, with the rule's own sentence. The
+  // author is passed as the status answer gave it: an older backend sends none, and the question
+  // then names nobody rather than an administrator.
+  // Ctrl+C at inquirer 9's prompt does not reject it: the prompt's own handler signals this
+  // process with SIGINT (`baseUI.onForceClose`), which Bun may not deliver before the event loop
+  // drains, and the command then ends with exit code 0 as if nothing had been asked. So this
+  // listens on the same readline interface, after inquirer's, and exits 130 itself (the code of a
+  // walked-away prompt, which the exit hook does not read as a failure to report).
+  const asking = inquirer.prompt<{ value: string }>([
     {
       type: "input",
       name: "value",
-      message: resubmissionPrompt(
-        day,
-        previous.denied_by_kind === "agent" ? "agent" : "administrator",
-      ),
+      message: resubmissionPrompt(day, previous.denied_by_kind ?? null),
+      validate: (typed: string) => {
+        const check = readResubmissionNote(typed);
+        return check.ok ? true : RESUBMISSION_NOTE_REFUSAL_SENTENCES[check.refusal];
+      },
     },
   ]);
+  // `rl` is protected in inquirer's types and public at run time.
+  (asking.ui as unknown as { rl: NodeJS.EventEmitter }).rl.on("SIGINT", () => {
+    console.log(chalk.dim(`\n  ${RESUBMISSION_NOTE_CANCELLED}`));
+    process.exit(130);
+  });
+  const { value } = await asking;
   const read = readResubmissionNote(value);
-  if (!read.ok) refuseNote(RESUBMISSION_NOTE_REFUSAL_SENTENCES[read.refusal]);
-  return read.note ?? undefined;
+  return read.ok ? (read.note ?? undefined) : undefined;
 }
 
 publishCommand
@@ -4663,11 +4682,7 @@ Examples:
       } else if (note !== undefined) {
         // The server did not confirm it (an older backend, or a note lost on the way): said, so
         // the depositor does not rely on a reviewer having read what was never stored.
-        console.log(
-          chalk.yellow(
-            "  WARNING: the server did not confirm that your note was recorded. Run the request again, or tell an administrator.",
-          ),
-        );
+        console.log(chalk.yellow(`  ${RESUBMISSION_NOTE_NOT_CONFIRMED}`));
       }
       // Printed from the server's ECHO, not from the flag that was typed. A
       // request whose body never arrived would otherwise succeed with a

@@ -53,7 +53,7 @@ export function readResubmissionNote(raw: unknown): ResubmissionNoteReading {
 export type PreviousDenialBy = "agent" | "administrator";
 
 /**
- * The `audit_log.action` of an automatic denial (ADR 0139, decision 2), whose `details` JSON names
+ * The `audit_log.action` of an automatic denial (written by the automatic deny, B5; ADR 0139, decision 2), whose `details` JSON names
  * the denied request as `request_id`. The status answer says "an automated agent" for a denied
  * request that has such a row and "an administrator" for one that has none, so the denial that
  * writes the row and the answer that reads it must use this one word.
@@ -62,11 +62,14 @@ export const AUTO_DENY_AUDIT_ACTION = "auto_deny";
 
 /**
  * The question the CLI asks at a terminal after a denial that was not a withdrawal (ADR 0139,
- * decision 5). `date` is the day of the denial.
+ * decision 5). `date` is the day of the denial. `by` is who denied it, or null when the status
+ * answer did not say (an older backend, or a read that failed): an unknown author is never worded
+ * as "an administrator", so the question then carries no ", by ..." at all.
  */
-export function resubmissionPrompt(date: string, by: PreviousDenialBy): string {
-  const who = by === "agent" ? "an automated agent" : "an administrator";
-  return `This dataset's last request was denied on ${date}, by ${who}. Tell the reviewer what changed, or why the decision was wrong (optional, Enter to skip)`;
+export function resubmissionPrompt(date: string, by: PreviousDenialBy | null): string {
+  const who =
+    by === "agent" ? ", by an automated agent" : by === null ? "" : ", by an administrator";
+  return `This dataset's last request was denied on ${date}${who}. Tell the reviewer what changed, or why the decision was wrong (optional, Enter to skip)`;
 }
 
 /** What a session with no terminal is told, once, before the request goes on without a note. */
@@ -80,3 +83,39 @@ export const RESUBMISSION_NOTE_RECORDED =
 /** The sentence under the label in the administrator's views, saying what the text is. */
 export const RESUBMISSION_NOTE_PROVENANCE =
   "Written by the depositor. It is not verified and it is not NEMAR's.";
+
+/** What the CLI says when `--note` and `--note-file` are both given. */
+export const RESUBMISSION_NOTE_FLAGS_EXCLUSIVE = "Give either --note or --note-file, not both.";
+
+/** What the CLI says when the note file cannot be read; `file` is the path as typed, clipped. */
+export function resubmissionNoteFileUnreadable(file: string): string {
+  return `Could not read the note file ${file}.`;
+}
+
+/** What follows a refusal of what was typed for the note: nothing was sent. */
+export const RESUBMISSION_NOTE_NOT_REQUESTED = "Nothing was requested.";
+
+/** What the CLI says when the server did not confirm that the note was recorded. */
+export const RESUBMISSION_NOTE_NOT_CONFIRMED =
+  "WARNING: the server did not confirm that your note was recorded. Run the request again, or tell an administrator.";
+
+/** What the CLI says when the question was cancelled with Ctrl+C. */
+export const RESUBMISSION_NOTE_CANCELLED = "Canceled. Nothing was requested.";
+
+/**
+ * What the administrators' mail says when the request's note could not be read for the mail (a
+ * failed read, which is not the same as no note): the mail still goes, and points at the command
+ * that reads the request itself. `datasetId` is a validated dataset id.
+ */
+export function resubmissionNoteUnreadable(datasetId: string): string {
+  return `A note was recorded but could not be read here; open \`nemar admin dataset publish show ${datasetId}\`.`;
+}
+
+/**
+ * The note as the plain-text part of a mail: a label line, the note quoted line by line with its
+ * line breaks kept, and a blank line after.
+ */
+export function resubmissionNoteText(note: string): string {
+  const quoted = note.split("\n").map((line) => (line === "" ? ">" : `> ${line}`));
+  return [`${RESUBMISSION_NOTE_LABEL} (${RESUBMISSION_NOTE_PROVENANCE})`, ...quoted, ""].join("\n");
+}

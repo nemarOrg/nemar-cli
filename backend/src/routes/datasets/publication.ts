@@ -606,6 +606,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     }
 
     if (blocked) {
+      // The note sent with this request is KEPT on the held row (the UPDATE or INSERT above, with
+      // COALESCE so a retry without one keeps the earlier words) and is deliberately NOT echoed
+      // here: the keys of this body are pinned field for field by the CLI's stand-in bodies, and
+      // the depositor is told the note was recorded when the request is released and accepted.
       return c.json(
         {
           status: "blocked",

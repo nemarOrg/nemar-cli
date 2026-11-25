@@ -240,17 +240,54 @@ describe.skipIf(process.platform === "win32")("on a terminal", () => {
     expect(newest()?.resubmission_note).toBeNull();
   });
 
-  test("a typed answer that breaks the rule is refused with the rule's words", async () => {
+  test("an answer that breaks the rule is asked again, and a valid one is then sent", async () => {
+    seedEnded("denied");
+    const r = await h.cli(request(), {
+      terminal: async (t) => {
+        const asked = await t.waitFor("optional, Enter to skip");
+        t.type(`${"y".repeat(2001)}\n`);
+        await t.waitFor("longer than 2000 characters", { after: asked });
+        expect(h.posted).toEqual([]);
+        // Clear the line the prompt wrote the refused text back onto, and answer again.
+        t.type("\u0015Shorter now\n");
+        await t.waitFor("Publication request submitted", { after: asked });
+      },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(newest()?.resubmission_note).toBe("Shorter now");
+  });
+
+  test("Ctrl+C at the question exits 130 and sends nothing", async () => {
     seedEnded("denied");
     const r = await h.cli(request(), {
       terminal: async (t) => {
         await t.waitFor("optional, Enter to skip");
-        t.type(`${"y".repeat(2001)}\n`);
-        await t.waitFor("longer than 2000 characters");
+        t.type("\u0003");
+        await t.waitFor("Nothing was requested");
       },
     });
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(130);
     expect(h.posted).toEqual([]);
+    expect(newest()?.status).toBe("denied");
+  });
+
+  test("a denial whose author the server did not say is not called an administrator's", async () => {
+    seedEnded("denied");
+    // A backend of an older version sends no author: the real route's answer, one field gone.
+    h.rewrite(`GET /datasets/${DATASET}/publish/status`, (body) => {
+      Reflect.deleteProperty(body, "denied_by_kind");
+    });
+    await h.cli(request(), {
+      terminal: async (t) => {
+        await t.waitFor("optional, Enter to skip");
+        const asked = flat(t.transcript());
+        expect(asked).toContain("denied on 2026-11-21. Tell the reviewer");
+        expect(asked).not.toContain("by an administrator");
+        expect(asked).not.toContain("by an automated agent");
+        t.type("\n");
+        await t.waitFor("Publication request submitted");
+      },
+    });
   });
 });
 
