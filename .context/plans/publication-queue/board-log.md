@@ -20,6 +20,11 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T14:48-08:00 | A2: companions paired by BIDS basename; header-named files checked in scan(); mismatch = partial/companion-missing; .vmrk/.inf read; no contract change | lead |  |
 | 2026-11-25T14:52-08:00 | A2 FP gate: NIRx runs on all public headers found (>=20, count stated); 200-file gate waived for NIRx only; thresholds unchanged | lead |  |
 | 2026-11-25T14:56-08:00 | A3: walker logical read cap 20,000; real bounds are source fetches (page cache), bytes and time, declared per reader by A4/A5 | lead |  |
+| 2026-11-25T14:57-08:00 | B4 stop resolved: Worker serves inputs via token-auth POST /publication-review-inputs (claimed review only); script fetches before pre-send; failure = inputs_unavailable; no workflow change; ADR 0139 d7 amended (+redistribution_prohibited, source_is_publication) | lead |  |
+| 2026-11-25T15:15-08:00 | D3: exclusion also applied to the screened head's tree at run time (shared classifier); D2 list kept for history; route cap 20; approve CLI check compares ack author | lead |  |
+| 2026-11-25T15:22-08:00 | D3: BIDS _photo files make a request ineligible for batch ack (individual look); screen rule unchanged | lead |  |
+| 2026-11-25T15:33-08:00 | A4: hdf5-identifier-field (JSON identifier keys on HDF5 fields); day-precision DOB = identifier, year/month = review; name-like only in person fields; elsewhere local-path rule only | lead |  |
+| 2026-11-25T15:34-08:00 | A2: name mismatch = informational (non-gating); vmrk limit 16 MiB; age alone no finding, DOB by precision; Notes/Contact local-path+email/phone+person-field names; contract adds coverage not-applicable (Analyze .hdr stays unscreened) | lead |  |
 
 ## Log
 
@@ -37,3 +42,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T14:20-08:00 | Local pure tier replaced by remote CI (faster under load); killed local run |
 | 2026-11-25T14:35-08:00 | D4 green but conflicting after D1 merge; base merge sent |
 | 2026-11-25T14:42-08:00 | A1 merged (#2374 -> 5c3d65d5): A2, A6, A9 ready |
+| 2026-11-25T15:46-08:00 | Incident: A2 ran A4's mutate.py (shared scratchpad name collision) on A4's worktree; A4 asked to verify; preamble now requires per-step scratch dirs |

@@ -34,6 +34,7 @@ Plan: `/Users/yahya/Documents/git/nemar/nemar-cli-worktrees/epic-publication-que
   `bun run typecheck`, `bun run lint`, and the targeted `bun test <files>` the card names.
   Never the full `bun test`: it takes about 80 minutes.
 - Stop and report on any stop condition, or when the card seems wrong.
+- Scratch files (mutation scripts, downloads, logs) go only under a directory named after your step id inside the session scratchpad, for example `<scratchpad>/A4/`. The scratchpad is shared by parallel agents, and a script with a common name has been overwritten and run against another agent's worktree. A mutation script must refuse to run unless its working directory is your own worktree.
 - No computer use, no visible GUI runs, no secrets.
 - Your final message is the report, at most 25 lines:
   PR number and head commit; gates with their quoted last lines; evidence paths; a revert check per rule; deviations from the card; questions for the lead; patch notes for other owners.
