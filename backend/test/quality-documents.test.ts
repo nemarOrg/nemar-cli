@@ -342,4 +342,51 @@ describe("a page shows a summary once its derivative is promoted", () => {
       .all<Loose>();
     expect(current.results.map((r) => JSON.parse(r.entry).dataset_version)).toEqual(["v1.0.1"]);
   });
+
+  test("a superseded row the owner then publishes is public again (MUTATION: drop the published clause, or keep it on the inner rows only)", async () => {
+    // The review's sequence (#2375 round 2): publishing never clears `superseded_at`.
+    const a = await finishedRun();
+    const b = await finishedRun(() => {}, "succeeded", {
+      datasetId: a.datasetId,
+      version: "v1.0.1",
+    });
+    await reconcilePipelineProgress(env);
+    const keyA = await seedDerivative(env.DB, {
+      datasetId: a.datasetId,
+      stampId: a.stampId,
+      jobId: a.jobId,
+      storedAt: "2026-11-21 10:00:00",
+    });
+    const keyB = await seedDerivative(env.DB, {
+      datasetId: a.datasetId,
+      stampId: b.stampId,
+      jobId: b.jobId,
+      storedAt: "2026-11-20 10:00:00",
+    });
+    const admin = { to: "catalog" as const, userId: 1, role: "admin" };
+    expect((await promoteDerivative(env, { key: keyA, ...admin })).ok).toBe(true);
+    expect((await promoteDerivative(env, { key: keyB, ...admin })).ok).toBe(true);
+    const published = await promoteDerivative(env, {
+      key: keyA,
+      to: "published",
+      userId: 1,
+      role: "owner",
+    });
+    expect(published.ok).toBe(true);
+    const row = await env.DB.prepare(
+      "SELECT retention, superseded_at FROM compute_derivatives WHERE key = ?1",
+    )
+      .bind(keyA)
+      .first<{ retention: string; superseded_at: string | null }>();
+    expect(row?.retention).toBe("published");
+    expect(row?.superseded_at).not.toBeNull();
+    const extensions = await readPipelineExtensions(env.DB, a.datasetId);
+    expect(
+      (extensions.dataQuality?.recipes["nemar-ica"] as Loose | undefined)?.dataset_version,
+    ).toBe("v1.0.0");
+    const current = await env.DB.prepare(CURRENT_QUALITY_DOCUMENTS_SQL)
+      .bind(a.datasetId)
+      .all<Loose>();
+    expect(current.results.map((r) => JSON.parse(r.entry).dataset_version)).toEqual(["v1.0.0"]);
+  });
 });

@@ -333,13 +333,15 @@ export function checkDatasetQualityDocument(
 
 /**
  * A derivative row that may be shown on a public page (ADR 0137 decision 7, ADR 0123): stored, of
- * retention `catalog` or `published`, not superseded (a later `catalog` row of its dataset, recipe, input
- * and profile replaced it), and not past its date (a deletion dates its rows to now). A `canary` row, a row
- * being copied, a failed row and an expired one are never public.
+ * retention `catalog` or `published`, not a superseded `catalog` row (a later `catalog` row of its dataset,
+ * recipe, input and profile replaced it), and not past its date (a deletion dates its rows to now). A
+ * `published` row is public whatever its `superseded_at`: publishing a superseded row keeps the date it was
+ * superseded and never clears it (`promotePublishedSql`), and the owner's publication is the newer decision.
+ * A `canary` row, a row being copied, a failed row and an expired one are never public.
  */
 const PUBLIC_DERIVATIVE_SQL = (d: string): string =>
   `${d}.state = 'stored' AND ${d}.retention IN ('catalog', 'published')
-   AND ${d}.superseded_at IS NULL
+   AND (${d}.retention = 'published' OR ${d}.superseded_at IS NULL)
    AND (${d}.expires_at IS NULL OR ${d}.expires_at > datetime('now'))`;
 
 /**
