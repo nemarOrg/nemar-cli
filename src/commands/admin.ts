@@ -62,6 +62,7 @@ import {
 } from "../../shared/contract/neurobagel-admin.js";
 import { UNPUBLISH_CACHE_NOTE } from "../../shared/contract/publication.js";
 import { weeklyAttention } from "../../shared/contract/weekly-attention.js";
+import { lineageExitCode, lineageLines } from "../../shared/license-lineage.js";
 import { isOpenNeuroTag } from "../../shared/openneuro-tag.js";
 import {
   checkedAfterDatasetId,
@@ -159,6 +160,7 @@ import {
   getEmailPreferences,
   getFleetDrift,
   getImportStatus,
+  getLicenseLineage,
   getNeurobagelStatus,
   getSummaryCoverage,
   getUserDuplicates,
@@ -1729,6 +1731,48 @@ const datasetGroupCommand = new Command("dataset")
 adminCommand.addCommand(datasetGroupCommand);
 
 datasetGroupCommand.addCommand(publishCommand);
+
+// `nemar admin dataset license-lineage <id>` (epic #2182 card D1, ADR 0139 decision 7): read-only.
+datasetGroupCommand
+  .command("license-lineage")
+  .description("A dataset's upstream license lineage, computed on demand (read-only)")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000480)")
+  .option("--json", "Print the result as one JSON document")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Reads the dataset's declared upstream sources (SourceDatasets, the
+  enrichment's IsDerivedFrom and IsIdenticalTo, the deposit attestation and
+  the README) and each source's license record, and prints the outcome with
+  its evidence, remedy and docs link. It is the same resolver the depositor
+  runs with 'nemar dataset license-check <path>'. Writes nothing.
+
+Exit codes:
+  0  compatible, compatible_attribution or compatible_nc
+  1  the request failed
+  2  any other outcome
+
+Examples:
+  $ nemar admin dataset license-lineage nm000480
+  $ nemar admin dataset license-lineage nm000480 --json`,
+  )
+  .action(async (datasetId: string, options: { json?: boolean }) => {
+    if (!requireAuth()) process.exit(1);
+    let result: Awaited<ReturnType<typeof getLicenseLineage>>;
+    try {
+      result = await getLicenseLineage(datasetId);
+    } catch (err) {
+      console.error(chalk.red(`License lineage failed: ${errorDetail(err)}`));
+      process.exit(1);
+    }
+    if (options.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(`Dataset: ${result.dataset_id}`);
+      for (const line of lineageLines(result)) console.log(line);
+    }
+    process.exit(lineageExitCode(result.outcome));
+  });
 
 // ============================================================================
 // Rework group (`admin rework`; ADR 0135 decision 3): operations that change the content or
