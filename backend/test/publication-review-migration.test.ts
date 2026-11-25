@@ -313,6 +313,7 @@ describe("the reviewable screen states come from screenGate", () => {
         "review",
         "unchecked",
         "not-screened",
+        "partially-screened",
         "clean-edf-only-others-unscreened",
       ].sort(),
     );

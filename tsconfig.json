@@ -38,6 +38,8 @@
     "test/fixtures/pr-review-canary/*.ts",
     "test/pr-review-original-set-a.test.ts",
     "test/publication-review-calibration.test.ts",
+    "test/identifier-coverage-contract.test.ts",
+    "backend/test/repull-screens-partially-screened-migration.test.ts",
     "test/publication-review-contract.test.ts",
     "test/publication-review-evidence.test.ts",
     "test/publication-review-presend.test.ts",

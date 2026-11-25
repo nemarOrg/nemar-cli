@@ -14,10 +14,11 @@
  * digits `9`, printable ASCII punctuation stays, and every other character (symbols, marks,
  * control characters) becomes `?`, so a report cannot repeat a participant's name.
  *
- * **Screening is a best effort and says what it did not read.** `formatCoverage` counts
- * recording data in formats this module cannot parse, including archives and any raw file under `sourcedata/` it does not recognize, so a caller can tell "nothing found"
- * from "nothing looked at"; a caller must not call a dataset clean while that count is
- * non-zero. Only the EDF/BDF identification fields are parsed here: the patient
+ * **Screening is a best effort and says what it did not read.** `formatCoverage`
+ * (`identifier-readers.ts`) counts recording data no registered reader parses, including
+ * archives and any raw file under `sourcedata/` it does not recognize, so a caller can tell
+ * "nothing found" from "nothing looked at"; a caller must not call a dataset clean while that
+ * count is non-zero. Only the EDF/BDF identification fields are parsed here: the patient
  * identification, the recording identification and the start date and time of the 256-byte
  * header. Signal-header fields (transducer, prefilter), reserved bytes and EDF+ annotation
  * channels are not read.
@@ -1135,21 +1136,12 @@ export function scanTextForLocalPaths(text: string): Finding[] {
   return [];
 }
 
-export interface FormatCoverage {
-  /** EDF and BDF files, whose header this module parses. */
-  screened: number;
-  /**
-   * Recording data this module cannot parse, counted by format: `.set`, `.hdf5`, `.edf.gz`,
-   * and directory formats as `.ds/`, `.mff/`, `.mefd/`, `.zarr/` (one per directory).
-   */
-  unscreened: Record<string, number>;
-}
-
 /** Directory formats: the recording is a folder, and a manifest lists the files inside it. */
 export const DIRECTORY_FORMATS: readonly string[] = [".ds", ".mff", ".mefd", ".zarr"];
-/** A BIDS data file: `..._<suffix>.<extension>`, with a one- or two-part extension. */
-const BIDS_DATA_FILE = /_(eeg|ieeg|meg|emg|nirs|physio|motion)\.([a-z0-9+]+(?:\.[a-z0-9]+)?)$/;
-/** Formats counted as recording or signal data wherever they sit, named or not by BIDS. */
+/**
+ * Formats counted as recording or signal data wherever they sit, named or not by BIDS, when no
+ * registered reader reads them. An extension leaves this list when a reader is registered for it.
+ */
 export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
   ".vhdr",
   ".set",
@@ -1193,124 +1185,6 @@ export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
   ".7z",
   ".rar",
 ];
-
-/**
- * Under `sourcedata/` anything that is not one of these is raw material of unknown format and is
- * counted as unscreened. Text, tables, code and documents are read by other rules or carry no signal.
- */
-const SOURCEDATA_HARMLESS = new Set([
-  "json",
-  "tsv",
-  "csv",
-  "txt",
-  "md",
-  "yml",
-  "yaml",
-  "xml",
-  "iml",
-  "py",
-  "pyc",
-  "m",
-  "r",
-  "rmd",
-  "ipynb",
-  "gitignore",
-  "jpg",
-  "jpeg",
-  "png",
-  "gif",
-  "pdf",
-  "svg",
-  "tex",
-  "bib",
-  "rst",
-  "cfg",
-  "ini",
-  "toml",
-  "docx",
-  "doc",
-  "xlsx",
-  "xls",
-  "pptx",
-  "ppt",
-  "odt",
-  "ods",
-  "rtf",
-  "html",
-  "htm",
-  "log",
-  "sh",
-  "bat",
-  "ps1",
-  "js",
-  "ts",
-  "css",
-  "lock",
-  "gitkeep",
-  "ds_store",
-]);
-
-/** Base names that are documentation or housekeeping, with or without an extension. */
-const HARMLESS_BASENAME =
-  /^(readme|license|licence|changes|citation|authors|notice|thumbs\.db|\.ds_store|\.gitkeep)/;
-
-/**
- * Count recording data by whether this module can read it. The question it answers is "what is
- * here that nobody looked at", so it counts by what a file IS (a BIDS data file in any format
- * but EDF, BDF, JSON or TSV; a directory format; a known signal extension) rather than by a
- * short list of formats someone remembered.
- */
-export function formatCoverage(paths: string[]): FormatCoverage {
-  const unscreened: Record<string, number> = {};
-  const directories = new Set<string>();
-  let screened = 0;
-  const count = (key: string) => {
-    unscreened[key] = (unscreened[key] ?? 0) + 1;
-  };
-  for (const raw of paths) {
-    const path = raw.toLowerCase();
-    if (path.endsWith(".edf") || path.endsWith(".bdf")) {
-      screened++;
-      continue;
-    }
-    const segments = path.split("/");
-    const dirIndex = segments.findIndex(
-      (s, i) => i < segments.length - 1 && DIRECTORY_FORMATS.some((e) => s.endsWith(e)),
-    );
-    if (dirIndex >= 0) {
-      const dir = segments.slice(0, dirIndex + 1).join("/");
-      if (!directories.has(dir)) {
-        directories.add(dir);
-        const ext = DIRECTORY_FORMATS.find((e) => (segments[dirIndex] as string).endsWith(e));
-        count(`${ext}/`);
-      }
-      continue;
-    }
-    const bids = BIDS_DATA_FILE.exec(path);
-    if (bids) {
-      const ext = bids[2] as string;
-      if (ext !== "json" && ext !== "tsv") count(`.${ext}`);
-      continue;
-    }
-    const hit = OTHER_RECORDING_EXTENSIONS.filter((e) => path.endsWith(e)).sort(
-      (a, b) => b.length - a.length,
-    )[0];
-    if (hit) {
-      count(hit);
-      continue;
-    }
-    // Raw material under sourcedata/ in a format not listed above is still unread.
-    if (path.startsWith("sourcedata/")) {
-      const base = segments[segments.length - 1] as string;
-      const dot = base.lastIndexOf(".");
-      const ext = dot > 0 ? base.slice(dot + 1) : dot === 0 ? base.slice(1) : "";
-      if (!SOURCEDATA_HARMLESS.has(ext) && !HARMLESS_BASENAME.test(base)) {
-        count(ext === "" ? "(no extension)" : `.${ext}`);
-      }
-    }
-  }
-  return { screened, unscreened };
-}
 
 /** Count findings by kind. Values never enter a summary, only counts. */
 export function countByKind(findings: Finding[]): Partial<Record<FindingKind, number>> {

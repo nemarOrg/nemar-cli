@@ -45,6 +45,7 @@ import { hashApiKey } from "../src/services/token";
 import { REPULL_SCREEN_CALLBACK_PATH } from "../src/services/upstream-repull-screen";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { asVersion2 } from "./helpers/identifier-screen";
 import {
   type Dispatch,
   type RepullGitHub,
@@ -239,6 +240,12 @@ async function dispatchOn(d1: D1Database, id: number, sha = HEAD) {
 
 /** A scan report as the workflow posts it: `status` of `datasetId` at `head`. */
 function scanReport(head: string, status = "clean", datasetId = DS): Record<string, unknown> {
+  const body = scanReportV1(head, status, datasetId);
+  // `partially-screened` is version 2's word only.
+  return status === "partially-screened" ? asVersion2(body, { ".set": 1 }) : body;
+}
+
+function scanReportV1(head: string, status: string, datasetId: string) {
   return {
     version: 1,
     scanner: "identifier-scan@abcdef1",
@@ -527,6 +534,7 @@ describe("the dispatch", () => {
       "review",
       "unchecked",
       "not-screened",
+      "partially-screened",
       "clean-edf-only-others-unscreened",
     ]) {
       db.run("DELETE FROM upstream_repull_screens");
@@ -549,7 +557,8 @@ describe("the dispatch", () => {
     );
     const acked = await dispatch(id);
     expect([acked.status, acked.body.code]).toEqual([409, "screen-exists"]);
-    expect(gh.dispatches).toHaveLength(4);
+    // One dispatch per state that asks for a person, and none for the rest.
+    expect(gh.dispatches).toHaveLength(5);
   });
 
   test("an acknowledgment recorded between the read and the claim keeps the verdict", async () => {

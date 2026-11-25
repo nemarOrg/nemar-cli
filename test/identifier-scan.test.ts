@@ -15,6 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { formatCoverage } from "../shared/identifier-readers";
 import {
   DATE_KINDS,
   DIRECT_KINDS,
@@ -22,7 +23,6 @@ import {
   type Shape,
   countByKind,
   detectEdfFamily,
-  formatCoverage,
   scanAcqTime,
   scanEdfHeader,
   scanJsonKeys,
@@ -297,7 +297,7 @@ describe("coverage and summaries", () => {
       "sub-03/anat/t1.nii.gz",
       "participants.tsv",
     ]);
-    expect(cov.screened).toBe(2);
+    expect(cov.byReader).toEqual({ edf: 2 });
     expect(cov.unscreened).toEqual({ ".set": 1, ".fdt": 1, ".fif.gz": 1, ".nii.gz": 1 });
   });
 
@@ -754,7 +754,7 @@ describe("second review: delimiters, record numbers, slots, coverage, canonical 
       expect(formatCoverage(paths).unscreened, paths[0]).toEqual(expected);
     }
     expect(formatCoverage(["sub-01/eeg/a.edf", "sub-01/eeg/a.json", "sub-01/eeg/a.tsv"])).toEqual({
-      screened: 1,
+      byReader: { edf: 1 },
       unscreened: {},
     });
     expect(

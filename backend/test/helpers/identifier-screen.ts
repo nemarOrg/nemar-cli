@@ -19,7 +19,7 @@ export function cleanScreenReportBody(
   head: string = SCREENED_HEAD,
   status = "clean",
 ): Record<string, unknown> {
-  return {
+  const body = {
     version: 1,
     scanner: "identifier-scan@abcdef1",
     head,
@@ -32,6 +32,38 @@ export function cleanScreenReportBody(
       incomplete: false,
       incomplete_reasons: [],
       files: { total: 10, edf_bdf: 4, header_read: 4, header_read_failed: 0 },
+    } as Record<string, unknown>,
+  };
+  return status === "partially-screened" ? asVersion2(body, { ".set": 1 }) : body;
+}
+
+/**
+ * The same report in version 2, the only version that says `partially-screened`: the EDF/BDF
+ * counts become the per-reader counts, and `unscreened` names the formats no reader parses.
+ */
+export function asVersion2(
+  body: { version: number; scan?: Record<string, unknown> } & Record<string, unknown>,
+  unscreened: Record<string, number> = {},
+): Record<string, unknown> {
+  const scan = body.scan;
+  if (!scan) return { ...body, version: 2 };
+  const files = scan.files as { edf_bdf: number; header_read: number; header_read_failed: number };
+  return {
+    ...body,
+    version: 2,
+    scan: {
+      ...scan,
+      read_by_format: {
+        edf: {
+          files: files.edf_bdf,
+          read: files.header_read,
+          partial: 0,
+          failed: files.header_read_failed,
+        },
+      },
+      companion_missing: 0,
+      readers: { edf: "1" },
+      unscreened_formats: unscreened,
     },
   };
 }

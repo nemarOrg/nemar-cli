@@ -653,7 +653,7 @@ export type SweepStoreOutcome =
  * What a stored report keeps: the verdict, its counts and what it read, and
  * nothing a reader does not use (sampling statistics, per-class read failures,
  * distinct-value counts, per-kind file counts, the manifest source, and the
- * unparsed-format map, whose keys are a pattern rather than a closed list). The projection is parsed again
+ * unparsed-format map; a version-2 report keeps its per-reader counts, whose keys are a pattern rather than a closed list). The projection is parsed again
  * before it is written, so what is stored is still a report the contract
  * accepts; the row stays small (ADR 0034, and the restore limit of #1188).
  */
@@ -671,6 +671,10 @@ export function projectReport(report: ScreenReport): ScreenReport {
   if (s.files !== undefined) scan.files = s.files;
   if (s.findings_by_kind !== undefined) scan.findings_by_kind = s.findings_by_kind;
   if (s.edf_bdf_files_flagged !== undefined) scan.edf_bdf_files_flagged = s.edf_bdf_files_flagged;
+  // Version 2's coverage is part of the verdict: a clean version-2 scan does not read back without it.
+  if (s.read_by_format !== undefined) scan.read_by_format = s.read_by_format;
+  if (s.companion_missing !== undefined) scan.companion_missing = s.companion_missing;
+  if (s.readers !== undefined) scan.readers = s.readers;
   return parseScreenReport({
     version: report.version,
     scanner: report.scanner,

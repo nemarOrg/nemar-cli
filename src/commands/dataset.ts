@@ -31,10 +31,7 @@ import {
   describeUncheckedSandboxGap,
 } from "../../shared/contract/profile-gaps.js";
 import { datasetLandingUrl } from "../../shared/datacite-constants.js";
-import {
-  PREFLIGHT_ACKNOWLEDGEABLE,
-  publicationRequestNotice,
-} from "../../shared/identifier-screen-report.js";
+import { publicationRequestNotice } from "../../shared/identifier-screen-report.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { MODALITY_FILTER_CLI_HELP } from "../../shared/modality-filter.js";
 import { stepsForRelease } from "../../shared/publication-steps.js";
@@ -273,6 +270,7 @@ import {
 import { deployCiStep, printUploadSuccess, pushMetadata } from "../lib/upload/finalize.js";
 import {
   ACKNOWLEDGE_FLAG,
+  ACKNOWLEDGE_WORDS,
   collectAcknowledgment,
   identifierPreflightStep,
   recheckIdentifierPreflight,
@@ -668,7 +666,7 @@ export function createUploadCommand(): Command {
     .addOption(
       new Option(
         `${ACKNOWLEDGE_FLAG} <verdicts>`,
-        `Upload despite what the identifier preflight found, naming every condition it reports (non-interactive; recorded; repeatable or comma-separated: ${PREFLIGHT_ACKNOWLEDGEABLE.join(", ")}). Direct identifiers cannot be acknowledged`,
+        `Upload despite what the identifier preflight found, naming every condition it reports (non-interactive; recorded; repeatable or comma-separated: ${ACKNOWLEDGE_WORDS.join(", ")}). Direct identifiers cannot be acknowledged`,
       ).argParser(collectAcknowledgment),
     )
     .addHelpText(

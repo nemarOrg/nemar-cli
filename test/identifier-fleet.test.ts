@@ -790,7 +790,7 @@ describe("status from EDF/BDF headers", () => {
       [EDF]: edfHeader({ startdate: "14.03.93" }),
       "sub-01/eeg/b.set": "x",
     });
-    expect(mixed.record.status).toBe("clean-edf-only-others-unscreened");
+    expect(mixed.record.status).toBe("partially-screened");
   });
 
   test("a date never hides an incomplete scan: an unreadable header beside it is unchecked", async () => {
@@ -923,9 +923,9 @@ describe("status from recording formats", () => {
     expect(record.unscreened_formats).toEqual({ ".set": 1 });
     expect(w.hits(w.pathOf(ID, SET))).toBe(0);
   });
-  test("clean EDF beside an unparsed format: clean-edf-only-others-unscreened", async () => {
+  test("clean EDF beside an unparsed format: partially-screened", async () => {
     const { record } = await scanFiles({ [EDF]: CLEAN, [SET]: "x" });
-    expect(record.status).toBe("clean-edf-only-others-unscreened");
+    expect(record.status).toBe("partially-screened");
     expect(record.incomplete).toBe(false);
   });
   test("the same clean EDF with no other format is plain clean", async () => {
@@ -959,7 +959,7 @@ describe("recording data this scanner cannot parse is counted by what the file i
       "sub-01/meg/sub-01_task-a_meg.ds/a.res4": "y",
     };
     const { w, record } = await scanFiles(files);
-    expect(record.status).toBe("clean-edf-only-others-unscreened");
+    expect(record.status).toBe("partially-screened");
     expect(record.unscreened_formats).toEqual({ ".ds/": 1 });
     expect(record.incomplete).toBe(false);
     never(w, "sub-01/meg/sub-01_task-a_meg.ds/a.meg4", "sub-01/meg/sub-01_task-a_meg.ds/a.res4");
@@ -1031,20 +1031,20 @@ describe("recording data this scanner cannot parse is counted by what the file i
 describe("classifyDataset", () => {
   const base = {
     findings: [],
-    edfCount: 0,
-    headerRead: 0,
+    recordings: 0,
+    recordingsRead: 0,
     unscreenedCount: 0,
     incompleteReasons: [],
   };
   test("each status is reachable, and incompleteness only matters when nothing was found", () => {
     expect(classifyDataset(base)).toBe("no-recordings");
     expect(classifyDataset({ ...base, unscreenedCount: 2 })).toBe("not-screened");
-    expect(classifyDataset({ ...base, edfCount: 2, headerRead: 2 })).toBe("clean");
-    expect(classifyDataset({ ...base, edfCount: 2, headerRead: 2, unscreenedCount: 1 })).toBe(
-      "clean-edf-only-others-unscreened",
+    expect(classifyDataset({ ...base, recordings: 2, recordingsRead: 2 })).toBe("clean");
+    expect(classifyDataset({ ...base, recordings: 2, recordingsRead: 2, unscreenedCount: 1 })).toBe(
+      "partially-screened",
     );
     // headers not all read, even with no reason recorded
-    expect(classifyDataset({ ...base, edfCount: 2, headerRead: 1 })).toBe("unchecked");
+    expect(classifyDataset({ ...base, recordings: 2, recordingsRead: 1 })).toBe("unchecked");
     expect(classifyDataset({ ...base, incompleteReasons: ["json-sampled"] })).toBe("unchecked");
   });
 
@@ -1057,8 +1057,8 @@ describe("classifyDataset", () => {
     };
     const incomplete = {
       ...base,
-      edfCount: 2,
-      headerRead: 1,
+      recordings: 2,
+      recordingsRead: 1,
       unscreenedCount: 1,
       incompleteReasons: ["json-sampled"],
     };
@@ -1301,7 +1301,7 @@ describe("sampling caps are counted and make the dataset incomplete", () => {
     const table = "filename\tacq_time\nsub-01/eeg/a.edf\t2020-03-14T10:00:00\n";
     const scans = { "sub-01/sub-01_scans.tsv": table };
     const withSet = await scanFiles({ [EDF]: CLEAN, ...scans, "sub-01/eeg/b.set": "x" });
-    expect(withSet.record.status).toBe("clean-edf-only-others-unscreened");
+    expect(withSet.record.status).toBe("partially-screened");
     const unread = await scanFiles({
       [EDF]: CLEAN,
       ...scans,
@@ -2600,7 +2600,7 @@ describe("reading through a caller-supplied reader, and a clone source", () => {
     const denied = { ...never("denied/old.edf"), edf: true };
 
     const absent = await scanDatasetFromManifest(ctx, ID, null, current, "clone", {
-      supersededEdf: [gone],
+      supersededRecordings: [gone],
     });
     expect(absent.status).toBe("clean");
     expect(absent.incomplete).toBe(false);
@@ -2608,7 +2608,7 @@ describe("reading through a caller-supplied reader, and a clone source", () => {
     expect(absent.read_failures).toEqual({ "edf/superseded-absent": 1 });
 
     const refused = await scanDatasetFromManifest(ctx, ID, null, current, "clone", {
-      supersededEdf: [denied],
+      supersededRecordings: [denied],
     });
     expect(refused.status).toBe("unchecked");
     expect(refused.files).toMatchObject({ edf_bdf: 2, header_read: 1, header_read_failed: 1 });
