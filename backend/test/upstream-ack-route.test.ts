@@ -466,6 +466,12 @@ describe("the screened commit's own files", () => {
     expect(byId(body.results)).toEqual({ [ELIGIBLE]: "eligible" });
   });
 
+  test("a BIDS photograph at the screened commit is photo_file, though the screen accepts it", async () => {
+    trees.set(ELIGIBLE, [...DEFAULT_TREE, "sub-01/eeg/sub-01_photo.jpg"]);
+    const { body } = await post({ dataset_ids: [ELIGIBLE] });
+    expect(byId(body.results)).toEqual({ [ELIGIBLE]: "not_eligible:photo_file" });
+  });
+
   test("a truncated or failed tree listing is tree_unreadable", async () => {
     trees.set(ELIGIBLE, "truncated");
     trees.set(IMAGES, "fail");

@@ -409,6 +409,18 @@ describe("treeEligibility and the shared name classifier", () => {
         reason: "excluded",
       });
     }
+    // A BIDS photograph, which the screen itself accepts, keeps the request out of a batch.
+    for (const p of [
+      "sub-01/ses-01/eeg/sub-01_ses-01_photo.jpg",
+      "sub-02/eeg/sub-02_acq-face_photo.PNG",
+      "sub-03/ieeg/sub-03_photo.tif",
+    ]) {
+      expect(treeEligibility(["code/plot.png", p]), p).toEqual({
+        eligible: false,
+        reason: "photo_file",
+      });
+    }
+    expect(treeEligibility(["sub-01/eeg/sub-01_photo.json"])).toEqual({ eligible: true });
     // Whole words only, and only image or document files.
     expect(excludedImageCount(["code/interface.png", "phenotype/questionnaire.tsv"])).toBe(0);
   });

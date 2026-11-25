@@ -97,6 +97,7 @@ export const NOT_ELIGIBLE_REASONS = [
   "head_unverified",
   "tree_unreadable",
   "excluded",
+  "photo_file",
   "not_measured",
   "lineage_unreadable",
   "lineage_outcome",
@@ -219,6 +220,11 @@ export const UPSTREAM_ACK_COPY: Record<UpstreamAckEntry, Copy> = {
     `${READ_TREE} ${READ_D2}`,
     INDIVIDUAL,
   ),
+  "not_eligible:photo_file": ack(
+    "The screened commit holds a BIDS photograph (a file ending in _photo), such as an electrode or head photograph, which can show a face. The screen accepts it as a BIDS file; a batch acknowledgment never covers it.",
+    READ_TREE,
+    INDIVIDUAL,
+  ),
   "not_eligible:not_measured": ack(
     "The request was not part of the publication-queue measurement, so whether its history holds a photo, face or questionnaire file is unknown (the Worker reads only the screened commit's files).",
     READ_D2,
@@ -333,13 +339,22 @@ export function screenEligibility(f: ScreenFacts): Eligibility {
 /**
  * The freshness check on the screened commit's own files: null (the listing failed or was
  * truncated) is `tree_unreadable`; any image or document file of an excluded name class is
- * `excluded`. D2's list stays as well, for files only in history.
+ * `excluded`, and any BIDS photograph is `photo_file`. D2's list stays as well, for files only in
+ * history.
  */
 export function treeEligibility(paths: readonly string[] | null): Eligibility {
   if (paths === null) return { eligible: false, reason: "tree_unreadable" };
   if (excludedImageCount(paths) > 0) return { eligible: false, reason: "excluded" };
+  if (paths.some((p) => BIDS_PHOTO_FILE.test(p))) return { eligible: false, reason: "photo_file" };
   return { eligible: true };
 }
+
+/**
+ * A BIDS photograph (`*_photo.<image>`: electrode or head photographs), which the screen accepts by
+ * design and does not flag. It can show a face, so a request holding one is reviewed individually
+ * (lead ruling, 2026-11-25); this changes this eligibility rule only, never the screen's own.
+ */
+export const BIDS_PHOTO_FILE = /_photo\.(jpe?g|png|gif|bmp|tiff?|webp|heic)$/i;
 
 /**
  * The lineage check: a compatible outcome with at least one source read from its own record. The
