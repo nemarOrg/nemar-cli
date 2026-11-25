@@ -16,45 +16,14 @@
  * 404 an unknown dataset; 409 a dataset with no repository; 502 a repository read that failed.
  */
 
-import {
-  CACHE_TTL_SECONDS,
-  type LineageCache,
-  type SourceRecord,
-  resolveLicenseLineage,
-} from "../../../../shared/license-lineage.js";
+import { resolveLicenseLineage } from "../../../../shared/license-lineage.js";
 import { README_CANDIDATES } from "../../../../shared/readme-candidates.js";
 import { isValidDatasetId } from "../../services/datasetId";
 import { getFileContent } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
+import { workerLineageCache } from "../../services/license-lineage-cache";
 import { extractRepoName } from "../../services/repo-metadata";
 import type { AdminRouter } from "./shared";
-
-/** A cache key is a URL in the Worker cache; this host is never fetched. */
-const CACHE_ORIGIN = "https://license-lineage.cache.invalid/";
-
-/** The Worker cache as the resolver's per-DOI cache, or undefined where there is none. */
-export function workerLineageCache(): LineageCache | undefined {
-  if (typeof caches === "undefined" || !("default" in caches)) return undefined;
-  const cache = (caches as unknown as { default: Cache }).default;
-  const keyOf = (k: string) => new Request(`${CACHE_ORIGIN}${encodeURIComponent(k)}`);
-  return {
-    async get(k) {
-      const hit = await cache.match(keyOf(k));
-      return hit ? ((await hit.json()) as SourceRecord) : undefined;
-    },
-    async put(k, record) {
-      await cache.put(
-        keyOf(k),
-        new Response(JSON.stringify(record), {
-          headers: {
-            "Content-Type": "application/json",
-            "Cache-Control": `max-age=${CACHE_TTL_SECONDS}`,
-          },
-        }),
-      );
-    },
-  };
-}
 
 function parseJson(text: string | null): unknown {
   if (text === null) return null;

@@ -35,10 +35,10 @@ import {
 } from "../../../shared/publication-review.js";
 import { README_CANDIDATES } from "../../../shared/readme-candidates.js";
 import { readResubmissionNote } from "../../../shared/resubmission-note.js";
-import { workerLineageCache } from "../routes/admin/license-lineage.js";
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getFileContent } from "./github.js";
+import { workerLineageCache } from "./license-lineage-cache.js";
 import { SHA40, errorWords } from "./publication-review-log.js";
 import { readReview } from "./publication-review-rows.js";
 import { extractRepoName } from "./repo-metadata.js";
