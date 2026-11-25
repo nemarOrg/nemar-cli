@@ -37,6 +37,12 @@ function source(
   };
 }
 
+/**
+ * Per-walk time bound in the fuzz tests. A walk on these inputs takes a few milliseconds; 200 ms
+ * leaves room for a loaded machine and still fails a walk that loops on hostile bytes.
+ */
+const FUZZ_WALK_MS = 200;
+
 /** A seeded generator (mulberry32), so a failing fuzz seed can be replayed. */
 function prng(seed: number): () => number {
   let t = seed >>> 0;
@@ -326,6 +332,7 @@ describe("bounds", () => {
       const next = prng(seed);
       // Random bytes of the requested length at every offset; the first 8 are the signature, so
       // the decoders run on random superblocks, headers, B-trees and heaps.
+      const started = performance.now();
       const w = await walkHdf5({
         size: 64 * 1024,
         read: async (offset, length) => {
@@ -338,6 +345,7 @@ describe("bounds", () => {
         },
       });
       expect(w.complete).toBe(false);
+      expect(performance.now() - started).toBeLessThan(FUZZ_WALK_MS);
     }
   });
 
@@ -347,8 +355,10 @@ describe("bounds", () => {
       const next = prng(seed);
       const flipped = bytes.slice();
       for (let i = 0; i < 64; i++) flipped[next() % 40_000] = next() & 0xff;
+      const started = performance.now();
       const w = await walkHdf5(source(flipped));
       expect(Array.isArray(w.entries)).toBe(true);
+      expect(performance.now() - started).toBeLessThan(FUZZ_WALK_MS);
     }
   });
 
