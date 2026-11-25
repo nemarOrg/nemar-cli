@@ -46,6 +46,8 @@ export function parseDatatype(c: Cursor): Dtype {
   if (version < 1 || version > 5) throw new Hdf5Problem("unsupported-version");
   const flags = c.uint(3);
   const size = c.u32();
+  // No HDF5 type stores elements of zero bytes; a zero would make every element count free.
+  if (size === 0) throw new Hdf5Problem("corrupt");
   switch (cls) {
     case 0: {
       c.skip(4); // bit offset, bit precision; a width other than 1, 2, 4 or 8 is not decoded

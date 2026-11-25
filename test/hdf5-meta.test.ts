@@ -37,6 +37,17 @@ function source(
   };
 }
 
+/** A seeded generator (mulberry32), so a failing fuzz seed can be replayed. */
+function prng(seed: number): () => number {
+  let t = seed >>> 0;
+  return () => {
+    t = (t + 0x6d2b79f5) >>> 0;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+    return (r ^ (r >>> 14)) >>> 0;
+  };
+}
+
 /** JSON's spelling of the oracle: non-finite numbers are strings, object keys sorted. */
 function canonical(v: unknown): unknown {
   if (typeof v === "number" && !Number.isFinite(v)) {
@@ -306,6 +317,83 @@ describe("bounds", () => {
       },
     });
     expect(w.incomplete).toBe("read-failed");
+    expect(w.entries.length).toBeGreaterThan(0);
+  });
+
+  test("random bytes behind a valid signature: the walk always returns, never throws", async () => {
+    const signature = [0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a];
+    for (let seed = 1; seed <= 300; seed++) {
+      const next = prng(seed);
+      // Random bytes of the requested length at every offset; the first 8 are the signature, so
+      // the decoders run on random superblocks, headers, B-trees and heaps.
+      const w = await walkHdf5({
+        size: 64 * 1024,
+        read: async (offset, length) => {
+          const out = new Uint8Array(length);
+          for (let i = 0; i < length; i++) {
+            const at = offset + i;
+            out[i] = at < 8 ? (signature[at] as number) : next() & 0xff;
+          }
+          return out;
+        },
+      });
+      expect(w.complete).toBe(false);
+    }
+  });
+
+  test("random byte flips in a real SNIRF: the walk always returns, never throws", async () => {
+    const bytes = load("snirf-samples-simple-probe.snirf");
+    for (let seed = 1; seed <= 200; seed++) {
+      const next = prng(seed);
+      const flipped = bytes.slice();
+      for (let i = 0; i < 64; i++) flipped[next() % 40_000] = next() & 0xff;
+      const w = await walkHdf5(source(flipped));
+      expect(Array.isArray(w.entries)).toBe(true);
+    }
+  });
+
+  test("a shuffle filter whose element size disagrees with the type is corrupt, at once", async () => {
+    const bytes = load("chunked-strings.h5");
+    // Filter pipeline version 1: id, name length, flags, value count, the padded name, values.
+    const name = Buffer.from(bytes).indexOf("shuffle\0");
+    expect(name).toBeGreaterThan(8);
+    const nameLength = (bytes[name - 6] as number) | ((bytes[name - 5] as number) << 8);
+    const client = name + Math.ceil(nameLength / 8) * 8;
+    expect(Array.from(bytes.slice(client, client + 4))).toEqual([4, 0, 0, 0]);
+    const patched = bytes.slice();
+    patched.set([0xff, 0xff, 0xff, 0xff], client);
+    const started = performance.now();
+    const w = await walkHdf5(source(patched));
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(find(w, "/shuffled")).toMatchObject({ value: null, skipped: "error" });
+    expect(find(w, "/labels").value).toHaveLength(40);
+  });
+
+  test("a datatype of zero bytes is corrupt", async () => {
+    const bytes = load("chunked-strings.h5");
+    // /shuffled's type: fixed-point, little-endian, signed, 4 bytes, offset 0, precision 32.
+    const int32 = [0x10, 0x08, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00];
+    const at = Buffer.from(bytes).indexOf(Buffer.from(int32));
+    expect(at).toBeGreaterThan(0);
+    const patched = bytes.slice();
+    patched.set([0, 0, 0, 0], at + 4);
+    const w = await walkHdf5(source(patched));
+    expect(find(w, "/shuffled")).toMatchObject({ dtype: null, value: null, skipped: "error" });
+  });
+
+  test("an error no decoder foresaw is recorded as corrupt, with the entries so far", async () => {
+    // A source that breaks its contract (no bytes at all) after 40 reads: the TypeError that
+    // follows is not an Hdf5Problem, and it must still not escape walkHdf5.
+    const bytes = load("homer3-neuro-run02.snirf");
+    let calls = 0;
+    const w = await walkHdf5({
+      size: bytes.length,
+      read: async (o, l) => {
+        calls += 1;
+        return (calls > 40 ? undefined : bytes.slice(o, o + l)) as Uint8Array;
+      },
+    });
+    expect(w.incomplete).toBe("corrupt");
     expect(w.entries.length).toBeGreaterThan(0);
   });
 

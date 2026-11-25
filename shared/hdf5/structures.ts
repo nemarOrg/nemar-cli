@@ -667,9 +667,15 @@ export async function inflate(raw: Uint8Array, expected: number): Promise<Uint8A
   return out;
 }
 
-/** Undo the shuffle filter: bytes were grouped by position within each element. */
-export function unshuffle(data: Uint8Array, elementSize: number): Uint8Array {
-  if (elementSize <= 1) return data;
+/**
+ * Undo the shuffle filter: bytes were grouped by position within each element. The filter's
+ * element size must equal the datatype's, as libhdf5 checks (H5Z__set_local_shuffle writes it
+ * from the type), and neither may be 0; anything else is corrupt, refused before any loop.
+ */
+export function unshuffle(data: Uint8Array, clientSize: number, elementSize: number): Uint8Array {
+  if (clientSize < 1 || elementSize < 1 || clientSize !== elementSize)
+    throw new Hdf5Problem("corrupt");
+  if (elementSize === 1) return data;
   const n = Math.floor(data.length / elementSize);
   const out = new Uint8Array(data.length);
   for (let b = 0; b < elementSize; b++) {

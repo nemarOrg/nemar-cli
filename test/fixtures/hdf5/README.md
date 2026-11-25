@@ -12,7 +12,7 @@ uv run --with 'h5py==3.16.0' python scripts/dev/hdf5-oracle.py --generate test/f
 The committed oracle files were printed by h5py 3.16.0.
 CI does not run Python; the tests read the committed JSON.
 
-The seven HDF5 files total 6,132,934 bytes (under 6 MiB).
+The seven HDF5 files total 6,128,873 bytes (under 6 MiB).
 They are committed as plain git blobs, not git-annex pointers (`git -c annex.largefiles=nothing add`).
 
 ## Real recordings

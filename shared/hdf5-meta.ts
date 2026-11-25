@@ -13,14 +13,17 @@
  * - an integer, float or enum with at most 64 elements, as `number[]` (flattened, row-major);
  * - anything larger: `value: null, skipped: "size"`. A numeric dataset larger than that is never
  *   read at all, so recording signals are not fetched.
- * A reference, compound or other type is listed with `value: null, skipped: "type"`.
+ * A small numeric stored in a chunk over 1 MiB is listed with `value: null, skipped: "size"`, and
+ * the walk stays complete. A reference, compound or other type is listed with `value: null,
+ * skipped: "type"`, which records `unsupported-datatype` for every such type except a reference.
  *
  * Untrusted input: every read is checked against the file's size and counted against
  * {@link HDF5_LIMITS} (bytes, reads, entries, depth); every object address is visited once, which
  * also ends cycles. A construct the walker does not support, or a structure that does not decode,
  * is skipped and recorded, the walk goes on, and `complete` is `false` with the first reason in
  * `incomplete`. A limit on bytes, reads or entries, or a failing source read, ends the walk early
- * with the entries found so far; the walker never throws a {@link Hdf5Problem}.
+ * with the entries found so far; so does any other error, recorded as `corrupt`: `walkHdf5` never
+ * throws.
  *
  * External links and external storage are never followed: they are recorded as `external-link`.
  *
@@ -174,7 +177,11 @@ class Walker {
     if (this.incomplete === undefined) this.incomplete = reason;
   }
 
-  /** Record a non-fatal problem and carry on; anything else propagates. */
+  /**
+   * Record a non-fatal problem and carry on. A limit, a failing source, or an error that is not
+   * a {@link Hdf5Problem} (input the decoders did not foresee) propagates to {@link run}, which
+   * records it and ends the walk.
+   */
   private absorb(e: unknown): void {
     if (e instanceof Hdf5Problem && !e.fatal) {
       this.record(e.reason);
@@ -198,8 +205,9 @@ class Walker {
       if (sb.eof > this.src.size) this.record("corrupt");
       await this.visit(sb.root, "/", "", 0);
     } catch (e) {
-      if (e instanceof Hdf5Problem) this.record(e.reason);
-      else throw e;
+      // Nothing escapes walkHdf5: an unforeseen error is recorded as corrupt, and the entries
+      // found so far are kept.
+      this.record(e instanceof Hdf5Problem ? e.reason : "corrupt");
     }
   }
 
@@ -344,7 +352,11 @@ class Walker {
   ): Promise<Uint8Array> {
     const rank = shape.length;
     if (chunk.length !== rank || chunk.some((d) => d < 1)) throw new Hdf5Problem("corrupt");
+    if (element < 1) throw new Hdf5Problem("corrupt");
     const chunkElements = product(chunk);
+    // Bounds every per-element loop below: at most CHUNK_BYTES_MAX elements per chunk, and at
+    // most CHUNKS_BYTES_TOTAL_MAX across all chunks (each element is at least one byte).
+    if (chunkElements > CHUNK_BYTES_MAX) throw new ChunksTooLarge();
     const chunkBytes = chunkElements * element;
     if (chunkBytes > CHUNK_BYTES_MAX) throw new ChunksTooLarge();
     const out = new Uint8Array(n);
@@ -366,7 +378,7 @@ class Walker {
         if (mask & (1 << i)) continue;
         const filter = filters[i] as Filter;
         if (filter.id === 1) data = await inflate(data, chunkBytes);
-        else data = unshuffle(data, filter.client[0] ?? element);
+        else data = unshuffle(data, filter.client[0] ?? element, element);
       }
       if (data.length !== chunkBytes) throw new Hdf5Problem("corrupt");
       const local = new Array<number>(rank).fill(0);
