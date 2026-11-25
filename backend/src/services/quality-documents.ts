@@ -279,7 +279,8 @@ function utf8(bytes: Uint8Array): string | null {
 /**
  * Check a run's dataset `dataQuality` document, in this order: its size, that it is UTF-8 I-JSON, the
  * schema, that it is one entry keyed by the stamp's recipe, the writer's rules, the stamp's identity
- * (recipe version, dataset version, input and the copy it describes), the dataset record's digest, the
+ * (recipe version, dataset version and input; the schema pairs the input with the copy it describes, so
+ * the `profile` follows from the input and is not compared again), the dataset record's digest, the
  * recordings table's counts, and the metric names. The entry kept is the document's own entry, member for
  * member, as `entryText`.
  */
@@ -303,8 +304,7 @@ export function checkDatasetQualityDocument(
   if (
     entry.recipe_version !== ctx.stamp.recipeVersion ||
     entry.dataset_version !== ctx.stamp.version ||
-    entry.input_kind !== ctx.stamp.input ||
-    entry.profile !== PROFILE_OF_INPUT[ctx.stamp.input]
+    entry.input_kind !== ctx.stamp.input
   ) {
     return refuse("identity_mismatch");
   }
