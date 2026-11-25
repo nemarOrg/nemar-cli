@@ -75,6 +75,7 @@ import {
   lockObjectKeys,
 } from "../../services/s3";
 import {
+  batchClaimGuardSql,
   noteBatchDispatch,
   readScreenBatch,
   settleBatchEntry,
@@ -147,6 +148,12 @@ function denyRefusal(row: {
   }
   return row.in_flight === 1 ? DENY_IN_FLIGHT : null;
 }
+
+/** The answer for a dispatch of a request the batch already screened and counted. */
+const ALREADY_SCREENED = {
+  error: "already_screened",
+  message: `The batch cannot screen this request again: ${SCREEN_BATCH_REFUSAL_TEXT["already-screened"]}.`,
+} as const;
 
 /** The optional body of the screen re-run route: nothing, or exactly a batch id. */
 const identifierScreenBodySchema = z
@@ -1211,13 +1218,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     if (batchId !== null && request.batch === batchId && request.batch_settled !== null) {
       // This batch already screened the request and counted it: a second dispatch would count it
       // twice, so it is refused and nothing is settled.
-      return c.json(
-        {
-          error: "already_screened",
-          message: `The batch cannot screen this request again: ${SCREEN_BATCH_REFUSAL_TEXT["already-screened"]}.`,
-        },
-        409,
-      );
+      return c.json(ALREADY_SCREENED, 409);
     }
     if (request.status === "approving" && hasStartedPublishing(request.steps_completed)) {
       await refused("publishing-started");
@@ -1233,7 +1234,9 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       started = await startIdentifierScreen(
         c.env,
         { requestId: request.id, datasetId, githubRepo: dataset?.github_repo ?? null },
-        RERUN_GUARD_SQL,
+        // A batch's claim also loses to a screen the batch has already counted, atomically: a
+        // settle that lands between the read above and this statement cannot be dispatched over.
+        batchId === null ? RERUN_GUARD_SQL : `${RERUN_GUARD_SQL}${batchClaimGuardSql(batchId)}`,
         batchId,
       );
     } catch (err) {
@@ -1253,11 +1256,21 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       // publishing) since it was read, or a recent screen is still running.
       const now = await db
         .prepare(
-          `SELECT status, steps_completed, identifier_screen_batch_id AS batch
+          `SELECT status, steps_completed, identifier_screen_batch_id AS batch,
+                  identifier_screen_batch_settled_at AS batch_settled
              FROM publication_requests WHERE id = ?`,
         )
         .bind(request.id)
-        .first<{ status: string; steps_completed: string | null; batch: number | null }>();
+        .first<{
+          status: string;
+          steps_completed: string | null;
+          batch: number | null;
+          batch_settled: string | null;
+        }>();
+      if (batchId !== null && now?.batch === batchId && now.batch_settled !== null) {
+        // The claim lost to a result this batch had just counted: nothing is settled again.
+        return c.json(ALREADY_SCREENED, 409);
+      }
       // A repeated call for a request this batch already dispatched finds its screen pending:
       // that screen is still the batch's to wait for, so it is not settled a second time.
       if (batchId === null || now?.batch !== batchId) {

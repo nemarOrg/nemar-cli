@@ -31,7 +31,7 @@ import {
 } from "../src/services/screen-batch";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, realD1, yieldingD1 } from "./helpers/d1";
+import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
 import { SCREENED_HEAD, cleanScreenReportBody } from "./helpers/identifier-screen";
 import { type CapturedEmail, type ResendSendBody, asSend, withFakeResend } from "./helpers/resend";
 
@@ -185,12 +185,13 @@ interface BatchRow {
   reported: number;
   digest_sent_at: string | null;
   digest_claimed_at: string | null;
+  refused: string | null;
 }
 
 function batchRow(id: number): BatchRow {
   return db
     .query<BatchRow, [number]>(
-      "SELECT id, total, closed_at, reported, digest_sent_at, digest_claimed_at FROM screen_batches WHERE id = ?",
+      "SELECT id, total, closed_at, reported, digest_sent_at, digest_claimed_at, refused FROM screen_batches WHERE id = ?",
     )
     .get(id) as BatchRow;
 }
@@ -996,6 +997,128 @@ describe("a request settles once, and the digest waits for what was stored", () 
         `<code>${A}</code>: it could not be started now (a recent screen may still be running; one dispatched less than ${SCREEN_REPORT_DEADLINE_MINUTES} minutes before had not reported)`,
       );
       expect(digests[0].html).toContain("while this digest is being sent");
+    });
+  });
+
+  test("a settle landing between the route's read and its claim makes the claim lose, atomically", async () => {
+    seedRequest(A);
+    seedRequest(B);
+    await withFakeResend(async () => {
+      const batchId = await createBatch([A, B]);
+      await screen(A, batchId);
+      // The screen is overdue, so the claim's own guard would let a second dispatch through.
+      db.run(
+        `UPDATE publication_requests SET identifier_screen_dispatched_at = datetime('now', '-${
+          SCREEN_REPORT_DEADLINE_MINUTES + 1
+        } minutes') WHERE dataset_id = ?`,
+        [A],
+      );
+      let landed = false;
+      const racing = {
+        ...env(),
+        DB: interceptingD1(realD1(db), (sql) => {
+          // Just before the claim: the first dispatch's report is stored and counted.
+          if (
+            !landed &&
+            sql.includes("identifier_screen_status = 'pending', identifier_screen_nonce = ?")
+          ) {
+            landed = true;
+            db.run(
+              `UPDATE publication_requests
+                  SET identifier_screen_status = 'clean', identifier_screen_nonce = NULL,
+                      identifier_screen_batch_settled_at = datetime('now')
+                WHERE dataset_id = ?`,
+              [A],
+            );
+            db.run("UPDATE screen_batches SET reported = reported + 1 WHERE id = ?", [batchId]);
+          }
+        }),
+      } as Bindings;
+      const res = await screen(A, batchId, racing);
+      expect(landed).toBe(true);
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe("already_screened");
+      // Nothing was dispatched over the counted result, and nothing was counted again.
+      expect(dispatches).toHaveLength(1);
+      expect(requestRow(A).identifier_screen_status).toBe("clean");
+      expect(batchRow(batchId).reported).toBe(1);
+    });
+  });
+
+  test("a refused request the batch later dispatches and settles is counted once, as reported", async () => {
+    seedRequest(A);
+    seedRequest(B);
+    await withFakeResend(async (calls) => {
+      // A has a screen running that is not the batch's: the batch's dispatch is refused.
+      expect((await screen(A)).status).toBe(202);
+      const batchId = await createBatch([A, B]);
+      expect((await screen(A, batchId)).status).toBe(409);
+      expect(batchRow(batchId).reported).toBe(1);
+      expect(JSON.parse(batchRow(batchId).refused ?? "[]")).toEqual([[A, "screen-running"]]);
+      // The other screen goes overdue, and the batch dispatches A after all.
+      db.run(
+        `UPDATE publication_requests SET identifier_screen_dispatched_at = datetime('now', '-${
+          SCREEN_REPORT_DEADLINE_MINUTES + 1
+        } minutes') WHERE dataset_id = ?`,
+        [A],
+      );
+      expect((await screen(A, batchId)).status).toBe(202);
+      await callback(A, reportBody(A, "clean"));
+      // Counted when it was refused; its settle does not count it again.
+      expect(batchRow(batchId).reported).toBe(1);
+      expect(digestsOf(calls)).toHaveLength(0);
+      await screen(B, batchId);
+      await callback(B, reportBody(B, "clean"));
+      const digests = digestsOf(calls);
+      expect(digests).toHaveLength(1);
+      // The later outcome replaces the refusal: A reported, and is not listed as not started.
+      expect(digests[0].subject).toBe(
+        `[NEMAR] Re-screen batch ${batchId} finished: all 2 reported`,
+      );
+      const html = digests[0].html;
+      const notStarted = html.slice(
+        html.indexOf("Could not start, or refused"),
+        html.indexOf("Screened again outside the batch"),
+      );
+      expect(notStarted).not.toContain(`<code>${A}</code>`);
+    });
+  });
+
+  test("a refused request the batch dispatched and a single screen then replaced is named as screened again, not as refused", async () => {
+    seedRequest(A);
+    seedRequest(B);
+    await withFakeResend(async (calls) => {
+      expect((await screen(A)).status).toBe(202);
+      const batchId = await createBatch([A, B]);
+      expect((await screen(A, batchId)).status).toBe(409);
+      db.run(
+        `UPDATE publication_requests SET identifier_screen_dispatched_at = datetime('now', '-${
+          SCREEN_REPORT_DEADLINE_MINUTES + 1
+        } minutes') WHERE dataset_id = ?`,
+        [A],
+      );
+      expect((await screen(A, batchId)).status).toBe(202);
+      // The batch's screen is overdue again, and a single screen replaces it.
+      db.run(
+        `UPDATE publication_requests SET identifier_screen_dispatched_at = datetime('now', '-${
+          SCREEN_REPORT_DEADLINE_MINUTES + 1
+        } minutes') WHERE dataset_id = ?`,
+        [A],
+      );
+      expect((await screen(A)).status).toBe(202);
+      expect(batchRow(batchId).reported).toBe(1);
+      expect(JSON.parse(batchRow(batchId).refused ?? "[]")).toEqual([[A, "rescreened"]]);
+      await screen(B, batchId);
+      await callback(B, reportBody(B, "clean"));
+      const html = digestsOf(calls)[0].html;
+      const notStarted = html.slice(
+        html.indexOf("Could not start, or refused"),
+        html.indexOf("Screened again outside the batch"),
+      );
+      expect(notStarted).not.toContain(`<code>${A}</code>`);
+      expect(html.slice(html.indexOf("Screened again outside the batch"))).toContain(
+        `<code>${A}</code>`,
+      );
     });
   });
 });

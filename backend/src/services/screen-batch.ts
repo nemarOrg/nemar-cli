@@ -92,6 +92,18 @@ const DIGEST_DUE_SQL = `(
                        AND pr.identifier_screen_batch_settled_at IS NULL))
   OR last_dispatch_at < datetime('now', '-${DIGEST_AFTER_LAST_DISPATCH_MINUTES} minutes'))`;
 
+/**
+ * The addition to a batch dispatch's claim (an UPDATE of the request's screen): it loses when the
+ * batch has already screened and counted the request, whatever a concurrent settle did after the
+ * route read it. `batchId` is a validated positive integer and is written into the text; it is
+ * checked here too, so nothing else can be.
+ */
+export function batchClaimGuardSql(batchId: number): string {
+  if (!Number.isSafeInteger(batchId) || batchId < 1) throw new Error("not a batch id");
+  return ` AND NOT (identifier_screen_batch_id = ${batchId}
+                   AND identifier_screen_batch_settled_at IS NOT NULL)`;
+}
+
 /** One request of a batch, as stored: [request id, dataset id, screen state before, status before]. */
 export type SelectionEntry = [number, string, string | null, string];
 
@@ -258,15 +270,33 @@ export async function settleBatchRefusal(
   alreadyCounted = false,
 ): Promise<void> {
   try {
+    // Once per dataset. A request screened again outside the batch REPLACES an earlier refusal of
+    // the same dataset (its later outcome is the truer one) and is counted only if nothing counted
+    // it before; any other reason keeps the first one recorded.
     await env.DB.prepare(
       `UPDATE screen_batches
-          SET reported = reported + ?,
-              refused = json_insert(COALESCE(refused, '[]'), '$[#]', json(?))
+          SET reported = reported + CASE
+                WHEN ? = 1 OR EXISTS (SELECT 1 FROM json_each(COALESCE(refused, '[]'))
+                                       WHERE json_extract(value, '$[0]') = ?) THEN 0 ELSE 1 END,
+              refused = json_insert(
+                (SELECT COALESCE(json_group_array(json(j.value)), '[]')
+                   FROM json_each(COALESCE(screen_batches.refused, '[]')) j
+                  WHERE json_extract(j.value, '$[0]') <> ?),
+                '$[#]', json(?))
         WHERE id = ? AND digest_sent_at IS NULL
-          AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(refused, '[]'))
-                           WHERE json_extract(value, '$[0]') = ?)`,
+          AND (? = 'rescreened'
+               OR NOT EXISTS (SELECT 1 FROM json_each(COALESCE(refused, '[]'))
+                               WHERE json_extract(value, '$[0]') = ?))`,
     )
-      .bind(alreadyCounted ? 0 : 1, JSON.stringify([datasetId, reason]), batchId, datasetId)
+      .bind(
+        alreadyCounted ? 1 : 0,
+        datasetId,
+        datasetId,
+        JSON.stringify([datasetId, reason]),
+        batchId,
+        reason,
+        datasetId,
+      )
       .run();
   } catch (err) {
     console.error(
