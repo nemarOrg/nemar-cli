@@ -10,7 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Hdf5Entry, Hdf5Incomplete } from "../shared/hdf5-meta";
+import { HDF5_LIMITS, type Hdf5Entry, type Hdf5Incomplete } from "../shared/hdf5-meta";
 import {
   type FormatReader,
   READERS,
@@ -23,7 +23,11 @@ import {
 } from "../shared/identifier-readers";
 import { DATE_KINDS, DIRECT_KINDS, type Finding } from "../shared/identifier-scan";
 import { INCOMPLETE_COPY, KIND_COPY } from "../shared/identifier-screen-copy";
-import { HDF5_INCOMPLETE_REASON, walkForReader } from "../shared/readers/hdf5-incomplete";
+import {
+  HDF5_INCOMPLETE_REASON,
+  walkForReader,
+  walkLimits,
+} from "../shared/readers/hdf5-incomplete";
 import {
   SHORT_CODE_MAX,
   SNIRF_READER,
@@ -242,6 +246,16 @@ describe("walkForReader", () => {
     expect(incomplete).toBe("time");
     expect(calls).toBeGreaterThan(1);
     expect(walk.entries.length).toBeGreaterThan(0);
+  });
+
+  test("the walker's caps admit the largest measured public file", () => {
+    // 66,500 entries and 38 MiB in 573 fetches (an OpenNeuro high-density SNIRF; PR body).
+    const walker = walkLimits(SNIRF_READER.limits);
+    expect(walker.maxObjects).toBeGreaterThanOrEqual(66_500);
+    expect(SNIRF_READER.limits.maxBytes).toBeGreaterThanOrEqual(38 * 1024 * 1024);
+    expect(SNIRF_READER.limits.maxReads).toBeGreaterThanOrEqual(573);
+    // Twin: the walker's own defaults would cut that file short.
+    expect(HDF5_LIMITS.maxObjects).toBeLessThan(66_500);
   });
 
   test("an unsupported construct maps through the table", async () => {
