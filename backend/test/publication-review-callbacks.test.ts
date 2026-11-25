@@ -1873,7 +1873,7 @@ describe("an administrator's start", () => {
 
   test("a restart the platform declines does not erase the call the row already spent", async () => {
     // The row's earlier call was real. Declining the restart must leave it counted: written off,
-    // the tally dropped by one, the next start was admitted, and fifty-one calls were made in a day.
+    // the tally dropped by one, the next start was admitted, and one call past the cap was made in a day.
     fillPlatform(PLATFORM_DAILY_CAP - 1);
     const target = startable("unreported", undefined, 120, PROD_DATASET, true);
     expect(counted()).toBe(PLATFORM_DAILY_CAP);
@@ -1885,7 +1885,7 @@ describe("an administrator's start", () => {
     expect(out.reason).toBe("platform_limit");
     expect(counted()).toBe(PLATFORM_DAILY_CAP);
 
-    // So the next start, of another request, is still the fifty-first and is declined.
+    // So the next start, of another request, is still one past the cap and is declined.
     const other = seedScreenedRequest(h.db, { datasetId: "nm000481" });
     const next = await startPublicationReview(h.env(), {
       requestId: other.requestId,
@@ -1914,7 +1914,7 @@ describe("an administrator's start", () => {
     // The failed attempt is free, the call before it is not.
     expect(counted()).toBe(PLATFORM_DAILY_CAP - 1);
 
-    // One more start fits (the cap-th); the one after it does not.
+    // One more start fits (the last within the cap); the one after it does not.
     h.dispatchStatus = 204;
     const a = seedScreenedRequest(h.db, { datasetId: "nm000481" });
     const b = seedScreenedRequest(h.db, { datasetId: "nm000482" });
