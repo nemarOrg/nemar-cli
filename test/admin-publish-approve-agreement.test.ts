@@ -348,7 +348,7 @@ const SCENARIOS: Scenario[] = [
     override: "none",
   },
   {
-    name: "an acknowledgment another administrator recorded: the command goes on, the Worker decides",
+    name: "an acknowledgment another administrator recorded: the command asks for the caller's own, as the Worker does",
     seed: (w) => {
       const requestId = golden(w, { status: "unchecked" });
       seedReport(w.db, requestId);
@@ -360,11 +360,10 @@ const SCENARIOS: Scenario[] = [
         [w.otherId, WHY, requestId],
       );
     },
-    decision: "proceed",
-    override: "none",
-    // An acknowledgment counts only for the administrator who gave it, and the command cannot
-    // know whose key is whose.
-    workerRefuses: "identifier_screen_not_clear",
+    // An acknowledgment counts only for the administrator who gave it (ADR 0086): the command
+    // reads whose key it is and refuses as the Worker's gate does, naming the flag that cures it.
+    decision: "needs_ack",
+    workerRefusal: "identifier_screen_not_clear",
   },
 
   // ---- a run that has started publishing, and the gate that is off ------------------------------
@@ -474,9 +473,13 @@ const SCENARIOS: Scenario[] = [
 // The two sides
 // ---------------------------------------------------------------------------------------------
 
+/** The administrator whose key the command uses, as the command reads it (`/users/me`). */
+let callerId: number | null = null;
+
 async function world(s: Scenario): Promise<World> {
   h.reset();
   const adminId = await h.admin("agreeadmin", KEY);
+  callerId = adminId;
   const otherId = await h.admin("agreeother", OTHER_KEY);
   if (s.flag !== "off") h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
   const w = { db: h.db, adminId, otherId };
@@ -545,6 +548,7 @@ const optionsOf = (s: Scenario, over: Partial<ApproveOptions> = {}): ApproveOpti
   force: false,
   acknowledge: undefined,
   resume: true,
+  caller: callerId,
   ...s.options,
   ...over,
 });

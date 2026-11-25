@@ -29,6 +29,7 @@ import {
   DENIAL_REASON_MAX_LENGTH,
 } from "../../shared/publication-limits.js";
 import { checkedDatasetId, failWith, requireSignedIn } from "../lib/admin-command.js";
+import { getCurrentUser } from "../lib/api/auth.js";
 import { commentOnPublication, denyPublication, listPublishRequests } from "../lib/api/publish.js";
 import { LineReader, PASTE_SETTLE_MS } from "../lib/prompt-lines.js";
 import { type ReviewRead, readReview, reasonViewLine } from "../lib/publication-review-approve.js";
@@ -182,6 +183,7 @@ async function walk(options: WalkOptions): Promise<void> {
   // Whatever the loop throws (a field this version of the CLI did not expect, from a Worker of
   // another version), the reader is closed and the tally says what was done before it.
   let completed = false;
+  let caller: number | null | undefined;
   try {
     run: for (;;) {
       let rows: PublishRow[];
@@ -234,7 +236,20 @@ async function walk(options: WalkOptions): Promise<void> {
 
       // The review as it is now, read once: the card, `d` and an override all come from this one.
       const read = await readReview(row.dataset_id);
-      const answer = yAnswer(row.dataset_id, read, force, resumeOf(row));
+      // Whose recorded screen acknowledgment counts: the caller's only (ADR 0086). Read once, the
+      // first time a recorded one is met; unread, it is nobody's.
+      if (
+        caller === undefined &&
+        read.kind === "detail" &&
+        read.detail.screen_acknowledgment !== null
+      ) {
+        try {
+          caller = (await getCurrentUser()).id;
+        } catch {
+          caller = null;
+        }
+      }
+      const answer = yAnswer(row.dataset_id, read, force, resumeOf(row), caller ?? null);
       const card: Card = { row, read, answer };
       if (!noted && read.kind === "detail" && read.detail.environment !== "production") {
         noted = true;

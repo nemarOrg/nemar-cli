@@ -19,6 +19,7 @@
 import {
   CACHE_TTL_SECONDS,
   type LineageCache,
+  type LineageResult,
   type SourceRecord,
   resolveLicenseLineage,
 } from "../../../../shared/license-lineage.js";
@@ -27,6 +28,7 @@ import { isValidDatasetId } from "../../services/datasetId";
 import { getFileContent } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { extractRepoName } from "../../services/repo-metadata";
+import type { Bindings } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
 /** A cache key is a URL in the Worker cache; this host is never fetched. */
@@ -74,6 +76,44 @@ function upstreamSourceOf(attestation: string | null): string | null {
   return null;
 }
 
+/**
+ * A dataset's lineage from its repository files at `ref` (default `main`) and its attestation, by
+ * the one shared resolver. `ok: false` when a repository read failed: a lineage is never computed
+ * from inputs that could not be read. Also used by the batch acknowledgment (card D3), which reads
+ * at the screened commit.
+ */
+export async function readDatasetLineage(
+  env: Bindings,
+  args: { datasetId: string; repo: string; attestation: string | null; ref?: string },
+): Promise<{ ok: true; result: LineageResult } | { ok: false }> {
+  const ref = args.ref ?? "main";
+  let description: string | null;
+  let readme: string | null = null;
+  let metadata: string | null;
+  try {
+    const token = await getDatasetsToken(env);
+    description = await getFileContent(args.repo, "dataset_description.json", token, ref);
+    for (const name of README_CANDIDATES) {
+      readme = await getFileContent(args.repo, name, token, ref);
+      if (readme !== null) break;
+    }
+    metadata = await getFileContent(args.repo, ".nemar/metadata.json", token, ref);
+  } catch (err) {
+    console.error(`[license-lineage] repository read failed for ${args.datasetId}:`, err);
+    return { ok: false };
+  }
+  const result = await resolveLicenseLineage(
+    {
+      datasetDescription: description,
+      nemarMetadata: metadata,
+      attestationUpstreamSource: upstreamSourceOf(args.attestation),
+      readme,
+    },
+    { cache: workerLineageCache() },
+  );
+  return { ok: true, result };
+}
+
 export function registerLicenseLineageRoutes(admin: AdminRouter): void {
   admin.get("/datasets/:id/license-lineage", async (c) => {
     const datasetId = c.req.param("id");
@@ -89,34 +129,14 @@ export function registerLicenseLineageRoutes(admin: AdminRouter): void {
     const repo = row.github_repo ? extractRepoName(row.github_repo) : null;
     if (!repo) return c.json({ error: "The dataset has no repository to read" }, 409);
 
-    let description: string | null;
-    let readme: string | null = null;
-    let metadata: string | null;
-    try {
-      const token = await getDatasetsToken(c.env);
-      description = await getFileContent(repo, "dataset_description.json", token);
-      for (const name of README_CANDIDATES) {
-        readme = await getFileContent(repo, name, token);
-        if (readme !== null) break;
-      }
-      metadata = await getFileContent(repo, ".nemar/metadata.json", token);
-    } catch (err) {
-      console.error(`[license-lineage] repository read failed for ${datasetId}:`, err);
+    const read = await readDatasetLineage(c.env, { datasetId, repo, attestation: row.attestation });
+    if (!read.ok) {
       return c.json(
         { error: "The dataset's repository files could not be read; try again later" },
         502,
       );
     }
-
-    const result = await resolveLicenseLineage(
-      {
-        datasetDescription: description,
-        nemarMetadata: metadata,
-        attestationUpstreamSource: upstreamSourceOf(row.attestation),
-        readme,
-      },
-      { cache: workerLineageCache() },
-    );
+    const result = read.result;
     // A file that is there but cannot be parsed: 422 with the result, which names the file.
     // A missing description is a 200 whose outcome is `unresolved` (never no_upstream_declared).
     if (

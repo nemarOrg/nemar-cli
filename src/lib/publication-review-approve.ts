@@ -62,6 +62,13 @@ export interface ApproveOptions {
   force: boolean;
   acknowledge: string | undefined;
   resume: boolean;
+  /**
+   * The calling administrator's user id, or null/absent when it could not be read. A recorded
+   * screen acknowledgment clears the screen's reason only when it is this administrator's, as the
+   * Worker's gate decides (ADR 0086: a recorded reason counts only for the administrator who gave
+   * it); an unknown caller is never assumed to be its author.
+   */
+  caller?: number | null;
 }
 
 export type ApproveRefusal = "blocked" | "needs_resume" | "hard" | "needs_ack" | "needs_force";
@@ -312,7 +319,11 @@ export function decideApproval(
 
   // 6. The screen's own reason is cleared by its own flag, never by --force and never by --yes.
   const ackReason = detail.reasons.find((r) => r.code === "identifier_screen_needs_acknowledgment");
-  if (ackReason !== undefined && !ackGiven && detail.screen_acknowledgment === null) {
+  const ackIsCallers =
+    detail.screen_acknowledgment !== null &&
+    typeof options.caller === "number" &&
+    detail.screen_acknowledgment.by === options.caller;
+  if (ackReason !== undefined && !ackGiven && !ackIsCallers) {
     const lines = [reasonViewLine(ackReason)];
     if (need.length > 0 && !options.force && !recordedCovers) {
       lines.push(

@@ -105,20 +105,22 @@ const ASKED_LATER = "(asked after the card)";
  * blocked request or a run that was not told to resume is not offered, and a review that is not a
  * pass is offered only with `--force`, which then asks about each approval over reasons.
  *
- * `resume` is the walk's own: a stopped run continues (`resumeOf`).
+ * `resume` is the walk's own: a stopped run continues (`resumeOf`). `caller` is the administrator
+ * walking the queue; a recorded acknowledgment clears the screen's reason only when it is theirs.
  */
 export function yAnswer(
   datasetId: string,
   read: ReviewRead,
   force: boolean,
   resume: boolean,
+  caller: number | null = null,
 ): YAnswer {
   // Asked first without an acknowledgment: that is the rule's own way of saying the screen's
   // reason stands and nobody has cleared it, so there is one place that knows.
-  const bare = decideApproval(datasetId, read, { force, acknowledge: undefined, resume });
+  const bare = decideApproval(datasetId, read, { force, acknowledge: undefined, resume, caller });
   const needsAck = bare.kind === "refuse" && bare.why === "needs_ack";
   const decision = needsAck
-    ? decideApproval(datasetId, read, { force, acknowledge: ASKED_LATER, resume })
+    ? decideApproval(datasetId, read, { force, acknowledge: ASKED_LATER, resume, caller })
     : bare;
 
   if (decision.kind === "proceed") {
