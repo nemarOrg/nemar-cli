@@ -9,6 +9,7 @@
  *   nemar admin dataset publish approve <ds>           approve and publish (admin-publish-approve.ts)
  *   nemar admin dataset publish deny <ds> [-r <why>]   deny one, mailing the depositor the reason
  *   nemar admin dataset publish screen <ds>            run the identifier screen of a request again
+ *   nemar admin dataset publish screen-batch ...       re-screen many requests, paced, one digest (admin-publish-screen-batch.ts)
  *
  * Split out of `admin.ts` (epic #1726, phase 2) so the publication review's commands do not grow
  * a file of ten thousand lines. The group is registered on `datasetGroupCommand` (`nemar admin dataset`, alias `repo`; the old
@@ -52,6 +53,7 @@ import { plain } from "../lib/terminal-text.js";
 import { printable, registerApproveCommand, requestNumber } from "./admin-publish-approve.js";
 import { registerNextCommand } from "./admin-publish-next.js";
 import { registerReviewCommands } from "./admin-publish-review.js";
+import { registerScreenBatchCommand } from "./admin-publish-screen-batch.js";
 
 export const publishCommand = new Command("publish").description("Publication workflow management");
 
@@ -478,3 +480,4 @@ Examples:
 
 registerApproveCommand(publishCommand);
 registerNextCommand(publishCommand);
+registerScreenBatchCommand(publishCommand);
