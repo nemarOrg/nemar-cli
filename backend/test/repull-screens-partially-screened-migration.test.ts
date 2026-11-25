@@ -67,7 +67,7 @@ const sha = (n: number) => n.toString(16).padStart(40, "0");
 function sqliteEngine(): Engine {
   const db = new Database(":memory:");
   const apply = (files: string[]) => {
-    for (const f of files) db.exec(readFileSync(join(MIGRATIONS_DIR, f), "utf-8"));
+    for (const f of files) db.run(readFileSync(join(MIGRATIONS_DIR, f), "utf-8"));
   };
   apply(BEFORE);
   return {
