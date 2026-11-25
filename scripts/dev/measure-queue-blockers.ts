@@ -19,7 +19,7 @@
  * keys, text files). The blocker set here is the path-derived part of what the screen reports,
  * plus the unscreened formats.
  */
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -30,6 +30,7 @@ import {
   formatCoverage,
   scanPaths,
 } from "../../shared/identifier-scan";
+import { KNOWN_FORMATS } from "../../shared/identifier-screen-report";
 import { MINIMUM_FAILURES, minimumFailureSentence } from "../../shared/submission-minimums";
 
 // ---------------------------------------------------------------------------------------
@@ -182,10 +183,47 @@ export interface DatasetAnalysis {
 
 export const UNUSUAL_FORMAT = "(unusual extension)";
 
-/** A format key as the screen names it, or a stand-in when the key looks like part of a file name. */
+/** Common document, image and archive types that are safe to name beside the screen's own formats. */
+const COMMON_FORMATS = [
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".xls",
+  ".xlsx",
+  ".ppt",
+  ".pptx",
+  ".rtf",
+  ".odt",
+  ".ods",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".bmp",
+  ".tif",
+  ".tiff",
+  ".svg",
+  ".eps",
+  ".zip",
+  ".tar",
+  ".gz",
+  ".tgz",
+  ".bz2",
+  ".7z",
+  ".rar",
+  ".tar.gz",
+];
+
+/** The extensions a report may name: the screen's `KNOWN_FORMATS` plus common document, image and archive types. */
+export const FORMAT_ALLOWLIST: ReadonlySet<string> = new Set([...KNOWN_FORMATS, ...COMMON_FORMATS]);
+
+/**
+ * A format key as the screen names it when it is on the allowlist, else a stand-in: an extension
+ * is taken from whatever a file is called, so it can be a fragment of a name, and a closed list
+ * keeps it out where a pattern cannot.
+ */
 export function safeFormatKey(key: string): string {
-  if (key === "(no extension)" || key.endsWith("/")) return key;
-  return /^\.[a-z0-9]{1,6}(\.[a-z0-9]{1,4})?$/.test(key) ? key : UNUSUAL_FORMAT;
+  return FORMAT_ALLOWLIST.has(key) ? key : UNUSUAL_FORMAT;
 }
 
 const UNREAD_KEYS = new Set(["(no extension)", ".other"]);
@@ -364,6 +402,9 @@ interface RunResult {
   stderr: string;
 }
 
+/** Git processes in flight; an interrupt stops them before their directories are removed. */
+const activeChildren = new Set<ChildProcess>();
+
 /** Run a command, handing each NUL-terminated stdout token to `onToken`. Never stores content. */
 function runTokens(
   args: string[],
@@ -373,8 +414,10 @@ function runTokens(
   return new Promise((done) => {
     const child = spawn(args[0] as string, args.slice(1), {
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
       env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", GIT_TERMINAL_PROMPT: "0" },
     });
+    activeChildren.add(child);
     const decoder = new TextDecoder();
     let carry = "";
     let stderr = "";
@@ -393,6 +436,7 @@ function runTokens(
       done({ code: null, stderr: String(e.message) });
     });
     child.on("close", (code) => {
+      activeChildren.delete(child);
       clearTimeout(timer);
       if (carry !== "") onToken(carry);
       done({ code, stderr });
@@ -406,15 +450,35 @@ export interface RepoPaths {
   cloneKiB: number;
 }
 
+/** Scratch directories in use; an interrupt removes them before the process exits. */
+const activeDirs = new Set<string>();
+
+export function removeActiveDirs(): void {
+  // Each child leads its own process group, so git's helper processes stop with it.
+  for (const child of activeChildren) {
+    try {
+      process.kill(-(child.pid as number), "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }
+  for (const dir of activeDirs)
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  activeDirs.clear();
+}
+
 const CLONE_TIMEOUT_MS = 15 * 60_000;
 
 /** Blob-less, checkout-less clone into the OS temp directory; deleted before returning. */
 export async function readRepoPaths(id: string): Promise<RepoPaths> {
   const dir = mkdtempSync(join(tmpdir(), "pq-d2-"));
+  activeDirs.add(dir);
   try {
     const repo = join(dir, "repo");
     let cloned: RunResult = { code: null, stderr: "" };
     for (let attempt = 0; attempt < 2 && cloned.code !== 0; attempt++) {
+      // A failed attempt can leave a partial clone, and git refuses a non-empty target.
+      rmSync(repo, { recursive: true, force: true });
       cloned = await runTokens(
         [
           "git",
@@ -478,6 +542,7 @@ export async function readRepoPaths(id: string): Promise<RepoPaths> {
     return { head, history: [...history], cloneKiB: await sizeKiB(repo) };
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    activeDirs.delete(dir);
   }
 }
 
@@ -804,7 +869,7 @@ function render(s: Summary, measured: Measured[], peakCloneKiB: number): string 
   L.push("Reading the difference:");
   L.push("");
   L.push(
-    "- The a7 list is a subset of what is measured here, so no screen finding is missed by the path rebuild.",
+    "- Measured: the a7 list is a subset of what is measured here, so no screen finding is missed by the path rebuild.",
   );
   L.push(
     `- Blocked requests are not screened, and ${x.withImageBlocked} of them have an image path, which accounts for ${x.onlyInMeasured.length - surplusRequested.length} of the surplus.`,
@@ -813,10 +878,10 @@ function render(s: Summary, measured: Measured[], peakCloneKiB: number): string 
     `- ${surplusRequested.length} requested requests have an image path and are not in the a7 list: ${surplusRequested.join(", ") || "none"}.`,
   );
   L.push(
-    "  This script reads paths only, so it cannot say whether a screen record exists for them; the likely cause is no screen record when the a7 list was made.",
+    "  Inference, confirmed by the lead: this script reads paths only and cannot see screen records. The a7 list was built from requests whose stored screen held an image finding; blocked requests and requested ones whose screen never ran had no record, which matches the blocked and requested surplus above.",
   );
   L.push(
-    `- The screen's "only image findings" figure (196) counts image findings among ALL kinds, content kinds included (EDF headers, participants tables, JSON keys, text files); this measurement sees path kinds only, so its count restricted to the a7 list (${x.imageOnlyInA7 ?? "n/a"}) is an upper bound on it, and the gap is requests whose other findings are content kinds.`,
+    `- Inference: the screen's "only image findings" figure (196) counts image findings among ALL kinds, content kinds included (EDF headers, participants tables, JSON keys, text files); this measurement sees path kinds only, so its count restricted to the a7 list (${x.imageOnlyInA7 ?? "n/a"}) is an upper bound on it, and the gap is requests whose other findings are content kinds.`,
   );
   if (s.unreadable.length) {
     L.push("");
@@ -862,7 +927,7 @@ function render(s: Summary, measured: Measured[], peakCloneKiB: number): string 
   );
   L.push("");
   L.push(
-    `${formats.length - shownFormats.length} further formats, each held by one or two requests, are in the JSON; an extension that is not a plausible format word is counted as \`${UNUSUAL_FORMAT}\`.`,
+    `${formats.length - shownFormats.length} further formats, each held by one or two requests, are in the JSON; an extension outside the known-format allowlist is counted as \`${UNUSUAL_FORMAT}\`.`,
   );
   L.push("");
   L.push("### Blocker-set shapes");
@@ -899,6 +964,11 @@ function render(s: Summary, measured: Measured[], peakCloneKiB: number): string 
   grp("extension", s.imageGroups.byExtension);
   grp("name class", s.imageGroups.byName);
   grp("presence", s.imageGroups.byPresence);
+  const presenceSum = s.imageGroups.byPresence.reduce((n, r) => n + r.requests, 0);
+  L.push("");
+  L.push(
+    `Presence classes are not exclusive: a request with files of more than one class counts under each, so the requests column sums to ${presenceSum} against ${x.withImage} requests with an image finding.`,
+  );
   L.push("");
   L.push("### Files by location and name class");
   L.push("");
@@ -1081,5 +1151,14 @@ function tally<T>(items: T[], pick: (item: T) => string): Record<string, number>
 }
 
 if (import.meta.main) {
+  for (const [signal, code] of [
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const) {
+    process.on(signal, () => {
+      removeActiveDirs();
+      process.exit(code);
+    });
+  }
   process.exit(await main(process.argv));
 }
