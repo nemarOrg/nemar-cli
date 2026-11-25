@@ -623,24 +623,24 @@ describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
       const stopped = await upload(["--yes"], server.url);
       expect(stopped.exitCode).toBe(1);
       expect(stopped.output).toContain(
-        "Identifier preflight: EDF/BDF clean, other recordings NOT screened",
+        "Identifier preflight: partially screened, other recordings NOT screened",
       );
       expectWarningCarriesOnlyItsCount(stopped.output, 1);
       expectNoNormalizationLine(stopped.output);
-      expect(stopped.output).toContain(
-        "--acknowledge-identifier-preflight clean-edf-only-others-unscreened",
-      );
+      expect(stopped.output).toContain("--acknowledge-identifier-preflight partially-screened");
       expect(stopped.output).not.toContain("dates-only");
       expectNothingSent(server.requests);
 
-      // The flag that names exactly that one condition is accepted, with the warning printed.
+      // The flag that names exactly that one condition is accepted, with the warning printed. The
+      // condition's old name is an alias of the new one, so a pipeline written before the rename
+      // keeps working.
       const named = await upload(
         ["--yes", "--acknowledge-identifier-preflight", "clean-edf-only-others-unscreened"],
         server.url,
         { gitOnly: true },
       );
       expect(named.output).toContain(
-        "Acknowledged with --acknowledge-identifier-preflight clean-edf-only-others-unscreened",
+        "Acknowledged with --acknowledge-identifier-preflight partially-screened",
       );
       expectWarningCarriesOnlyItsCount(named.output, 1);
       expect(named.output).toContain("Missing required tools");

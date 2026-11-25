@@ -56,6 +56,7 @@ import {
   createContext,
   scanDatasetFromManifest,
 } from "../../../scripts/identifier-fleet-lib.js";
+import { ACKNOWLEDGE_WHY, PREFLIGHT_REFUSAL } from "../../../shared/identifier-screen-copy.js";
 import {
   type AcknowledgedVia,
   type DatasetStatus,
@@ -188,17 +189,21 @@ function createLocalReader(
     try {
       // No more than the file held when the walk sized it: a 2 MiB buffer for a 40-byte file
       // is waste, and the scan judges truncation by that same size.
-      const want = entry.size === null ? n : Math.min(n, entry.size);
+      const offset = options.offset ?? 0;
+      const want = Math.max(0, entry.size === null ? n : Math.min(n, entry.size - offset));
       const out = new Uint8Array(want);
       let got = 0;
       while (got < want) {
-        const { bytesRead } = await handle.read(out, got, want - got, got);
+        const { bytesRead } = await handle.read(out, got, want - got, offset + got);
         if (bytesRead === 0) break;
         got += bytesRead;
       }
       if (got < options.minBytes) throw new ReadFailure("short-body");
       // A header the upload will rewrite before anything is sent is read as it will be (ADR 0091).
-      if (header) out.set(header.subarray(0, Math.min(got, header.length)), 0);
+      if (header && offset < header.length) {
+        const from = header.subarray(offset, Math.min(header.length, offset + got));
+        out.set(from, 0);
+      }
       return out.subarray(0, got);
     } catch (error) {
       if (error instanceof ReadFailure) throw error;
@@ -248,6 +253,9 @@ export async function scanLocalDataset(
     edf_bdf_files_flagged: record.edf_bdf_files_flagged,
     unscreened_formats: record.unscreened_formats,
     read_failures: record.read_failures,
+    read_by_format: record.read_by_format,
+    companion_missing: record.companion_missing,
+    readers: record.readers,
   };
   // Format names come from whatever a file is called, so only the closed list is kept.
   return parsePreflightScan(foldOddFailures(foldUnknownFormats(scan)));
@@ -269,7 +277,9 @@ export function preflightConditions(scan: PreflightScan): DatasetStatus[] {
   if (scan.incomplete && scan.status !== "unchecked") conditions.add("unchecked");
   const unscreened = Object.values(scan.unscreened_formats).reduce((a, b) => a + b, 0);
   const saysUnscreened =
-    scan.status === "not-screened" || scan.status === "clean-edf-only-others-unscreened";
+    scan.status === "not-screened" ||
+    scan.status === "partially-screened" ||
+    scan.status === "clean-edf-only-others-unscreened";
   if (unscreened > 0 && !saysUnscreened) conditions.add("not-screened");
   return [...conditions].sort();
 }
@@ -278,15 +288,26 @@ const sameWords = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && a.every((word, i) => word === b[i]);
 
 /**
+ * The words an acknowledgment may still use for a verdict that has been renamed. A scan says
+ * `partially-screened` where it used to say `clean-edf-only-others-unscreened`; a pipeline that
+ * names the old word keeps working.
+ */
+const ACKNOWLEDGE_ALIASES: Readonly<Record<string, DatasetStatus>> = {
+  "clean-edf-only-others-unscreened": "partially-screened",
+};
+
+/**
  * Commander's parser for `--acknowledge-identifier-preflight`: repeatable, and comma-separated
- * within one value, each word one of the verdicts that can be acknowledged. Anything else, and
- * `direct-identifiers` in particular, is refused before the command runs.
+ * within one value, each word one of the verdicts that can be acknowledged (an old name is taken
+ * as its new one). Anything else, and `direct-identifiers` in particular, is refused before the
+ * command runs.
  */
 export function collectAcknowledgment(value: string, previous: string[] | undefined): string[] {
   const words = value
     .split(",")
     .map((word) => word.trim())
-    .filter((word) => word !== "");
+    .filter((word) => word !== "")
+    .map((word) => ACKNOWLEDGE_ALIASES[word] ?? word);
   const allowed = PREFLIGHT_ACKNOWLEDGEABLE as readonly string[];
   if (words.length === 0 || !words.every((word) => allowed.includes(word))) {
     throw new InvalidArgumentError(
@@ -339,16 +360,6 @@ export function decidePreflight(scan: PreflightScan, choices: PreflightChoices):
   return { action: "stop", why: "acknowledgment-required" };
 }
 
-/** Why a condition needs a person, in a sentence that names nothing. */
-const ACKNOWLEDGE_WHY: Partial<Record<DatasetStatus, string>> = {
-  review: "the scanner found something a person should look at (the kinds are listed above)",
-  unchecked: "the scanner could not read everything it should have (see Incomplete above)",
-  "not-screened":
-    "some recordings are in formats the scanner cannot read, so their headers were not checked",
-  "clean-edf-only-others-unscreened":
-    "the EDF/BDF headers are clean, but other recordings are in formats the scanner cannot read",
-};
-
 /** The flag as it would have to be given for this scan. */
 const flagFor = (conditions: readonly string[]) => `${ACKNOWLEDGE_FLAG} ${conditions.join(",")}`;
 
@@ -368,20 +379,10 @@ function printAcknowledgmentNeed(conditions: readonly DatasetStatus[]): void {
 
 function printRefusal(): void {
   console.log();
+  console.log(chalk.red(`  ${PREFLIGHT_REFUSAL.found}`));
+  console.log(chalk.red(`  ${PREFLIGHT_REFUSAL.remove}`));
   console.log(
-    chalk.red(
-      "  Upload refused: the preflight found direct identifiers (a name, a birth date finer than the year, a record number, an age over 89, or an identifying column or key). Nothing was sent.",
-    ),
-  );
-  console.log(
-    chalk.red(
-      "  Remove them from the files (for EDF/BDF, the patient and recording fields of the header) and run the upload again.",
-    ),
-  );
-  console.log(
-    chalk.dim(
-      `  There is no override, and ${ACKNOWLEDGE_FLAG} does not apply. If this is a false positive, please report it, so the scanner is fixed for every dataset. Terms: ${CONTRIBUTOR_TERMS_URL}`,
-    ),
+    chalk.dim(`  ${PREFLIGHT_REFUSAL.noOverride(ACKNOWLEDGE_FLAG, CONTRIBUTOR_TERMS_URL)}`),
   );
 }
 

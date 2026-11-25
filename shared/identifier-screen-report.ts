@@ -15,14 +15,31 @@
  * own state with its own answer, never "clean" and never "no findings".
  */
 
+import { READER_IDS, READER_INCOMPLETE_REASONS, type ReaderId } from "./identifier-readers";
 import {
   DATE_KINDS,
   DIRECTORY_FORMATS,
   type FindingKind,
   OTHER_RECORDING_EXTENSIONS,
 } from "./identifier-scan";
+import {
+  ERROR_TEXT,
+  INCOMPLETE_COPY,
+  KIND_COPY,
+  LINES,
+  READER_LABEL,
+  STATUS_COPY,
+  remedyLines,
+} from "./identifier-screen-copy";
 
-export const REPORT_VERSION = 1;
+/**
+ * The version a screen writes. Version 2 counts recordings per format reader (`read_by_format`);
+ * version 1 counted EDF/BDF headers only. The door reads both: a stored version-1 report keeps
+ * reading back, and is checked by the version-1 rules, verbatim.
+ */
+export const REPORT_VERSION = 2;
+export type ReportVersion = 1 | 2;
+const REPORT_VERSIONS: readonly unknown[] = [1, 2];
 
 /** Every finding kind. A `Record` over the union, so adding a kind to the scanner fails the build here. */
 const KIND_TABLE: Record<FindingKind, true> = {
@@ -57,12 +74,26 @@ export const DATASET_STATUSES = [
   "dates-only",
   "review",
   "clean",
+  "partially-screened",
   "clean-edf-only-others-unscreened",
   "not-screened",
   "no-recordings",
   "unchecked",
 ] as const;
 export type DatasetStatus = (typeof DATASET_STATUSES)[number];
+
+/** A status only a version-1 report may carry: version 2 says `partially-screened` instead. */
+const V1_ONLY_STATUS: DatasetStatus = "clean-edf-only-others-unscreened";
+/** A status only a version-2 report may carry. */
+const V2_ONLY_STATUS: DatasetStatus = "partially-screened";
+
+/** One reader's files in a version-2 scan: how many there were, and how each read ended. */
+export interface ReaderTally {
+  files: number;
+  read: number;
+  partial: number;
+  failed: number;
+}
 
 export type ManifestSource = "manifest.json" | "s3-version-manifest" | "git-tree" | "clone";
 const MANIFEST_SOURCES: ReadonlySet<string> = new Set([
@@ -102,6 +133,12 @@ export interface DatasetRecord {
   edf_bdf_files_by_kind?: Partial<Record<FindingKind, number>>;
   unscreened_formats?: Record<string, number>;
   side_reads_failed?: number;
+  /** Version 2: recording files per reader, and how their reads ended. */
+  read_by_format?: Partial<Record<ReaderId, ReaderTally>>;
+  /** Version 2: companion files a recording's header needs and the dataset lacks. */
+  companion_missing?: number;
+  /** Version 2: the version of each reader the scanner had. */
+  readers?: Partial<Record<ReaderId, string>>;
   /** The fleet scan writes this; the publication report does not carry it (a pattern is not a vocabulary). */
   finding_fields?: string[];
 }
@@ -121,7 +158,7 @@ const ERROR_SET: ReadonlySet<string> = new Set(SCREEN_ERRORS);
 
 /** What the workflow posts. Exactly one of `scan` and `error`. */
 export interface ScreenReport {
-  version: typeof REPORT_VERSION;
+  version: ReportVersion;
   /**
    * `identifier-scan@<revision>` of the scanner that ran; null only on an error report, where
    * the workflow failed before (or without) knowing which scanner it had.
@@ -168,7 +205,8 @@ function countMap(x: unknown, accepts: (key: string) => boolean, max: number, co
   return out;
 }
 
-const FORMAT_KEY = /^(\.[a-z0-9]{1,12}(\.[a-z0-9]{1,12})?\/?|\(no extension\))$/;
+/** A format name: an extension, a directory format, `(no extension)`, or any of these inside a ZIP. */
+const FORMAT_KEY = /^(zip:)?(\.[a-z0-9]{1,12}(\.[a-z0-9]{1,12})?\/?|\(no extension\))$/;
 /**
  * Why a scan fell short, as the scanner names it. A closed list, not a pattern: a pattern lets
  * a lowercase name through as a "reason" and into the admin mail.
@@ -193,12 +231,18 @@ export const INCOMPLETE_REASONS = [
   "tree-truncated",
   "credentials-missing",
   "deadline",
+  // A recording in a format a reader parses that could not be read (EDF/BDF says `edf-headers-unread`).
+  "recordings-unread",
+  // Why a reader read a file only partly (`identifier-readers.ts`).
+  ...READER_INCOMPLETE_REASONS,
 ] as const;
+export type IncompleteReason = (typeof INCOMPLETE_REASONS)[number];
 const REASON_SET: ReadonlySet<string> = new Set(INCOMPLETE_REASONS);
+const READER_SET: ReadonlySet<string> = new Set(READER_IDS);
 
 /** What a failed read was reading, and the fixed classes a failure can have. */
 const READ_WHAT: ReadonlySet<string> = new Set([
-  "edf",
+  ...READER_IDS,
   "participants",
   "scans",
   "json",
@@ -216,6 +260,7 @@ const READ_CLASS: ReadonlySet<string> = new Set([
   "short-body",
   "unreadable-entry",
   "superseded-absent",
+  "limit",
   "blob-missing",
   "blob-closed",
   "internal",
@@ -295,11 +340,92 @@ function checkStatus(
   if (r.status === "unchecked" && !r.incomplete) bad("scan-status");
 }
 
-function parseRecord(x: unknown): DatasetRecord {
+const sum = (xs: readonly number[]) => xs.reduce((a, b) => a + b, 0);
+
+/**
+ * The version-2 rule, over every reader's files rather than EDF/BDF headers alone. `clean` and
+ * `dates-only` need at least one recording, every recording file to have a reader (no
+ * unscreened format) and every one of them read completely; `no-recordings` needs no recording
+ * file of any format. Like the version-1 rule it refuses a record too clean for its counts and
+ * re-derives nothing else.
+ */
+function checkStatusV2(
+  r: Pick<
+    DatasetRecord,
+    | "status"
+    | "incomplete"
+    | "incomplete_reasons"
+    | "files"
+    | "findings_by_kind"
+    | "unscreened_formats"
+    | "edf_bdf_files_flagged"
+    | "read_by_format"
+    | "companion_missing"
+  >,
+): void {
+  if (r.status === V1_ONLY_STATUS) bad("scan-status");
+  const kinds = Object.keys(r.findings_by_kind ?? {}) as FindingKind[];
+  const unscreened = sum(Object.values(r.unscreened_formats ?? {}));
+  const tallies = Object.values(r.read_by_format ?? {}) as ReaderTally[];
+  for (const t of tallies) if (t.read + t.partial + t.failed > t.files) bad("scan-status");
+  const recordings = sum(tallies.map((t) => t.files));
+  const read = sum(tallies.map((t) => t.read));
+  const files = r.files;
+  // A scan that counted files counted them by reader too, and the two agree on EDF/BDF.
+  if (files && !r.read_by_format) bad("scan-status");
+  if (files) {
+    const edf = r.read_by_format?.edf;
+    if ((edf?.files ?? 0) !== files.edf_bdf || (edf?.read ?? 0) !== files.header_read) {
+      bad("scan-status");
+    }
+  }
+  if (r.read_by_format) {
+    const shortfall = read !== recordings || r.incomplete_reasons.length > 0;
+    if (r.incomplete !== shortfall) bad("scan-status");
+  }
+  const clear = r.status === "clean" || r.status === "dates-only" || r.status === "no-recordings";
+  if (clear) {
+    if (
+      !files ||
+      !r.read_by_format ||
+      r.incomplete ||
+      unscreened > 0 ||
+      (r.edf_bdf_files_flagged ?? 0) > 0 ||
+      (r.companion_missing ?? 0) > 0
+    ) {
+      bad("scan-status");
+    }
+    if (r.status === "no-recordings") {
+      if (recordings !== 0) bad("scan-status");
+    } else if (recordings === 0) {
+      bad("scan-status");
+    }
+    if (r.status === "clean" && kinds.length > 0) bad("scan-status");
+    if (r.status !== "clean" && !kinds.every((k) => DATE_KINDS.has(k))) bad("scan-status");
+  }
+  if (r.status === "unchecked" && !r.incomplete) bad("scan-status");
+}
+
+/** The status rule of a report's version. */
+function checkStatusOf(version: ReportVersion, record: DatasetRecord | PreflightScan): void {
+  if (version === 1) {
+    // Version 1 never said `partially-screened`; its own rule stays verbatim.
+    if (record.status === V2_ONLY_STATUS) bad("scan-status");
+    checkStatus(record);
+  } else {
+    checkStatusV2(record);
+  }
+}
+
+/** The keys a version-2 scan adds to version 1's. */
+const V2_SCAN_KEYS = ["read_by_format", "companion_missing", "readers"] as const;
+
+function parseRecord(x: unknown, version: ReportVersion): DatasetRecord {
   if (!isObject(x)) return bad("scan-shape");
   onlyKeys(
     x,
     [
+      ...(version === 2 ? V2_SCAN_KEYS : []),
       "id",
       "version",
       "scanned_at",
@@ -336,8 +462,49 @@ function parseRecord(x: unknown): DatasetRecord {
     version: x.version,
     ...parseScanBody(x),
   } as unknown as DatasetRecord;
-  checkStatus(record);
+  checkStatusOf(version, record);
   return record;
+}
+
+const READER_VERSION = /^[0-9a-z][0-9a-z.+-]{0,31}$/;
+const TALLY_KEYS = ["files", "read", "partial", "failed"] as const;
+
+/** The version-2 fields, validated. Absent ones stay absent; the caller refused unknown keys. */
+function parseV2Fields(x: Record<string, unknown>, out: Record<string, unknown>): void {
+  if (x.read_by_format !== undefined) {
+    const m = x.read_by_format;
+    if (!isObject(m)) bad("scan-readers");
+    const tallies: Record<string, ReaderTally> = {};
+    for (const [id, t] of Object.entries(m as Record<string, unknown>)) {
+      if (!READER_SET.has(id) || !isObject(t)) bad("scan-readers");
+      const tally = t as Record<string, unknown>;
+      onlyKeys(tally, TALLY_KEYS, "scan-readers");
+      for (const k of TALLY_KEYS) if (!isCount(tally[k])) bad("scan-readers");
+      tallies[id] = {
+        files: tally.files as number,
+        read: tally.read as number,
+        partial: tally.partial as number,
+        failed: tally.failed as number,
+      };
+    }
+    out.read_by_format = tallies;
+  }
+  if (x.companion_missing !== undefined) {
+    if (!isCount(x.companion_missing)) bad("scan-count");
+    out.companion_missing = x.companion_missing;
+  }
+  if (x.readers !== undefined) {
+    const m = x.readers;
+    if (!isObject(m)) bad("scan-readers");
+    const versions: Record<string, string> = {};
+    for (const [id, v] of Object.entries(m as Record<string, unknown>)) {
+      if (!READER_SET.has(id) || typeof v !== "string" || !READER_VERSION.test(v)) {
+        bad("scan-readers");
+      }
+      versions[id] = v as string;
+    }
+    out.readers = versions;
+  }
 }
 
 /**
@@ -424,6 +591,8 @@ function parseScanBody(x: Record<string, unknown>): Record<string, unknown> {
       "scan-formats",
     );
   }
+  // Only a version-2 caller lets these keys past its key list.
+  parseV2Fields(x, out);
   return out;
 }
 
@@ -431,7 +600,8 @@ function parseScanBody(x: Record<string, unknown>): Record<string, unknown> {
 export function parseScreenReport(x: unknown): ScreenReport {
   if (!isObject(x)) return bad("report-shape");
   onlyKeys(x, ["version", "scanner", "head", "scan", "error"], "report-key");
-  if (x.version !== REPORT_VERSION) bad("report-version");
+  if (!REPORT_VERSIONS.includes(x.version)) bad("report-version");
+  const version = x.version as ReportVersion;
   if (x.scanner !== null && !(typeof x.scanner === "string" && SCANNER.test(x.scanner))) {
     bad("report-scanner");
   }
@@ -440,7 +610,7 @@ export function parseScreenReport(x: unknown): ScreenReport {
   const hasError = x.error !== undefined;
   if (hasScan === hasError) bad("report-outcome");
   const report: ScreenReport = {
-    version: REPORT_VERSION,
+    version,
     scanner: x.scanner as string | null,
     head: x.head as string | null,
   };
@@ -449,7 +619,7 @@ export function parseScreenReport(x: unknown): ScreenReport {
     // matched to the content it describes, so the approval gate could never tell it was stale.
     if (x.head === null) bad("report-head");
     if (x.scanner === null) bad("report-scanner");
-    report.scan = parseRecord(x.scan);
+    report.scan = parseRecord(x.scan, version);
   } else {
     if (typeof x.error !== "string" || !ERROR_SET.has(x.error)) bad("report-error");
     report.error = x.error as ScreenError;
@@ -487,6 +657,7 @@ export function screenGate(state: ScreenState | null): ScreenGate {
     case "review":
     case "unchecked":
     case "not-screened":
+    case "partially-screened":
     case "clean-edf-only-others-unscreened":
       return "acknowledge";
     case "pending":
@@ -517,49 +688,15 @@ export interface ScreenDescription {
   lines: string[];
 }
 
-/**
- * Why a screen produced no scan, as a person reads it. Exported through {@link screenErrorText}
- * so the scheduled sweep's report (ADR 0088) states a cause in these words and no others.
- */
-const ERROR_TEXT: Record<ScreenError, string> = {
-  "dispatch-unconfigured":
-    "the screen could not be started: the Worker had no GitHub credential or callback secret, or the dataset has no repository",
-  "dispatch-failed": "GitHub refused to start the screen workflow",
-  "no-report-in-time":
-    "no report arrived from the screen workflow in time (it may never have started)",
-  "workflow-failed": "the screen workflow failed before it produced a result",
-  "clone-failed": "the screen workflow could not read the dataset repository",
-  "credentials-missing":
-    "the screen workflow had no storage credentials, so it could not read headers",
-  deadline: "the screen workflow ran out of time before it finished reading",
-};
-
-/**
- * What each state is called, without the surface's prefix. The publication screen says
- * "Identifier screen: <verdict>" and the uploader preflight "Identifier preflight: <verdict>", so
- * one state reads the same everywhere it is shown. The scheduled sweep's report (ADR 0088) puts
- * the verdict alone beside a count.
- */
-const VERDICTS: Record<ScreenState, { verdict: string; tone: ScreenDescription["tone"] }> = {
-  pending: { verdict: "running", tone: "note" },
-  clean: { verdict: "clean", tone: "ok" },
-  "dates-only": { verdict: "clean (acquisition dates only)", tone: "ok" },
-  "no-recordings": { verdict: "clean (no recordings)", tone: "ok" },
-  review: { verdict: "needs review", tone: "warn" },
-  "direct-identifiers": { verdict: "FOUND IDENTIFIERS", tone: "stop" },
-  unchecked: { verdict: "INCOMPLETE", tone: "warn" },
-  "not-screened": { verdict: "recordings NOT screened", tone: "warn" },
-  "clean-edf-only-others-unscreened": {
-    verdict: "EDF/BDF clean, other recordings NOT screened",
-    tone: "warn",
-  },
-  error: { verdict: "DID NOT RUN", tone: "stop" },
-  unreported: { verdict: "DID NOT REPORT", tone: "stop" },
-};
+// The words of each state, error, kind and reason are declared in `identifier-screen-copy.ts`
+// (ADR 0045): a state's verdict and tone are `STATUS_COPY`'s, and a cause is `ERROR_TEXT`'s. The
+// publication screen says "Identifier screen: <verdict>" and the uploader preflight "Identifier
+// preflight: <verdict>", so one state reads the same everywhere it is shown. The scheduled
+// sweep's report (ADR 0088) puts the verdict alone beside a count.
 
 /** The name of a state, without the `Identifier screen:` prefix. */
 export function screenStateLabel(state: ScreenState): string {
-  return VERDICTS[state].verdict;
+  return STATUS_COPY[state].verdict;
 }
 
 /** The cause of a screen that produced no scan, as {@link describeScreen} states it. */
@@ -575,7 +712,7 @@ export function kindsPhrase(byKind: Partial<Record<FindingKind, number>> | undef
 }
 
 /** What the screen does not read, whatever it found. One sentence, shown by every surface. */
-export const SCREEN_NOT_READ = "Not read: the contents of sidecars and tables in earlier commits.";
+export const SCREEN_NOT_READ = LINES.notRead;
 
 /**
  * How many findings of the acquisition-date kinds ({@link DATE_KINDS}) a scan's counts hold. A
@@ -683,45 +820,100 @@ export function publicationRequestNotice(datasetId: string): string[] {
   ];
 }
 
-/** The counts of a scan as lines of fixed words, shared by the publication screen and the preflight. */
-function scanLines(
-  scan: Pick<
-    DatasetRecord,
-    | "files"
-    | "findings_by_kind"
-    | "edf_bdf_files_flagged"
-    | "unscreened_formats"
-    | "incomplete_reasons"
-  >,
-): string[] {
+type ScanLineInput = Pick<
+  DatasetRecord,
+  | "files"
+  | "findings_by_kind"
+  | "edf_bdf_files_flagged"
+  | "unscreened_formats"
+  | "incomplete_reasons"
+  | "read_by_format"
+  | "companion_missing"
+>;
+
+/** The counts of a version-1 scan as lines of fixed words, as they always read. */
+function scanLinesV1(scan: ScanLineInput): string[] {
   const lines: string[] = [];
   if (scan.files) {
-    const unreadable =
-      scan.files.header_read_failed > 0 ? ` (${scan.files.header_read_failed} unreadable)` : "";
     lines.push(
-      `Files: ${scan.files.total}; EDF/BDF headers read: ${scan.files.header_read} of ${scan.files.edf_bdf}${unreadable}.`,
+      LINES.filesV1(
+        scan.files.total,
+        scan.files.header_read,
+        scan.files.edf_bdf,
+        scan.files.header_read_failed,
+      ),
     );
   }
   const kinds = kindsPhrase(scan.findings_by_kind);
-  if (kinds) lines.push(`Findings by kind: ${kinds}.`);
-  if (scan.edf_bdf_files_flagged) {
-    lines.push(`EDF/BDF files with an identifier finding: ${scan.edf_bdf_files_flagged}.`);
-  }
+  if (kinds) lines.push(LINES.kinds(kinds));
+  if (scan.edf_bdf_files_flagged) lines.push(LINES.flagged(scan.edf_bdf_files_flagged));
   const formats = Object.entries(scan.unscreened_formats ?? {});
   if (formats.length > 0) {
-    lines.push(
-      `Not screened (format x files): ${formats.map(([f, n]) => `${f} x${n}`).join(", ")}.`,
-    );
+    lines.push(LINES.notScreened(formats.map(([f, n]) => `${f} x${n}`).join(", ")));
   }
   if (scan.incomplete_reasons.length > 0) {
-    lines.push(`Incomplete: ${scan.incomplete_reasons.join(", ")}.`);
+    lines.push(LINES.incomplete(scan.incomplete_reasons.join(", ")));
   }
   return lines;
 }
 
 /**
+ * The counts of a version-2 scan: the recordings each reader read, then each finding kind and
+ * each reason the scan fell short, each followed by its remedy and its docs link.
+ */
+function scanLinesV2(scan: ScanLineInput): string[] {
+  const lines: string[] = [];
+  if (scan.files) lines.push(LINES.files(scan.files.total));
+  if (scan.read_by_format) {
+    const entries = Object.entries(scan.read_by_format) as [ReaderId, ReaderTally][];
+    const withFiles = entries.filter(([, t]) => t.files > 0);
+    lines.push(
+      LINES.recordingsRead(
+        withFiles.map(([id, t]) => LINES.readerCount(READER_LABEL[id], t.read, t.files)),
+        sum(withFiles.map(([, t]) => t.partial)),
+        sum(withFiles.map(([, t]) => t.failed)),
+      ),
+    );
+  }
+  const kinds = kindsPhrase(scan.findings_by_kind);
+  if (kinds) lines.push(LINES.kinds(kinds));
+  for (const [name, n] of Object.entries(scan.findings_by_kind ?? {}) as [FindingKind, number][]) {
+    const copy = KIND_COPY[name];
+    lines.push(LINES.kind(name, n, copy), ...remedyLines(copy));
+  }
+  if (scan.edf_bdf_files_flagged) lines.push(LINES.flagged(scan.edf_bdf_files_flagged));
+  const formats = Object.entries(scan.unscreened_formats ?? {});
+  if (formats.length > 0) {
+    lines.push(LINES.notScreened(formats.map(([f, n]) => `${f} x${n}`).join(", ")));
+  }
+  if (scan.companion_missing) lines.push(LINES.companionMissing(scan.companion_missing));
+  if (scan.incomplete_reasons.length > 0) {
+    lines.push(LINES.incomplete(scan.incomplete_reasons.join(", ")));
+    for (const name of scan.incomplete_reasons as IncompleteReason[]) {
+      const copy = INCOMPLETE_COPY[name];
+      if (copy) lines.push(LINES.reason(name, copy), ...remedyLines(copy));
+    }
+  }
+  return lines;
+}
+
+/** The counts of a scan as lines, in the words of its version. */
+function scanLines(scan: ScanLineInput, version: ReportVersion): string[] {
+  return version === 1 ? scanLinesV1(scan) : scanLinesV2(scan);
+}
+
+/** A version-2 description opens with what its state means, what to do, and where to read more. */
+function stateLines(state: ScreenState, version: ReportVersion | null): string[] {
+  if (version !== 2) return [];
+  const copy = STATUS_COPY[state];
+  return [LINES.state(copy), ...remedyLines(copy)];
+}
+
+/**
  * The words that go in front of a person. One function for the admin email, the status view and
- * the CLI, so the three cannot disagree about what a state means.
+ * the CLI, so the three cannot disagree about what a state means. A version-1 report reads as it
+ * always did; a version-2 report adds its readers' counts and a remedy and docs link per state,
+ * kind and reason.
  */
 export function describeScreen(
   state: ScreenState | null,
@@ -729,31 +921,31 @@ export function describeScreen(
 ): ScreenDescription {
   if (state === null) {
     return {
-      headline: "Identifier screen: NOT RUN for this request",
+      headline: LINES.notRunHeadline,
       tone: "stop",
-      lines: ["This request predates the screen, or the screen was never started for it."],
+      lines: [LINES.notRunCause],
     };
   }
-  const base = VERDICTS[state];
-  const lines: string[] = [];
+  const base = STATUS_COPY[state];
+  const lines: string[] = [...stateLines(state, report?.version ?? null)];
   // The Worker stores an 'unreported' screen WITH the error report that says so
   // (`no-report-in-time`), so the cause is stated once, from the report, when
   // there is one; the state's own cause is only for a caller with no report.
   if (state === "unreported" && !report?.error) {
-    lines.push(`Cause: ${ERROR_TEXT["no-report-in-time"]}.`);
+    lines.push(LINES.cause(ERROR_TEXT["no-report-in-time"]));
   }
-  if (report?.error) lines.push(`Cause: ${ERROR_TEXT[report.error]}.`);
+  if (report?.error) lines.push(LINES.cause(ERROR_TEXT[report.error]));
   const scan = report?.scan;
   if (scan) {
-    lines.push(...scanLines(scan));
+    lines.push(...scanLines(scan, report.version));
     lines.push(...dateWarningLines(scan));
     lines.push(SCREEN_NOT_READ);
-    lines.push(`Scanner ${report.scanner}; commit ${report.head?.slice(0, 12)}.`);
+    lines.push(LINES.scanner(report.scanner, report.head?.slice(0, 12)));
   } else if (state === "dates-only") {
     // The verdict reads back and its report does not: the warning does not depend on the report.
     lines.push(...dateWarningLines({ status: state }));
   }
-  return { headline: `Identifier screen: ${base.verdict}`, tone: base.tone, lines };
+  return { headline: `${LINES.screenPrefix}${base.verdict}`, tone: base.tone, lines };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -845,9 +1037,12 @@ export function foldOddFailures<T extends { read_failures?: Record<string, numbe
  * and records the result with the deposit attestation. It is early feedback for the uploader and
  * is NEVER trusted: a modified client can send anything, so nothing gates on it, and the
  * publication screen above stays the check that holds (ADR 0086). It is parsed at the door like
- * the publication report, so what is stored is counts and fixed words only.
+ * the publication report, so what is stored is counts and fixed words only. Version 2 carries
+ * the same per-reader counts as the publication report's version 2; a stored version 1 still
+ * reads back under its own rules.
  */
-export const PREFLIGHT_VERSION = 1;
+export const PREFLIGHT_VERSION = 2;
+export type PreflightVersion = 1 | 2;
 
 /** A scan made before the dataset had an id: the scan fields that describe coverage and findings. */
 export interface PreflightScan {
@@ -860,6 +1055,10 @@ export interface PreflightScan {
   edf_bdf_files_flagged: number;
   unscreened_formats: Record<string, number>;
   read_failures: Record<string, number>;
+  /** Version 2 only, and required there. */
+  read_by_format?: Partial<Record<ReaderId, ReaderTally>>;
+  companion_missing?: number;
+  readers?: Partial<Record<ReaderId, string>>;
 }
 
 /**
@@ -888,6 +1087,11 @@ export const KNOWN_FORMATS: ReadonlySet<string> = new Set([
   OTHER_FORMAT,
 ]);
 
+/** Is this a format name a preflight may carry: a known one, or a known one inside a ZIP? */
+export function isKnownFormat(key: string): boolean {
+  return KNOWN_FORMATS.has(key) || (key.startsWith("zip:") && KNOWN_FORMATS.has(key.slice(4)));
+}
+
 /** Fold every format name outside {@link KNOWN_FORMATS} into `.other`, keeping its count. */
 export function foldUnknownFormats<T extends { unscreened_formats?: Record<string, number> }>(
   record: T,
@@ -896,7 +1100,7 @@ export function foldUnknownFormats<T extends { unscreened_formats?: Record<strin
   if (typeof formats !== "object" || formats === null) return record;
   const folded: Record<string, number> = {};
   for (const [key, count] of Object.entries(formats)) {
-    const name = KNOWN_FORMATS.has(key) ? key : OTHER_FORMAT;
+    const name = isKnownFormat(key) ? key : OTHER_FORMAT;
     folded[name] = (folded[name] ?? 0) + count;
   }
   return { ...record, unscreened_formats: folded };
@@ -919,7 +1123,7 @@ const PREFLIGHT_SCAN_KEYS = [
 export type AcknowledgedVia = "prompt" | "flag";
 
 export interface UploaderPreflight {
-  version: typeof PREFLIGHT_VERSION;
+  version: PreflightVersion;
   /** `nemar-cli@<version>`: the client that ran the scanner. */
   scanner: string;
   scan: PreflightScan;
@@ -934,17 +1138,24 @@ export const PREFLIGHT_ACKNOWLEDGEABLE: readonly DatasetStatus[] = DATASET_STATU
 
 const PREFLIGHT_SCANNER = /^nemar-cli@\d{1,4}\.\d{1,4}\.\d{1,6}(-[0-9a-z.]{1,24})?$/;
 
-/** Validate the scan half of a preflight. Throws {@link ReportError} with a fixed word. */
-export function parsePreflightScan(x: unknown): PreflightScan {
+/**
+ * Validate the scan half of a preflight, under the rules of its version (the current one unless
+ * said). Throws {@link ReportError} with a fixed word.
+ */
+export function parsePreflightScan(
+  x: unknown,
+  version: PreflightVersion = PREFLIGHT_VERSION,
+): PreflightScan {
   if (!isObject(x)) return bad("scan-shape");
-  onlyKeys(x, PREFLIGHT_SCAN_KEYS, "scan-key");
-  for (const key of PREFLIGHT_SCAN_KEYS) if (x[key] === undefined) bad("scan-missing");
+  const keys = version === 2 ? [...PREFLIGHT_SCAN_KEYS, ...V2_SCAN_KEYS] : PREFLIGHT_SCAN_KEYS;
+  onlyKeys(x, keys, "scan-key");
+  for (const key of keys) if (x[key] === undefined) bad("scan-missing");
   const scan = parseScanBody(x) as unknown as PreflightScan;
   // Narrower than the publication report's pattern: only names from the closed list.
   for (const key of Object.keys(scan.unscreened_formats)) {
-    if (!KNOWN_FORMATS.has(key)) bad("scan-formats");
+    if (!isKnownFormat(key)) bad("scan-formats");
   }
-  checkStatus(scan);
+  checkStatusOf(version, scan);
   return scan;
 }
 
@@ -956,16 +1167,17 @@ export function parsePreflightScan(x: unknown): PreflightScan {
 export function parseUploaderPreflight(x: unknown): UploaderPreflight {
   if (!isObject(x)) return bad("preflight-shape");
   onlyKeys(x, ["version", "scanner", "scan", "acknowledged_via"], "preflight-key");
-  if (x.version !== PREFLIGHT_VERSION) bad("preflight-version");
+  if (x.version !== 1 && x.version !== 2) bad("preflight-version");
+  const version = x.version as PreflightVersion;
   if (typeof x.scanner !== "string" || !PREFLIGHT_SCANNER.test(x.scanner)) {
     bad("preflight-scanner");
   }
-  const scan = parsePreflightScan(x.scan);
+  const scan = parsePreflightScan(x.scan, version);
   const via = x.acknowledged_via;
   if (via !== null && via !== "prompt" && via !== "flag") bad("preflight-ack");
   if ((screenGate(scan.status) === "acknowledge") !== (via !== null)) bad("preflight-ack");
   return {
-    version: PREFLIGHT_VERSION,
+    version,
     scanner: x.scanner as string,
     scan,
     acknowledged_via: via as AcknowledgedVia | null,
@@ -976,13 +1188,12 @@ export function parseUploaderPreflight(x: unknown): UploaderPreflight {
 export function describePreflight(
   scan: PreflightScan,
   acknowledgedVia: AcknowledgedVia | null,
+  version: PreflightVersion = PREFLIGHT_VERSION,
 ): ScreenDescription {
-  const base = VERDICTS[scan.status];
-  const lines = scanLines(scan);
+  const base = STATUS_COPY[scan.status];
+  const lines = [...stateLines(scan.status, version), ...scanLines(scan, version)];
   lines.push(...dateWarningLines(scan));
-  if (acknowledgedVia === "prompt") lines.push("Acknowledged by the uploader at the prompt.");
-  if (acknowledgedVia === "flag") {
-    lines.push("Acknowledged by the uploader with --acknowledge-identifier-preflight.");
-  }
-  return { headline: `Identifier preflight: ${base.verdict}`, tone: base.tone, lines };
+  if (acknowledgedVia === "prompt") lines.push(LINES.ackPrompt);
+  if (acknowledgedVia === "flag") lines.push(LINES.ackFlag);
+  return { headline: `${LINES.preflightPrefix}${base.verdict}`, tone: base.tone, lines };
 }

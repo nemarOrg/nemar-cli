@@ -235,7 +235,7 @@ describe("a verdict that needs a person proceeds only on an acknowledgment that 
   test("EDF clean beside a format the scanner skips is its own verdict", async () => {
     bidsWith(recording(CLEAN_PATIENT));
     write("sub-01/eeg/sub-01_task-other_eeg.set", "MATLAB 5.0 MAT-file Quillfeather");
-    expect((await scanLocalDataset(root)).status).toBe("clean-edf-only-others-unscreened");
+    expect((await scanLocalDataset(root)).status).toBe("partially-screened");
   });
 
   test("a truncated recording is a header nobody read, so the scan is incomplete", async () => {
@@ -415,8 +415,18 @@ describe("decidePreflight", () => {
             ? { "image-or-document-file": 1 }
             : {},
       edf_bdf_files_flagged: status === "direct-identifiers" ? 1 : 0,
-      unscreened_formats: status === "clean-edf-only-others-unscreened" ? { ".vhdr": 1 } : {},
+      unscreened_formats: status === "partially-screened" ? { ".vhdr": 1 } : {},
       read_failures: status === "unchecked" ? { "edf/short-body": 1 } : {},
+      read_by_format: {
+        edf: {
+          files: 2,
+          read: status === "unchecked" ? 1 : 2,
+          partial: 0,
+          failed: status === "unchecked" ? 1 : 0,
+        },
+      },
+      companion_missing: 0,
+      readers: { edf: "1" },
       ...over,
     });
   const all = { isTty: true, dryRun: true, no: true };
@@ -442,7 +452,7 @@ describe("decidePreflight", () => {
   });
 
   test("an acknowledgeable verdict: flag, preview, decline, prompt, or stop, in that order", () => {
-    for (const status of ["review", "unchecked", "clean-edf-only-others-unscreened"] as const) {
+    for (const status of ["review", "unchecked", "partially-screened"] as const) {
       const s = scan(status);
       expect(decidePreflight(s, { ...all, acknowledge: [status] })).toEqual({
         action: "proceed",
@@ -473,6 +483,7 @@ describe("decidePreflight", () => {
       incomplete: true,
       incomplete_reasons: ["edf-headers-unread"],
       files: { total: 4, edf_bdf: 2, header_read: 1, header_read_failed: 1 },
+      read_by_format: { edf: { files: 2, read: 1, partial: 0, failed: 1 } },
       read_failures: { "edf/unreadable-entry": 1 },
       unscreened_formats: { ".vhdr": 1 },
     });
@@ -493,6 +504,10 @@ describe("decidePreflight", () => {
   test("the option takes repeated and comma-separated verdicts, and nothing else", () => {
     expect(collectAcknowledgment("review,unchecked", undefined)).toEqual(["review", "unchecked"]);
     expect(collectAcknowledgment("not-screened", ["review"])).toEqual(["review", "not-screened"]);
+    // The renamed verdict's old word is taken as the new one, so an old pipeline keeps working.
+    expect(collectAcknowledgment("clean-edf-only-others-unscreened", undefined)).toEqual([
+      "partially-screened",
+    ]);
     for (const bad of ["direct-identifiers", "clean", "review,Quillfeather", "", " , "]) {
       expect(() => collectAcknowledgment(bad, undefined)).toThrow(InvalidArgumentError);
     }
@@ -589,7 +604,7 @@ describe("the walk, the reader and the limits, at their edges", () => {
     write("sourcedata/raw/backup.dat_backup", new Uint8Array(16));
     write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
     const scan = await scanLocalDataset(root);
-    expect(scan.status).toBe("clean-edf-only-others-unscreened");
+    expect(scan.status).toBe("partially-screened");
     expect(scan.unscreened_formats).toEqual({ ".other": 2, ".vhdr": 1 });
   });
 

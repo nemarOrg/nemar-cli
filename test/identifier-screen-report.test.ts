@@ -116,7 +116,7 @@ describe("parseScreenReport: what passes", () => {
       incomplete_reasons: [],
       files: { total: 10, edf_bdf: 4, header_read: 4, header_read_failed: 0 },
     };
-    const byStatus: Record<(typeof DATASET_STATUSES)[number], Record<string, unknown>> = {
+    const byStatus: Record<string, Record<string, unknown>> = {
       clean: {},
       "dates-only": { findings_by_kind: { "edf-startdate": 4 } },
       "no-recordings": { files: { total: 3, edf_bdf: 0, header_read: 0, header_read_failed: 0 } },
@@ -136,7 +136,9 @@ describe("parseScreenReport: what passes", () => {
       },
       "clean-edf-only-others-unscreened": { unscreened_formats: { ".set": 2 } },
     };
-    for (const status of DATASET_STATUSES) {
+    // These are version-1 reports, which never said `partially-screened` (version 2's word;
+    // identifier-coverage-contract.test.ts holds it).
+    for (const status of DATASET_STATUSES.filter((s) => s !== "partially-screened")) {
       const parsed = parseScreenReport(
         report({ scan: scan({ ...base, status, ...byStatus[status] }) }),
       );
@@ -327,7 +329,7 @@ describe("parseScreenReport: what is refused, without quoting it", () => {
   });
 
   test("the version, the scanner revision, the id and the time are checked", () => {
-    expect(refusal(report({ version: 2 }))).toBe("report-version");
+    expect(refusal(report({ version: 3 }))).toBe("report-version");
     expect(refusal(report({ scanner: LEAK }))).toBe("report-scanner");
     expect(refusal(report({ scan: scan({ id: LEAK }) }))).toBe("scan-id");
     expect(refusal(report({ scan: scan({ scanned_at: LEAK }) }))).toBe("scan-time");

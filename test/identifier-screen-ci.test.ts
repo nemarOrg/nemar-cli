@@ -53,6 +53,7 @@ import {
   runScreen,
   walkHistory,
 } from "../scripts/identifier-screen-ci-lib";
+import { DEFAULT_READER_LIMITS, type FormatReader, READERS } from "../shared/identifier-readers";
 import {
   type DatasetRecord,
   type ScreenReport,
@@ -593,7 +594,7 @@ describe("the screen: what a run reports", () => {
       withEdf.file("sub-05/eeg/sub-05_task-rest_eeg.set", "not parsed");
       withEdf.commit("set");
       const first = scanOf(await runScript(withEdf));
-      expect(first.status).toBe("clean-edf-only-others-unscreened");
+      expect(first.status).toBe("partially-screened");
       expect(first.unscreened_formats).toEqual({ ".set": 1 });
 
       fresh();
@@ -812,7 +813,7 @@ describe("the screen: what a run reports", () => {
       const result = await runScript(repo);
       const scan = scanOf(result);
       expect(scan.unscreened_formats).toEqual({ ".set": 1, [OTHER_FORMAT]: 1 });
-      expect(scan.status).toBe("clean-edf-only-others-unscreened");
+      expect(scan.status).toBe("partially-screened");
       expect(result.posted).toHaveLength(1);
     },
     T,
@@ -1047,6 +1048,52 @@ describe("the screen: a history walk that failed", () => {
   );
 
   test(
+    "a superseded recording of any registered reader's format is found, not only EDF/BDF",
+    async () => {
+      fresh();
+      const repo = new Repo();
+      const OLD = "sub-01/nirs/sub-01_task-rest_nirs.snirf";
+      repo.file(OLD, "old recording bytes").commit("a recording");
+      repo.remove(OLD);
+      repo.file("README", "readme").commit("removed");
+      const walk = (await walkHistory(repo.dir, Date.now() + 30_000)) as HistoryWalk;
+      const head = git(repo.dir, "rev-parse", "HEAD");
+      const tree = (await listTree(repo.dir, head)) as Tree;
+      const reader = new GitBlobReader(repo.dir);
+      try {
+        const resolved = {
+          entries: [],
+          annexed: 0,
+          inline: 0,
+          unresolved: 0,
+          annexedEdf: 0,
+          annexedRecordings: 0,
+        };
+        const oids = new Set(tree.entries.map((t) => t.oid));
+        // A reader registered for `.snirf` (only in this test): the old blob is a recording.
+        const snirf: FormatReader = {
+          id: "snirf",
+          extensions: [".snirf"],
+          limits: { ...DEFAULT_READER_LIMITS },
+          version: "test-1",
+          scan: async () => ({ findings: [], coverage: "complete" }),
+        };
+        const found = await findSuperseded(repo.dir, walk, resolved, oids, reader, [
+          ...READERS,
+          snirf,
+        ]);
+        expect(found.entries.map((e) => [e.path, e.reader])).toEqual([[OLD, "snirf"]]);
+        // The twin: with the registry as it is, no reader parses it, so it is not a recording.
+        const none = await findSuperseded(repo.dir, walk, resolved, oids, reader);
+        expect(none.entries).toEqual([]);
+      } finally {
+        await reader.close();
+      }
+    },
+    T,
+  );
+
+  test(
     "historic blobs that cannot be examined make the walk incomplete, never empty",
     async () => {
       fresh();
@@ -1062,6 +1109,7 @@ describe("the screen: a history walk that failed", () => {
         inline: 0,
         unresolved: 0,
         annexedEdf: 0,
+        annexedRecordings: 0,
       };
       const found = await findSuperseded(
         repo.dir,
@@ -1766,7 +1814,7 @@ describe("a report is never posted with anything the contract does not declare",
             const real = await scanDatasetFromManifest(...args);
             return {
               ...real,
-              status: "clean-edf-only-others-unscreened" as const,
+              status: "partially-screened" as const,
               unscreened_formats: { [`.${NAME}`]: 2 },
             };
           },
@@ -1788,6 +1836,7 @@ describe("a report is never posted with anything the contract does not declare",
       incomplete: false,
       incomplete_reasons: [],
       files: { total: 4, edf_bdf: 4, header_read: 4, header_read_failed: 0 },
+      read_by_format: { edf: { files: 4, read: 4, partial: 0, failed: 0 } },
       finding_fields: [`edf-patient-name:${NAME}`],
     };
     const report = finalizeScanReport(record, "identifier-scan@abcdef1", "a".repeat(40));
@@ -1805,6 +1854,7 @@ describe("a report is never posted with anything the contract does not declare",
       incomplete: false,
       incomplete_reasons: [],
       files: { total: 4, edf_bdf: 4, header_read: 4, header_read_failed: 0 },
+      read_by_format: { edf: { files: 4, read: 4, partial: 0, failed: 0 } },
     };
     const report = finalizeScanReport(record, "identifier-scan@abcdef1", "a".repeat(40));
     expect(report.scan).toEqual(record as unknown as DatasetRecord);
@@ -1812,7 +1862,7 @@ describe("a report is never posted with anything the contract does not declare",
     expect(
       finalizeScanReport({ ...record, extra: 1 }, "identifier-scan@abcdef1", "a".repeat(40)),
     ).toEqual({
-      version: 1,
+      version: 2,
       scanner: "identifier-scan@abcdef1",
       head: "a".repeat(40),
       error: "workflow-failed",
