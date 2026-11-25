@@ -50,6 +50,7 @@ import {
 } from "./helpers/publication-review";
 
 const SQL = readFileSync(join(MIGRATIONS_DIR, "0098_publication_reviews.sql"), "utf8");
+const RECORD_SQL = readFileSync(join(MIGRATIONS_DIR, "0152_publication_review_record.sql"), "utf8");
 const OTHER_HEAD = "fedcba9876543210fedcba9876543210fedcba98";
 
 interface ColumnInfo {
@@ -95,6 +96,13 @@ describe("0098 publication_reviews: columns", () => {
     override_reasons: { type: "TEXT", notnull: 0, dflt: null },
     created_at: { type: "TEXT", notnull: 1, dflt: "datetime('now')" },
     decided_at: { type: "TEXT", notnull: 0, dflt: null },
+    // Migration 0152: the reproducibility record (ADR 0139, decision 9).
+    scanner_id: { type: "TEXT", notnull: 0, dflt: null },
+    reader_versions: { type: "TEXT", notnull: 0, dflt: null },
+    resolver_version: { type: "TEXT", notnull: 0, dflt: null },
+    models: { type: "TEXT", notnull: 0, dflt: null },
+    prompt_version: { type: "TEXT", notnull: 0, dflt: null },
+    input_digest: { type: "TEXT", notnull: 0, dflt: null },
   };
 
   test("exactly the declared columns, types, NOT NULLs and defaults", () => {
@@ -171,7 +179,13 @@ describe("0098: the vocabularies of the migration and the code are the same list
     expect(listAfter(/verdict TEXT CHECK \(verdict IS NULL OR verdict IN \(([^)]*)\)/)).toEqual([
       ...PUBLICATION_OUTCOMES,
     ]);
+    // 0098's list is every run error but the one migration 0152 added; 0152's is the whole list.
     expect(listAfter(/detail TEXT CHECK \(detail IS NULL OR detail IN \(([^)]*)\)/)).toEqual([
+      ...PUBLICATION_DECLINE_DETAILS,
+      ...PUBLICATION_RUN_ERRORS.filter((e) => e !== "inputs_unavailable"),
+    ]);
+    const m = RECORD_SQL.match(/detail TEXT CHECK \(detail IS NULL OR detail IN \(([^)]*)\)/);
+    expect([...(m?.[1] ?? "").matchAll(/'([a-z_]+)'/g)].map((x) => x[1])).toEqual([
       ...PUBLICATION_DECLINE_DETAILS,
       ...PUBLICATION_RUN_ERRORS,
     ]);
@@ -553,6 +567,12 @@ describe("the row module", () => {
         "overrideReasons",
         "createdAt",
         "decidedAt",
+        "scannerId",
+        "readerVersions",
+        "resolverVersion",
+        "models",
+        "promptVersion",
+        "inputDigest",
       ].sort(),
     );
     expect(row).toMatchObject({

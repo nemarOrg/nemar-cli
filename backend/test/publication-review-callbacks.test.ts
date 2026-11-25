@@ -855,7 +855,11 @@ describe("the result", () => {
     const body = reportFor(SCREENED_HEAD, false);
     await h.result(reviewId, { outcome: "reported", report: body });
     const stored = JSON.parse(state(reviewId).report as string);
-    expect(Object.keys(stored).sort()).toEqual(Object.keys(body).sort());
+    // A version-1 body reads back with the version-2 fields as `not_asked` and null.
+    expect(Object.keys(stored).sort()).toEqual(
+      [...Object.keys(body), "note_answer", "record"].sort(),
+    );
+    expect(stored).toMatchObject({ v: 1, note_answer: "not_asked", record: null });
     // The raw callback body, with its envelope, is never stored.
     expect(state(reviewId).report as string).not.toContain("review_id");
   });
