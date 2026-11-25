@@ -10,6 +10,7 @@
 import { Hono } from "hono";
 import { adminMiddleware, authMiddleware, cookieOriginGuard } from "../../middleware/auth";
 import { registerComputeAdminRoutes } from "./compute";
+import { registerComputeAccessAdminRoutes } from "./compute-access";
 import { registerComputeDerivativeAdminRoutes } from "./compute-derivatives";
 import { registerComputeJobAdminRoutes } from "./compute-jobs";
 import { registerComputePipelineAdminRoutes } from "./compute-pipeline";
@@ -102,6 +103,8 @@ registerComputeAdminRoutes(adminRoutes);
 registerComputeJobAdminRoutes(adminRoutes);
 registerComputePipelineAdminRoutes(adminRoutes);
 registerComputeReportingRoutes(adminRoutes);
+// Compute access: the administrator's decisions on a person's request (epic #2021 phase D1; ADR 0118).
+registerComputeAccessAdminRoutes(adminRoutes);
 // Runner registrations (portable compute, card DM-05): owner only, behind the same router middleware.
 registerComputeRunnerAdminRoutes(adminRoutes);
 // The derivative store (portable compute, card V1b; ADR 0123): admin, with `published` the owner's alone

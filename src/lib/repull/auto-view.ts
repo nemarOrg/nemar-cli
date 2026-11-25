@@ -158,6 +158,6 @@ export function autoLines(v: AutoView): string[] {
     );
     for (const d of v.dispatches) lines.push(dispatchLine(d));
   }
-  lines.push("", "The week's counts, and what asks for attention: nemar admin import-weekly");
+  lines.push("", "The week's counts, and what asks for attention: nemar admin import weekly");
   return lines;
 }

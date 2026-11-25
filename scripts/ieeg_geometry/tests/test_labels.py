@@ -129,7 +129,9 @@ def test_native_coordsystem_is_untouched_and_a_space_pair_is_added(native_sideca
         f"{ieeg}_space-fsaverage_coordsystem.json",
         f"{ieeg}_space-fsaverage_electrodes.tsv",
     ]
-    assert after[f"{ieeg}_space-fsaverage_electrodes.tsv"] == before[f"{ieeg}_electrodes.tsv"]
+    # the table is the authors' rows, rewritten with LF line endings (a clean source is unchanged)
+    copied = before[f"{ieeg}_electrodes.tsv"].replace(b"\r\n", b"\n")
+    assert after[f"{ieeg}_space-fsaverage_electrodes.tsv"] == copied
     doc = json.loads(after[f"{ieeg}_space-fsaverage_coordsystem.json"])
     assert doc["iEEGCoordinateSystem"] == "fsaverage" and doc["iEEGCoordinateUnits"] == "mm"
     assert "MNI-305" in doc["iEEGCoordinateProcessingDescription"]  # the authors' word is kept
@@ -729,7 +731,7 @@ def test_a_malformed_row_is_skipped_with_a_reason(tmp_path):
     )
     elec.write_text(elec.read_text() + "C99\t1.0\n")  # a truncated row
     prop = _only(labels.plan_dataset(tmp_path))
-    assert prop.status == labels.SKIPPED and "cannot copy positions" in prop.reason
+    assert prop.status == labels.SKIPPED and "electrodes-rows" in prop.reason
     elec.write_text(elec.read_text().replace("C99\t1.0\n", "C99\tx\ty\tz\t0\n"))
     assert _only(labels.plan_dataset(tmp_path)).status == labels.SKIPPED
 

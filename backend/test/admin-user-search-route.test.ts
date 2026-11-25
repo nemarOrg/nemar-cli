@@ -184,6 +184,10 @@ describe("GET /admin/users?q= finds an account by any text field", () => {
     service_access_granted_at: "2046-01-01T00:00:06Z",
     upload_access_requested_at: "2047-01-01T00:00:07Z",
     upload_access_notified_at: "2048-01-01T00:00:08Z",
+    compute_access_requested_at: "2050-01-01T00:00:10Z",
+    compute_access_notified_at: "2051-01-01T00:00:11Z",
+    compute_access_granted_at: "2052-01-01T00:00:12Z",
+    compute_terms_accepted_at: "2053-01-01T00:00:13Z",
   };
   const CONSTRAINED: Record<string, { value: string; search: string }> = {
     status: { value: "revoked", search: "revoked" },
@@ -520,7 +524,7 @@ describe("credentials are neither searched nor returned", () => {
         username: "holdssecrets",
         email: "holds@example.org",
         status: "verified",
-        // `nemar admin doctor kinds` reads these two.
+        // `nemar admin users kind-check` reads these two.
         account_kind: "test",
         // A non-secret column the route has always returned stays returned.
         email_preferences: '{"digest":false}',

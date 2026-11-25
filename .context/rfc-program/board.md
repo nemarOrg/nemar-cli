@@ -19,7 +19,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-sonnet |
 | State | paused |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T15:39-08:00 |
+| Last tick | 2026-11-21T11:14-08:00 |
 | Next tick | - |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
@@ -47,9 +47,9 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 40 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 150 | 12 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
-| Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
+| Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
 ## Waves
 
@@ -67,10 +67,10 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - |  | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
 | A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | done | O0 | 2269 | r1 code+comments (1 Sonnet, docs-only): 2 sugg fixed + index sync; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged 0184cb051d77587144f501a327b3928c9da97033; ADR 0131; #2217 to be closed or rescoped by owner |
 | A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | done | O0 | 2268 | r1 code+comments (1 Sonnet, docs <50 lines): 3 sugg, 2 fixed, 1 no change; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged b20b9e93 (ADR 0130) |
-| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | - | blocked | O0 | - |  | - | 1d | waits until remi:18769 scan.py (pid 99119) ends (Q35); then dispatch from the cache copy |
+| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | claude-sonnet | done | O0 | #2289 | r1 claims+code (2 Sonnet): 1 crit, 10 imp, 15 sugg fixed; r2 delta clean, 3 sugg fixed, verified by manager | 2026-11-20T16:45-08:00 | 1d | merged #2289 (c48405fe0ad8e4a005dea123a0fa668b40af6ab1); 3 questions for the lead |
 | R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | done | O0, O1 | rfcs#1 | r1 code/errors/types/comments + tests (2 Sonnet): 5 imp, 9 sugg fixed; r2 delta clean, 2 sugg rejected (cosmetic) | 2026-11-20T12:57-08:00 | 2d | merged c3a3ccc6 into rfcs main |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | done | R1 | - |  | - | - | ruleset protect-main 27763743 active, verified (rfc-check required, admins bypass via PR) |
-| R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker-hard | - | - | todo | R1 | - |  | - | 1d | ready: dispatch (C1a card merged) |
+| R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker-hard | - | claude-sonnet | done | R1 | 2278 | r1 code+tests (2 Sonnet): 1 imp, 4 sugg fixed; r2 delta clean, 2 sugg rejected (empty-title placeholder: rfc-check requires a title; port-9 test never reaches GitHub) | 2026-11-20T16:45-08:00 | 1d | merged 14d49c8e |
 | B1 | [biosig-zarr initialized](cards/B1.md) | - | worker-hard | - | claude-sonnet | done | A2 | biosig-zarr#1 | r1 code/errors + comments (2 Sonnet): 2 imp, 5 sugg fixed, 3 rejected with reason; fix diff verified by manager | 2026-11-20T14:25-08:00 | 1d | merged 5794535df619f7daef8d91d79928c7a803a99e8b (merge commit, keeps DCO sign-offs) |
 | B2 | [Spec text moves into biosig-zarr](cards/B2.md) | - | worker | - | claude-sonnet | done | B1 | biosig-zarr#2 | r1 code/errors/tests + comments (2 Sonnet): 0 crit/imp; 2 sugg fixed (link-target check), 1 no change; fix diff verified by manager | 2026-11-20T15:30-08:00 | 1d | merged 36112961471b46de1a96e5cb67f9581772d9146e |
 | R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | claude-sonnet | done | A1, R1 | docs#127 | r1 code+comments (1 Sonnet, docs): 2 sugg fixed; fix diff verified by manager | 2026-11-20T14:50-08:00 | 1d | owner merged docs#127 (2026-11-20T22:15:20Z ee23bf7f) |
@@ -79,19 +79,25 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | done | O4, A2 | biosig-zarr#4 | r1 decisions+technical (2 Sonnet): 7 imp, ~11 sugg fixed; r2 delta clean, 2 sugg fixed, verified by manager | 2026-11-20T16:05-08:00 | 2d | draft waits for the owner: biosig-zarr#4 head 08a990b7 |
 | O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | done | B6 | - |  | - | - | pre-release 3.0.0-draft.1 on 08a990b7, isPrerelease true (verified); compare link 200 |
 | B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | done | R1, B2, A2 | rfcs#2 | r1 decisions+technical (2 Sonnet): 6 imp, ~13 sugg fixed; r2 delta+seam: 1 imp fixed (aligned to spec), verified by manager | 2026-11-20T16:05-08:00 | 2d | draft waits for the owner: rfcs#2 head b49245f2 (Q36-Q40) |
-| B5 | [Version 3 schemas and vectors](cards/B5.md) | - | lead | - | - | blocked | B5a, O4d, B6 | - |  | - | 3d | after B5a and O4d |
+| B5 | [Version 3 schemas and vectors](cards/B5.md) | - | lead | - | claude-opus | done | B5a, O4d, B6 | biosig-zarr#6 | r1 spec+tools (2 Sonnet): 3 imp, 6 sugg fixed (layer per advisor); r2 delta clean; 1 sugg fixed, verified by manager | 2026-11-20T18:15-08:00 | 3d | merged into draft/3.0.0 (ac6e3124f44e3d7e940fe25430cee4296f755d39) |
 | N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | claude-sonnet | done | B4 | 2273 | r1 comments (1 Sonnet): 0 crit/imp, 4 sugg fixed or no change; r2 delta clean; 1 sugg (stale card N1 text) to the lead | 2026-11-20T18:45-08:00 | 4h | merged 0585cc96; drafts in owner/announce-0001 for O5 |
-| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1, B5a, O4d, B5, O4c, B4b | - |  | - | - | owner step; also mail epic #2260 P1-P3 and privacy text in production |
+| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1, B5a, O4d, B5, O4c, B4c, B4d | - |  | - | - | owner opens Mon 2026-11-30 ~09:00 PST (moved from 11-23 by owner 2026-11-25); closes 2026-12-21 17:00 UTC if opened 17:00 UTC (ext. to 2027-01-04 max); commands in owner/announce-0001/monday.md; mail dependency met 11-22, prod 0.10.39 |
 | C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - |  | - | - | when RFC-0001's close instant passes |
 | V2 | [RFC-0002 text, draft PR](cards/V2.md) | - | lead | - | - | outline | V1, O5 | - |  | - | 2d | lead completes at C2 (Q16) |
 | O6 | Owner opens RFC-0002 after RFC-0001 closes | - | owner | - | - | blocked | V2, C3 | - |  | - | - | one RFC open at a time |
 | C4 | Checkpoint: RFC-0002 closed, decision draft, process ADR review | - | lead | - | - | blocked | O6 | - |  | - | - | when RFC-0002's close instant passes |
-| A3 | [ADR amends 0124: vectors canonical in biosig-zarr](cards/A3.md) | - | lead | - | - | todo | - | - |  | - | 4h | ready: dispatch; PR stays draft until 0132 on dev and dev merged in |
-| B5a | [Version 2 schemas and vectors on main](cards/B5a.md) | - | lead | - | - | todo | B2, O4 | - |  | - | 2d | ready: dispatch |
-| O4d | Manager releases 2.0.1 on owner say-so | - | owner | - | - | blocked | B5a | - |  | - | - | after B5a merges |
-| O4c | Manager tags 3.0.0-draft.2 on owner say-so (Q36) | - | owner | - | - | blocked | B5 | - |  | - | - | after B5 merges |
-| B4b | [RFC-0001 points at 3.0.0-draft.2, license notice](cards/B4b.md) | - | lead | - | - | blocked | O4c | - |  | - | 2h | after O4c |
-| SC1 | [Store Contract states v3 NEMAR profile](cards/SC1.md) | - | lead | - | - | todo | B6, O4b | - |  | - | 4h | ready: dispatch; owner merges docs |
+| A3 | [ADR amends 0124: vectors canonical in biosig-zarr](cards/A3.md) | - | lead | - | claude-opus | todo | - | 2277 |  | 2026-11-20T16:45-08:00 | 4h | unblocked: ADR 0132 on dev (mail epic, 2026-11-22); merge dev into feature/rfc-program, then review and merge PR 2277 |
+| B5a | [Version 2 schemas and vectors on main](cards/B5a.md) | - | lead | - | claude-opus | done | B2, O4 | biosig-zarr#5 | r1 spec+tools (2 Sonnet): 3 imp, ~10 sugg fixed; r2 delta clean, 1 sugg rejected (docstring is fixed, cannot be empty) | 2026-11-20T16:45-08:00 | 2d | merged 3bd184a9c85a3a9cc646dce94b98520021231650 |
+| O4d | Manager releases 2.0.1 on owner say-so | - | owner | - | - | done | B5a | - |  | - | - | release 2.0.1 on 3bd184a9, isPrerelease false (verified) |
+| O4c | Manager tags 3.0.0-draft.2 on owner say-so (Q36) | - | owner | - | - | done | B5 | - |  | - | - | pre-release 3.0.0-draft.2 on ac6e3124f44e3d7e940fe25430cee4296f755d39, isPrerelease true (verified) |
+| B4b | [RFC-0001 points at 3.0.0-draft.2, license notice](cards/B4b.md) | - | lead | - | claude-opus | done | O4c | rfcs#2 | r1 comments+seam (1 Sonnet): clean; 2 sugg moved to B4c | 2026-11-20T19:55-08:00 | 2h | superseded by B4c (independence notice, draft.3) |
+| SC1 | [Store Contract states v3 NEMAR profile](cards/SC1.md) | - | lead | - | claude-opus | done | B6, O4b | docs#129 | r1 code+comments (1 Sonnet): clean, 1 sugg no change needed | 2026-11-20T16:45-08:00 | 4h | merged by manager on owner instruction (f6305f74) |
+| B7 | [biosig-zarr main: NEMAR as origin and implementer only](cards/B7.md) | - | lead | - | claude-opus | done | - | biosig-zarr#7 | r1 comments+code (1 Sonnet): 0 crit/imp; 2 sugg: 1 fixed, 1 rejected (history); version-history NEMAR fixed; fixes verified by manager (small, no r2) | 2026-11-20T19:40-08:00 | 4h | merged into main (509b68976144561050606d11ac71f623b51f0a97) |
+| O4e | Manager releases 2.0.2 on owner say-so (Q37/Q38) | - | owner | - | - | done | B7 | - |  |  | - | release 2.0.2 on 509b68976144561050606d11ac71f623b51f0a97, not prerelease (verified) |
+| B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | claude-opus | done | B7, O4e | biosig-zarr#8 | r1 comments+seam (1 Sonnet): 0 crit/imp; 2 sugg: 1 fixed, 1 rejected (history verbatim); fix verified by manager | 2026-11-21T10:50-08:00 | 3h | merged into draft/3.0.0 (c0cb7e49e301feb8cebd57208edee8feb9fdb533) |
+| O4f | Manager tags 3.0.0-draft.3 on owner say-so (Q37/Q38) | - | owner | - | - | done | B7b | - |  |  | - | pre-release 3.0.0-draft.3 on c0cb7e49e301feb8cebd57208edee8feb9fdb533 (verified) |
+| B4c | [RFC-0001 on 3.0.0-draft.3, independence notice](cards/B4c.md) | - | lead | - | claude-opus | done | B4b, O4e, O4f | - | r1 comments+seam (1 Sonnet): clean; 1 sugg (history row 2.0.2 date) is card-given text, routed to the lead's S1 card | 2026-11-21T11:25-08:00 | 2h | rfcs#2 head 0e4947c7f6f3b6bbf8f6a5aaf054b2357cc0ad0e, still draft; acceptance verified by manager |
+| B4d | [RFC-0001 cites S1 figures](cards/B4d.md) | - | worker | - | claude-sonnet | done | S1, B4c | rfcs#2 | r1 comments + seam of whole RFC-0001 (1 Sonnet): clean | 2026-11-21T12:05-08:00 | 2h | rfcs#2 head b6bbb3cddca8f49fc59b98ca130e72eaf1cca4eb, still draft; RFC text ready for O5 |
 
 ## Questions
 
@@ -133,6 +139,13 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q34 | - | ADR 0124 amendment (vectors canonical in biosig-zarr, vendored by digest): write at C3 or now after mail ADR 0132 merges? | At C3 (Recommended) / Now, as a lead step | none | 2026-11-22T17:00 | closed | Write the ADR 0124 amendment now, as a lead step (owner, 2026-11-20T20:20-08:00) |
 | Q35 | - | The EDF+D header scan (pid 99119, remi:18769) is still running. Let it finish, then dispatch S1, or stop it and dispatch S1 now? | Let it finish (Recommended) / Stop it now | none | 2026-11-22T17:00 | closed | Owner gave the counts so far; scan is actively progressing (13000/16883); let it finish, S1 after (owner, 2026-11-20T20:20-08:00) |
 | Q36 | - | O4c (tag 3.0.0-draft.2 after B5): owner runs it, or the manager runs it under the new P1 rule? | Manager runs it on owner say-so (Recommended) / Owner runs it | none | 2026-11-24T17:00 | closed | Manager runs O4c on the owner's say-so under the P1 rule (owner, 2026-11-20T20:20-08:00) |
+| Q37 | - | RFC-0001 quotes spec text with the notice 'Copyright (c) 2026 NEMAR contributors', W3C Software and Document License (from biosig-zarr LICENSE.md). Is that the notice you want? | Yes, as in LICENSE.md (Recommended) / A different holder | none | 2026-11-22T17:00 | closed | biosig-zarr is independent of NEMAR; holder 'the biosig-zarr contributors'; reword all, new 2.0.2 and 3.0.0-draft.3 (owner, 2026-11-20T20:35; detail in Decisions) |
+| Q39 | - | Who is the biosig-zarr spec editor under independence? | Seyed Yahya Shirazi, personal capacity; rewording ruled editorial (Recommended) / A governance RFC after RFC-0001 / NEMAR's owner stays editor | none | 2026-11-22T17:00 | closed | Seyed Yahya Shirazi, personal capacity; rewording ruled editorial (owner, 2026-11-20T21:25-08:00) |
+| Q40 | - | Where are biosig-zarr RFCs decided under independence? | Keep nemarOrg/rfcs; the spec editor decides; RFC-0001 stays NEMAR RFC 0001 (Recommended) / biosig-zarr's own process (moves RFC-0001, delays O5) | none | 2026-11-22T17:00 | closed | Keep nemarOrg/rfcs; the spec editor decides; RFC-0001 stays NEMAR RFC 0001 (owner, 2026-11-20T21:25-08:00) |
+| Q41 | - | Where does the biosig-zarr repository live? | Stay in nemarOrg as hosting only; move when a second institution co-maintains (Recommended) / Transfer to its own organization now | none | 2026-11-22T17:00 | closed | Stay in nemarOrg as hosting only; move when a second institution co-maintains (owner, 2026-11-20T21:25-08:00) |
+| Q42 | - | Release DOIs for biosig-zarr (Q14 planned NEMAR DOIs)? | Keep nemar-doi as a registration service / Zenodo (lead's pick; note AGENTS.md says EZID not Zenodo for NEMAR) / No DOI before beta | none | 2026-11-22T17:00 | closed | Keep nemar-doi, described as a registration service (owner, 2026-11-20T21:25-08:00) |
+| Q43 | - | O4e: release biosig-zarr 2.0.2 on B7's merge commit 509b6897 with plan section 5's notes? | Yes, release now (Recommended) / Hold | none | 2026-11-22T17:00 | closed | Yes, release now (owner, 2026-11-21) |
+| Q44 | - | O4f: tag 3.0.0-draft.3 (pre-release) on B7b's merge commit c0cb7e49 with plan section 5's notes? | Yes, tag now (Recommended) / Hold | none | 2026-11-22T17:00 | closed | Yes, tag now (owner, 2026-11-21) |
 
 ## Proposals
 
@@ -141,6 +154,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | P1 | 2026-11-20T13:29-08:00 | Owner says a rule is wrong and should be updated clearly; the lead rewrites it in runbook.md (manager cannot edit the runbook) | owner, 2026-11-20T15:00: 'That is wrong rule, ask an owner to update the rules clearly' | accepted |
 | P2 | 2026-11-20T14:40-08:00 | Lead writes a docs card: update /platform/zarr/store-contract/ with the v3 NEMAR profile choices (D5, D7, D11, D12, index.json rule), owner merges | owner answer Q29 'Both now' | accepted |
 | P3 | 2026-11-20T15:01-08:00 | Lead updates card N1 Scope text for notes.md to the Q31/Q32 venues (EEGLAB list, MNE Forum, Neurostars) | N1 r2 review: card text predates Q31/Q32 | accepted |
+| P4 | 2026-11-21T10:27-08:00 | Lead: answer S1's 3 questions (36 negative-total BV, 528 undated as can-be, nm000411 no index) and say which figures RFC-0001 cites and by which card before O5 | S1 gives both figures; no card yet carries them into RFC-0001; B4c is fixed | accepted |
 
 ## Agents
 
@@ -167,7 +181,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | impl-B2 | implementer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:30-08:00 | done |
 | rev-B2-code | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
 | rev-B2-text | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
-| impl-B4 | implementer | claude-opus | Opus xhigh | B4 | 2026-11-20T16:05-08:00 | done |
+| impl-B4 | implementer | claude-opus | Opus xhigh | B4b | 2026-11-20T19:55-08:00 | done |
 | impl-B6 | implementer | claude-opus | Opus xhigh | B6 | 2026-11-20T16:05-08:00 | done |
 | impl-B3 | implementer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:05-08:00 | done |
 | rev-B3 | reviewer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:20-08:00 | done |
@@ -184,3 +198,36 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | lead-C1 | lead | claude-opus | Opus xhigh | C1 | 2026-11-20T19:45-08:00 | done |
 | rev-C1 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:10-08:00 | done |
 | rev-C1-r2 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:40-08:00 | done |
+| impl-S1 | implementer | claude-sonnet | Sonnet high | S1 | 2026-11-20T16:45-08:00 | done |
+| impl-R3 | implementer | claude-sonnet | Sonnet xhigh | R3 | 2026-11-20T16:45-08:00 | done |
+| impl-A3 | implementer | claude-opus | Opus xhigh | A3 | 2026-11-20T16:45-08:00 | done |
+| impl-B5a | implementer | claude-opus | Opus xhigh | B5a | 2026-11-20T16:45-08:00 | done |
+| impl-SC1 | implementer | claude-opus | Opus xhigh | SC1 | 2026-11-20T16:45-08:00 | done |
+| rev-SC1 | reviewer | claude-sonnet | Sonnet high | SC1 | 2026-11-20T17:05-08:00 | done |
+| rev-R3-code | reviewer | claude-sonnet | Sonnet high | R3 | 2026-11-20T17:30-08:00 | done |
+| rev-R3-tests | reviewer | claude-sonnet | Sonnet high | R3 | 2026-11-20T17:30-08:00 | done |
+| rev-B5a-spec | reviewer | claude-sonnet | Sonnet high | B5a | 2026-11-20T17:30-08:00 | done |
+| rev-B5a-tools | reviewer | claude-sonnet | Sonnet high | B5a | 2026-11-20T17:30-08:00 | done |
+| rev-B5a-r2 | reviewer | claude-sonnet | Sonnet high | B5a | 2026-11-20T17:50-08:00 | done |
+| rev-R3-r2 | reviewer | claude-sonnet | Sonnet high | R3 | 2026-11-20T18:00-08:00 | done |
+| impl-B5 | implementer | claude-opus | Opus xhigh | B5 | 2026-11-20T18:15-08:00 | done |
+| rev-B5-spec | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:00-08:00 | done |
+| rev-B5-tools | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:00-08:00 | done |
+| adv-B5-layer | advisor | claude-opus | Opus xhigh | B5 | 2026-11-20T19:30-08:00 | done |
+| rev-2285 | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:05-08:00 | done |
+| rev-B5-r2 | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:40-08:00 | done |
+| rev-B4b | reviewer | claude-sonnet | Sonnet high | B4b | 2026-11-20T20:20-08:00 | done |
+| lead-indep | lead | claude-opus | Opus xhigh | - | 2026-11-20T20:35-08:00 | running |
+| rev-2288 | reviewer | claude-sonnet | Sonnet high | - | 2026-11-20T21:10-08:00 | done |
+| ad09993a | reviewer | claude-sonnet | sonnet | PR 2288 r2 | 19:21 | done |
+| a8707231 | implementer | claude-opus | Opus xhigh | B7 | 2026-11-20T19:40-08:00 | done |
+| a535721e | reviewer | claude-sonnet | sonnet | B7 | 2026-11-21T10:20-08:00 | done |
+| a768fe87 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | done |
+| a5f0463d | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | done |
+| aa2406a9 | implementer | claude-opus | Opus xhigh | B7b | 2026-11-21T10:50-08:00 | done |
+| ad17a6a5 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T11:05-08:00 | done |
+| ac7d379d | reviewer | claude-sonnet | sonnet | B7b | 2026-11-21T11:15-08:00 | done |
+| a8692c4a | implementer | claude-opus | Opus xhigh | B4c | 2026-11-21T11:25-08:00 | done |
+| a21b313b | lead | claude-opus | Opus xhigh | B4d-card | 2026-11-21T11:45-08:00 | done |
+| a5fb478c | implementer | claude-sonnet | Sonnet high | B4d | 2026-11-21T12:05-08:00 | done |
+| a21eb37a | reviewer | claude-sonnet | sonnet | B4d | 2026-11-21T11:00-08:00 | done |

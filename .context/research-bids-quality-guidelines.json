@@ -1,0 +1,2919 @@
+{
+  "meta": {
+    "bids_specification_version": "1.11.2",
+    "bids_schema_version": "2.0.0",
+    "bids_validator_version_pinned_by_nemar": "3.0.2",
+    "tiers": {
+      "T0": "BIDS REQUIRED, cannot be omitted",
+      "T1": "BIDS RECOMMENDED or OPTIONAL that NEMAR strongly recommends",
+      "T2": "useful but not essential"
+    },
+    "enforcement_codes": {
+      "validator": "the BIDS validator already reports it",
+      "preflight-warn": "a NEMAR CLI preflight check could warn",
+      "gate-record": "the submission gate could record it for the reviewer",
+      "gate-block": "the submission gate could block (or already blocks)",
+      "docs-only": "documentation only"
+    },
+    "measurement": {
+      "method": "read-only sample of public datasets, latest version, first subject with the datatype; rates are per sampled dataset",
+      "measured_on": null,
+      "measured_on_note": "not recorded; the reads were made on or before 2026-11-19, the date of the research document and its first commit",
+      "seed": null,
+      "seed_note": "a fixed seed was used, but its value was not recorded, so the random draws for eeg, ieeg and meg cannot be redrawn",
+      "sampled_per_modality": {
+        "eeg": 40,
+        "ieeg": 40,
+        "meg": 40,
+        "nirs": 27,
+        "emg": 11,
+        "motion": 6
+      },
+      "recordings_read_per_modality": {
+        "eeg": 40,
+        "ieeg": 36,
+        "meg": 36,
+        "nirs": 27,
+        "emg": 11,
+        "motion": 6
+      },
+      "recordings_read_note": "4 of the 40 ieeg draws and 4 of the 40 meg draws gave no recording sidecar for that modality and were recorded as unknown, not absent; the per-dataset log that would say which and why was not kept",
+      "draws": 164,
+      "datasets_read": 163,
+      "draws_note": "nirs, emg and motion were read in full, and nm000284 lists both emg and motion, so it was drawn twice: 164 draws, 163 distinct datasets",
+      "datasets_failed": 0,
+      "presence_rule": "for presence items a key, column or file counts as missing when absent; an empty or n/a value counts only where metric_definition says so",
+      "ieeg_coordinates": "from a separate spot check of 37 iEEG datasets; first electrode rows only"
+    },
+    "bids_validator_bundled_schema": {
+      "schema_version": "1.2.7",
+      "bids_version": "1.11.1",
+      "note": "NEMAR runs the validator without a schema option, so it checks against its bundled schema (BIDS 1.11.1). For every item here the levels are the same as in 1.11.2; the validator text was read at tag 3.0.2."
+    },
+    "fields": {
+      "id": "stable kebab-case identifier, unique across items; never reused",
+      "file": "display label for the file column of the documentation tables",
+      "key": "display label for the item (keys, columns or the property checked)",
+      "target": "machine form: files is a list of path globs or suffixes relative to the dataset root (all must match for file-pair), keys lists JSON keys, columns lists TSV columns",
+      "check": "one of check_types",
+      "bids_level": "one of bids_levels",
+      "condition": "when the item applies, or, for CONDITIONAL, the rule that sets the level; null when unconditional",
+      "level_note": "qualifier of the level that is not a condition (where the level comes from, or a sub-rule)",
+      "tier_note": "why the tier is a judgment call, when it is one",
+      "metric_definition": "what the measured rate counts; null when not measured"
+    },
+    "bids_levels": {
+      "REQUIRED": "BIDS REQUIRED (under condition, if one is given)",
+      "RECOMMENDED": "BIDS RECOMMENDED (under condition, if one is given)",
+      "OPTIONAL": "BIDS OPTIONAL (under condition, if one is given)",
+      "CONDITIONAL": "the level itself depends on the dataset; condition states the rule",
+      "VALUE_QUALITY": "the key or column meets its BIDS level already; the item asks for a better value than BIDS demands"
+    },
+    "check_types": {
+      "presence": "the files exist, and each listed key or column exists",
+      "non-n/a": "present, and the value (for a column, at least one row) is not n/a, empty or unknown",
+      "numeric": "present, and the value is a number",
+      "named-enum": "the value is a named keyword from the schema enumeration, not Other",
+      "levels-present": "categorical code columns are described with Levels or HED in the JSON sidecar",
+      "columns-described": "every non-standard TSV column is described in the JSON sidecar",
+      "file-pair": "all listed files exist together",
+      "strict-json": "the file parses with a strict JSON parser (UTF-8, no raw control characters)",
+      "min-length": "the file is longer than 150 bytes",
+      "judgment": "needs a human reader; no mechanical check settles it"
+    }
+  },
+  "items": [
+    {
+      "id": "dataset-name",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "Name",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "Name"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Titles every listing, search hit and DOI record.",
+      "failure_when_missing": "Short or slug titles are unsearchable; the gate already refuses names under 25 characters for native datasets.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes; EMPTY_DATASET_NAME warning",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted; publication gate (native datasets): Name of at least 25 characters",
+      "enforcement_options": [
+        "validator",
+        "gate-block"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "dataset-bids-version",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "BIDSVersion",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "BIDSVersion"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Tells tools which rules the dataset was written against.",
+      "failure_when_missing": "Catalog holds values that are not releases (for example `v1.2.1` in 15 datasets, `1.2` in 10).",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes; UNKNOWN_BIDS_VERSION warning for a value that is not a release",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator",
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "dataset-authors",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "Authors",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "Authors"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "CONDITIONAL",
+      "condition": "OPTIONAL; RECOMMENDED when CITATION.cff is absent (CITATION.cff then carries the authors)",
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Becomes the DOI creator list, so credit and citation depend on it.",
+      "failure_when_missing": "A dataset with no named people cannot be cited; placeholder author lists such as `[Unspecified1]` were the motivating case for the gate.",
+      "validator_warns": "yes: NO_AUTHORS warning when the key is absent and CITATION.cff is absent; TOO_FEW_AUTHORS warning for a single entry",
+      "nemar_checks_today": "publication gate (native datasets): Authors must name a person, placeholders refused; CLI collects co-author ORCID identifiers",
+      "enforcement_options": [
+        "validator",
+        "gate-block"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.0,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets whose dataset_description.json has no Authors key"
+    },
+    {
+      "id": "dataset-license",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "License",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "License"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "States reuse terms; a license identifier is machine-readable for DOI rights and catalog filters.",
+      "failure_when_missing": "Free-text values in the catalog: 61 of 910 datasets use a string that is neither a BIDS nor an SPDX identifier, such as `CC BY 4.0`, `CC0 BY 4.0`, `Creative commons`, `Unknown` or `n/a`.",
+      "validator_warns": "partly: JSON_KEY_RECOMMENDED when absent; the value is not checked",
+      "nemar_checks_today": "CLI upload: detects License, prompts for an SPDX identifier on a terminal and writes LICENSE",
+      "enforcement_options": [
+        "preflight-warn",
+        "gate-record"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.006,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets whose dataset_description.json has no License key; the value was not judged"
+    },
+    {
+      "id": "dataset-ethics-approvals",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "EthicsApprovals",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "EthicsApprovals"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": "unless the README carries an ethics statement",
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Visible evidence that the collection was approved, which reusers and journals ask for.",
+      "failure_when_missing": "Absent in most OpenNeuro mirrors (68.6% of in-scope OpenNeuro datasets in the June 2026 scan, [research-submission-minimums-deskreject.md](research-submission-minimums-deskreject.md)).",
+      "validator_warns": "no",
+      "nemar_checks_today": "publication gate (native datasets): EthicsApprovals or an ethics statement in the README",
+      "enforcement_options": [
+        "gate-block"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.436,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets whose dataset_description.json has no EthicsApprovals key; README ethics statements were not searched"
+    },
+    {
+      "id": "dataset-references-and-links",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "ReferencesAndLinks",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "ReferencesAndLinks"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": "when a publication or protocol describes the data",
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Points to the methods paper, which is where most acquisition detail lives.",
+      "failure_when_missing": "Without it a reader cannot find the protocol behind sparse sidecars.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn",
+        "docs-only"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.38,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets whose dataset_description.json has no ReferencesAndLinks key"
+    },
+    {
+      "id": "dataset-funding",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "Funding",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "Funding"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": null,
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Becomes DOI funding references, how funders find what they paid for; NEMAR's submission standards already list it as strongly recommended.",
+      "failure_when_missing": "No funder link in the DOI record.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.405,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets whose dataset_description.json has no Funding key"
+    },
+    {
+      "id": "dataset-hed-version",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "HEDVersion",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "HEDVersion"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": "when any HED annotation is present",
+      "level_note": "needed for HED validation",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Pins the HED schema so annotations validate the same way later.",
+      "failure_when_missing": "HED tags without a version are not validated at all by the pinned validator.",
+      "validator_warns": "partly: JSON_KEY_RECOMMENDED warning whenever the key is absent, HED or not; when HED is used without it, the HED annotations are silently not validated",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator",
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "dataset-generated-by",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "GeneratedBy",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "GeneratedBy"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "CONDITIONAL",
+      "condition": "RECOMMENDED; REQUIRED when DatasetType is derivative",
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Names the pipeline that produced derived data.",
+      "failure_when_missing": "Processed data with no provenance cannot be reproduced.",
+      "validator_warns": "yes: error for a derivative dataset",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "dataset-type",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "DatasetType",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "DatasetType"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Distinguishes raw from derivative datasets; defaults to raw.",
+      "failure_when_missing": "Processed-only deposits look like raw data.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.282,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets whose dataset_description.json has no DatasetType key"
+    },
+    {
+      "id": "dataset-acknowledgements-keywords",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "Acknowledgements, HowToAcknowledge, Keywords",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "Acknowledgements",
+          "HowToAcknowledge",
+          "Keywords"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Courtesy and discovery text.",
+      "failure_when_missing": "Minor.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "docs-only"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.816,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets whose dataset_description.json lacks the keys; a multi-key item counts as missing when any listed key is absent; the run did not record whether it used any or all"
+    },
+    {
+      "id": "dataset-source-datasets",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "SourceDatasets",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "SourceDatasets"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Links a converted or derived dataset to its source.",
+      "failure_when_missing": "Lineage is lost for re-hosted or converted data.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "dataset-links",
+      "modality": "all",
+      "file": "dataset_description.json",
+      "key": "DatasetLinks",
+      "target": {
+        "files": [
+          "dataset_description.json"
+        ],
+        "keys": [
+          "DatasetLinks"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "CONDITIONAL",
+      "condition": "OPTIONAL; REQUIRED when BIDS URIs are used",
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Resolves `bids:<name>:` URIs.",
+      "failure_when_missing": "Unresolvable references.",
+      "validator_warns": "no: the condition is prose the validator does not evaluate, so the key is treated as OPTIONAL",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "readme-file",
+      "modality": "all",
+      "file": "README",
+      "key": "file",
+      "target": {
+        "files": [
+          "README",
+          "README.md",
+          "README.txt",
+          "README.rst"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": "REQUIRED in the prose definition; RECOMMENDED in the schema file rule",
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "The only free-text explanation of what the dataset is and how it is organized.",
+      "failure_when_missing": "A missing or stub README leaves every other field without context; NEMAR's policy already requires a substantive README.",
+      "validator_warns": "yes: README_FILE_MISSING warning; README_FILE_SMALL warning at 150 bytes or fewer",
+      "nemar_checks_today": "publication prescreen (advisory, language model): README present and describes the data; administrator review",
+      "enforcement_options": [
+        "validator",
+        "preflight-warn",
+        "gate-block"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.0,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets with no README file in the root listing"
+    },
+    {
+      "id": "readme-substance",
+      "modality": "all",
+      "file": "README",
+      "key": "substance (more than 150 bytes, dataset specific)",
+      "target": {
+        "files": [
+          "README",
+          "README.md",
+          "README.txt",
+          "README.rst"
+        ]
+      },
+      "check": "min-length",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "SHOULD describe the dataset",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "A specific README is what lets a reader decide whether the data fit their question.",
+      "failure_when_missing": "Boilerplate copied across a family of datasets.",
+      "validator_warns": "partly: README_FILE_SMALL at 150 bytes or fewer",
+      "nemar_checks_today": "publication prescreen (advisory, language model): README present and describes the data",
+      "enforcement_options": [
+        "preflight-warn",
+        "docs-only"
+      ],
+      "machine_check_feasible": false,
+      "measured_missing_rate": 0.006,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets whose README is 150 bytes or smaller; dataset specificity was not measured"
+    },
+    {
+      "id": "changes-file",
+      "modality": "all",
+      "file": "CHANGES",
+      "key": "file",
+      "target": {
+        "files": [
+          "CHANGES"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Version history for reusers of an earlier release.",
+      "failure_when_missing": "Readers cannot tell what changed between versions.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "docs-only"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.11,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets with no CHANGES file in the root listing"
+    },
+    {
+      "id": "license-file",
+      "modality": "all",
+      "file": "LICENSE",
+      "key": "file",
+      "target": {
+        "files": [
+          "LICENSE"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": null,
+      "level_note": "MUST match License when present",
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Full license text.",
+      "failure_when_missing": "Mismatch with the License field.",
+      "validator_warns": "no",
+      "nemar_checks_today": "CLI upload: detects License, prompts for an SPDX identifier on a terminal and writes LICENSE",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "participants-file",
+      "modality": "all",
+      "file": "participants.tsv",
+      "key": "file",
+      "target": {
+        "files": [
+          "participants.tsv"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "RECOMMENDED in the prose; OPTIONAL in the schema file rule",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "The cohort table behind age, sex and group filters and the catalog's age range.",
+      "failure_when_missing": "No demographics at all; the dataset cannot be filtered by cohort.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.049,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets with no participants.tsv in the root listing"
+    },
+    {
+      "id": "participants-id",
+      "modality": "all",
+      "file": "participants.tsv",
+      "key": "participant_id",
+      "target": {
+        "files": [
+          "participants.tsv"
+        ],
+        "columns": [
+          "participant_id"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": "when participants.tsv exists",
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Joins the table to subject folders.",
+      "failure_when_missing": "Rows cannot be matched to data.",
+      "validator_warns": "yes: PARTICIPANT_ID_MISMATCH error",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "participants-age",
+      "modality": "all",
+      "file": "participants.tsv",
+      "key": "age (column present with values)",
+      "target": {
+        "files": [
+          "participants.tsv"
+        ],
+        "columns": [
+          "age"
+        ]
+      },
+      "check": "non-n/a",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Age filters and the catalog age range come from this column.",
+      "failure_when_missing": "In the sample, 28 of 155 participants tables have no age column and 31 more have one whose every value is n/a; the catalog has no age range for 338 of 910 datasets.",
+      "validator_warns": "no: absent RECOMMENDED columns are skipped silently",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.381,
+      "measured_sample_size": 155,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled participants tables (datasets with a participants.tsv) with no age column, or with one whose every value is n/a"
+    },
+    {
+      "id": "participants-sex",
+      "modality": "all",
+      "file": "participants.tsv",
+      "key": "sex",
+      "target": {
+        "files": [
+          "participants.tsv"
+        ],
+        "columns": [
+          "sex"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Sex is the most common covariate and cohort filter.",
+      "failure_when_missing": "Cohort balance cannot be checked.",
+      "validator_warns": "no: absent RECOMMENDED columns are skipped silently",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.135,
+      "measured_sample_size": 155,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled participants tables with no sex column; whether an all-n/a column also counted was not recorded"
+    },
+    {
+      "id": "participants-handedness-species-strain",
+      "modality": "all",
+      "file": "participants.tsv",
+      "key": "handedness, species, strain",
+      "target": {
+        "files": [
+          "participants.tsv"
+        ],
+        "columns": [
+          "handedness",
+          "species",
+          "strain"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": "species becomes essential for non-human data",
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Handedness matters for motor and language tasks; species and strain for non-human data.",
+      "failure_when_missing": "Covariate unavailable.",
+      "validator_warns": "no: absent RECOMMENDED columns are skipped silently",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.826,
+      "measured_sample_size": 155,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled participants tables without the columns; a multi-key item counts as missing when any listed key is absent; the run did not record whether it used any or all"
+    },
+    {
+      "id": "participants-json-columns",
+      "modality": "all",
+      "file": "participants.json",
+      "key": "description of every non-standard column, with Levels for coded values",
+      "target": {
+        "files": [
+          "participants.json",
+          "participants.tsv"
+        ]
+      },
+      "check": "columns-described",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Turns columns such as `group` = 1/2 into meaning a reader and a search index can use.",
+      "failure_when_missing": "Coded columns with no key are unreadable.",
+      "validator_warns": "no: participants.tsv allows undefined columns without warning",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.116,
+      "measured_sample_size": 155,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled participants tables with at least one non-standard column that participants.json does not describe"
+    },
+    {
+      "id": "events-onset-duration",
+      "modality": "all",
+      "file": "events.tsv",
+      "key": "onset, duration",
+      "target": {
+        "files": [
+          "*_events.tsv"
+        ],
+        "columns": [
+          "onset",
+          "duration"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": "when events.tsv exists",
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Places every event on the recording timeline.",
+      "failure_when_missing": "Events cannot be epoched.",
+      "validator_warns": "yes: TSV_COLUMN_MISSING error when the column is absent; n/a values pass",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "events-tsv-file",
+      "modality": "all",
+      "file": "events.tsv",
+      "key": "file for every non-rest task recording",
+      "target": {
+        "files": [
+          "*_events.tsv"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": "when the task name does not contain rest",
+      "level_note": "a validator warning; no level in the schema file rules",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Task data without events cannot be analyzed as a task.",
+      "failure_when_missing": "Event codes left only inside proprietary recording headers.",
+      "validator_warns": "yes: EVENTS_TSV_MISSING warning for non-rest tasks",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator",
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.179,
+      "measured_sample_size": 151,
+      "measured_breakdown": {
+        "eeg": {
+          "missing": 3,
+          "n": 37
+        },
+        "ieeg": {
+          "missing": 9,
+          "n": 36
+        },
+        "meg": {
+          "missing": 6,
+          "n": 36
+        },
+        "nirs": {
+          "missing": 1,
+          "n": 25
+        },
+        "emg": {
+          "missing": 3,
+          "n": 11
+        },
+        "motion": {
+          "missing": 5,
+          "n": 6
+        }
+      },
+      "metric_definition": "share of sampled non-rest task recordings (one per dataset and modality) with no events.tsv applying to them"
+    },
+    {
+      "id": "events-json-code-levels",
+      "modality": "all",
+      "file": "events.json",
+      "key": "Levels or HED on the categorical code columns (`trial_type`, `value` and similar)",
+      "target": {
+        "files": [
+          "*_events.json",
+          "*_events.tsv"
+        ],
+        "columns": [
+          "trial_type",
+          "value"
+        ]
+      },
+      "check": "levels-present",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "SHOULD be documented",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "A numeric trigger code is meaningless without its key, and the key is cheap for the submitter and impossible for anyone else to recover.",
+      "failure_when_missing": "Sampled recordings whose only code columns (`trial_type`, `value` and similar) carry no Levels or HED, so codes such as 1, 2 or S 11 have no key.",
+      "validator_warns": "no, except HED_WARNING with subcode SIDECAR_KEY_MISSING when HED is used and a value has no HED string",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn",
+        "gate-record"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.64,
+      "measured_sample_size": 114,
+      "measured_breakdown": {
+        "eeg": {
+          "missing": 13,
+          "n": 29
+        },
+        "ieeg": {
+          "missing": 11,
+          "n": 25
+        },
+        "meg": {
+          "missing": 25,
+          "n": 27
+        },
+        "nirs": {
+          "missing": 23,
+          "n": 24
+        },
+        "emg": {
+          "missing": 1,
+          "n": 8
+        },
+        "motion": {
+          "missing": 0,
+          "n": 1
+        }
+      },
+      "metric_definition": "share of sampled non-rest task recordings whose events.tsv has at least one categorical code column (trial_type, value or a similar column with at most 50 distinct values) in which none of those code columns has Levels or HED in events.json; recordings without a code column are excluded from the denominator"
+    },
+    {
+      "id": "json-strict",
+      "modality": "all",
+      "file": "every .json file",
+      "key": "strict JSON (UTF-8, no raw control characters)",
+      "target": {
+        "files": [
+          "*.json"
+        ]
+      },
+      "check": "strict-json",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": "files MUST be valid JSON",
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Every tool parses sidecars with a strict JSON parser.",
+      "failure_when_missing": "Coordinate-system files in three live EMG datasets contain a raw control character inside a string, which a strict parser rejects ([#2298](https://github.com/nemarOrg/nemar-cli/issues/2298)).",
+      "validator_warns": "yes: JSON_INVALID error (not re-tested against these files)",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator",
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "events-hed-annotations",
+      "modality": "all",
+      "file": "events.tsv or events.json",
+      "key": "HED annotations",
+      "target": {
+        "files": [
+          "*_events.tsv",
+          "*_events.json"
+        ],
+        "columns": [
+          "HED"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": "judgment call: T1 if NEMAR ships HED-based event search",
+      "rationale": "Makes events comparable and searchable across datasets.",
+      "failure_when_missing": "Events can be read only with each dataset's own vocabulary.",
+      "validator_warns": "HED_ERROR or HED_WARNING (the HED code as subcode) when present, but only if HEDVersion is set",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn",
+        "docs-only"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.926,
+      "measured_sample_size": 163,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled datasets with no HED column in events.tsv and no HED key in events.json for the recording read"
+    },
+    {
+      "id": "events-stimulus-presentation",
+      "modality": "all",
+      "file": "events.json",
+      "key": "StimulusPresentation",
+      "target": {
+        "files": [
+          "*_events.json"
+        ],
+        "keys": [
+          "StimulusPresentation"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Software and screen details for timing reproducibility.",
+      "failure_when_missing": "Timing caveats unknown.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "sidecar-task-name",
+      "modality": "all",
+      "file": "recording sidecar",
+      "key": "TaskName",
+      "target": {
+        "files": [
+          "*_eeg.json",
+          "*_ieeg.json",
+          "*_meg.json",
+          "*_nirs.json",
+          "*_emg.json",
+          "*_motion.json"
+        ],
+        "keys": [
+          "TaskName"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Names the task.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "sidecar-task-description",
+      "modality": "all",
+      "file": "recording sidecar",
+      "key": "TaskDescription",
+      "target": {
+        "files": [
+          "*_eeg.json",
+          "*_ieeg.json",
+          "*_meg.json",
+          "*_nirs.json",
+          "*_emg.json",
+          "*_motion.json"
+        ],
+        "keys": [
+          "TaskDescription"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "One paragraph that tells a reader what the participant did; the task label alone rarely does.",
+      "failure_when_missing": "Task labels such as `task-1` or `task-default` with no description.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond a validator warning count",
+      "enforcement_options": [
+        "validator",
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.538,
+      "measured_sample_size": 156,
+      "measured_breakdown": {
+        "eeg": {
+          "missing": 24,
+          "n": 40
+        },
+        "ieeg": {
+          "missing": 6,
+          "n": 36
+        },
+        "meg": {
+          "missing": 29,
+          "n": 36
+        },
+        "nirs": {
+          "missing": 24,
+          "n": 27
+        },
+        "emg": {
+          "missing": 0,
+          "n": 11
+        },
+        "motion": {
+          "missing": 1,
+          "n": 6
+        }
+      },
+      "metric_definition": "share of sampled recordings whose recording sidecar, after inheritance, has no TaskDescription key"
+    },
+    {
+      "id": "sidecar-instructions-ontology",
+      "modality": "all",
+      "file": "recording sidecar",
+      "key": "Instructions, CogAtlasID, CogPOID",
+      "target": {
+        "files": [
+          "*_eeg.json",
+          "*_ieeg.json",
+          "*_meg.json",
+          "*_nirs.json",
+          "*_emg.json",
+          "*_motion.json"
+        ],
+        "keys": [
+          "Instructions",
+          "CogAtlasID",
+          "CogPOID"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Exact wording given to participants; ontology links.",
+      "failure_when_missing": "Minor.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.801,
+      "measured_sample_size": 156,
+      "measured_breakdown": {
+        "eeg": {
+          "missing": 31,
+          "n": 40
+        },
+        "ieeg": {
+          "missing": 26,
+          "n": 36
+        },
+        "meg": {
+          "missing": 34,
+          "n": 36
+        },
+        "nirs": {
+          "missing": 25,
+          "n": 27
+        },
+        "emg": {
+          "missing": 3,
+          "n": 11
+        },
+        "motion": {
+          "missing": 6,
+          "n": 6
+        }
+      },
+      "metric_definition": "share of sampled recordings whose recording sidecar, after inheritance, lacks the keys; a multi-key item counts as missing when any listed key is absent; the run did not record whether it used any or all"
+    },
+    {
+      "id": "sidecar-device",
+      "modality": "all",
+      "file": "recording sidecar",
+      "key": "Manufacturer, ManufacturersModelName, HardwareFilters",
+      "target": {
+        "files": [
+          "*_eeg.json",
+          "*_ieeg.json",
+          "*_meg.json",
+          "*_nirs.json",
+          "*_emg.json",
+          "*_motion.json"
+        ],
+        "keys": [
+          "Manufacturer",
+          "ManufacturersModelName",
+          "HardwareFilters"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Device and analog filter identity for reproducibility and device-specific search.",
+      "failure_when_missing": "Amplifier characteristics unknown.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.346,
+      "measured_sample_size": 156,
+      "measured_breakdown": {
+        "eeg": {
+          "missing": 18,
+          "n": 40
+        },
+        "ieeg": {
+          "missing": 15,
+          "n": 36
+        },
+        "meg": {
+          "missing": 1,
+          "n": 36
+        },
+        "nirs": {
+          "missing": 18,
+          "n": 27
+        },
+        "emg": {
+          "missing": 1,
+          "n": 11
+        },
+        "motion": {
+          "missing": 1,
+          "n": 6
+        }
+      },
+      "metric_definition": "share of sampled recordings whose recording sidecar, after inheritance, lacks the keys; a multi-key item counts as missing when any listed key is absent; the run did not record whether it used any or all"
+    },
+    {
+      "id": "sidecar-institution",
+      "modality": "all",
+      "file": "recording sidecar",
+      "key": "InstitutionName, InstitutionAddress, InstitutionalDepartmentName",
+      "target": {
+        "files": [
+          "*_eeg.json",
+          "*_ieeg.json",
+          "*_meg.json",
+          "*_nirs.json",
+          "*_emg.json",
+          "*_motion.json"
+        ],
+        "keys": [
+          "InstitutionName",
+          "InstitutionAddress",
+          "InstitutionalDepartmentName"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Site for multi-site pooling.",
+      "failure_when_missing": "Minor.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.526,
+      "measured_sample_size": 156,
+      "measured_breakdown": {
+        "eeg": {
+          "missing": 10,
+          "n": 40
+        },
+        "ieeg": {
+          "missing": 18,
+          "n": 36
+        },
+        "meg": {
+          "missing": 25,
+          "n": 36
+        },
+        "nirs": {
+          "missing": 24,
+          "n": 27
+        },
+        "emg": {
+          "missing": 1,
+          "n": 11
+        },
+        "motion": {
+          "missing": 4,
+          "n": 6
+        }
+      },
+      "metric_definition": "share of sampled recordings whose recording sidecar, after inheritance, lacks the keys; a multi-key item counts as missing when any listed key is absent; the run did not record whether it used any or all"
+    },
+    {
+      "id": "scans-tsv",
+      "modality": "all",
+      "file": "scans.tsv",
+      "key": "filename; acq_time",
+      "target": {
+        "files": [
+          "*_scans.tsv"
+        ],
+        "columns": [
+          "filename",
+          "acq_time"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "CONDITIONAL",
+      "condition": "OPTIONAL file; filename REQUIRED when the file is present, acq_time OPTIONAL",
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Recording order and relative timing across runs.",
+      "failure_when_missing": "Run order unknown; note NEMAR sets day and month of new recording dates to 1 January.",
+      "validator_warns": "yes: SCANS_FILENAME_NOT_MATCH_DATASET error for stale rows",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "sessions-tsv",
+      "modality": "all",
+      "file": "sessions.tsv",
+      "key": "session_id",
+      "target": {
+        "files": [
+          "*_sessions.tsv"
+        ],
+        "columns": [
+          "session_id"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": "when sessions.tsv is present",
+      "level_note": "OPTIONAL file",
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Describes longitudinal sessions.",
+      "failure_when_missing": "Session meaning is implicit.",
+      "validator_warns": "yes: TSV_COLUMN_MISSING error when the column is absent; n/a values pass",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "derivatives-separated",
+      "modality": "all",
+      "file": "derivatives/",
+      "key": "processed data kept under derivatives/ with its own dataset_description.json",
+      "target": {
+        "files": [
+          "derivatives/*/dataset_description.json"
+        ]
+      },
+      "check": "judgment",
+      "bids_level": "OPTIONAL",
+      "condition": "when the deposit includes processed data",
+      "level_note": "OPTIONAL directory; GeneratedBy REQUIRED inside it",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Keeps raw and processed data apart so readers and the viewer know what they are opening.",
+      "failure_when_missing": "nm000389 lists MEG as a modality but its sub-*/meg folders hold only processed connectome files.",
+      "validator_warns": "partly: derivative description rules apply only when declared",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn",
+        "docs-only"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "sourcedata-code",
+      "modality": "all",
+      "file": "sourcedata/, code/",
+      "key": "conversion scripts and original files",
+      "target": {
+        "files": [
+          "sourcedata/",
+          "code/"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Lets others repeat the conversion to BIDS.",
+      "failure_when_missing": "Conversion choices are invisible.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "docs-only"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "eeg-sidecar-required",
+      "modality": "eeg",
+      "file": "_eeg.json",
+      "key": "EEGReference, SamplingFrequency, PowerLineFrequency, SoftwareFilters",
+      "target": {
+        "files": [
+          "*_eeg.json"
+        ],
+        "keys": [
+          "EEGReference",
+          "SamplingFrequency",
+          "PowerLineFrequency",
+          "SoftwareFilters"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Reference and sampling are needed to read the signal at all.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "eeg-reference-value",
+      "modality": "eeg",
+      "file": "_eeg.json",
+      "key": "EEGReference with a real value",
+      "target": {
+        "files": [
+          "*_eeg.json"
+        ],
+        "keys": [
+          "EEGReference"
+        ]
+      },
+      "check": "non-n/a",
+      "bids_level": "VALUE_QUALITY",
+      "condition": null,
+      "level_note": "the key is REQUIRED; its value is not checked",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Re-referencing and comparison across datasets need the original reference.",
+      "failure_when_missing": "`n/a` or `unknown` passes validation.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.275,
+      "measured_sample_size": 40,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled EEG recordings whose EEGReference is n/a, empty or unknown"
+    },
+    {
+      "id": "eeg-power-line-numeric",
+      "modality": "eeg",
+      "file": "_eeg.json",
+      "key": "PowerLineFrequency as a number",
+      "target": {
+        "files": [
+          "*_eeg.json"
+        ],
+        "keys": [
+          "PowerLineFrequency"
+        ]
+      },
+      "check": "numeric",
+      "bids_level": "VALUE_QUALITY",
+      "condition": null,
+      "level_note": "the key is REQUIRED; `n/a` is a legal value",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Line-noise removal needs 50 or 60.",
+      "failure_when_missing": "Catalog has no line frequency for 314 of 910 datasets.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.05,
+      "measured_sample_size": 40,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled EEG recordings whose PowerLineFrequency is not a number"
+    },
+    {
+      "id": "eeg-placement-scheme",
+      "modality": "eeg",
+      "file": "_eeg.json",
+      "key": "EEGPlacementScheme",
+      "target": {
+        "files": [
+          "*_eeg.json"
+        ],
+        "keys": [
+          "EEGPlacementScheme"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Names the montage family, which is what lets the viewer draw a topography without measured positions.",
+      "failure_when_missing": "Catalog has no placement scheme for 508 of 910 datasets.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator",
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.35,
+      "measured_sample_size": 40,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled EEG recordings whose eeg.json has no EEGPlacementScheme key"
+    },
+    {
+      "id": "eeg-channels-file",
+      "modality": "eeg",
+      "file": "_channels.tsv",
+      "key": "file with name, type, units",
+      "target": {
+        "files": [
+          "*_channels.tsv"
+        ],
+        "columns": [
+          "name",
+          "type",
+          "units"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "RECOMMENDED file; columns REQUIRED when present",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Channel types (EEG, EOG, ECG, MISC) and units are what the viewer and every pipeline read first.",
+      "failure_when_missing": "Without it tools guess types from labels; auxiliary channels get treated as EEG.",
+      "validator_warns": "no for the file; TSV_COLUMN_MISSING for its required columns",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.1,
+      "measured_sample_size": 40,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled EEG recordings with no channels.tsv"
+    },
+    {
+      "id": "eeg-channels-status",
+      "modality": "eeg",
+      "file": "_channels.tsv",
+      "key": "status, status_description",
+      "target": {
+        "files": [
+          "*_channels.tsv"
+        ],
+        "columns": [
+          "status",
+          "status_description"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Marks bad channels the submitter already knows about.",
+      "failure_when_missing": "Every reuser rediscovers them.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.444,
+      "measured_sample_size": 36,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled EEG channels tables (recordings with a channels.tsv) with no status column"
+    },
+    {
+      "id": "eeg-electrodes-coordsystem-pair",
+      "modality": "eeg",
+      "file": "_electrodes.tsv + _coordsystem.json",
+      "key": "file pair",
+      "target": {
+        "files": [
+          "*_electrodes.tsv",
+          "*_coordsystem.json"
+        ]
+      },
+      "check": "file-pair",
+      "bids_level": "OPTIONAL",
+      "condition": "when positions were digitized or the montage is not a standard 10-20 family layout",
+      "level_note": "coordsystem.json REQUIRED when electrodes.tsv exists",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Measured or template positions drive topographies and source analysis.",
+      "failure_when_missing": "Without them nonstandard nets cannot be plotted.",
+      "validator_warns": "no for the files; REQUIRED_COORDSYSTEM error when electrodes.tsv exists without coordsystem.json",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.525,
+      "measured_sample_size": 40,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled EEG recordings without both electrodes.tsv and coordsystem.json"
+    },
+    {
+      "id": "eeg-coordsystem-required",
+      "modality": "eeg",
+      "file": "_coordsystem.json",
+      "key": "EEGCoordinateSystem, EEGCoordinateUnits; EEGCoordinateSystemDescription if Other",
+      "target": {
+        "files": [
+          "*_coordsystem.json"
+        ],
+        "keys": [
+          "EEGCoordinateSystem",
+          "EEGCoordinateUnits",
+          "EEGCoordinateSystemDescription"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": "when coordsystem.json exists",
+      "level_note": "EEGCoordinateSystemDescription REQUIRED if Other",
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Defines the frame of the positions.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "eeg-coordsystem-named-frame",
+      "modality": "eeg",
+      "file": "_coordsystem.json",
+      "key": "a named frame rather than Other",
+      "target": {
+        "files": [
+          "*_coordsystem.json"
+        ],
+        "keys": [
+          "EEGCoordinateSystem"
+        ]
+      },
+      "check": "named-enum",
+      "bids_level": "VALUE_QUALITY",
+      "condition": "when electrodes.tsv is present",
+      "level_note": "the value is free; Other needs a description",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "The viewer maps positions only from a named frame; it does not read free text.",
+      "failure_when_missing": "Template named only in EEGCoordinateSystemDescription.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.111,
+      "measured_sample_size": 18,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled EEG coordsystem.json files that were read whose EEGCoordinateSystem is Other"
+    },
+    {
+      "id": "eeg-sidecar-context",
+      "modality": "eeg",
+      "file": "_eeg.json",
+      "key": "EEGGround, CapManufacturer, RecordingDuration, RecordingType, SubjectArtefactDescription, EEGChannelCount",
+      "target": {
+        "files": [
+          "*_eeg.json"
+        ],
+        "keys": [
+          "EEGGround",
+          "CapManufacturer",
+          "RecordingDuration",
+          "RecordingType",
+          "SubjectArtefactDescription",
+          "EEGChannelCount"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Useful context; channel counts are checked against channels.tsv when given.",
+      "failure_when_missing": "Minor.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value; channel count mismatch warnings",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.7,
+      "measured_sample_size": 40,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled EEG recordings whose eeg.json lacks the keys; a multi-key item counts as missing when any listed key is absent; the run did not record whether it used any or all"
+    },
+    {
+      "id": "ieeg-sidecar-required",
+      "modality": "ieeg",
+      "file": "_ieeg.json",
+      "key": "iEEGReference, SamplingFrequency, PowerLineFrequency, SoftwareFilters",
+      "target": {
+        "files": [
+          "*_ieeg.json"
+        ],
+        "keys": [
+          "iEEGReference",
+          "SamplingFrequency",
+          "PowerLineFrequency",
+          "SoftwareFilters"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Needed to read the signal.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "ieeg-electrodes-file",
+      "modality": "ieeg",
+      "file": "_electrodes.tsv",
+      "key": "file with name, x, y, z, size",
+      "target": {
+        "files": [
+          "*_electrodes.tsv"
+        ],
+        "columns": [
+          "name",
+          "x",
+          "y",
+          "z",
+          "size"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Electrode identity and location are the core of iEEG reuse.",
+      "failure_when_missing": "Never omit the file; positions that are truly unknown are written as n/a.",
+      "validator_warns": "yes: IEEG_ELECTRODES_REQUIRED error; TSV_COLUMN_MISSING for columns",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "ieeg-coordsystem-required",
+      "modality": "ieeg",
+      "file": "_coordsystem.json",
+      "key": "iEEGCoordinateSystem, iEEGCoordinateUnits; iEEGCoordinateSystemDescription if Other",
+      "target": {
+        "files": [
+          "*_coordsystem.json"
+        ],
+        "keys": [
+          "iEEGCoordinateSystem",
+          "iEEGCoordinateUnits",
+          "iEEGCoordinateSystemDescription"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": "MUST accompany electrodes.tsv; iEEGCoordinateSystemDescription REQUIRED if Other",
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Defines the frame of the positions.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: REQUIRED_COORDSYSTEM error; key errors",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "ieeg-electrodes-coordinates",
+      "modality": "ieeg",
+      "file": "_electrodes.tsv",
+      "key": "real coordinates (x, y, z not all n/a)",
+      "target": {
+        "files": [
+          "*_electrodes.tsv"
+        ],
+        "columns": [
+          "x",
+          "y",
+          "z"
+        ]
+      },
+      "check": "non-n/a",
+      "bids_level": "VALUE_QUALITY",
+      "condition": null,
+      "level_note": "columns REQUIRED; n/a values allowed",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Without coordinates no anatomical localization, plotting or cross-patient pooling is possible.",
+      "failure_when_missing": "Spot check: 14 of 37 sampled iEEG datasets had n/a in every electrode row read.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn",
+        "gate-record"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.378,
+      "measured_sample_size": 37,
+      "measured_breakdown": null,
+      "metric_definition": "share of the 37 spot-checked iEEG datasets whose first electrodes.tsv rows read have x, y and z all n/a"
+    },
+    {
+      "id": "ieeg-coordsystem-named-frame",
+      "modality": "ieeg",
+      "file": "_coordsystem.json",
+      "key": "a named frame (template or ACPC) rather than Other",
+      "target": {
+        "files": [
+          "*_coordsystem.json"
+        ],
+        "keys": [
+          "iEEGCoordinateSystem"
+        ]
+      },
+      "check": "named-enum",
+      "bids_level": "VALUE_QUALITY",
+      "condition": null,
+      "level_note": "Other allowed with a description",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "The viewer maps electrodes only from a named frame; it does not read frames from free text.",
+      "failure_when_missing": "Spot check: 30 of 36 readable iEEG coordinate files declare Other; 14 of those name MNI or Talairach only in the description, often without the exact template, and 16 have no coordinates.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn",
+        "gate-record"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.833,
+      "measured_sample_size": 36,
+      "measured_breakdown": null,
+      "metric_definition": "share of the 36 readable coordsystem.json files in the iEEG spot check whose iEEGCoordinateSystem is Other; excluding the 16 Other files recorded as having no coordinates, 14 of 20 (70%) are Other",
+      "measured_missing_rate_excluding_no_coordinates": 0.7,
+      "measured_sample_size_excluding_no_coordinates": 20
+    },
+    {
+      "id": "ieeg-coordsystem-intended-for",
+      "modality": "ieeg",
+      "file": "_coordsystem.json",
+      "key": "IntendedFor (the anatomical image for native frames)",
+      "target": {
+        "files": [
+          "*_coordsystem.json"
+        ],
+        "keys": [
+          "IntendedFor"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": "when the frame is ACPC, ScanRAS, Pixels or Other and an image is shared",
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Links patient-space coordinates to the MRI they were measured on.",
+      "failure_when_missing": "ACPC or native coordinates with no image cannot be checked or re-registered.",
+      "validator_warns": "yes when present: INTENDED_FOR error for a bad path",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "ieeg-channels-file",
+      "modality": "ieeg",
+      "file": "_channels.tsv",
+      "key": "file with name, type, units, low_cutoff, high_cutoff",
+      "target": {
+        "files": [
+          "*_channels.tsv"
+        ],
+        "columns": [
+          "name",
+          "type",
+          "units",
+          "low_cutoff",
+          "high_cutoff"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "RECOMMENDED file in 1.11.2; columns REQUIRED when present",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Channel types and filters drive the viewer and analysis.",
+      "failure_when_missing": "Types guessed from labels.",
+      "validator_warns": "TSV_COLUMN_MISSING for required columns",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.0,
+      "measured_sample_size": 36,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled iEEG recordings with no channels.tsv"
+    },
+    {
+      "id": "ieeg-electrodes-context",
+      "modality": "ieeg",
+      "file": "_electrodes.tsv",
+      "key": "group, hemisphere, material, manufacturer",
+      "target": {
+        "files": [
+          "*_electrodes.tsv"
+        ],
+        "columns": [
+          "group",
+          "hemisphere",
+          "material",
+          "manufacturer"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Shaft grouping and hemisphere support quick anatomical summaries.",
+      "failure_when_missing": "Minor.",
+      "validator_warns": "no: absent RECOMMENDED columns are skipped silently",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "ieeg-coordinate-processing",
+      "modality": "ieeg",
+      "file": "_coordsystem.json",
+      "key": "iEEGCoordinateProcessingDescription, iEEGCoordinateProcessingReference",
+      "target": {
+        "files": [
+          "*_coordsystem.json"
+        ],
+        "keys": [
+          "iEEGCoordinateProcessingDescription",
+          "iEEGCoordinateProcessingReference"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "How coordinates were obtained (co-registration, brain shift).",
+      "failure_when_missing": "Accuracy unknown.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "ieeg-sidecar-context",
+      "modality": "ieeg",
+      "file": "_ieeg.json",
+      "key": "iEEGGround, iEEGPlacementScheme, iEEGElectrodeGroups, ElectrodeManufacturer, RecordingType",
+      "target": {
+        "files": [
+          "*_ieeg.json"
+        ],
+        "keys": [
+          "iEEGGround",
+          "iEEGPlacementScheme",
+          "iEEGElectrodeGroups",
+          "ElectrodeManufacturer",
+          "RecordingType"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Context.",
+      "failure_when_missing": "Minor.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.444,
+      "measured_sample_size": 36,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled iEEG recordings whose ieeg.json lacks the keys; a multi-key item counts as missing when any listed key is absent; the run did not record whether it used any or all"
+    },
+    {
+      "id": "meg-sidecar-required",
+      "modality": "meg",
+      "file": "_meg.json",
+      "key": "SamplingFrequency, PowerLineFrequency, DewarPosition, SoftwareFilters, DigitizedLandmarks, DigitizedHeadPoints",
+      "target": {
+        "files": [
+          "*_meg.json"
+        ],
+        "keys": [
+          "SamplingFrequency",
+          "PowerLineFrequency",
+          "DewarPosition",
+          "SoftwareFilters",
+          "DigitizedLandmarks",
+          "DigitizedHeadPoints"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Needed to read and co-register the recording.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "meg-coordsystem-required",
+      "modality": "meg",
+      "file": "_coordsystem.json",
+      "key": "MEGCoordinateSystem, MEGCoordinateUnits; MEGCoordinateSystemDescription if Other",
+      "target": {
+        "files": [
+          "*_coordsystem.json"
+        ],
+        "keys": [
+          "MEGCoordinateSystem",
+          "MEGCoordinateUnits",
+          "MEGCoordinateSystemDescription"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": "when coordsystem.json exists",
+      "level_note": "MEGCoordinateSystemDescription REQUIRED if Other",
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Defines the frame and units of the positions.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "meg-empty-room",
+      "modality": "meg",
+      "file": "_meg.json or sub-emptyroom",
+      "key": "AssociatedEmptyRoom or an empty-room recording",
+      "target": {
+        "files": [
+          "*_meg.json",
+          "sub-emptyroom/"
+        ],
+        "keys": [
+          "AssociatedEmptyRoom"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "either the key or an empty-room recording",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Noise covariance for source analysis is computed from the empty-room recording.",
+      "failure_when_missing": "Source localization cannot be reproduced.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value; ASSOCIATED_EMPTY_ROOM error for a bad path",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator",
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.667,
+      "measured_sample_size": 36,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled MEG datasets with no AssociatedEmptyRoom key, no sub-emptyroom folder and no task-noise recording in the first subject's meg folder"
+    },
+    {
+      "id": "meg-coordsystem-landmarks",
+      "modality": "meg",
+      "file": "_coordsystem.json",
+      "key": "file with landmarks and IntendedFor when an anatomical image is shared",
+      "target": {
+        "files": [
+          "*_coordsystem.json"
+        ],
+        "keys": [
+          "AnatomicalLandmarkCoordinates",
+          "IntendedFor"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "OPTIONAL",
+      "condition": null,
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Co-registration of sensors to the head and MRI needs the frame and the landmarks.",
+      "failure_when_missing": "Sensor-to-MRI transform must be reconstructed by hand.",
+      "validator_warns": "no",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.111,
+      "measured_sample_size": 36,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled MEG recordings with no coordsystem.json"
+    },
+    {
+      "id": "meg-channels-file",
+      "modality": "meg",
+      "file": "_channels.tsv",
+      "key": "file with name, type, units",
+      "target": {
+        "files": [
+          "*_channels.tsv"
+        ],
+        "columns": [
+          "name",
+          "type",
+          "units"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "RECOMMENDED file",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Channel types and bad channels in a vendor-neutral form.",
+      "failure_when_missing": "Readers depend on vendor readers.",
+      "validator_warns": "TSV_COLUMN_MISSING for its columns",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.083,
+      "measured_sample_size": 36,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled MEG recordings with no channels.tsv"
+    },
+    {
+      "id": "meg-headshape",
+      "modality": "meg",
+      "file": "_headshape, _meg.json",
+      "key": "head shape file; ContinuousHeadLocalization, HeadCoilFrequency, MaxMovement",
+      "target": {
+        "files": [
+          "*_headshape.*",
+          "*_meg.json"
+        ],
+        "keys": [
+          "ContinuousHeadLocalization",
+          "HeadCoilFrequency",
+          "MaxMovement"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Improves co-registration and motion assessment.",
+      "failure_when_missing": "Minor.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.278,
+      "measured_sample_size": 36,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled MEG recordings missing the head shape file or the keys; a multi-key item counts as missing when any listed key is absent; the run did not record whether it used any or all"
+    },
+    {
+      "id": "nirs-sidecar-required",
+      "modality": "nirs",
+      "file": "_nirs.json",
+      "key": "SamplingFrequency, NIRSChannelCount, NIRSSourceOptodeCount, NIRSDetectorOptodeCount",
+      "target": {
+        "files": [
+          "*_nirs.json"
+        ],
+        "keys": [
+          "SamplingFrequency",
+          "NIRSChannelCount",
+          "NIRSSourceOptodeCount",
+          "NIRSDetectorOptodeCount"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Needed to read the recording.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "nirs-coordsystem-required",
+      "modality": "nirs",
+      "file": "_coordsystem.json",
+      "key": "NIRSCoordinateSystem, NIRSCoordinateUnits; NIRSCoordinateSystemDescription if Other",
+      "target": {
+        "files": [
+          "*_coordsystem.json"
+        ],
+        "keys": [
+          "NIRSCoordinateSystem",
+          "NIRSCoordinateUnits",
+          "NIRSCoordinateSystemDescription"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": "when coordsystem.json exists",
+      "level_note": "NIRSCoordinateSystemDescription REQUIRED if Other",
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Defines the frame and units of the positions.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "nirs-channels-file",
+      "modality": "nirs",
+      "file": "_channels.tsv",
+      "key": "file with source, detector, wavelength_nominal, units",
+      "target": {
+        "files": [
+          "*_channels.tsv"
+        ],
+        "columns": [
+          "source",
+          "detector",
+          "wavelength_nominal",
+          "units"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "RECOMMENDED file; columns REQUIRED when present",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Source-detector pairs and wavelengths are what make the signal interpretable.",
+      "failure_when_missing": "Pairs must be dug out of the SNIRF file.",
+      "validator_warns": "yes: NIRS_RECOMMENDED_CHANNELS warning",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator",
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.037,
+      "measured_sample_size": 27,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled NIRS recordings with no channels.tsv"
+    },
+    {
+      "id": "nirs-optodes-coordsystem-pair",
+      "modality": "nirs",
+      "file": "_optodes.tsv + _coordsystem.json",
+      "key": "file pair",
+      "target": {
+        "files": [
+          "*_optodes.tsv",
+          "*_coordsystem.json"
+        ]
+      },
+      "check": "file-pair",
+      "bids_level": "REQUIRED",
+      "condition": "when channels.tsv is present",
+      "level_note": "optodes.tsv MUST exist (prose); coordsystem.json REQUIRED with optodes.tsv",
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Optode positions are needed to map channels to the head.",
+      "failure_when_missing": "4 of 26 sampled NIRS datasets with a channels.tsv have no optodes.tsv (on006902, on007477, on007554, on007990), which the prose forbids.",
+      "validator_warns": "partly: REQUIRED_COORDSYSTEM and template column errors once optodes.tsv exists; nothing checks that optodes.tsv exists when channels.tsv does",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "preflight-warn",
+        "gate-record"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.154,
+      "measured_sample_size": 26,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled NIRS recordings that have a channels.tsv but no optodes.tsv"
+    },
+    {
+      "id": "nirs-sidecar-context",
+      "modality": "nirs",
+      "file": "_nirs.json",
+      "key": "NIRSPlacementScheme, ShortChannelCount, SourceType, DetectorType",
+      "target": {
+        "files": [
+          "*_nirs.json"
+        ],
+        "keys": [
+          "NIRSPlacementScheme",
+          "ShortChannelCount",
+          "SourceType",
+          "DetectorType"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Montage family and short channels guide preprocessing.",
+      "failure_when_missing": "Minor.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.926,
+      "measured_sample_size": 27,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled NIRS recordings whose nirs.json lacks the keys; a multi-key item counts as missing when any listed key is absent; the run did not record whether it used any or all"
+    },
+    {
+      "id": "emg-sidecar-required",
+      "modality": "emg",
+      "file": "_emg.json",
+      "key": "EMGPlacementScheme, EMGReference, SamplingFrequency, PowerLineFrequency, RecordingType, SoftwareFilters; EMGPlacementSchemeDescription if Other",
+      "target": {
+        "files": [
+          "*_emg.json"
+        ],
+        "keys": [
+          "EMGPlacementScheme",
+          "EMGReference",
+          "SamplingFrequency",
+          "PowerLineFrequency",
+          "RecordingType",
+          "SoftwareFilters",
+          "EMGPlacementSchemeDescription"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": "EMGPlacementSchemeDescription REQUIRED if Other",
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Needed to read the signal and know how sensors were placed.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "emg-coordsystem-required",
+      "modality": "emg",
+      "file": "_coordsystem.json",
+      "key": "EMGCoordinateSystem, EMGCoordinateUnits; EMGCoordinateSystemDescription if Other",
+      "target": {
+        "files": [
+          "*_coordsystem.json"
+        ],
+        "keys": [
+          "EMGCoordinateSystem",
+          "EMGCoordinateUnits",
+          "EMGCoordinateSystemDescription"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": "when coordsystem.json exists",
+      "level_note": "Other is the only valid EMGCoordinateSystem value in 1.11.2, so the description is effectively REQUIRED",
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Defines the frame and units of the positions.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "emg-electrodes-columns",
+      "modality": "emg",
+      "file": "_electrodes.tsv",
+      "key": "name, x, y",
+      "target": {
+        "files": [
+          "*_electrodes.tsv"
+        ],
+        "columns": [
+          "name",
+          "x",
+          "y"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": "when electrodes.tsv exists",
+      "level_note": "z is OPTIONAL for EMG",
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Electrode identity and position on the limb or body.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: TSV_COLUMN_MISSING error when the column is absent; n/a values pass",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "emg-channels-target-muscle",
+      "modality": "emg",
+      "file": "_channels.tsv",
+      "key": "file with target_muscle",
+      "target": {
+        "files": [
+          "*_channels.tsv"
+        ],
+        "columns": [
+          "target_muscle"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "RECOMMENDED file and column",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Which muscle each channel records is the first thing an EMG reader needs, and the main search key.",
+      "failure_when_missing": "Muscle only implied by channel labels.",
+      "validator_warns": "no: absent RECOMMENDED columns are skipped silently",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.5,
+      "measured_sample_size": 10,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled EMG channels tables with no target_muscle column"
+    },
+    {
+      "id": "emg-electrodes-coordsystem-pair",
+      "modality": "emg",
+      "file": "_electrodes.tsv + _coordsystem.json",
+      "key": "file pair",
+      "target": {
+        "files": [
+          "*_electrodes.tsv",
+          "*_coordsystem.json"
+        ]
+      },
+      "check": "file-pair",
+      "bids_level": "CONDITIONAL",
+      "condition": "OPTIONAL; SHOULD be given when EMGPlacementScheme is Measured",
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Positions make sensor placement reproducible.",
+      "failure_when_missing": "Placement cannot be repeated.",
+      "validator_warns": "EMG_COORD_SYS_MISMATCH and EMG_COORD_SYS_PARENTS errors when present; REQUIRED_COORDSYSTEM does not apply to EMG",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.273,
+      "measured_sample_size": 11,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled EMG recordings without both electrodes.tsv and coordsystem.json"
+    },
+    {
+      "id": "emg-bipolar-details",
+      "modality": "emg",
+      "file": "_channels.tsv / _emg.json",
+      "key": "signal_electrode, reference, group, interelectrode_distance; InterelectrodeDistance, EMGGround",
+      "target": {
+        "files": [
+          "*_channels.tsv",
+          "*_emg.json"
+        ],
+        "keys": [
+          "InterelectrodeDistance",
+          "EMGGround"
+        ],
+        "columns": [
+          "signal_electrode",
+          "reference",
+          "group",
+          "interelectrode_distance"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "a mix of RECOMMENDED and OPTIONAL fields",
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Bipolar configuration details.",
+      "failure_when_missing": "Minor.",
+      "validator_warns": "no: absent RECOMMENDED columns are skipped silently",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "motion-channels-required",
+      "modality": "motion",
+      "file": "_channels.tsv",
+      "key": "file with name, component, type, tracked_point, units",
+      "target": {
+        "files": [
+          "*_channels.tsv"
+        ],
+        "columns": [
+          "name",
+          "component",
+          "type",
+          "tracked_point",
+          "units"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Motion data have no header row, so channels.tsv is the only column key.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: TSV_COLUMN_MISSING error when the column is absent; n/a values pass",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "motion-sidecar-required",
+      "modality": "motion",
+      "file": "_motion.json",
+      "key": "TaskName, SamplingFrequency",
+      "target": {
+        "files": [
+          "*_motion.json"
+        ],
+        "keys": [
+          "TaskName",
+          "SamplingFrequency"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "REQUIRED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T0",
+      "tier_note": null,
+      "rationale": "Needed to read the data.",
+      "failure_when_missing": "Validator error.",
+      "validator_warns": "yes: error when the key is absent; an n/a value passes",
+      "nemar_checks_today": "CLI upload: runs the pinned BIDS validator and blocks on errors; warnings are only counted",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": null,
+      "measured_sample_size": null,
+      "measured_breakdown": null,
+      "metric_definition": null
+    },
+    {
+      "id": "motion-channels-placement",
+      "modality": "motion",
+      "file": "_channels.tsv",
+      "key": "placement",
+      "target": {
+        "files": [
+          "*_channels.tsv"
+        ],
+        "columns": [
+          "placement"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Where on the body each tracked point sits.",
+      "failure_when_missing": "Tracked-point labels such as `marker3` are meaningless.",
+      "validator_warns": "no: absent RECOMMENDED columns are skipped silently",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.667,
+      "measured_sample_size": 6,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled motion channels tables with no placement column"
+    },
+    {
+      "id": "motion-channels-reference-frame",
+      "modality": "motion",
+      "file": "_channels.tsv + _channels.json",
+      "key": "reference_frame and its definition",
+      "target": {
+        "files": [
+          "*_channels.tsv",
+          "*_channels.json"
+        ],
+        "columns": [
+          "reference_frame"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": "the column and its definition in channels.json",
+      "tier": "T1",
+      "tier_note": null,
+      "rationale": "Position and orientation values cannot be interpreted without the frame.",
+      "failure_when_missing": "Axes unknown.",
+      "validator_warns": "no: absent RECOMMENDED columns are skipped silently",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "preflight-warn"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 0.667,
+      "measured_sample_size": 6,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled motion channels tables with no reference_frame column"
+    },
+    {
+      "id": "motion-sidecar-context",
+      "modality": "motion",
+      "file": "_motion.json",
+      "key": "TrackedPointsCount, MissingValues, SamplingFrequencyEffective",
+      "target": {
+        "files": [
+          "*_motion.json"
+        ],
+        "keys": [
+          "TrackedPointsCount",
+          "MissingValues",
+          "SamplingFrequencyEffective"
+        ]
+      },
+      "check": "presence",
+      "bids_level": "RECOMMENDED",
+      "condition": null,
+      "level_note": null,
+      "tier": "T2",
+      "tier_note": null,
+      "rationale": "Data-loss conventions and effective rate.",
+      "failure_when_missing": "Minor.",
+      "validator_warns": "yes: SIDECAR_KEY_RECOMMENDED or JSON_KEY_RECOMMENDED warning when the key is absent; no warning for an n/a value",
+      "nemar_checks_today": "nothing beyond the BIDS validator",
+      "enforcement_options": [
+        "validator"
+      ],
+      "machine_check_feasible": true,
+      "measured_missing_rate": 1.0,
+      "measured_sample_size": 6,
+      "measured_breakdown": null,
+      "metric_definition": "share of sampled motion recordings whose motion.json lacks the keys; a multi-key item counts as missing when any listed key is absent; the run did not record whether it used any or all"
+    }
+  ]
+}

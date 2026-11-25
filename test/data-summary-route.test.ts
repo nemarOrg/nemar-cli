@@ -21,7 +21,7 @@
  *  - 200-path `Cache-Control: public, max-age=300, s-maxage=86400, ...`
  *    header. Requires both real S3 (an actual summary.json object) and
  *    real D1 (a published dataset row that passes `loadPublishedDataset`).
- *    Verified at epic-level by `nemar admin e2e-test --verbose` and by
+ *    Verified at epic-level by `nemar admin fleet e2e-test --verbose` and by
  *    the real-S3 conditional `test/s3-summary.test.ts` (which proves
  *    `loadSummary` returns the bytes; the route then attaches the header
  *    unconditionally, as the source assertion above guarantees no

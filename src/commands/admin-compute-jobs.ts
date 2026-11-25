@@ -60,6 +60,7 @@ import {
   listComputeJobs,
   listUnmatchedComputeRows,
   mintComputeObserverRun,
+  moveComputeCharge,
   placeComputeHold,
   readComputeRecord,
   releaseComputeHold,
@@ -142,6 +143,11 @@ function printJob(res: ComputeJobAdminResponse): void {
     );
   }
   say(`  flags: ${job.flags.length > 0 ? job.flags.map(plain).join(", ") : "none"}`);
+  if (job.partner_state || job.partner_flag) {
+    say(
+      `  partner: ${job.partner_state ? plain(job.partner_state) : "reservation"}${job.partner_flag ? ` (${plain(job.partner_flag)})` : ""}`,
+    );
+  }
   say(
     `  results: upload ${job.outputs_completed ? "complete" : "not complete"}, ` +
       `${job.results_verified ? "verified" : "not verified"}, ` +
@@ -178,8 +184,9 @@ lost answer did), a submitted one is read back from Tapis and brought to the sta
 finished one gets what it is still owed (its settlement, the copy of its files). The way a job moves in
 development, where no compute cron runs. It does what the webhook and the 30-minute tick do, and no more.
 
-The submit is refused while compute is switched off: a created job stays created (the answer is
-"waiting", with submit compute_disabled), and everything else, a read-back, a settlement, a copy, still
+The submit is refused while compute is switched off: a created job (one held while compute was on;
+no new job is held while it is off) stays created (the answer is "waiting", with submit
+compute_disabled), and everything else, a read-back, a settlement, a copy, still
 happens, because a job that is already on a cluster is never stranded by the switch.
 
 Admin or owner. --json prints the Worker's answer as it is.
@@ -1015,4 +1022,59 @@ observerCommand
     }
   });
 
-export { jobsCommand, observerCommand };
+const MOVE_CHARGE_HELP = `
+Moves the charge of a job that skipped the reservation from the partner's pool to one person's pool. The
+tenant sweep charges such a job to the partner's pool and never to a person, because a Tapis job's owner
+is not proof of who ran it; this is the way an owner moves it once someone has established who did. The two
+halves are one transaction, the job's charge moves once (a repeat of the same move is a replay, another
+account is refused), the platform's people budget is counted once, and an audit row records it.
+
+Owner only. Refused when the job was reserved, has no charge to the partner's pool, is not over, or when
+the account is deleted, not in good standing or has no pool of the charge's word. The person's balance
+may go below zero: it is a fact that already happened, and holds are refused until a grant brings it back.
+The account must be the one the job's Tapis owner was attributed to when the sweep indexed it; any other
+account (and any account, for a job nothing attributed) needs --confirm-unproven-owner, and the audit row
+records that the owner was not proven. --json prints the Worker's answer as it is.
+
+Exit codes:
+  0  moved, or already moved to this account.
+  1  the id or the account is not valid, the Worker refused, or you are not an owner.`;
+
+const moveChargeCommand = new Command("move-charge")
+  .description("Move the charge of a job that skipped the reservation to a person (owner)")
+  .argument("<job>", "The job's id (job_ and 24 lowercase hexadecimal digits)")
+  .requiredOption("--to <account id>", "The account that is charged (its number)")
+  .option(
+    "--confirm-unproven-owner",
+    "Charge an account that is not the one the job's Tapis owner was attributed to (or any account, for an unattributed job)",
+  )
+  .option("--json", "Print the Worker's answer as JSON")
+  .addHelpText("after", MOVE_CHARGE_HELP)
+  .action(async (id: string, o: { to: string; json?: boolean; confirmUnprovenOwner?: boolean }) => {
+    const json = o.json === true;
+    if (!requireSignedIn(json)) return;
+    const jobId = jobIdArg(id, json);
+    if (jobId === null) return;
+    const account = /^[1-9][0-9]{0,15}$/.test(o.to) ? Number(o.to) : Number.NaN;
+    if (!Number.isSafeInteger(account)) {
+      failMessage(`"${o.to}" is not an account number: it is a whole number from 1.`, {
+        json,
+        answered: true,
+      });
+      return;
+    }
+    try {
+      const res = await moveComputeCharge(jobId, account, o.confirmUnprovenOwner === true);
+      if (json) {
+        console.log(JSON.stringify(res, null, 2));
+        return;
+      }
+      say(
+        `${res.replayed ? "already moved: " : ""}${formatSu(res.moved_milli)} SU of ${plain(res.pool)} moved to account ${res.to_account_id}`,
+      );
+    } catch (err) {
+      failWith(err, null, "Could not move the charge.", undefined, { json });
+    }
+  });
+
+export { jobsCommand, moveChargeCommand, observerCommand };

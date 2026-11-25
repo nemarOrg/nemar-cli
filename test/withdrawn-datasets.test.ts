@@ -220,8 +220,8 @@ describe("resolveWithdrawTargets (not-on-list --force guard)", () => {
     // never wired into. `--all` learned it via stillWithdrawn; an explicit id
     // goes through here, where the only guard asked whether the id is on the
     // list at all. A reinstated entry IS on the list -- it stays as the record
-    // of a withdrawal that was reversed -- so `nemar admin repo withdraw on008065
-    // --execute` would take a dataset this PR just proved whole, make it
+    // of a withdrawal that was reversed -- so `nemar admin dataset withdraw on008065
+    // --apply` would take a dataset this PR just proved whole, make it
     // private, tombstone its DOIs, and file the reason as "recovered".
     const reinstated: WithdrawnDatasetEntry[] = [
       ...entries,

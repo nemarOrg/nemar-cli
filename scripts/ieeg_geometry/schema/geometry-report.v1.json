@@ -46,6 +46,22 @@
       }
     },
     "warnings": { "type": "array", "items": { "type": "string" } },
+    "electrodes_cleaning": {
+      "description": "Per written electrodes table, what the writer changed besides the coordinates: columns dropped (not defined by BIDS or by the dataset's own sidecar) or added (`size`), cells rewritten per column (missing values to n/a, non-numeric numbers to n/a), and hemisphere words mapped to L or R. Absent in reports from pipeline 0.1.0.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "dropped_columns", "added_columns", "coerced_cells", "hemisphere_rewritten"],
+        "properties": {
+          "path": { "type": "string" },
+          "dropped_columns": { "type": "array", "items": { "type": "string" } },
+          "added_columns": { "type": "array", "items": { "type": "string" } },
+          "coerced_cells": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } },
+          "hemisphere_rewritten": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
     "counts": {
       "type": "object",
       "additionalProperties": false,

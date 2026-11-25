@@ -15,7 +15,7 @@ Plan: plan.md rulings 26 and 27, owner decisions of 2026-11-20; step P3a
 
 ## Context
 
-- Read P1 (`pipeline.py`, `fetch.py`, `__main__.py`), the report schema, plan rulings 26 and 27, and ADR 0001 (dataset changes go through pull requests). Existing PR-opening code to learn from, not reuse blindly: `src/lib/repull/execute/pull-request.ts` and `nemar admin revert` in `src/commands/admin.ts` (~3109-3340).
+- Read P1 (`pipeline.py`, `fetch.py`, `__main__.py`), the report schema, plan rulings 26 and 27, and ADR 0001 (dataset changes go through pull requests). Existing PR-opening code to learn from, not reuse blindly: `src/lib/repull/execute/pull-request.ts` and `nemar admin rework revert` in `src/commands/admin.ts` (~3109-3340).
 - The owner runs these from their own machine with their own `gh` login and AWS profile; nothing here runs in CI against real datasets.
 - `generate_zarr.py --wipe` erases `<id>/zarr/` (~10510-10516); `--clean` already leaves non-store prefixes alone.
 

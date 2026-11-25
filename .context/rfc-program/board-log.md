@@ -93,6 +93,26 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T15:29-08:00 | Q34: the ADR 0124 amendment (vectors canonical in biosig-zarr, vendored by digest) is written now as a lead step | owner |  |
 | 2026-11-20T15:29-08:00 | Q35: let the remi:18769 EDF+D header scan finish; S1 dispatches after it stops writing its cache | owner |  |
 | 2026-11-20T15:29-08:00 | Q36: the manager runs O4c (tag 3.0.0-draft.2) on the owner's say-so under the P1 rule | owner |  |
+| 2026-11-20T16:42-08:00 | Owner raised today's 'Agents today' limit from 40 to 60 (owner instruction; manager applied the edit) | owner |  |
+| 2026-11-20T17:17-08:00 | SC1: owner authorized the manager to merge docs#129 | owner |  |
+| 2026-11-20T17:57-08:00 | O4d: owner said yes; manager releases 2.0.1 on B5a merge commit 3bd184a9 | owner |  |
+| 2026-11-20T18:29-08:00 | Advisor ruling (B5 layer): top-level layer is the reader-safety layer under the vector's own format_version text, or null; all v2 entries null (v2-version-3 stays null as released in 2.0.1); a reader's refusal layer lives only in expect[N].refusal. Lead updates cards B5 and B5a | advisor |  |
+| 2026-11-20T18:38-08:00 | O4c: owner said yes; manager tags pre-release 3.0.0-draft.2 on B5's merge commit | owner |  |
+| 2026-11-20T18:54-08:00 | Q37/Q38: biosig-zarr is independent of NEMAR. Copyright holder 'the biosig-zarr contributors'. Reword LICENSE, GOVERNANCE, README, CONTRIBUTING, CITATION so NEMAR is the first implementer and the text's origin, not decider or owner; release 2.0.2 and tag 3.0.0-draft.3; RFC-0001 points at draft.3 with the new notice. Published tags are immutable and stay | owner |  |
+| 2026-11-20T18:58-08:00 | Owner raised today's 'Agents today' limit from 60 to 80 (owner instruction; manager applied the edit) | owner |  |
+| 2026-11-20T19:16-08:00 | Q39 editor: Seyed Yahya Shirazi in a personal capacity; rewording ruled editorial. Q40: RFCs stay in nemarOrg/rfcs, decided by the spec editor. Q41: repo stays in nemarOrg as hosting only. Q42: release DOIs via nemar-doi as a registration service | owner |  |
+| 2026-11-20T19:16-08:00 | K15: owner confirms they held the copyright of the docs.nemar.org spec text; the relicense stands; O4e (2.0.2) may proceed | owner |  |
+| 2026-11-20T19:17-08:00 | NEMAR's role in biosig-zarr (owner, as read by the manager): NEMAR hosts the repository and offers hosting and DOI registration as a capacity, not ownership; the spec is as independent as possible and NEMAR is ready to hand it off when it matures; until then NEMAR backstops it and guarantees its continuation | owner |  |
+| 2026-11-21T10:18-08:00 | Q43: release biosig-zarr 2.0.2 on B7's merge commit 509b6897 with plan section 5's notes (owner, 2026-11-21) | owner |  |
+| 2026-11-21T10:25-08:00 | B7b gate names the conformance workflow, which did not run on biosig-zarr#8: its path filter (Q27) covers schemas, conformance, tools, package.json, bun.lock, and acceptance line 5 shows none changed vs 3.0.0-draft.2; implementer ran its commands locally (pass). Accepted as not applicable, not as a pass | manager |  |
+| 2026-11-21T10:32-08:00 | Q44: tag 3.0.0-draft.3 (pre-release) on B7b's merge commit c0cb7e49 with plan section 5's notes (owner, 2026-11-21) | owner |  |
+| 2026-11-21T10:36-08:00 | Version 3 tags while RFC-0001 is open: 3.0.0-draft.N pre-releases are fine and expected; no 3.0.x release (3.0.0, 3.0.1, ...) is cut until the RFC closes. 3.0.0-draft.3 stands and B4c pins it (owner, 2026-11-21) | owner |  |
+| 2026-11-21T10:38-08:00 | Agents today limit raised to 150 for 2026-11-21 to reach RFC-0001 quickly; solid, working draft without overthinking (owner) | owner |  |
+| 2026-11-21T10:39-08:00 | P4 accepted: a lead agent answers S1's 3 questions, picks the figures RFC-0001 cites, and writes a card to add them on rfcs#2 (owner, 2026-11-21) | owner |  |
+| 2026-11-21T10:52-08:00 | Evidence link: tag rfc-0001-evidence on nemar-cli c48405fe so RFC-0001's S1 link survives the branch (owner, 2026-11-21) | owner |  |
+| 2026-11-21T10:52-08:00 | nm000411 (zarr_status failed, no stores): manager files one nemar-cli issue with S1's facts, no cause examined (owner, 2026-11-21) | owner |  |
+| 2026-11-21T11:14-08:00 | Session wrapped: everything left waits on the owner (O5) and mail epic #2260 in production; the next session resumes from the nemarOrg/rfcs clone, not a worktree; handoff in rfcs .context/handoff.md (PR rfcs#3), memories in rfcs .memory/ (owner, 2026-11-21) | owner |  |
+| 2026-11-25T10:11-08:00 | RFC-0001 opens Monday 2026-11-30 ~09:00 PST instead of 2026-11-23 | owner | make sure everything is up and running and people are back from the holiday |
 
 ## Log
 
@@ -180,3 +200,67 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T15:37-08:00 | Lead PR 2276 r2: 2 important (A3 number/base, layer field B5a vs B5), 2 sugg; lead fixes, manager verifies (no third round) |
 | 2026-11-20T15:39-08:00 | Lead PR 2276 merged (f72fb4a1); r2 fixes verified by manager; board gains A3, B5a, O4d, O4c, B4b, SC1; R3 todo; C1 and C1a done |
 | 2026-11-20T15:39-08:00 | Budget: Agents today 40/40; R3, A3, B5a, SC1 ready but held for the daily reset |
+| 2026-11-20T16:42-08:00 | remi:18769 final EDF+D scan: 141,747 files, 0 failures; 1,728 EDF+D; real gaps only in 102 files = 51 recordings x2 in nm000456 v1.0.2; S1 unblocked |
+| 2026-11-20T16:43-08:00 | Dispatched S1, R3 (claude-sonnet), A3, B5a, SC1 (claude-opus); Agents today 45/60 |
+| 2026-11-20T16:45-08:00 | SC1 docs#129 head 25798002 reported; review dispatched (Agents today 46/60) |
+| 2026-11-20T16:46-08:00 | SC1 r1 review clean; set owner for docs#129 merge |
+| 2026-11-20T17:18-08:00 | SC1 merged by manager (owner auth). A3 draft PR 2277 held (ADR 0133). R3 PR 2278 and B5a biosig-zarr#5 verified (CI green), review panels dispatched; Agents today 50/60 |
+| 2026-11-20T17:19-08:00 | R3 code lens: 0 crit, 1 imp (non-failure bad conclusions not flagged), 3 sugg; held to batch with tests lens |
+| 2026-11-20T17:20-08:00 | B5a tools lens: 0 crit, 2 imp (class vs outcome check; created_utc rebuild note), 4 sugg; held to batch with spec lens |
+| 2026-11-20T17:20-08:00 | B5a spec lens: schemas faithful, 1 imp (class definition), 5 sugg; both lenses sent back as one round; worker questions answered (const 2 stays, v2-unknown-attribute stays) |
+| 2026-11-20T17:20-08:00 | R3 tests lens clean (6 mutations caught, offline); R3 r1 findings sent back |
+| 2026-11-20T17:22-08:00 | B5a r1 fixes ac76a32d (class check + tests, rebuild note, docs); r2 delta dispatched; Agents today 51/60 |
+| 2026-11-20T17:23-08:00 | R3 r1 fixes 9c12a664; r2 delta dispatched; Agents today 52/60 |
+| 2026-11-20T17:23-08:00 | B5a merged (3bd184a9c85a3a9cc646dce94b98520021231650); O4d set owner |
+| 2026-11-20T17:57-08:00 | O4d done (2.0.1 on 3bd184a9). R3 merged (14d49c8e). B5 ready |
+| 2026-11-20T17:57-08:00 | B5 dispatched (claude-opus); Agents today 53/60 |
+| 2026-11-20T18:24-08:00 | B5 biosig-zarr#6 head 0d749222 (9 v3 schemas, 19 vectors, CI green); review panel dispatched; Agents today 55/60 |
+| 2026-11-20T18:26-08:00 | B5 tools lens clean (all mutations caught; v3 rebuild byte-identical); 2 sugg (README wording, optional $comment unit test); waiting on spec lens |
+| 2026-11-20T18:28-08:00 | B5 spec lens: 0 crit, 3 imp, 3 sugg; judgment calls 1-8 accepted (4,7,8 verdict accept). Finding 2 contests card B5's layer rule: escalated to advisor (Advisor consults 1/3); Agents today 56/60 |
+| 2026-11-20T18:28-08:00 | A3 hold check: PR 2270 merged into feature/issue-2260-epic-mail-categories, not dev; 0132 not on origin/dev; no dev merge |
+| 2026-11-20T18:29-08:00 | Advisor ruled (B) on B5 layer; lead-C1 resumed for card edits; impl-B5 resumed for r1 fixes |
+| 2026-11-20T18:30-08:00 | Lead card PR 2285 (layer rule, v3-version-4 example) head 2a5223a4; review dispatched; Agents today 57/60 |
+| 2026-11-20T18:31-08:00 | PR 2285 review clean; sugg 1 (assert v3-version-4 layer 1) sent to lead; sugg 2 rejected (README is on origin main, reviewer's local main stale) |
+| 2026-11-20T18:31-08:00 | Card PR 2285 merged (OPEN ): advisor layer rule in B5 and B5a, v3-version-4 layer 1 asserted; review r1 clean, fix diff verified by manager |
+| 2026-11-20T18:32-08:00 | Correction: the previous PR 2285 log line was written before the merge; first attempt failed (short SHA). Merged now: MERGED 7396dbb0 |
+| 2026-11-20T18:35-08:00 | B5 r1 fixes bc618188 (layer ruling, v3-gap-exact-copy mask vector, ties, schema rules, spec 'has'); r2 delta dispatched; Agents today 58/60 |
+| 2026-11-20T18:36-08:00 | B5 r2 clean; 1 sugg (cite spec lines in 3 new $comments) sent back; manager verifies the one commit |
+| 2026-11-20T18:37-08:00 | B5 merged into draft/3.0.0 (ac6e3124f44e3d7e940fe25430cee4296f755d39); O4c set owner |
+| 2026-11-20T18:38-08:00 | O4c done: 3.0.0-draft.2 on ac6e3124; B4b ready |
+| 2026-11-20T18:38-08:00 | B4b dispatched to impl-B4 (resumed; same draft PR rfcs#2) |
+| 2026-11-20T18:41-08:00 | B4b done on rfcs#2 (72098ada); review dispatched (Agents today 59/60); Q37 asked |
+| 2026-11-20T18:53-08:00 | Owner: biosig-zarr is independent of NEMAR. Q37 reopened; B4b wording fix held; asking scope (holder, LICENSE.md, README/GOVERNANCE/CITATION wording) |
+| 2026-11-20T18:54-08:00 | Owner decision: biosig-zarr independent of NEMAR; lead-indep (Opus) writes the cards; Agents today 60/60 (limit) |
+| 2026-11-20T19:08-08:00 | Lead PR 2288 (B7, B7b, B4c, O4e, O4f, K14, K15) head 9f7ca294; review dispatched (61/80); Q39-Q42 asked |
+| 2026-11-20T19:16-08:00 | PR 2288 r1: 0 crit, 4 imp, 4 sugg; sent to lead with Q39-Q42 answers |
+| 2026-11-20T19:16-08:00 | K15 resolved by owner; lead-indep revising PR 2288 |
+| 2026-11-20T19:17-08:00 | Owner clarified NEMAR's stewardship role; forwarded to lead-indep for B7 and B4c wording |
+| 2026-11-20T19:19-08:00 | PR 2288 r1 fixes at ebc7d6f3 verified (card check passes B7 B7b B4c; Zenodo only in a count-0 gate; stewardship section; K15 resolved); r2 delta review out (1 Sonnet) |
+| 2026-11-20T19:21-08:00 | PR 2288 r2: 3 Important (B7b grep -i hits nemarOrg; B4c nemar-doi count 2; B7 Hosting lines redefine NEMAR/DOI/RFC) + 1 Suggestion (ADR 0005 phrasing); sent to lead-indep; manager verifies fixes, no r3 |
+| 2026-11-20T19:24-08:00 | PR 2288 r2 fixes verified at 9865d78c (card check passes; B7b grep case-sensitive; B4c nemar-doi 1; Hosting lines short forms); merged 92e78f59; steps B7 O4e B7b O4f B4c added, O5 now depends on B4c; B7 dispatched (Opus xhigh) |
+| 2026-11-21T10:06-08:00 | budget reset (daily): Agents today was 63 |
+| 2026-11-21T10:06-08:00 | B7 and S1 agents stopped on the weekly usage limit (429) around 19:45 on 11-20; owner says the limit reset; both resumed at 10:07 on 11-21. B7 timebox breach is wall-clock during the limit, not work, so no advisor escalation (manager) |
+| 2026-11-21T10:09-08:00 | B7 report: biosig-zarr#7 head d366f5df; manager ran card acceptance (6 empty, counts right), checks green, 13 files in scope; deviations accepted: extra ADR index line, plan checkboxes and version-history NEMAR left out of scope; r1 review out |
+| 2026-11-21T10:10-08:00 | B7 r1 (1 Sonnet, comments+code): no Critical/Important. Outcomes: sugg 1 (CHANGELOG redefines NEMAR/JSON) rejected, card keeps published entries as history; sugg 2 (ADR 0005 context length, receipt RFC) sent to fix; version-history NEMAR undefined sent to fix; manager verifies, no r2 unless substantial |
+| 2026-11-21T10:11-08:00 | S1 report: PR 2289 head da4ccd10; manager ran acceptance (all pass); real discontinuity 1,265 recordings / 37 datasets / 997 stores; lead questions: 36 negative BV gaps, 528 undated as can-be-discontinuous, nm000411 no zarr index; r1 panel (claims, code) out |
+| 2026-11-21T10:11-08:00 | Owner cleanup: manager temp worktree at /private/var/folders/.../T/tmp.Teu8fPYl0M (detached da4ccd10) could not be removed (guard refused rm); run git worktree remove --force on it |
+| 2026-11-21T10:12-08:00 | B7 r1 fixes verified at 8ea1137a (acceptance re-run all pass, checks green); merged biosig-zarr#7 with merge commit 509b6897; O4e asked as Q43 |
+| 2026-11-21T10:19-08:00 | Q43 answered: owner says release now; 2.0.2 created on 509b6897 (verified tag, not prerelease); B7b dispatched (Opus xhigh) |
+| 2026-11-21T10:19-08:00 | S1 r1 panel: A (claims) 1 crit (inferred gap drop stated as fact), 8 imp, 8 sugg; B (code) 0 crit, 2 imp (FIF lower bound, fif.gz uncounted), 5 sugg; scripts read-only, no secrets, no miscount; all sent back to impl-S1 |
+| 2026-11-21T10:25-08:00 | S1 r1 fixes at fab22ba6: acceptance pass; real discontinuity 1,265/37/997 (1,229/36/978 without 36 negative-total); can-be 3,509/68/3,217 (1,794/56/1,525 without known non-gaps); r2 delta review out |
+| 2026-11-21T10:26-08:00 | B7b report: biosig-zarr#8 head 10670779 (merge af84a9b2 of 2.0.2); manager ran acceptance, all pass; checks green (conformance not triggered, path filter); r1 review out |
+| 2026-11-21T10:26-08:00 | S1 r2 delta (1 Sonnet): all r1 outcomes real, every new figure recomputed and matching; 3 wording suggestions sent to impl-S1 |
+| 2026-11-21T10:26-08:00 | B7b r1 (1 Sonnet, comments+seam): merge resolutions verified verbatim, spec lines exact; sugg 1 sent to fix, sugg 2 rejected (published entries verbatim) |
+| 2026-11-21T10:27-08:00 | proposal P4 opened: Lead: answer S1's 3 questions (36 negative-total BV, 528 undated as can-be, nm000411 no index) and say which figures RFC-0001 cites and by which card before O5 |
+| 2026-11-21T10:27-08:00 | S1 r2 fixes verified at c6d4b48c (one file, onsets checked against deep-edfd-files.json); merged #2289 squash c48405fe; lead proposal recorded for S1 questions and RFC-0001 figures |
+| 2026-11-21T10:28-08:00 | B7b r1 fix verified at 498bd9bb (version-history only, signed off, checks green); merged biosig-zarr#8 merge commit c0cb7e49; O4f asked as Q44 |
+| 2026-11-21T10:32-08:00 | Q44 answered: owner says tag now; pre-release 3.0.0-draft.3 on c0cb7e49 (verified); B4c dispatched (Opus xhigh) |
+| 2026-11-21T10:39-08:00 | B4c verified at 0e4947c7 (all acceptance greps pass, rfc-check pass, draft); r1 clean, 1 sugg routed to lead (card text); P4 accepted by owner, lead-s1 dispatched (Opus xhigh) |
+| 2026-11-21T10:53-08:00 | Card PR 2291 (B4d) r1 (1 Sonnet): 1 crit (question 18 count 2->1), 2 sugg; sent to lead. Tag rfc-0001-evidence created on c48405fe (link 200). Issue #2292 filed for nm000411 |
+| 2026-11-21T10:55-08:00 | Card PR 2291 r1: crit rejected with evidence (0e4947c7 line 504 has '(question 18)', manager verified), 2 sugg fixed; merged 90ca0ee6; B4d dispatched (Sonnet high) |
+| 2026-11-21T10:56-08:00 | B4d report: rfcs#2 head b6bbb3cd; manager ran acceptance (all pass), rfc-check pass, still draft; r1 + seam review of whole RFC-0001 out before O5 |
+| 2026-11-21T10:57-08:00 | B4d r1 + seam review of whole RFC-0001 clean (links resolve at their tags, no stale refs, questions 1-40 once each, rfc-check ok); RFC-0001 text ready; O5 waits on mail epic #2260 in production and owner |
+| 2026-11-21T11:14-08:00 | Manager paused: handoff and memories written to nemarOrg/rfcs (PR #3); temp worktree tmp.Teu8fPYl0M removed; loop stopped |
+| 2026-11-21T23:06-08:00 | Mail slice for O5 live in production (reported by doi-work; manager verified 2026-11-22T07:06Z: /health 0.10.38, release v0.10.38 06:30Z, docs policies/community-mail 200, /mail/unsubscribe/bogus/info 410 link_invalid, nemar.org/unsubscribe/bogus 410). O5 now waits only on the owner. Epic #2260 stays open. |
+| 2026-11-21T23:31-08:00 | Owner (relayed by doi-work, 2026-11-21 23:28 PST): plan RFC-0001 opening for Monday 2026-11-23 morning PT. Monday packet written: owner/announce-0001/monday.md (thread, PR fields + index + merge, token fill, news, notice, docs banner, mail dry run/canary/all, community notes, LinkedIn, BIDS group). Dry-run of PR step on scratch copy: rfc-check ok after bun run index; text extraction checked. |
+| 2026-11-25T10:11-08:00 | Re-checked O5 gates 2026-11-25: #2260 closed, PR 2293 on main, prod 0.10.39, rfcs#2 draft at b6bbb3cd, tag rfc-0001-evidence on c48405fe; notify/notice paths unchanged by admin tree epic #2307. monday.md moved to 11-30 (close 12-21 17:00 UTC). A3 unblocked. |

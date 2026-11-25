@@ -47,7 +47,7 @@ several oddities here are deliberate, and the ADR says which.
 
 **`nm000103`-`nm000107` are LIVE** (public, DOIs minted).
 Do NOT modify their visibility, S3 data, DOIs or repo settings during development or testing.
-For end-to-end testing use `nm099999` (`nemar admin e2e-test`; reset with `POST /admin/datasets/nm099999/reset`).
+For end-to-end testing use `nm099999` (`nemar admin fleet e2e-test`; reset with `POST /admin/datasets/nm099999/reset`).
 `xx`-prefix datasets are blocked from publishing.
 Detail: [`.rules/datasets-and-fixtures.md`](.rules/datasets-and-fixtures.md).
 

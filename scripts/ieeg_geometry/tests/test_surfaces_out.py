@@ -474,3 +474,23 @@ def test_the_command_line_prints_one_decision_per_electrodes_file(dataset, tmp_p
 def test_vendored_reference_still_reads(tmp_path):
     # the reader the writer is tested against loads the vendored template meshes
     assert len(load_reference("MNI152NLin2009cAsym")) == 2
+
+
+def test_a_repeated_electrode_name_does_not_stop_the_surfaces_track(tmp_path, dataset):
+    """The surfaces track reads x, y and z only; the table writers refuse this file."""
+    from ieeg_geometry.bids import GeometryRefusal, check_source_table
+
+    root = tmp_path / "ds"
+    shutil.copytree(
+        dataset["root"] / "derivatives" / "freesurfer" / "sub-1",
+        root / "derivatives" / "freesurfer" / "sub-1",
+    )
+    _write_electrodes(root / "sub-1" / "ieeg", "sub-1", dataset["scanner"][:10], ["L"] * 10)
+    table = root / "sub-1" / "ieeg" / "sub-1_electrodes.tsv"
+    lines = table.read_text().splitlines()
+    lines[2] = "\t".join(["E0", *lines[2].split("\t")[1:]])  # a second contact named E0
+    table.write_text("\n".join(lines) + "\n")
+    with pytest.raises(GeometryRefusal, match="electrodes-names"):
+        check_source_table(table)
+    index, _ = build_geometry(root, tmp_path / "out", source_commit="abc123")
+    assert index["entries"][0]["subject"] == "1"

@@ -4,26 +4,42 @@
  *   POST /compute/jobs/:id/bundle             the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/outputs            the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/outputs/complete   the launcher, with its job token (no session)
- *   POST /compute/jobs/:id/cancel             the job's owner, signed in: cancel it
+ *   POST /compute/jobs/:id/cancel             the job's owner, signed in: cancel it (a job that had already
+ *                                             ended answers 200 with its state and `cancelled: false`)
  *   POST /compute/jobs/:id/links              the job's owner, signed in: 7-day links to the results,
  *                                             1,000 at a time (an optional `{ "after": path }` body pages on)
+ *   POST /compute/jobs, /jobs/:id/finalize, GET /jobs/:id/logs, /jobs/:id/results, POST /jobs/:id/results/renew
+ *                                             the person's submission, log and results (`./jobs.ts`, phase D3, #2024)
+ *   POST /compute/holds, /jobs/:id/report, DELETE /holds/:id
+ *                                             the partner's reserve, report and release (`./partner.ts`,
+ *                                             phase D4, #2025): an access token with `compute.reserve`
  *   POST /compute/observer                    the observer, with a token for one run (phase A7, #2012;
  *                                             no session: see `routes/callbacks/compute-observer.ts`)
+ *   GET  /compute/me                          the caller's access, pools, limits and queue estimates
+ *   GET  /compute/me/usage                    the caller's net charge by day, app, partition and source
+ *   GET  /compute/me/jobs                     the caller's jobs, newest first, paged
+ *   GET  /compute/me/jobs/:id                 one of the caller's jobs (a live one refreshed from Tapis)
+ *   GET  /compute/stats                       platform-wide aggregates, for a partner's CLIENT
+ *                                             (the read routes: `./read.ts`, phase D2, #2023; their
+ *                                             credential rule, a key, the cookie or an access token with
+ *                                             `compute.read` for `/me*` and a client credentials token
+ *                                             with `compute.stats` for `/stats`: `./auth.ts`)
  *
  * The callbacks are registered FIRST and carry no middleware of their own beyond the Worker's global
  * ones: the launcher has no account. Every route that has a person behind it declares its own
  * authentication ON THE ROUTE (`authMiddleware`, then `cookieOriginGuard`, which a write made with a
- * session cookie must pass): there is no `use("*")` here, which would put a session in front of a
- * launcher. `backend/test/compute-route-inventory.test.ts` pins every entry of this router.
+ * session cookie must pass; the read routes' own rule is `./auth.ts`): there is no `use("*")` here,
+ * which would put a session in front of a launcher. `backend/test/compute-route-inventory.test.ts` pins every entry of this router.
  *
  * THE ANSWERS ARE CONTRACTS. `shared/contract/compute-responses.ts` declares the answers of `cancel`,
  * `links` and the observer as open schemas, and `backend/test/compute-person-responses.test.ts` parses the
  * real output against them. The wire is snake_case throughout.
  *
- * NO CLI COMMAND FOR `cancel` AND `links` YET. They are a person's routes, and a person's front doors are
- * the website's job page and `nemar compute submit`, both Epic D (#2024 is the submit command; the job
- * page is nemarOrg/website#495). An administrator cancels with `nemar admin compute jobs cancel`. A
- * command added here belongs to that epic, built on the contract above.
+ * THE CLI. `cancel` has a command, `nemar compute cancel` (phase D3b, `src/commands/compute-jobs.ts`).
+ * `links` has none: `nemar compute results` reads the job's results through `./jobs.ts` (`GET
+ * /jobs/:id/results` and `POST /jobs/:id/results/renew`, phase D3), not through `links`. A person's other
+ * front door is the website's job page (nemarOrg/website#495). An administrator cancels with
+ * `nemar admin compute jobs cancel`.
  *
  * THE OWNER ONLY. A job is the person's own: any other signed-in account, an administrator included
  * (an administrator has `/admin/compute/jobs/:id/cancel`), is answered `job_not_found`, which never
@@ -36,16 +52,20 @@ import {
   COMPUTE_REFUSAL_STATUS,
   COMPUTE_ROUTE_SENTENCES,
   type ComputeRouteSentenceCode,
-} from "../../../shared/compute-state.js";
-import { COMPUTE_JOB_ID_RE, isSafeComputePath } from "../../../shared/contract/compute.js";
-import { authMiddleware, cookieOriginGuard } from "../middleware/auth.js";
-import { getJob } from "../services/compute-jobs.js";
-import { requestComputeCancel } from "../services/compute-lifecycle.js";
-import { mintResultLinks } from "../services/compute-results.js";
-import type { Bindings, Variables } from "../types/bindings.js";
-import { readBoundedJsonObject } from "./callbacks/bounded-json.js";
-import { registerComputeJobCallbackRoutes } from "./callbacks/compute-job-callbacks.js";
-import { registerComputeObserverRoute } from "./callbacks/compute-observer.js";
+} from "../../../../shared/compute-state.js";
+import { COMPUTE_CANCEL_ENDED_OUTCOME } from "../../../../shared/contract/compute-submit.js";
+import { isSafeComputePath } from "../../../../shared/contract/compute.js";
+import { authMiddleware, cookieOriginGuard } from "../../middleware/auth.js";
+import { requestComputeCancel } from "../../services/compute-lifecycle.js";
+import { mintResultLinks } from "../../services/compute-results.js";
+import type { Bindings, Variables } from "../../types/bindings.js";
+import { readBoundedJsonObject } from "../callbacks/bounded-json.js";
+import { registerComputeJobCallbackRoutes } from "../callbacks/compute-job-callbacks.js";
+import { registerComputeObserverRoute } from "../callbacks/compute-observer.js";
+import { registerComputeJobRoutes } from "./jobs.js";
+import { registerComputePartnerRoutes } from "./partner.js";
+import { registerComputeReadRoutes } from "./read.js";
+import { ownJob } from "./shared.js";
 
 /** The most bytes the links route reads: a cursor is at most 512 characters, which is 2 KiB at four bytes each. */
 export const LINKS_BODY_MAX_BYTES = 4096;
@@ -54,26 +74,31 @@ export const computeRoutes = new Hono<{ Bindings: Bindings; Variables: Variables
 
 registerComputeJobCallbackRoutes(computeRoutes);
 registerComputeObserverRoute(computeRoutes);
+registerComputeReadRoutes(computeRoutes);
+registerComputeJobRoutes(computeRoutes);
+registerComputePartnerRoutes(computeRoutes);
 
 const refuse = (
   c: { json: (body: unknown, status: number) => Response },
   code: ComputeRouteSentenceCode,
 ) => c.json({ error: COMPUTE_ROUTE_SENTENCES[code], code }, COMPUTE_REFUSAL_STATUS[code]);
 
-/** The job a signed-in person owns, or null for any other reason (never says which). */
-async function ownJob(env: Bindings, id: string, userId: number) {
-  if (!COMPUTE_JOB_ID_RE.test(id)) return null;
-  const job = await getJob(env.DB, id);
-  return job && job.account_id === userId ? job : null;
-}
-
 computeRoutes.post("/jobs/:id/cancel", authMiddleware, cookieOriginGuard, async (c) => {
   const job = await ownJob(c.env, c.req.param("id"), c.get("user").id);
   if (!job) return refuse(c, "job_not_found");
   const result = await requestComputeCancel(c.env, job.id, "user");
-  if (!result.ok)
-    return refuse(c, result.outcome === "job_not_found" ? "job_not_found" : "bad_state");
-  return c.json({ ok: true, state: result.state, outcome: result.outcome });
+  if (!result.ok) {
+    if (result.outcome === "job_not_found") return refuse(c, "job_not_found");
+    // A job that had already finished or failed: answered, not refused (phase D3, #2024). It says what
+    // state the job is in and that this call cancelled nothing.
+    return c.json({
+      ok: true,
+      state: result.state,
+      outcome: COMPUTE_CANCEL_ENDED_OUTCOME,
+      cancelled: false,
+    });
+  }
+  return c.json({ ok: true, state: result.state, outcome: result.outcome, cancelled: true });
 });
 
 computeRoutes.post("/jobs/:id/links", authMiddleware, cookieOriginGuard, async (c) => {

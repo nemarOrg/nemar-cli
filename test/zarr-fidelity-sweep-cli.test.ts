@@ -1,5 +1,5 @@
 /**
- * CLI `nemar admin zarr-fidelity-sweep` (issue #1068, epic #1181 phase 8),
+ * CLI `nemar admin fleet sweep zarr-fidelity` (issue #1068, epic #1181 phase 8),
  * driven through the real entry point (`bun run src/index.ts admin
  * zarr-fidelity-sweep ...`). Mirrors test/has-zarr-cli-flag.test.ts's
  * harness: a real subprocess CLI invocation pointed at a real local HTTP
@@ -139,11 +139,11 @@ const FAILED_RESPONSE = {
   remaining: 0,
 };
 
-describe("nemar admin zarr-fidelity-sweep: auth", () => {
+describe("nemar admin fleet sweep zarr-fidelity: auth", () => {
   test("without a stored apiKey, requireAuth blocks before any request is sent", async () => {
     const server = startCaptureServer(VERIFIED_RESPONSE);
     try {
-      const result = await runCli(["admin", "zarr-fidelity-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "zarr-fidelity"], server.url);
       expect(result.stdout).toContain("Not authenticated");
       expect(server.requests.length).toBe(0);
     } finally {
@@ -152,13 +152,13 @@ describe("nemar admin zarr-fidelity-sweep: auth", () => {
   });
 });
 
-describe("nemar admin zarr-fidelity-sweep: request shape", () => {
+describe("nemar admin fleet sweep zarr-fidelity: request shape", () => {
   test("--limit is forwarded as ?limit=N on the real request", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(VERIFIED_RESPONSE);
     try {
       const result = await runCli(
-        ["admin", "zarr-fidelity-sweep", "--limit", "10", "--json"],
+        ["admin", "fleet", "sweep", "zarr-fidelity", "--limit", "10", "--json"],
         server.url,
       );
       expect(result.exitCode).toBe(0);
@@ -174,7 +174,10 @@ describe("nemar admin zarr-fidelity-sweep: request shape", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(VERIFIED_RESPONSE);
     try {
-      const result = await runCli(["admin", "zarr-fidelity-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "zarr-fidelity", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(server.requests[0].searchParams.get("limit")).toBe("25");
     } finally {
@@ -183,12 +186,15 @@ describe("nemar admin zarr-fidelity-sweep: request shape", () => {
   });
 });
 
-describe("nemar admin zarr-fidelity-sweep: output and exit code", () => {
+describe("nemar admin fleet sweep zarr-fidelity: output and exit code", () => {
   test("--json prints the raw response verbatim", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(VERIFIED_RESPONSE);
     try {
-      const result = await runCli(["admin", "zarr-fidelity-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "zarr-fidelity", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual(VERIFIED_RESPONSE);
     } finally {
@@ -200,7 +206,7 @@ describe("nemar admin zarr-fidelity-sweep: output and exit code", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(VERIFIED_RESPONSE);
     try {
-      const result = await runCli(["admin", "zarr-fidelity-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "zarr-fidelity"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("verified");
       expect(result.stdout).toContain("on800001");
@@ -214,7 +220,7 @@ describe("nemar admin zarr-fidelity-sweep: output and exit code", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(FAILED_RESPONSE);
     try {
-      const result = await runCli(["admin", "zarr-fidelity-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "zarr-fidelity"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("failed");
       expect(result.stdout).toContain("on800002");
@@ -236,7 +242,10 @@ describe("nemar admin zarr-fidelity-sweep: output and exit code", () => {
       remaining: 0,
     });
     try {
-      const result = await runCli(["admin", "zarr-fidelity-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "zarr-fidelity", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
@@ -257,7 +266,10 @@ describe("nemar admin zarr-fidelity-sweep: output and exit code", () => {
       remaining: null,
     });
     try {
-      const result = await runCli(["admin", "zarr-fidelity-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "zarr-fidelity", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
@@ -282,7 +294,10 @@ describe("nemar admin zarr-fidelity-sweep: output and exit code", () => {
       budget_exhausted: true,
     });
     try {
-      const result = await runCli(["admin", "zarr-fidelity-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "zarr-fidelity", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
@@ -304,7 +319,10 @@ describe("nemar admin zarr-fidelity-sweep: output and exit code", () => {
       budget_exhausted: false,
     });
     try {
-      const result = await runCli(["admin", "zarr-fidelity-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "zarr-fidelity", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
     } finally {
       server.stop();

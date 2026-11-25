@@ -17,6 +17,9 @@
  *   - the candidate is not itself a spam ticket;
  *   - the recipient's queue and the candidate agree on restriction (a security or conduct
  *     address never appends to an unrestricted ticket);
+ *   - a recipient queue with its own retention (`QUEUE_RETENTION_DAYS`) never appends to a ticket
+ *     of another queue, whose shorter period would then govern it (`retention_mismatch`); the
+ *     reverse threads, so a reply to such a ticket from another queue keeps its longer period;
  *   - the From address is the ticket's requester or an address already on the ticket.
  *
  * Tags are descriptive labels taken from the recipient address, which anyone can choose, so they
@@ -35,6 +38,7 @@ import {
   isRestrictedQueue,
   resolveAssignee,
 } from "./ticket-assignment";
+import { QUEUE_RETENTION_DAYS } from "./ticket-retention";
 import { TICKET_WORDS } from "./ticket-words";
 
 /** The stored body is clamped to this many UTF-8 bytes. */
@@ -524,6 +528,8 @@ async function ingestNew(
       if (candidate.status === "spam") reason = "candidate_is_spam";
       else if (candidate.purged_at !== null) reason = "candidate_purged";
       else if (queueRestricted && candidate.restricted !== 1) reason = "restriction_mismatch";
+      else if (QUEUE_RETENTION_DAYS.has(queueTag) && candidate.queue_tag !== queueTag)
+        reason = "retention_mismatch";
       else if (!(await isTicketParticipant(db, candidate, fromAddr)))
         reason = "sender_not_on_ticket";
       if (reason === null) target = candidate;

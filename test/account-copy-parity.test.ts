@@ -51,6 +51,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { ACCOUNT_COPY } from "../shared/contract/account-copy.js";
 import {
+  COMPUTE_PURPOSE_MAX_CHARS,
+  COMPUTE_PURPOSE_MIN_CHARS,
+} from "../shared/contract/compute-access.js";
+import {
   UPLOAD_ACCESS_WHY_MAX_CHARS,
   UPLOAD_ACCESS_WHY_MIN_CHARS,
 } from "../shared/contract/user.js";
@@ -142,6 +146,13 @@ describe("the copy table's own rules", () => {
     );
   });
 
+  test("the compute purpose hint's written-out bounds still match the constants", () => {
+    // Epic #2021 phase D1: the same rule 1, for the compute request's purpose text.
+    expect(ACCOUNT_COPY["compute_access.request.purpose_hint"]).toBe(
+      `Describe what you intend to compute in ${COMPUTE_PURPOSE_MIN_CHARS}-${COMPUTE_PURPOSE_MAX_CHARS} characters`,
+    );
+  });
+
   test("every placeholder comes from the declared vocabulary", () => {
     const allowed = new Set([
       "label",
@@ -152,6 +163,23 @@ describe("the copy table's own rules", () => {
       "client",
       "redirect_host",
       "reason",
+      // The admin Compute tab's (website#497): the numbers and fixed words its sentences carry.
+      "kind",
+      "version",
+      "id",
+      "cpu",
+      "gpu",
+      "count",
+      "max",
+      "word",
+      "what",
+      "shown",
+      "total",
+      "state",
+      "flag",
+      "token",
+      "health",
+      "status",
     ]);
     for (const [key, value] of Object.entries(ACCOUNT_COPY)) {
       for (const [, name] of value.matchAll(/\{(\w+)\}/g)) {

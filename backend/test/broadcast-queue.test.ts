@@ -47,7 +47,7 @@ function run(db: Database, recipients: string[], e: BroadcastEnv) {
     FROM,
     {
       sentById: seedSender(db),
-      group: "admins",
+      group: "user:broadcastadmin",
       subject: "Maintenance window",
       bodyMarkdown: "Hello **all**",
       recipients,

@@ -1,7 +1,8 @@
 # ADR 0100: Tracking records index stat data for large files through git-annex's per-file clean filter
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-12
+**Accepted:** 2026-10-13
 **Owner:** Seyed Yahya Shirazi
 
 Issue #1704 (follow-up to #884 and #1455).

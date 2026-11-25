@@ -1,0 +1,26 @@
+heads: 24336 to read
+  heads 1000/24336 requests=2013 stat={'429': 0, '5xx': 0, 'other_fail': 0}
+  heads 2000/24336 requests=4011 stat={'429': 0, '5xx': 0, 'other_fail': 0}
+  heads 3000/24336 requests=6010 stat={'429': 0, '5xx': 0, 'other_fail': 0}
+  heads 4000/24336 requests=8010 stat={'429': 0, '5xx': 0, 'other_fail': 0}
+  heads 5000/24336 requests=10008 stat={'429': 0, '5xx': 0, 'other_fail': 0}
+  heads 6000/24336 requests=12045 stat={'429': 0, '5xx': 32, 'other_fail': 0}
+  heads 7000/24336 requests=14109 stat={'429': 0, '5xx': 102, 'other_fail': 0}
+ABORTED: 8 consecutive 429/5xx/network failures; last=https://raw.githubusercontent.com/nemarDatasets/nm000281/v1.0.5/sub-192/ses-04/emg/sub-192_ses-04_task-emg2pose_run-25_recording-right_emg.bdf stat {'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 8000/24336 requests=16281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 9000/24336 requests=18281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 10000/24336 requests=20281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 11000/24336 requests=22281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 12000/24336 requests=24281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 13000/24336 requests=26281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 14000/24336 requests=28281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 15000/24336 requests=30281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 16000/24336 requests=32281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 17000/24336 requests=34281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 18000/24336 requests=36281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 19000/24336 requests=38281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 20000/24336 requests=40281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 21000/24336 requests=42281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 22000/24336 requests=44281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 23000/24336 requests=46281 stat={'429': 0, '5xx': 281, 'other_fail': 0}
+  heads 24000/24336 requests=48281 stat={'429': 0, '5xx': 281, 'other_fail': 0}

@@ -905,7 +905,7 @@ describe("queues", () => {
     const asAdmin = (await call("admin", "GET", "/queues")).body.queues as { tag: string }[];
     expect(asAdmin.map((q) => q.tag).sort()).toEqual(["*"]);
     const asOwner = (await call("owner", "GET", "/queues")).body.queues as { tag: string }[];
-    expect(asOwner.map((q) => q.tag).sort()).toEqual(["*", "conduct", "security"]);
+    expect(asOwner.map((q) => q.tag).sort()).toEqual(["*", "conduct", "legal-process", "security"]);
     expect((await call("admin", "PUT", "/queues/support", { strategy: "pool" })).status).toBe(403);
     expect((await call("member", "PUT", "/queues/support", { strategy: "pool" })).status).toBe(403);
   });

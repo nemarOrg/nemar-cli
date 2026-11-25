@@ -151,7 +151,7 @@ export { OWNER_NAME_MISSING_REASON } from "../../../shared/publication-steps.js"
  * so rather than sending them to a record they may not control.
  *
  * ORCID is canonical either way: a public name on the record flows in through
- * the signup lookup, the OAuth link refresh, and `nemar admin backfill-names`.
+ * the signup lookup, the OAuth link refresh, and the since-retired `nemar admin backfill-names`.
  */
 export const OWNER_NAME_MISSING_MESSAGE =
   "DOIs cite the person who deposited the dataset by name, and this account has no " +

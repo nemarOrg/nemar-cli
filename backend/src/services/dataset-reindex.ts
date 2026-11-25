@@ -453,8 +453,8 @@ export function extractEnrichmentSubErrors(body: unknown): string[] {
  * declined to push a DOI record that would have deleted an existing
  * DataCurator, which is the correct outcome, not a broken run. Folding it
  * into the sub-error list made every reindex of a dataset whose owner has no
- * name yet -- most of the catalogue until `nemar admin backfill-names --apply`
- * has been run -- report `status: "failed"` and log "enrichment failed",
+ * name yet -- most of the catalogue before the since-retired `nemar admin backfill-names`
+ * ran -- report `status: "failed"` and log "enrichment failed",
  * burying the real failures in the same batch.
  *
  * Operators still need to see it, so it travels as a WARNING alongside an

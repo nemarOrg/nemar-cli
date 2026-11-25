@@ -13,7 +13,7 @@
  * `readme.content` (embedded markdown, schema 1.1) is present in the bundle's
  * `summary` payload ONLY for versions whose summary.json has been regenerated
  * since the schema bump. Existing pre-bump versions still ship schema 1.0
- * with `readme: {path}` only — `nemar admin summary check --fix` does the
+ * with `readme: {path}` only — `nemar admin fleet summary check --apply` does the
  * one-shot backfill that populates `readme.content` everywhere.
  *
  * The three S3/D1 fanouts (metadata, summary, catalog) are wrapped in

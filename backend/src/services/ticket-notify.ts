@@ -104,7 +104,7 @@ async function sendTicketMail(
 ${extra}
 <p style="color: #666; font-size: 14px;">Read and answer it through the admin API
 (GET /admin/mail/tickets/${ticket.id}). You receive this because the support ticket notification
-category is on for your account; change it with <code>nemar admin email-preferences</code>.</p>
+category is on for your account; change it with <code>nemar admin users email-preferences</code>.</p>
 </body></html>`;
   let sent = 0;
   for (const person of people) {

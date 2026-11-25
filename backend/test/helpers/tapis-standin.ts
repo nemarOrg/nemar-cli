@@ -161,6 +161,8 @@ export interface TapisStandin {
   rejectAllTokens(on: boolean): void;
   /** Search ignores `select` and list serves whole records (see the header). */
   fullRecords(on: boolean): void;
+  /** The wire form of a served record's `parameterSet`: a JSON string (the specification, the default) or an object (the documentation's examples). */
+  parameterSetAs(form: "string" | "object"): void;
   /** The uuids of the jobs `fullRecords` served whole, in order. */
   fullRecordsServed: string[];
   /** Share a job with a user, so `SHARED_JOBS` and `ALL_JOBS` list it for them. */
@@ -170,6 +172,8 @@ export interface TapisStandin {
   /** How many tokens it has minted, by route. */
   mints(): { password: number; service: number };
   /** Forget jobs, subscriptions, outputs, the log, tokens and every failure mode. */
+  /** Clear every injected failure mode, keeping the jobs. */
+  clearFailures(): void;
   reset(): void;
   stop(): void;
 }
@@ -300,6 +304,7 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
   let behaviours: Behaviour[] = [];
   let rejectAll = false;
   let fullRecordsOn = false;
+  let parameterSetForm: "string" | "object" = "string";
   const fullRecordsServed: string[] = [];
   const shares = new Map<string, Set<string>>();
   let mintCounts = { password: 0, service: 0 };
@@ -345,8 +350,20 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
     return b;
   }
 
+  /**
+   * A record as the wire carries it: `parameterSet` is a JSON STRING in Tapis's Jobs specification and an
+   * object in its documentation's examples; the stand-in serves the specification's form by default
+   * (`parameterSetAs`), so the happy path of a reader covers it.
+   */
+  function onTheWire(record: Record<string, unknown>): Record<string, unknown> {
+    if (parameterSetForm === "string" && typeof record.parameterSet === "object") {
+      return { ...record, parameterSet: JSON.stringify(record.parameterSet) };
+    }
+    return record;
+  }
+
   function jobSummary(job: StandinJob, select: string[] | null): Record<string, unknown> {
-    const full = job.record;
+    const full = onTheWire(job.record);
     if (select === null) return full;
     const out: Record<string, unknown> = {};
     for (const key of select) if (key in full) out[key] = full[key];
@@ -740,7 +757,7 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
       }
 
       if (route === "GET /v3/jobs/:uuid")
-        return json(envelope("JOBS_RETRIEVED Job retrieved.", job.record));
+        return json(envelope("JOBS_RETRIEVED Job retrieved.", onTheWire(job.record)));
       if (route === "GET /v3/jobs/:uuid/status") {
         return json(
           envelope("JOBS_STATUS_RETRIEVED", { status: job.status, condition: job.condition }),
@@ -946,6 +963,9 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
     rejectAllTokens(on) {
       rejectAll = on;
     },
+    parameterSetAs(form) {
+      parameterSetForm = form;
+    },
     fullRecords(on) {
       fullRecordsOn = on;
     },
@@ -962,6 +982,10 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
       server = listen();
     },
     mints: () => ({ ...mintCounts }),
+    clearFailures() {
+      behaviours = [];
+      rejectAll = false;
+    },
     reset() {
       log.length = 0;
       jobs.clear();
@@ -971,6 +995,7 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
       behaviours = [];
       rejectAll = false;
       fullRecordsOn = false;
+      parameterSetForm = "string";
       fullRecordsServed.length = 0;
       shares.clear();
       mintCounts = { password: 0, service: 0 };

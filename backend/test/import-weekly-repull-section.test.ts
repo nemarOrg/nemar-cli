@@ -20,7 +20,7 @@
  *    part, and the section says unknown (ADR 0054), never zero;
  *  - attention follows ADR 0053 exactly: each reason alone, none for a switch that is off, a hold
  *    other than the two bounds or a run's refusal, and the thresholds exactly where they are stated;
- *  - the headline, the log line and `nemar admin import-weekly`'s rule are one function.
+ *  - the headline, the log line and `nemar admin import weekly`'s rule are one function.
  * Mail is pinned by `repull-no-mail-scan.test.ts`; the Resend capture below stays empty.
  */
 
@@ -87,6 +87,12 @@ let mailDone: Promise<void> | null = null;
 
 beforeAll(() => {
   gh = startRepullGitHub({ defaultHead: HEAD });
+  // The report's RFC reads go to GITHUB_API() too. This file does not test them: the stand-in
+  // above installs itself as NEMAR_GITHUB_API_URL and answers their paths with a 404 (a failed
+  // `rfcs` part nothing here counts). Pin that, so these tests cannot reach api.github.com.
+  expect((globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL).toMatch(
+    /^http:\/\/127\.0\.0\.1:\d+$/,
+  );
 });
 afterAll(() => {
   openneuro.stop();
