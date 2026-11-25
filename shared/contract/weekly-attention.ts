@@ -58,7 +58,7 @@ export interface NeurobagelWeekly {
 }
 
 // The RFC clock's week (RFC program card R3). Declared here, with no imports, because the Worker
-// writes it and `nemar admin import-weekly` reads it.
+// writes it and `nemar admin import weekly` reads it.
 
 /** A listed RFC: opened and not decided. */
 export interface RfcListed {
@@ -97,7 +97,7 @@ export interface RfcClockRun {
 /**
  * The RFC clock's week. Each part is `null` when its read failed (unknown, never zero), and
  * `attention` holds one phrase per reason a person should look, decided here at the report's
- * instant, so that the headline and `nemar admin import-weekly` repeat them and cannot disagree.
+ * instant, so that the headline and `nemar admin import weekly` repeat them and cannot disagree.
  */
 export interface RfcWeekFacts {
   index: RfcIndexReading | null;

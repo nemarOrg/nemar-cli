@@ -124,6 +124,15 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
 - Plain `nemar admin --help` lists all fourteen groups with their descriptions; the "More commands" fold it needed for about fifty commands is gone.
 - Backend mail and refusal text, and the weekly summary drift issue, name the new paths. No workflow, script or cron runs a moved command unattended.
 
+### Request for Comments program (epic #2239, ADR 0130)
+
+- **The weekly report shows the Request for Comments (RFC) clock (#2278).**
+  The Monday report gains an `## RFC clock` section, and `nemar admin import weekly` prints an `rfcs:` line (`listed`, `closed_awaiting_decision`, `clock`, `last_run`), both read from `nemarOrg/rfcs` through the public GitHub API.
+  The command exits 1 when the clock workflow is stopped, an RFC is past its decision date, or the backend sends no `rfcs` field, and exits 2 when the field could not be read (`rfcs=unknown`).
+  Deploy order: the backend first. A new CLI against an older backend exits 1, the same way it does for the re-pull section.
+  No secret, binding, cron or migration.
+- **New decision records:** ADR 0130 (community input goes through a time-boxed RFC in `nemarOrg/rfcs`), ADR 0131 (biosig-zarr has its own home and packing rules; partly supersedes ADR 0128) and ADR 0133 (format conformance vectors are canonical in biosig-zarr and nemar-cli vendors them by digest; partly supersedes ADR 0124 decision 3).
+
 ### Changed
 
 - **The compute recipe registry declares `nemar-floor` and `nemar-ica` `1.0.0-b1`, engine `eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8` (#2329).**
