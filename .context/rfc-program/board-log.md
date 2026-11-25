@@ -112,6 +112,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:52-08:00 | Evidence link: tag rfc-0001-evidence on nemar-cli c48405fe so RFC-0001's S1 link survives the branch (owner, 2026-11-21) | owner |  |
 | 2026-11-21T10:52-08:00 | nm000411 (zarr_status failed, no stores): manager files one nemar-cli issue with S1's facts, no cause examined (owner, 2026-11-21) | owner |  |
 | 2026-11-21T11:14-08:00 | Session wrapped: everything left waits on the owner (O5) and mail epic #2260 in production; the next session resumes from the nemarOrg/rfcs clone, not a worktree; handoff in rfcs .context/handoff.md (PR rfcs#3), memories in rfcs .memory/ (owner, 2026-11-21) | owner |  |
+| 2026-11-25T10:11-08:00 | RFC-0001 opens Monday 2026-11-30 ~09:00 PST instead of 2026-11-23 | owner | make sure everything is up and running and people are back from the holiday |
 
 ## Log
 
@@ -262,3 +263,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T11:14-08:00 | Manager paused: handoff and memories written to nemarOrg/rfcs (PR #3); temp worktree tmp.Teu8fPYl0M removed; loop stopped |
 | 2026-11-21T23:06-08:00 | Mail slice for O5 live in production (reported by doi-work; manager verified 2026-11-22T07:06Z: /health 0.10.38, release v0.10.38 06:30Z, docs policies/community-mail 200, /mail/unsubscribe/bogus/info 410 link_invalid, nemar.org/unsubscribe/bogus 410). O5 now waits only on the owner. Epic #2260 stays open. |
 | 2026-11-21T23:31-08:00 | Owner (relayed by doi-work, 2026-11-21 23:28 PST): plan RFC-0001 opening for Monday 2026-11-23 morning PT. Monday packet written: owner/announce-0001/monday.md (thread, PR fields + index + merge, token fill, news, notice, docs banner, mail dry run/canary/all, community notes, LinkedIn, BIDS group). Dry-run of PR step on scratch copy: rfc-check ok after bun run index; text extraction checked. |
+| 2026-11-25T10:11-08:00 | Re-checked O5 gates 2026-11-25: #2260 closed, PR 2293 on main, prod 0.10.39, rfcs#2 draft at b6bbb3cd, tag rfc-0001-evidence on c48405fe; notify/notice paths unchanged by admin tree epic #2307. monday.md moved to 11-30 (close 12-21 17:00 UTC). A3 unblocked. |

@@ -1,19 +1,21 @@
-# Opening NEMAR RFC 0001 on Monday 2026-11-23
+# Opening NEMAR RFC 0001 on Monday 2026-11-30
 
 The owner runs every command here, in order, on Monday morning Pacific time (planned for 09:00 PST, 17:00 UTC).
 Nothing here is run by the manager, a worker or another session.
-The plan's step O5 (`plan.md`, section 5) is the authority; this page fills in its commands for this RFC, as checked on 2026-11-22.
+The plan's step O5 (`plan.md`, section 5) is the authority; this page fills in its commands for this RFC, as checked on 2026-11-25.
+The owner moved the opening from 2026-11-23 to 2026-11-30 (2026-11-25), so that everything is running and people are back from the holiday.
 
-If the thread is created at 17:00 UTC, the RFC closes Monday 2026-12-14 at 17:00 UTC (09:00 PST);
-the one allowed extension of at most 14 days would end Monday 2026-12-28 at the latest.
+If the thread is created at 17:00 UTC, the RFC closes Monday 2026-12-21 at 17:00 UTC (09:00 PST);
+the one allowed extension of at most 14 days would end Monday 2027-01-04 at the latest.
 The close is computed from the thread's actual creation minute in step 2, so a later start only moves it.
 
-Checked on 2026-11-22 so that Monday is only these steps:
+Checked on 2026-11-25 so that Monday is only these steps:
 
 - RFC PR nemarOrg/rfcs#2 is a draft at `b6bbb3cddca8f49fc59b98ca130e72eaf1cca4eb`, `rfc-check` passes, and it is one commit behind `main` (the handoff, PR #3); `main` requires `rfc-check` on an up-to-date branch, so step 3 merges `main` into it.
 - A dry run of step 3 on a scratch copy (fields set, `bun run index`) gave `rfc-check: ok` and a clean `biome ci`; without `bun run index` the check fails on a stale index.
 - The `RFCs` Discussion category exists (id below); the repository has no Discussion yet.
-- Production API 0.10.38 has the `rfcs` mail category; the local CLI was 0.10.35, which has no `--category`, so step 1 upgrades it.
+- Production API 0.10.39 has the `rfcs` mail category; the local CLI is 0.10.35, which has no `--category`, so step 1 upgrades it.
+- The admin command tree (epic #2307, unreleased on 2026-11-25) keeps `nemar admin notify` and `nemar admin notice` where they are, so the commands below hold whether or not 0.10.40 ships first.
 
 Every block below runs in one terminal; later blocks use variables set by earlier ones.
 
@@ -22,7 +24,7 @@ Every block below runs in one terminal; later blocks use variables set by earlie
 ```bash
 date -u
 curl -s https://api.nemar.org/health        # must show "version":"0.10.38" or later
-bun add -g nemar-cli@0.10.38 && nemar --version
+bun add -g nemar-cli@latest && nemar --version   # 0.10.38 or later
 nemar admin notify --help | grep -- '--category'   # must print the --category line
 gh auth status
 
