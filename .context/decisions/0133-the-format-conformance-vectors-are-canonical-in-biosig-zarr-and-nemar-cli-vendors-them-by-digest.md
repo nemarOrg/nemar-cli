@@ -12,7 +12,7 @@ Epic #2239.
 ADR 0124 decision 3 put the whole conformance suite in nemar-cli, under `shared/contract/zarr-conformance/`, and had every other repository that holds a reader copy it from there.
 [ADR 0131](0131-biosig-zarr-has-its-own-home-and-packing-rules-and-its-tag-rename-waits-for-re-conversion.md) then gave the format its own repository, nemarOrg/biosig-zarr, and decision 4 there sends decisions about the specification itself to that repository.
 The vectors that test the format are part of the specification: they are written from its text, reviewed through its Request for Comments (RFC) process, and read by readers that have nothing to do with NEMAR.
-On 2026-11-20 the owner answered Q9 (the conformance test files live in nemarOrg/biosig-zarr, and nemar-cli vendors them by digest) and Q34 (record that now, as a lead step, not at checkpoint C3).
+On 2026-11-20 the owner answered Q9 of the RFC program plan (`.context/rfc-program/plan.md`) (the conformance test files live in nemarOrg/biosig-zarr, and nemar-cli vendors them by digest) and Q34 (record that now, as a lead step, not at checkpoint C3).
 On the same day the owner ruled on Q33 that the version 2 schemas and vectors go on biosig-zarr `main` and are released as `2.0.1`, and the version 3 ones go on `draft/3.0.0`.
 
 ## Decision
@@ -20,11 +20,11 @@ On the same day the owner ruled on Q33 that the version 2 schemas and vectors go
 1. **The format-level vectors are canonical in nemarOrg/biosig-zarr.**
    Its `schemas/` and `conformance/` (the vectors, `conformance/manifest.json` and the goldens) are where a change to them is made, through that repository's own process, and the only place it is made.
 2. **nemar-cli vendors them byte for byte, pinned twice.**
-   The copy lives in `shared/contract/zarr-conformance/biosig-zarr/` and is pinned to a biosig-zarr release tag and to the SHA-256 of that tag's `conformance/manifest.json`.
+   The copy lives in `shared/contract/zarr-conformance/biosig-zarr/` and is pinned to a biosig-zarr release tag and to the Secure Hash Algorithm 256 (SHA-256) digest of that tag's `conformance/manifest.json`.
    A drift check fails when the copy differs from what the pin names, so a copy edited in place is a failing check, not a local fix.
    Every other repository that holds a reader (eegprep-lean, EEGDash) vendors from biosig-zarr the same way, not from nemar-cli.
 3. **The NEMAR-profile cases stay canonical in nemar-cli.**
-   The `nemar` provenance block, NEMAR's other additions to the store root, and the store content digest of ADR 0123 decision 4 with its vectors remain in nemar-cli `shared/contract/zarr-conformance/`, as ADR 0124 decision 3 says, and are copied from there.
+   The `nemar` provenance block and NEMAR's other additions to the store root remain in nemar-cli `shared/contract/zarr-conformance/`, as ADR 0124 decision 3 says, and are copied from there; the store content digest of ADR 0123 decision 4 keeps its vectors in nemar-cli `shared/contract/derivatives-vectors.json`, as ADR 0124 decision 4 says, and the suite includes them.
 4. **This ADR vendors nothing.**
    The first change that vendors the vectors follows it, and names the tag and the manifest digest it pins; no digest is recorded here.
 
