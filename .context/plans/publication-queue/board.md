@@ -48,7 +48,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 3 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 4 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -88,7 +88,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | ID | Step | Question | Options | Default | Needed by | State | Answer |
 |---|---|---|---|---|---|---|---|
-| Q1 | - | Raise PLATFORM_DAILY_CAP (50 model calls/day) for the queue? At 50/day ~300 requests take ~1 week; ADR 0139 adds a Sonnet call per fail | Keep 50 for the shadow batch, decide after (Recommended) / Raise to 150 now / Make it an env var you set | none | 2026-11-27T17:00 | open |  |
+| Q1 | - | Raise PLATFORM_DAILY_CAP (50 model calls/day) for the queue? At 50/day ~300 requests take ~1 week; ADR 0139 adds a Sonnet call per fail | Keep 50 for the shadow batch, decide after (Recommended) / Raise to 150 now / Make it an env var you set | none | 2026-11-27T17:00 | closed | Raise to 150 now (owner, 2026-11-25T11:22-08:00) |
 
 ## Proposals
 
@@ -102,3 +102,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | D1 | implementer | claude-worker | Opus 5.5 | D1 | 2026-11-25T11:12 | running |
 | D2 | implementer | claude-worker | Sonnet 5.5 | D2 | 2026-11-25T11:12 | running |
 | A1 | implementer | claude-worker | Opus 5.5 | A1 | 2026-11-25T11:12 | running |
+| rev-2370 | reviewer | claude-worker | Sonnet 5.5 | D0 | 2026-11-25T11:22 | running |
