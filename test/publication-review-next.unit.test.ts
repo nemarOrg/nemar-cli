@@ -47,8 +47,8 @@ import { ID, type Spec, read, row, summary } from "./helpers/review-fixtures";
 const uncolored = (text: string) => text.replace(/\u001b\[[0-9;]*m/g, "");
 
 /** `yAnswer` for a request that is not being resumed, unless the test says. */
-const answerOf = (spec: Spec, force = false, resume = false) =>
-  yAnswer(ID, read(spec), force, resume);
+const answerOf = (spec: Spec, force = false, resume = false, caller: number | null = null) =>
+  yAnswer(ID, read(spec), force, resume, caller);
 
 function offered(a: YAnswer) {
   if (!a.offered) throw new Error(`expected y to be offered, got: ${a.why}`);
@@ -194,9 +194,17 @@ describe("yAnswer: the screen's acknowledgment is asked, never assumed", () => {
     expect(a.override).toBeNull();
   });
 
-  test("already on record: nothing to ask, and the screen gate decides", () => {
-    const a = offered(answerOf({ reasons: [ack], acknowledged: true }));
+  test("already on record by the caller: nothing to ask, and the screen gate decides", () => {
+    // The fixture's recorded acknowledgment is administrator 3's.
+    const a = offered(answerOf({ reasons: [ack], acknowledged: true }, false, false, 3));
     expect(a.askAcknowledgment).toBe(false);
+  });
+
+  test("on record by another administrator, or a caller not known: y asks for the caller's own", () => {
+    expect(
+      offered(answerOf({ reasons: [ack], acknowledged: true }, false, false, 4)).askAcknowledgment,
+    ).toBe(true);
+    expect(offered(answerOf({ reasons: [ack], acknowledged: true })).askAcknowledgment).toBe(true);
   });
 
   test("next to an override-class reason it needs --force as well, and with it asks both", () => {
