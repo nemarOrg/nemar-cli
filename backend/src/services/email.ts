@@ -2256,6 +2256,167 @@ export async function sendIdentifierScreenBlockedEmail(
 }
 
 /**
+ * What the digest of a paced re-screen says (`services/screen-batch.ts`, ADR 0086 amendment of
+ * 2026-11-25). Counts, dataset ids, fixed state labels and finding kinds; never a value a workflow
+ * wrote.
+ */
+export interface ScreenBatchDigest {
+  batchId: number;
+  /** Requests the batch was created for. */
+  total: number;
+  /** Requests whose result is stored. */
+  reported: number;
+  /** Screen states of the selection before the batch, as [label, count]. */
+  before: [string, number][];
+  /** Screen states after it, with `did not report` as a state of its own. */
+  after: [string, number][];
+  /** Findings by kind across the reported requests, in `kindsPhrase`'s words; empty when none. */
+  kinds: string;
+  /** Requests whose screen state or status changed. */
+  changed: { datasetId: string; from: string; to: string; nowBlocked: boolean }[];
+  /** Requests the batch blocked; their depositors were NOT mailed. */
+  blocked: string[];
+  /** Requests with no stored result from this batch, by dataset id. */
+  notReported: string[];
+}
+
+/**
+ * The words of the digest, in one place (the style of the other copy tables): the template below
+ * holds markup and no sentence. A batch sends no per-request mail, so every sentence that says
+ * what that mail would have said is here.
+ */
+const SCREEN_BATCH_DIGEST_COPY = {
+  subject: (d: ScreenBatchDigest): string => {
+    const missing = d.total - d.reported;
+    return missing > 0
+      ? `[NEMAR] Re-screen batch ${d.batchId} finished: ${d.reported} of ${d.total} reported, ${missing} did not`
+      : `[NEMAR] Re-screen batch ${d.batchId} finished: all ${d.total} reported`;
+  },
+  heading: (d: ScreenBatchDigest): string => `Re-screen batch ${d.batchId}`,
+  intro: (d: ScreenBatchDigest): string =>
+    `${d.reported} of ${d.total} publication requests reported. This batch sent no per-request mail to administrators and no mail to depositors; everything it would have said is below.`,
+  beforeHeading: "Screen states before",
+  afterHeading: "Screen states after",
+  kindsHeading: "Findings by kind",
+  noKinds: "No findings.",
+  changedHeading: "Requests whose state changed",
+  noChanges: "None.",
+  nowBlockedSuffix: "now blocked",
+  blockedHeading: "Blocked by this batch; the depositor was not mailed",
+  blockedNext:
+    "Each depositor still has to be told what to fix. A request blocked on findings is released by a clear screen after the data is fixed.",
+  notReportedHeading: "Did not report",
+  notReportedNext:
+    "No result from this batch is stored for these requests. Re-run one with: nemar admin repo publish screen <dataset-id>. A report that arrives late is mailed as usual.",
+  none: "None.",
+} as const;
+
+function digestCounts(rows: [string, number][]): string {
+  return rows.length === 0
+    ? ""
+    : `<ul style="margin: 8px 0 16px 0; padding-left: 20px;">${rows
+        .map(([label, n]) => `<li>${escapeHtml(label)}: ${n}</li>`)
+        .join("")}</ul>`;
+}
+
+function digestIds(ids: string[]): string {
+  return ids.length === 0
+    ? `<p>${SCREEN_BATCH_DIGEST_COPY.none}</p>`
+    : `<ul style="margin: 8px 0 16px 0; padding-left: 20px;">${ids
+        .map((id) => `<li><code>${escapeHtml(id)}</code></li>`)
+        .join("")}</ul>`;
+}
+
+/**
+ * Tell the administrators that a paced re-screen has finished (`screen-batch`). One mail per batch:
+ * the batch itself sends no other. Same recipients as the publication request mail, tried one by
+ * one, and the same per-recipient outcome, so the caller can release its claim when nobody
+ * received it.
+ */
+export async function sendScreenBatchDigestEmail(
+  adminEmails: string[],
+  digest: ScreenBatchDigest,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<AdminNotificationOutcome> {
+  const copy = SCREEN_BATCH_DIGEST_COPY;
+  const changedHtml =
+    digest.changed.length === 0
+      ? `<p>${copy.noChanges}</p>`
+      : `<ul style="margin: 8px 0 16px 0; padding-left: 20px;">${digest.changed
+          .map(
+            (c) =>
+              `<li><code>${escapeHtml(c.datasetId)}</code>: ${escapeHtml(c.from)} to ${escapeHtml(c.to)}${
+                c.nowBlocked ? ` (${copy.nowBlockedSuffix})` : ""
+              }</li>`,
+          )
+          .join("")}</ul>`;
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">${escapeHtml(copy.heading(digest))}</h1>
+  <p>${escapeHtml(copy.intro(digest))}</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.beforeHeading}</h2>
+  ${digestCounts(digest.before)}
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.afterHeading}</h2>
+  ${digestCounts(digest.after)}
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.kindsHeading}</h2>
+  <p>${digest.kinds ? escapeHtml(digest.kinds) : copy.noKinds}</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.changedHeading}</h2>
+  ${changedHtml}
+  <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.blockedHeading}</h2>
+  ${digestIds(digest.blocked)}
+  ${digest.blocked.length > 0 ? `<p>${copy.blockedNext}</p>` : ""}
+  <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.notReportedHeading}</h2>
+  ${digestIds(digest.notReported)}
+  ${digest.notReported.length > 0 ? `<p>${escapeHtml(copy.notReportedNext)}</p>` : ""}
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+  const subject = copy.subject(digest);
+  const outcome: AdminNotificationOutcome = {
+    attempted: adminEmails.length,
+    delivered: 0,
+    failures: [],
+  };
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        subject,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+      );
+      outcome.delivered++;
+    } catch (error) {
+      const detail = sendFailureText(error, adminEmail);
+      console.error(`Failed to send re-screen digest to ${redactRecipient(adminEmail)}: ${detail}`);
+      outcome.failures.push({ recipient: redactRecipient(adminEmail), error: detail });
+    }
+  }
+  return outcome;
+}
+
+/**
  * Notify a dataset owner that a user has requested collaborator access to their
  * (private/unpublished) dataset and is awaiting approval.
  */
