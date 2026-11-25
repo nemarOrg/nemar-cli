@@ -43,3 +43,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T14:35-08:00 | D4 green but conflicting after D1 merge; base merge sent |
 | 2026-11-25T14:42-08:00 | A1 merged (#2374 -> 5c3d65d5): A2, A6, A9 ready |
 | 2026-11-25T15:46-08:00 | Incident: A2 ran A4's mutate.py (shared scratchpad name collision) on A4's worktree; A4 asked to verify; preamble now requires per-step scratch dirs |
+| 2026-11-25T15:47-08:00 | Incident closed: A4 verified worktree intact (rules and later edits present, 35 tests pass) |

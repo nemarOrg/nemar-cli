@@ -48,7 +48,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 30 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 32 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -70,14 +70,14 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | A3 | [Pure-TS HDF5 metadata reader](cards/A3.md) |  | worker-hard |  | claude-worker | done |  | 2378 | r1 panel: 2 important (never-throw, unshuffle hang) + 4 fixed; r2 delta clean, 1 sugg fixed, 2 accepted | 2026-11-25T14:10 | 2d | merged d767b62b |
 | D0 | [Review in prod, shadow 20](cards/D0.md) |  | lead |  |  | owner |  | 2370 | r1 code+tests+comments: 0 important, 2 suggestions fixed |  | 4h | draft #2370; owner checklist, then owner merges and releases |
 | B2 | ADR 0139 auto-deny (draft on decide branch) |  | lead |  |  | done |  |  |  |  |  | accepted 2026-11-25 |
-| A2 | [BrainVision and NIRx](cards/A2.md) |  | worker-hard |  | claude-worker | review | A1 | 2381 |  | 2026-11-25T14:46 | 1d | lead rulings before panel |
+| A2 | [BrainVision and NIRx](cards/A2.md) |  | worker-hard |  | claude-worker | review | A1 | 2381 |  | 2026-11-25T14:46 | 1d | review panel r1 running (head 12db68c2) |
 | A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  | claude-worker | active | A1, A3 |  |  | 2026-11-25T15:23 | 1.5d | implementer running |
 | A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  |  | todo | A1 |  |  |  | 1d | after A1 |
 | A9 | [nemar dataset screen](cards/A9.md) |  | worker |  |  | todo | A1 |  |  |  | 1d | after A1 |
 | A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  |  | todo | A1, A4 |  |  |  | 2d | after A4 |
 | D3 | [Batch ack on public upstream](cards/D3.md) |  | worker-hard |  | claude-worker | review | D1, D2 | 2380 | r1 panel: 2 important (audit fail-open, item isolation) + 4 + lead (D1 batch txn, no JSON bundle) fixed; r2 delta clean, 2 sugg fixed | 2026-11-25T14:32 | 2d | last small push, CI, merge |
 | B3 | [Resubmission note](cards/B3.md) |  | worker |  | claude-worker | done | B2 | 2379 | r1 panel: 1 important + 7 fixed; r2 delta clean; 1 sugg rejected | 2026-11-25T14:10 | 1d | merged |
-| B4 | [Review inputs and record](cards/B4.md) |  | worker-hard |  | claude-worker | active | D1, B2 |  |  | 2026-11-25T14:54 | 2d | resumed with inputs-endpoint ruling |
+| B4 | [Review inputs and record](cards/B4.md) |  | worker-hard |  | claude-worker | review | D1, B2 | 2382 |  | 2026-11-25T14:54 | 2d | additions (prev reason codes, SourceRecord fields, cache service) before panel |
 | B5 | [Auto-deny and ready mail](cards/B5.md) |  | worker-hard |  |  | todo | B2, B3, B4, D4 |  |  |  | 2.5d | after B3, B4, D4 |
 | CPD3 | Seam review; decide epic to dev; release D |  | lead |  |  | outline | D1, D3, D4, B3, B4, B5 |  |  |  |  | CP-D3 |
 | C1 | Calibration in prod shadow mode |  | owner |  |  | outline | CPD3, D0 |  |  |  |  | owner labels |
@@ -121,9 +121,9 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | D3 | implementer | claude-worker | Opus 5.5 | D3 | 2026-11-25T14:32 | done |
 | rev-2379a | reviewer | claude-worker | Sonnet 5.5 | B3 | 2026-11-25T14:46 | done |
 | rev-2379b | reviewer | claude-worker | Sonnet 5.5 | B3 | 2026-11-25T14:46 | done |
-| A2 | implementer | claude-worker | Opus 5.5 | A2 | 2026-11-25T14:46 | running |
+| A2 | implementer | claude-worker | Opus 5.5 | A2 | 2026-11-25T14:46 | done |
 | rev-2379-r2 | reviewer | claude-worker | Sonnet 5.5 | B3 | 2026-11-25T14:54 | done |
-| B4 | implementer | claude-worker | Opus 5.5 | B4 | 2026-11-25T14:54 | running |
+| B4 | implementer | claude-worker | Opus 5.5 | B4 | 2026-11-25T14:54 | done |
 | rev-2378a | reviewer | claude-worker | Sonnet 5.5 | A3 | 2026-11-25T14:56 | done |
 | rev-2378b | reviewer | claude-worker | Sonnet 5.5 | A3 | 2026-11-25T14:56 | done |
 | rev-2378-r2 | reviewer | claude-worker | Sonnet 5.5 | A3 | 2026-11-25T15:01 | done |
@@ -131,3 +131,5 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-2380b | reviewer | claude-worker | Sonnet 5.5 | D3 | 2026-11-25T15:23 | done |
 | A4 | implementer | claude-worker | Opus 5.5 | A4 | 2026-11-25T15:23 | running |
 | rev-2380-r2 | reviewer | claude-worker | Sonnet 5.5 | D3 | 2026-11-25T15:32 | done |
+| rev-2381a | reviewer | claude-worker | Sonnet 5.5 | A2 | 2026-11-25T15:48 | running |
+| rev-2381b | reviewer | claude-worker | Sonnet 5.5 | A2 | 2026-11-25T15:48 | running |
