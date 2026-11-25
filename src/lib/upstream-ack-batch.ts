@@ -4,9 +4,8 @@
  *
  * The dry run always runs first and is printed in full. With `apply`, only the requests the dry run
  * reported `eligible` are sent back, each with the screen state and commit it showed, so the Worker
- * records an acknowledgment only for what was printed. The Worker caps a call at 100 requests;
- * this pages in {@link ACK_PAGE_SIZE}, which keeps one call's GitHub and registry reads well inside
- * the Worker's subrequest budget.
+ * records an acknowledgment only for what was printed. The Worker caps a call at 20 requests, for
+ * its subrequest budget, and this pages at that size.
  */
 
 import { PUBLICATION_DATASET_ID_RE } from "../../shared/publication-limits.js";
@@ -20,8 +19,8 @@ import {
   ackOutcomeLine,
 } from "../../shared/upstream-ack.js";
 
-/** Requests per call. */
-export const ACK_PAGE_SIZE = 20;
+/** Requests per call: the Worker's cap, which its subrequest budget sets. */
+export const ACK_PAGE_SIZE = ACK_BATCH_MAX;
 
 export type AckSelection = { all: true } | { ids: string[] };
 

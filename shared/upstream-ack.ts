@@ -14,6 +14,7 @@
 
 import type { FindingKind } from "./identifier-scan";
 import type { ScreenReport } from "./identifier-screen-report";
+import { EXCLUDED_NAME_CLASSES, excludedImageCount } from "./image-name-class";
 import {
   type Copy,
   type LineageOutcome,
@@ -32,8 +33,14 @@ export const UPSTREAM_ACK_ANCHOR = "public-upstream-acknowledgment";
 
 const POLICY_URL = `${UPSTREAM_ACK_DOCS_URL}#${UPSTREAM_ACK_ANCHOR}`;
 
-/** The most requests one call of the route reads or records. */
-export const ACK_BATCH_MAX = 100;
+/**
+ * The most requests one call of the route reads or records. Twenty, not the hundred first planned,
+ * because of the Worker's per-invocation subrequest budget (1,000): each request that passes the
+ * database checks costs about eight GitHub calls (the main ref, the screened tree, the description,
+ * up to four README names, the enrichment) plus the registry records its lineage names (up to
+ * ten, cached per DOI), so twenty stays well inside the budget and a hundred might not.
+ */
+export const ACK_BATCH_MAX = 20;
 
 /**
  * The screen states a batch acknowledgment may cover. `partially-screened` is the coverage state
@@ -74,8 +81,7 @@ export const OWN_RECORD_RESOLVERS: ReadonlySet<Resolver> = new Set<Resolver>([
   "physionet",
 ]);
 
-/** The image-name classes of D2's measurement that keep a request out of every batch. */
-export const EXCLUDED_NAME_CLASSES = ["photo-face", "questionnaire"] as const;
+export { EXCLUDED_NAME_CLASSES };
 
 /** Why a request is not eligible. Each has its entry in {@link UPSTREAM_ACK_COPY}. */
 export const NOT_ELIGIBLE_REASONS = [
@@ -89,6 +95,7 @@ export const NOT_ELIGIBLE_REASONS = [
   "screen_incomplete",
   "screen_stale",
   "head_unverified",
+  "tree_unreadable",
   "excluded",
   "not_measured",
   "lineage_unreadable",
@@ -117,6 +124,8 @@ const ack = (statement: string, read: string, remedy: string): Copy => ({
 const READ_SCREEN =
   "The request's status, its stored identifier screen (state, finding kinds, unread formats, completeness and screened commit) and its recorded acknowledgment.";
 const READ_HEAD = "The screened commit against the dataset repository's current main branch.";
+const READ_TREE =
+  "The full file list of the screened commit (one recursive tree listing), each image or document file's name classed by the same rule as the measurement.";
 const READ_D2 =
   "The publication-queue measurement of 2026-11-25 (d2-blockers.json): the name classes of each request's image and document files.";
 const READ_LINEAGE = `The dataset's license lineage, by the resolver nemar dataset license-check runs. ${Object.values(
@@ -132,17 +141,17 @@ const INDIVIDUAL =
 export const UPSTREAM_ACK_COPY: Record<UpstreamAckEntry, Copy> = {
   "public-upstream-acknowledgment": ack(
     "An administrator may acknowledge many identifier screens in one act when each request is a conversion of a public, redistributable upstream dataset whose license NEMAR read from the source's own record (DataCite, OpenNeuro or PhysioNet). Such an acknowledgment covers only formats the scanner does not read and image, document or tooling files. A content finding, a direct identifier, an unchecked, incomplete or stale screen, or a request holding a photo, face or questionnaire file is never acknowledged this way. Each acknowledgment records a reason naming the upstream, its license and the unread formats, and is the calling administrator's own act: it satisfies that administrator's approval and no other's. The weekly re-screen reads these datasets again as readers are added.",
-    `${READ_SCREEN} ${READ_HEAD} ${READ_D2} ${READ_LINEAGE}`,
+    `${READ_SCREEN} ${READ_HEAD} ${READ_TREE} ${READ_D2} ${READ_LINEAGE}`,
     "Nothing to do for an acknowledged request: approve it as usual. A request this does not cover is reviewed individually.",
   ),
   eligible: ack(
     "The request meets every condition of a batch acknowledgment; a run with --apply records one.",
-    `${READ_SCREEN} ${READ_HEAD} ${READ_D2} ${READ_LINEAGE}`,
+    `${READ_SCREEN} ${READ_HEAD} ${READ_TREE} ${READ_D2} ${READ_LINEAGE}`,
     "Run the same selection again with --apply to record the acknowledgment as your own act.",
   ),
   acknowledged: ack(
     "The acknowledgment was recorded as your own act, with the reason shown, and written to the audit log with the lineage it rests on.",
-    `${READ_SCREEN} ${READ_HEAD} ${READ_D2} ${READ_LINEAGE}`,
+    `${READ_SCREEN} ${READ_HEAD} ${READ_TREE} ${READ_D2} ${READ_LINEAGE}`,
     "Approve the request as usual; the acknowledgment counts for your approval only.",
   ),
   state_moved: ack(
@@ -200,13 +209,18 @@ export const UPSTREAM_ACK_COPY: Record<UpstreamAckEntry, Copy> = {
     READ_HEAD,
     "Run the dry run again later.",
   ),
+  "not_eligible:tree_unreadable": ack(
+    "The file list of the screened commit could not be read in full, so whether it holds a photo, face or questionnaire file is unknown.",
+    READ_TREE,
+    "Run the dry run again later; a repository too large for one tree listing is reviewed individually.",
+  ),
   "not_eligible:excluded": ack(
-    "The request holds a file named as a photo, a face or a questionnaire, which a batch acknowledgment never covers.",
-    READ_D2,
+    "The request holds an image or document file named as a photo, a face or a questionnaire, in the screened commit or in its history, which a batch acknowledgment never covers.",
+    `${READ_TREE} ${READ_D2}`,
     INDIVIDUAL,
   ),
   "not_eligible:not_measured": ack(
-    "The request was not part of the publication-queue measurement, so whether it holds a photo, face or questionnaire file is unknown.",
+    "The request was not part of the publication-queue measurement, so whether its history holds a photo, face or questionnaire file is unknown (the Worker reads only the screened commit's files).",
     READ_D2,
     INDIVIDUAL,
   ),
@@ -313,6 +327,17 @@ export function screenEligibility(f: ScreenFacts): Eligibility {
   if (f.report.scan.incomplete !== false) return { eligible: false, reason: "screen_incomplete" };
   if (f.exclusions.excluded.has(f.datasetId)) return { eligible: false, reason: "excluded" };
   if (!f.exclusions.measured.has(f.datasetId)) return { eligible: false, reason: "not_measured" };
+  return { eligible: true };
+}
+
+/**
+ * The freshness check on the screened commit's own files: null (the listing failed or was
+ * truncated) is `tree_unreadable`; any image or document file of an excluded name class is
+ * `excluded`. D2's list stays as well, for files only in history.
+ */
+export function treeEligibility(paths: readonly string[] | null): Eligibility {
+  if (paths === null) return { eligible: false, reason: "tree_unreadable" };
+  if (excludedImageCount(paths) > 0) return { eligible: false, reason: "excluded" };
   return { eligible: true };
 }
 

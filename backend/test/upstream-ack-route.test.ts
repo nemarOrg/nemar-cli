@@ -54,15 +54,29 @@ const OPENNEURO_CC0 = JSON.stringify({
   SourceDatasets: [{ DOI: "10.18112/openneuro.ds003645.v2.0.2" }],
 });
 
-/** Repository files and `main` heads, per repository. */
+/** Repository files, `main` heads and screened-commit trees, per repository. */
 const repoFiles = new Map<string, Record<string, string>>();
 const heads = new Map<string, string>();
+/** The blob paths of the screened commit; `"truncated"` or `"fail"` for those conditions. */
+const trees = new Map<string, string[] | "truncated" | "fail">();
+const DEFAULT_TREE = ["dataset_description.json", "sub-01/eeg/sub-01_eeg.set", "code/plot_erp.png"];
 const githubServer = Bun.serve({
   port: 0,
   fetch(req) {
     const path = new URL(req.url).pathname;
     const ref = /^\/repos\/nemarDatasets\/([^/]+)\/git\/ref\/heads\/main$/.exec(path);
     if (ref) return Response.json({ object: { sha: heads.get(ref[1]) ?? HEAD } });
+    const tree = /^\/repos\/nemarDatasets\/([^/]+)\/git\/trees\/([0-9a-f]{40})$/.exec(path);
+    if (tree) {
+      const t = trees.get(tree[1]) ?? DEFAULT_TREE;
+      if (t === "fail") return Response.json({ message: "Server Error" }, { status: 500 });
+      const paths = t === "truncated" ? DEFAULT_TREE : t;
+      return Response.json({
+        sha: tree[2],
+        tree: paths.map((p) => ({ path: p, type: "blob" })),
+        truncated: t === "truncated",
+      });
+    }
     const m = /^\/repos\/nemarDatasets\/([^/]+)\/contents\/(.+)$/.exec(path);
     const content = m ? repoFiles.get(m[1])?.[decodeURIComponent(m[2])] : undefined;
     if (content === undefined) return Response.json({ message: "Not Found" }, { status: 404 });
@@ -153,6 +167,7 @@ beforeEach(async () => {
   refused.length = 0;
   repoFiles.clear();
   heads.clear();
+  trees.clear();
   requestIds.clear();
   db = freshDb();
   d1 = realD1(db);
@@ -430,13 +445,56 @@ describe("apply", () => {
   });
 });
 
+describe("the screened commit's own files", () => {
+  test("a photo, face or questionnaire image at the screened commit excludes the request", async () => {
+    trees.set(ELIGIBLE, [...DEFAULT_TREE, "sourcedata/participant_photos/subj01_face.jpg"]);
+    trees.set(IMAGES, [...DEFAULT_TREE, "stimuli/Questionnaire_scan.pdf"]);
+    const { body } = await post({ dataset_ids: [ELIGIBLE, IMAGES] });
+    expect(byId(body.results)).toEqual({
+      [ELIGIBLE]: "not_eligible:excluded",
+      [IMAGES]: "not_eligible:excluded",
+    });
+  });
+
+  test("names that only look alike, and a questionnaire that is not an image or document, pass", async () => {
+    trees.set(ELIGIBLE, [
+      ...DEFAULT_TREE,
+      "code/interface_layout.png",
+      "phenotype/questionnaire.tsv",
+    ]);
+    const { body } = await post({ dataset_ids: [ELIGIBLE] });
+    expect(byId(body.results)).toEqual({ [ELIGIBLE]: "eligible" });
+  });
+
+  test("a truncated or failed tree listing is tree_unreadable", async () => {
+    trees.set(ELIGIBLE, "truncated");
+    trees.set(IMAGES, "fail");
+    const { body } = await post({ dataset_ids: [ELIGIBLE, IMAGES] });
+    expect(byId(body.results)).toEqual({
+      [ELIGIBLE]: "not_eligible:tree_unreadable",
+      [IMAGES]: "not_eligible:tree_unreadable",
+    });
+  });
+
+  test("the apply reads the tree again: a photo found then is never acknowledged", async () => {
+    const dry = await dryRun(send(), { ids: [ELIGIBLE] });
+    expect(byId(dry)).toEqual({ [ELIGIBLE]: "eligible" });
+    trees.set(ELIGIBLE, [...DEFAULT_TREE, "sourcedata/photo.jpg"]);
+    const applied = await applyEligible(send(), dry);
+    expect(byId(applied)).toEqual({ [ELIGIBLE]: "not_eligible:excluded" });
+    expect(ackRow(ELIGIBLE)?.identifier_screen_ack_at).toBeNull();
+  });
+});
+
 describe("the body and the caller", () => {
   test("400 a malformed body, a batch over 100, or a mix of selections; 403 a member", async () => {
     expect((await post({})).status).toBe(400);
     expect((await post({ dataset_ids: [] })).status).toBe(400);
-    const many = Array.from({ length: 101 }, (_, i) => `nm${String(i).padStart(6, "0")}`);
+    // Twenty per call, for the Worker's subrequest budget.
+    const many = Array.from({ length: 21 }, (_, i) => `nm${String(i).padStart(6, "0")}`);
     expect((await post({ dataset_ids: many })).status).toBe(400);
-    expect((await post({ all_requested: true, limit: 101 })).status).toBe(400);
+    expect((await post({ dataset_ids: many.slice(0, 20) })).status).toBe(200);
+    expect((await post({ all_requested: true, limit: 21 })).status).toBe(400);
     expect((await post({ all_requested: true, dataset_ids: [ELIGIBLE] })).status).toBe(400);
     expect((await post({ apply: true, dataset_ids: [ELIGIBLE] })).status).toBe(400);
     expect((await post({ apply: true, expect: [{ dataset_id: ELIGIBLE }] })).status).toBe(400);

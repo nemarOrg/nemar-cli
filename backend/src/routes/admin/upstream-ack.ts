@@ -16,12 +16,15 @@
  * and nothing is recorded for it. Nothing is approved: an acknowledgment is a recorded reason on
  * the request, which counts only for the administrator who gave it (ADR 0086).
  *
- * At most {@link ACK_BATCH_MAX} requests per call. Network reads per eligible-looking request: the
- * repository's `main` ref, up to six repository files and the registry records (cached per DOI);
- * a request that fails a database-only check reads nothing. The command pages in smaller calls.
+ * At most {@link ACK_BATCH_MAX} (20) requests per call, for the Worker's subrequest budget. Network
+ * reads per eligible-looking request: the repository's `main` ref, the screened commit's recursive
+ * tree, up to six repository files and the registry records (cached per DOI); a request that fails
+ * a database-only check reads nothing. The command pages at the same size.
  *
- * The excluded requests come from D2's measurement (`d2-blockers.json`, bundled), read by
- * `readD2Exclusions`; a measurement that does not read refuses the whole call (fail closed).
+ * Photo, face and questionnaire files are looked for twice: in the screened commit's own tree
+ * (`treeEligibility`, the same classifier as the measurement), and in D2's measurement
+ * (`d2-blockers.json`, bundled, read by `readD2Exclusions`), which also saw files only in history.
+ * A measurement that does not read refuses the whole call (fail closed).
  *
  * 400 a malformed body; 500 the measurement does not read; 502 no GitHub credential.
  */
@@ -44,8 +47,11 @@ import {
   lineageEligibility,
   readD2Exclusions,
   screenEligibility,
+  treeEligibility,
 } from "../../../../shared/upstream-ack.js";
 import { getDatasetsToken } from "../../services/github-auth";
+import { GITHUB_API, ORG_NAME } from "../../services/github/shared";
+import { githubFetchWithRetry } from "../../services/github/transport";
 import {
   isScreenExempt,
   readStoredReport,
@@ -176,6 +182,45 @@ function baseResult(row: AckRow): AckResult {
   };
 }
 
+/**
+ * Every blob path of the screened commit, from one recursive tree listing (GitHub resolves a commit
+ * sha to its tree). Null when the call fails or the listing is truncated: a partial list cannot say
+ * a file is absent. The repository is addressed by the dataset id, as the screen addresses it.
+ */
+async function readTreePaths(
+  datasetId: string,
+  head: string,
+  token: string,
+): Promise<string[] | null> {
+  try {
+    const res = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${datasetId}/git/trees/${head}?recursive=1`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "NEMAR-API",
+        },
+      },
+    );
+    if (!res.ok) {
+      await res.body?.cancel();
+      return null;
+    }
+    const body = await res.json<{
+      tree?: Array<{ path?: unknown; type?: unknown }>;
+      truncated?: unknown;
+    }>();
+    if (body.truncated !== false || !Array.isArray(body.tree)) return null;
+    return body.tree.flatMap((e) =>
+      e.type === "blob" && typeof e.path === "string" ? [e.path] : [],
+    );
+  } catch (err) {
+    console.error(`[acknowledge-batch] tree read failed for ${datasetId}:`, err);
+    return null;
+  }
+}
+
 /** The whole rule, for one request: the database facts, then the head, then the lineage. */
 async function evaluate(
   env: Bindings,
@@ -201,8 +246,11 @@ async function evaluate(
   if (!screen.eligible) return no(screen.reason);
   const head = await verifyScreenHead(env, row.dataset_id, row, token);
   if (!head.ok) return no(head.refusal.gate === "stale" ? "screen_stale" : "head_unverified");
+  if (!report?.head) return no("no_screen");
+  const tree = treeEligibility(await readTreePaths(row.dataset_id, report.head, token));
+  if (!tree.eligible) return no(tree.reason);
   const repo = row.github_repo ? extractRepoName(row.github_repo) : null;
-  if (!repo || !report?.head) return no("lineage_unreadable");
+  if (!repo) return no("lineage_unreadable");
   const read = await readDatasetLineage(env, {
     datasetId: row.dataset_id,
     repo,

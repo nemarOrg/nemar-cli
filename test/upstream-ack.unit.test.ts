@@ -11,8 +11,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { nameClass as scriptNameClass } from "../scripts/dev/measure-queue-blockers";
 import type { FindingKind } from "../shared/identifier-scan";
 import { type ScreenReport, parseScreenReport } from "../shared/identifier-screen-report";
+import { EXCLUDED_NAME_CLASSES, excludedImageCount, nameClass } from "../shared/image-name-class";
 import type { LineageResult, LineageSource } from "../shared/license-lineage";
 import { ACKNOWLEDGMENT_MAX_LENGTH } from "../shared/publication-limits";
 import {
@@ -26,6 +28,7 @@ import {
   lineageEligibility,
   readD2Exclusions,
   screenEligibility,
+  treeEligibility,
 } from "../shared/upstream-ack";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
@@ -386,5 +389,33 @@ describe("UPSTREAM_ACK_COPY", () => {
         `https://docs.nemar.org/platform/identifier-screening/#${UPSTREAM_ACK_ANCHOR}`,
       );
     }
+  });
+});
+
+describe("treeEligibility and the shared name classifier", () => {
+  test("a photo, face or questionnaire image or document in the tree excludes; null is unreadable", () => {
+    expect(treeEligibility(null)).toEqual({ eligible: false, reason: "tree_unreadable" });
+    expect(treeEligibility(["sub-01/eeg/sub-01_eeg.set", "code/plot.png"])).toEqual({
+      eligible: true,
+    });
+    for (const p of [
+      "sourcedata/photo_1.jpg",
+      "stimuli/faces/face_neutral.png",
+      "docs/sleepQuestionnaire.pdf",
+      "stimuli/photos_1.tif",
+    ]) {
+      expect(treeEligibility(["code/plot.png", p]), p).toEqual({
+        eligible: false,
+        reason: "excluded",
+      });
+    }
+    // Whole words only, and only image or document files.
+    expect(excludedImageCount(["code/interface.png", "phenotype/questionnaire.tsv"])).toBe(0);
+  });
+
+  test("the D2 script uses the same classifier", () => {
+    expect(scriptNameClass).toBe(nameClass);
+    expect(nameClass("sourcedata/consent_form.pdf")).toBe("consent");
+    expect(EXCLUDED_NAME_CLASSES).toEqual(["photo-face", "questionnaire"]);
   });
 });
