@@ -9,6 +9,13 @@
  */
 
 import inquirer from "inquirer";
+import {
+  COMPATIBLE_OUTCOMES,
+  LINEAGE_COPY,
+  type LineageOutcome,
+  normalizeLicense,
+  sourceOutcome,
+} from "../../shared/license-lineage.js";
 
 export interface ProvenanceInfo {
   isDerived: boolean;
@@ -24,84 +31,25 @@ export interface SourceDataset {
 }
 
 /**
- * License compatibility matrix: source license -> allowed target licenses.
- * A source with "NC" (NonCommercial) restriction cannot feed a dataset under
- * a fully open license, because the source restrictions carry forward.
- * A share-alike (SA) source requires the derivative to use the same license.
- */
-const LICENSE_COMPATIBILITY: Record<string, { allows: string[]; note?: string }> = {
-  "CC0-1.0": {
-    allows: ["*"],
-    note: "Public domain; no restrictions on derivative licenses.",
-  },
-  "PDDL-1.0": {
-    allows: ["*"],
-    note: "Public domain dedication; no restrictions on derivative licenses.",
-  },
-  "CC-BY-4.0": {
-    allows: ["*"],
-    note: "Any license is allowed as long as attribution is given.",
-  },
-  "CC-BY-SA-4.0": {
-    allows: ["CC-BY-SA-4.0"],
-    note: "Share-alike: derivative datasets must use CC-BY-SA-4.0.",
-  },
-  "CC-BY-NC-4.0": {
-    allows: ["CC-BY-NC-4.0", "CC-BY-NC-SA-4.0", "CC-BY-NC-ND-4.0"],
-    note: "NonCommercial: derivative datasets must also be NonCommercial.",
-  },
-  "CC-BY-NC-SA-4.0": {
-    allows: ["CC-BY-NC-SA-4.0"],
-    note: "NonCommercial + ShareAlike: derivative must use CC-BY-NC-SA-4.0.",
-  },
-  "ODC-By-1.0": {
-    allows: ["*"],
-    note: "Any license allowed with attribution.",
-  },
-  "ODbL-1.0": {
-    allows: ["ODbL-1.0"],
-    note: "Share-alike for databases: derivative databases must use ODbL-1.0.",
-  },
-  "CC-BY-ND-4.0": {
-    allows: [],
-    note: "NoDerivatives: derivative datasets are not permitted under this license.",
-  },
-  "CC-BY-NC-ND-4.0": {
-    allows: [],
-    note: "NonCommercial-NoDerivatives: derivative datasets are not permitted under this license.",
-  },
-};
-
-/**
- * Check whether a target license is compatible with a source license.
- * Returns an object with `compatible` (boolean) and an explanatory `reason`.
+ * Check whether a target license is compatible with a source license, by the one shared rule
+ * (`shared/license-lineage.ts`, epic #2182 card D1) that `nemar dataset license-check` and the
+ * admin lineage view also use. `outcome` is the rule's verdict; `reason` is its copy, statement
+ * then remedy. An unrecognized source license needs permission: it is never assumed compatible.
  */
 export function validateLicenseCompatibility(
   sourceLicense: string,
   targetLicense: string,
-): { compatible: boolean; reason: string } {
-  const rule = LICENSE_COMPATIBILITY[sourceLicense];
-
-  if (!rule) {
-    // Unknown source license; cannot validate - warn but allow
-    return {
-      compatible: true,
-      reason: `Source license "${sourceLicense}" is not in the compatibility table. Please verify compatibility manually.`,
-    };
-  }
-
-  if (rule.allows.includes("*") || rule.allows.includes(targetLicense)) {
-    return {
-      compatible: true,
-      reason: rule.note ?? "Compatible.",
-    };
-  }
-
+): { compatible: boolean; outcome: LineageOutcome; reason: string } {
+  const source = normalizeLicense(sourceLicense);
+  const outcome = sourceOutcome(
+    { status: "resolved", license: source.license, license_version: source.version },
+    normalizeLicense(targetLicense),
+  );
+  const copy = LINEAGE_COPY[outcome];
   return {
-    compatible: false,
-    reason:
-      `Source license "${sourceLicense}" does not allow derivative datasets to be licensed as ` +
-      `"${targetLicense}". ${rule.note ?? ""} Allowed target licenses: ${rule.allows.join(", ")}.`,
+    compatible: COMPATIBLE_OUTCOMES.has(outcome),
+    outcome,
+    reason: `${copy.statement} ${copy.remedy}`,
   };
 }
 
@@ -196,7 +144,7 @@ export async function promptForProvenance(targetLicense: string): Promise<Proven
       if (!continueAnyway) {
         throw new Error("Upload cancelled due to license incompatibility.");
       }
-    } else if (compatibility.reason && !compatibility.reason.includes("Compatible.")) {
+    } else if (compatibility.outcome !== "compatible") {
       console.log(`\n  Note: ${compatibility.reason}\n`);
     }
 

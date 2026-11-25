@@ -214,7 +214,11 @@ describe("validateLicenseCompatibility", () => {
 
     const other = validateLicenseCompatibility("CC-BY-SA-4.0", "CC-BY-4.0");
     expect(other.compatible).toBe(false);
-    expect(other.reason).toContain("CC-BY-SA-4.0");
+    expect(other.outcome).toBe("share_alike_mismatch");
+    // An earlier share-alike version is a mismatch too.
+    expect(validateLicenseCompatibility("CC-BY-SA-4.0", "CC-BY-SA-3.0").outcome).toBe(
+      "share_alike_mismatch",
+    );
   });
 
   test("CC-BY-NC-4.0 source disallows fully-open target", () => {
@@ -235,9 +239,29 @@ describe("validateLicenseCompatibility", () => {
     expect(other.compatible).toBe(false);
   });
 
-  test("unknown source license passes with warning", () => {
+  // The shared rule (epic #2182 card D1): an unrecognized source license needs permission. The
+  // old matrix passed it as compatible "with a warning", the permissive direction.
+  test("unknown source license needs permission", () => {
     const result = validateLicenseCompatibility("CUSTOM-1.0", "CC-BY-4.0");
-    expect(result.compatible).toBe(true);
-    expect(result.reason).toContain("not in the compatibility table");
+    expect(result.compatible).toBe(false);
+    expect(result.outcome).toBe("needs_permission");
+  });
+
+  test("NoDerivatives sources need permission whatever the target", () => {
+    expect(validateLicenseCompatibility("CC-BY-ND-4.0", "CC-BY-ND-4.0").outcome).toBe(
+      "needs_permission",
+    );
+    expect(validateLicenseCompatibility("CC-BY-NC-ND-4.0", "CC-BY-NC-4.0").outcome).toBe(
+      "needs_permission",
+    );
+  });
+
+  test("NC source keeping NC is compatible_nc, dropping it needs permission", () => {
+    expect(validateLicenseCompatibility("CC-BY-NC-4.0", "CC-BY-NC-ND-4.0").outcome).toBe(
+      "compatible_nc",
+    );
+    expect(validateLicenseCompatibility("CC-BY-NC-4.0", "CC0-1.0").outcome).toBe(
+      "needs_permission",
+    );
   });
 });
