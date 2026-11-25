@@ -23,6 +23,8 @@ import {
   OTHER_RECORDING_EXTENSIONS,
   scanEdfHeader,
 } from "./identifier-scan";
+import { HDF5_GENERIC_READER } from "./readers/hdf5-generic";
+import { SNIRF_READER } from "./readers/snirf";
 
 // ---------------------------------------------------------------------------------------
 // Vocabulary
@@ -30,7 +32,7 @@ import {
 
 /**
  * Every reader the screen may name. Closed: the report's door accepts exactly these, so a later
- * reader changes no vocabulary. Only `edf` has a reader today.
+ * reader changes no vocabulary.
  */
 export const READER_IDS = [
   "edf",
@@ -300,7 +302,7 @@ export const EDF_READER: FormatReader = {
 };
 
 /** The registry. A reader registered here is what makes its extension screened. */
-export const READERS: readonly FormatReader[] = [EDF_READER];
+export const READERS: readonly FormatReader[] = [EDF_READER, SNIRF_READER, HDF5_GENERIC_READER];
 
 /** The reader whose extension the path ends with, longest extension first; null when none. */
 export function readerFor(
