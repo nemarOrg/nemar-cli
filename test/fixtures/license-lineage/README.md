@@ -3,8 +3,10 @@
 Real registry and repository responses for the license lineage resolver
 (`shared/license-lineage.ts`, epic #2182 card D1).
 They were fetched on 2026-11-25 with `User-Agent: nemar-license-check/1` and stored byte for byte,
-with one edit:
-the email addresses in `19-openalex-article.json` are replaced by `redacted@example.org`.
+with two edits, both recorded in `index.json` (`edited`):
+- the email addresses in `19-openalex-article.json` are replaced by `redacted@example.org`;
+- in `03-datacite-openneuro-latest.json` and `04-datacite-openneuro-latest.json`, the personal name of one NEMAR curator listed as a contributor is replaced by `REDACTED, contributor`, and that curator's ORCID iD is removed.
+  The names and ORCID iDs of third-party authors are kept as recorded.
 `index.json` lists every recording with its method, URL, HTTP status, file and fetch time;
 `stand-in.ts` serves them to the tests from a local server.
 
