@@ -21,7 +21,7 @@
  * a request twice ({@link settleBatchEntry}). The digest is due when the batch is closed or every
  * request has settled, and no request the batch dispatched is still unsettled (so a result stored
  * between a close and its settle is waited for), or two hours after the last dispatch (the
- * watchdog, {@link sweepScreenBatchDigests}). It is claimed with a lease in one conditional UPDATE,
+ * watchdog, {@link sendDueScreenBatchDigests}). It is claimed with a lease in one conditional UPDATE,
  * so of two callbacks racing for the last report exactly one sends. Once the digest has gone out,
  * a report that arrives late is an ordinary one and is mailed as before: the digest told the
  * administrators it had not reported.
@@ -61,7 +61,7 @@ export const DIGEST_AFTER_LAST_DISPATCH_MINUTES = 120;
 export const DIGEST_LEASE_MINUTES = 5;
 
 /** Batches the watchdog handles per tick. */
-export const DIGEST_SWEEP_LIMIT = 5;
+export const DIGEST_PASS_LIMIT = 5;
 
 const LEASE_NOW_SQL = "strftime('%Y-%m-%d %H:%M:%f', 'now')";
 const LEASE_EXPIRED_SQL = `strftime('%Y-%m-%d %H:%M:%f', 'now', '-${DIGEST_LEASE_MINUTES} minutes')`;
@@ -554,7 +554,7 @@ async function buildDigest(
  * reported (two hours after its last dispatch), or one whose send reached nobody. Production only
  * by its caller. Returns the digests sent.
  */
-export async function sweepScreenBatchDigests(env: Bindings): Promise<{
+export async function sendDueScreenBatchDigests(env: Bindings): Promise<{
   sent: number;
   undelivered: number;
   errors: number;
@@ -570,12 +570,12 @@ export async function sweepScreenBatchDigests(env: Bindings): Promise<{
             AND ${DIGEST_DUE_SQL}
           ORDER BY id LIMIT ?`,
       )
-        .bind(DIGEST_SWEEP_LIMIT)
+        .bind(DIGEST_PASS_LIMIT)
         .all<{ id: number }>()
     ).results;
   } catch (err) {
     out.errors++;
-    console.error(`[screen-batch-sweep] due query failed: ${errorText(err)}`);
+    console.error(`[screen-batch-digests] due query failed: ${errorText(err)}`);
   }
   for (const { id } of due) {
     const outcome = await sendDigestIfDue(env, id);

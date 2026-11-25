@@ -72,7 +72,7 @@ import {
 } from "./identifier-screen-stored.js";
 import { reviewInFlightSql } from "./publication-review-rows.js";
 import { publicationReviewEmailSection, reviewEnabled } from "./publication-review-view.js";
-import { MAIL_COVERED_BY_DIGEST_SQL, sweepScreenBatchDigests } from "./screen-batch.js";
+import { MAIL_COVERED_BY_DIGEST_SQL, sendDueScreenBatchDigests } from "./screen-batch.js";
 
 // The two readers of a stored screen, the sandbox exemption and the screen's status view live in
 // their own module so the publication review (ADR 0102) can use them without importing this one;
@@ -875,7 +875,7 @@ export async function sweepIdentifierScreens(env: Bindings): Promise<ScreenSweep
   }
 
   // Last, so a request this run timed out is already `unreported` when its batch's digest is built.
-  const digests = await sweepScreenBatchDigests(env);
+  const digests = await sendDueScreenBatchDigests(env);
   result.digests = digests.sent;
   result.undelivered += digests.undelivered;
   result.errors += digests.errors;
