@@ -1,0 +1,189 @@
+[
+  {
+    "case": "openneuro-cc0",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.18112%2Fopenneuro.ds003645.v2.0.2",
+    "url": "https://api.datacite.org/dois/10.18112%2Fopenneuro.ds003645.v2.0.2",
+    "status": 200,
+    "file": "01-datacite-openneuro-cc0.json",
+    "fetched_at": "2026-11-25T19:18:40.668Z"
+  },
+  {
+    "case": "openneuro-cc0",
+    "registry": "openneuro",
+    "method": "POST",
+    "path": "/crn/graphql",
+    "body": {
+      "query": "query { snapshot(datasetId: \"ds003645\", tag: \"2.0.2\") { tag description { License } } }"
+    },
+    "url": "https://openneuro.org/crn/graphql",
+    "status": 200,
+    "file": "02-openneuro-openneuro-cc0.json",
+    "fetched_at": "2026-11-25T19:18:41.083Z"
+  },
+  {
+    "case": "openneuro-latest",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois?query=id%3A10.18112%2Fopenneuro.ds003645.v*&sort=-created&page%5Bsize%5D=1",
+    "url": "https://api.datacite.org/dois?query=id%3A10.18112%2Fopenneuro.ds003645.v*&sort=-created&page%5Bsize%5D=1",
+    "status": 200,
+    "file": "03-datacite-openneuro-latest.json",
+    "fetched_at": "2026-11-25T19:18:41.786Z"
+  },
+  {
+    "case": "openneuro-latest",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.18112%2Fopenneuro.ds003645.v2.1.0",
+    "url": "https://api.datacite.org/dois/10.18112%2Fopenneuro.ds003645.v2.1.0",
+    "status": 200,
+    "file": "04-datacite-openneuro-latest.json",
+    "fetched_at": "2026-11-25T19:18:42.255Z"
+  },
+  {
+    "case": "openneuro-latest",
+    "registry": "openneuro",
+    "method": "POST",
+    "path": "/crn/graphql",
+    "body": {
+      "query": "query { snapshot(datasetId: \"ds003645\", tag: \"2.1.0\") { tag description { License } } }"
+    },
+    "url": "https://openneuro.org/crn/graphql",
+    "status": 200,
+    "file": "05-openneuro-openneuro-latest.json",
+    "fetched_at": "2026-11-25T19:18:42.622Z"
+  },
+  {
+    "case": "physionet-odc-by",
+    "registry": "physionet",
+    "method": "GET",
+    "path": "/api/v1/project/published/eegmmidb/1.0.0/",
+    "url": "https://physionet.org/api/v1/project/published/eegmmidb/1.0.0/",
+    "status": 200,
+    "file": "06-physionet-physionet-odc-by.json",
+    "fetched_at": "2026-11-25T19:18:43.610Z"
+  },
+  {
+    "case": "physionet-odc-by",
+    "registry": "physionet",
+    "method": "GET",
+    "path": "/api/v1/project/published/eegmmidb/",
+    "url": "https://physionet.org/api/v1/project/published/eegmmidb/",
+    "status": 200,
+    "file": "07-physionet-physionet-odc-by.json",
+    "fetched_at": "2026-11-25T19:18:44.192Z"
+  },
+  {
+    "case": "physionet-odc-by",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.13026%2Fc28g6p",
+    "url": "https://api.datacite.org/dois/10.13026%2Fc28g6p",
+    "status": 200,
+    "file": "08-datacite-physionet-odc-by.json",
+    "fetched_at": "2026-11-25T19:18:44.659Z"
+  },
+  {
+    "case": "physionet-credentialed",
+    "registry": "physionet",
+    "method": "GET",
+    "path": "/api/v1/project/published/mimic-iv-ed/2.2/",
+    "url": "https://physionet.org/api/v1/project/published/mimic-iv-ed/2.2/",
+    "status": 200,
+    "file": "10-physionet-physionet-credentialed.json",
+    "fetched_at": "2026-11-25T19:18:45.707Z"
+  },
+  {
+    "case": "physionet-credentialed",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.13026%2F5ntk-km72",
+    "url": "https://api.datacite.org/dois/10.13026%2F5ntk-km72",
+    "status": 200,
+    "file": "11-datacite-physionet-credentialed.json",
+    "fetched_at": "2026-11-25T19:18:46.231Z"
+  },
+  {
+    "case": "zenodo-cc-by-nc",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.5281%2Fzenodo.22967622",
+    "url": "https://api.datacite.org/dois/10.5281%2Fzenodo.22967622",
+    "status": 200,
+    "file": "13-datacite-zenodo-cc-by-nc.json",
+    "fetched_at": "2026-11-25T19:18:47.455Z"
+  },
+  {
+    "case": "zenodo-cc-by-nc-nd",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.5281%2Fzenodo.21156617",
+    "url": "https://api.datacite.org/dois/10.5281%2Fzenodo.21156617",
+    "status": 200,
+    "file": "14-datacite-zenodo-cc-by-nc-nd.json",
+    "fetched_at": "2026-11-25T19:18:47.973Z"
+  },
+  {
+    "case": "zenodo-cc-by-sa",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.5281%2Fzenodo.24015383",
+    "url": "https://api.datacite.org/dois/10.5281%2Fzenodo.24015383",
+    "status": 200,
+    "file": "15-datacite-zenodo-cc-by-sa.json",
+    "fetched_at": "2026-11-25T19:18:48.499Z"
+  },
+  {
+    "case": "zenodo-cc-by",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.5281%2Fzenodo.24539621",
+    "url": "https://api.datacite.org/dois/10.5281%2Fzenodo.24539621",
+    "status": 200,
+    "file": "16-datacite-zenodo-cc-by.json",
+    "fetched_at": "2026-11-25T19:18:49.076Z"
+  },
+  {
+    "case": "article",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.1038%2Fs41597-019-0027-4",
+    "url": "https://api.datacite.org/dois/10.1038%2Fs41597-019-0027-4",
+    "status": 404,
+    "file": "17-datacite-article.json",
+    "fetched_at": "2026-11-25T19:18:49.538Z"
+  },
+  {
+    "case": "article",
+    "registry": "crossref",
+    "method": "GET",
+    "path": "/works/10.1038%2Fs41597-019-0027-4",
+    "url": "https://api.crossref.org/works/10.1038%2Fs41597-019-0027-4",
+    "status": 200,
+    "file": "18-crossref-article.json",
+    "fetched_at": "2026-11-25T19:18:50.188Z"
+  },
+  {
+    "case": "article",
+    "registry": "openalex",
+    "method": "GET",
+    "path": "/works/doi:10.1038%2Fs41597-019-0027-4",
+    "url": "https://api.openalex.org/works/doi:10.1038%2Fs41597-019-0027-4",
+    "status": 200,
+    "file": "19-openalex-article.json",
+    "fetched_at": "2026-11-25T19:18:50.952Z",
+    "edited": "email addresses replaced with redacted@example.org"
+  },
+  {
+    "case": "openalex-dataset",
+    "registry": "openalex",
+    "method": "GET",
+    "path": "/works/doi:10.18112%2Fopenneuro.ds003645.v2.0.2",
+    "url": "https://api.openalex.org/works/doi:10.18112%2Fopenneuro.ds003645.v2.0.2",
+    "status": 200,
+    "file": "20-openalex-openalex-dataset.json",
+    "fetched_at": "2026-11-25T19:18:51.474Z"
+  }
+]
