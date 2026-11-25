@@ -245,6 +245,8 @@ describe("validateLicenseCompatibility", () => {
     const result = validateLicenseCompatibility("CUSTOM-1.0", "CC-BY-4.0");
     expect(result.compatible).toBe(false);
     expect(result.outcome).toBe("needs_permission");
+    expect(result.recognized).toBe(false);
+    expect(validateLicenseCompatibility("CC-BY-ND-4.0", "CC0-1.0").recognized).toBe(true);
   });
 
   // Software licenses applied to data require attribution (lead ruling 2026-11-25).

@@ -11,6 +11,7 @@
 import inquirer from "inquirer";
 import {
   COMPATIBLE_OUTCOMES,
+  LICENSE_NOTE_COPY,
   LINEAGE_COPY,
   type LineageOutcome,
   normalizeLicense,
@@ -39,7 +40,7 @@ export interface SourceDataset {
 export function validateLicenseCompatibility(
   sourceLicense: string,
   targetLicense: string,
-): { compatible: boolean; outcome: LineageOutcome; reason: string } {
+): { compatible: boolean; outcome: LineageOutcome; recognized: boolean; reason: string } {
   const source = normalizeLicense(sourceLicense);
   const outcome = sourceOutcome(
     { status: "resolved", license: source.license, license_version: source.version },
@@ -49,6 +50,7 @@ export function validateLicenseCompatibility(
   return {
     compatible: COMPATIBLE_OUTCOMES.has(outcome),
     outcome,
+    recognized: source.license !== "other" && source.license !== "none",
     reason: `${copy.statement} ${copy.remedy}`,
   };
 }
@@ -126,6 +128,10 @@ export async function promptForProvenance(targetLicense: string): Promise<Proven
     const compatibility = validateLicenseCompatibility(sourceLicense.trim(), targetLicense);
 
     if (!compatibility.compatible) {
+      // The warning branch: the shared rule says this source does not allow the target as
+      // declared. Every sentence is the rule's copy; an unrecognized license gets its own line,
+      // because the fix there is the licensor's permission, not a different target license.
+      if (!compatibility.recognized) console.error(`\n  ${LICENSE_NOTE_COPY.unrecognized}`);
       console.error("\n  Warning: License incompatibility detected.");
       console.error(`  ${compatibility.reason}`);
       console.error(
