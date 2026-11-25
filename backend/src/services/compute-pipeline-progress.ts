@@ -5,7 +5,8 @@
  *
  *   `stampForJob`                 the dispatched pipeline stamp of a job and its recipe's checkpoint map
  *   `recordProgress`              one guarded batch that stores a report, or writes nothing
- *   `reconcilePipelineProgress`   ended runs reconciled from their recordings tables, `stored` resolved
+ *   `reconcilePipelineProgress`   ended runs reconciled from their recordings tables, `stored` resolved,
+ *                                 and a succeeded run's dataset quality summary checked and kept
  *   `liveSignalJourneyLinks`      the `in_progress` links of a dataset's reporting runs, worked out on read
  *
  * THE GATE. A report is one D1 batch whose FIRST statement upserts the run row of the stamp
@@ -28,6 +29,7 @@
 
 import {
   PIPELINE_STALLED_SECONDS,
+  type RecordingRow,
   STALLABLE_JOB_STATES,
   WAITING_JOB_STATES,
   countRecordings,
@@ -40,12 +42,15 @@ import {
   signalJourneyLink,
 } from "../../../shared/compute-checkpoints.js";
 import {
+  type ComputeRecipe,
   RECIPE_PRODUCT_OUTPUT_PREFIX,
   type RecipeCheckpoint,
   STORED_CHECKPOINT,
   declaredCheckpoints,
   findRecipe,
   recipeCheckpointMap,
+  recipeQualityDocumentPath,
+  recipeQualityPlugins,
   recipeRequiredOutputs,
 } from "../../../shared/compute-recipes.js";
 import { resultsOutputKey } from "../../../shared/contract/compute-launch.js";
@@ -54,8 +59,11 @@ import {
   type Progress,
   type ProgressCheckpointCounts,
 } from "../../../shared/contract/compute-progress.js";
+import { DATA_QUALITY_MAX_BYTES } from "../../../shared/contract/data-quality.js";
+import { sha256HexOfBytes } from "../../../shared/contract/view-digest.js";
 import type { Bindings } from "../types/bindings.js";
 import { RECORD_READ_MAX_BYTES, TABLE_READ_MAX_BYTES } from "./compute-derivatives.js";
+import { checkDatasetQualityDocument } from "./quality-documents.js";
 
 /** The job states in which a job on the supercomputer may report (its state in D1 lags Tapis). */
 export const PROGRESS_TAPIS_STATES = ["submitted", "queued", "running"] as const;
@@ -381,7 +389,8 @@ export interface ReconcileResult {
  * Ended stamps with a job whose run is not reconciled, oldest end first. A hold stamp (failed
  * `tuple_mismatch` whose job belongs to another stamp) is not a run of its own and is never a candidate.
  */
-export const RECONCILE_CANDIDATES_SQL = `SELECT s.id, s.dataset_id, s.recipe, s.recipe_version, s.state, s.job_id
+export const RECONCILE_CANDIDATES_SQL = `SELECT s.id, s.dataset_id, s.version, s.recipe, s.recipe_version,
+    s.input, s.state, s.job_id
   FROM compute_pipeline_stamps s
   LEFT JOIN compute_pipeline_progress_runs r ON r.stamp_id = s.id
   WHERE s.state IN ('succeeded', 'failed') AND s.job_id IS NOT NULL
@@ -435,11 +444,24 @@ export const FINAL_DOCUMENT_SQL = `INSERT INTO compute_pipeline_documents
     stamp_id = excluded.stamp_id, entry = excluded.entry, written_at = excluded.written_at
    WHERE excluded.stamp_id >= compute_pipeline_documents.stamp_id`;
 
+/**
+ * A succeeded run's dataset quality summary (migration 0151, ADR 0137 decision 8), kept for its stamp, only
+ * where the write id stands; a stamp's summary is written once. ?1 stamp, ?2 dataset (the STAMP's), ?3
+ * recipe, ?4 entry, ?5 the dataset record's digest, ?6 write id.
+ */
+export const QUALITY_DOCUMENT_SQL = `INSERT INTO compute_quality_documents
+    (stamp_id, dataset_id, recipe, entry, record_sha256)
+  SELECT ?1, ?2, ?3, ?4, ?5 WHERE ${BY_WRITE("?1", "?6")}
+  ON CONFLICT(stamp_id) DO NOTHING`;
+
 interface CandidateRow {
   id: number;
   dataset_id: string;
+  /** The data-plane version tag the run was given. */
+  version: string;
   recipe: string;
   recipe_version: string;
+  input: "bids" | "zarr";
   state: "succeeded" | "failed";
   job_id: string;
 }
@@ -452,21 +474,22 @@ interface CountsRow {
   total: number;
 }
 
-type TextRead = { kind: "ok"; text: string } | { kind: "absent" } | { kind: "too_large" };
+type BytesRead = { kind: "ok"; bytes: Uint8Array } | { kind: "absent" } | { kind: "too_large" };
 
-async function readBounded(bucket: R2Bucket, key: string, max: number): Promise<TextRead> {
+async function readBounded(bucket: R2Bucket, key: string, max: number): Promise<BytesRead> {
   const head = await bucket.head(key);
   if (!head) return { kind: "absent" };
   if (head.size > max) return { kind: "too_large" };
   const object = await bucket.get(key);
   if (!object) return { kind: "absent" };
-  return { kind: "ok", text: await object.text() };
+  const bytes = new Uint8Array(await object.arrayBuffer());
+  if (bytes.byteLength > max) return { kind: "too_large" };
+  return { kind: "ok", bytes };
 }
 
-async function sha256HexOf(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
-}
+/** Text as an R2 object's `text()` reads it: UTF-8, a byte order mark dropped, a bad sequence replaced. */
+const LENIENT_UTF8 = new TextDecoder();
+const textOf = (bytes: Uint8Array): string => LENIENT_UTF8.decode(bytes);
 
 /** The `sj_version` at the top of a signalJourney record, or null. */
 function sjVersionOf(text: string): string | null {
@@ -547,6 +570,8 @@ async function finalLinkStatement(
   env: Bindings,
   stamp: CandidateRow,
   writeId: string,
+  /** The record, when the caller has read it already. */
+  read?: BytesRead,
 ): Promise<D1PreparedStatement | null | "later"> {
   const db = env.DB;
   if (stamp.state === "failed") return failedLinkStatement(db, stamp, writeId);
@@ -561,16 +586,13 @@ async function finalLinkStatement(
     return "later";
   }
   const location = recipeRequiredOutputs(recipe).record;
-  let record: TextRead;
-  try {
-    record = await readBounded(
-      results,
-      resultsOutputKey(stamp.job_id, location),
-      RECORD_READ_MAX_BYTES,
-    );
-  } catch {
-    console.log(`${LOG} reconcile_later stamp=${stamp.id} reason=read_failed`);
-    return "later";
+  let record: BytesRead;
+  if (read !== undefined) {
+    record = read;
+  } else {
+    const fresh = await readRunRecord(results, stamp, recipe);
+    if (fresh === "later") return "later";
+    record = fresh;
   }
   const link =
     record.kind === "ok"
@@ -578,8 +600,8 @@ async function finalLinkStatement(
           recipeVersion: stamp.recipe_version,
           status: "completed",
           location: location.slice(RECIPE_PRODUCT_OUTPUT_PREFIX.length),
-          sha256: await sha256HexOf(record.text),
-          sjVersion: sjVersionOf(record.text),
+          sha256: await sha256HexOfBytes(record.bytes),
+          sjVersion: sjVersionOf(textOf(record.bytes)),
         })
       : null;
   if (link === null) {
@@ -589,6 +611,95 @@ async function finalLinkStatement(
   return db
     .prepare(FINAL_DOCUMENT_SQL)
     .bind(stamp.dataset_id, "signalJourney", stamp.recipe, stamp.id, JSON.stringify(link), writeId);
+}
+
+/** A run's dataset record (bounded), or `later` when the results bucket did not answer. */
+async function readRunRecord(
+  results: R2Bucket,
+  stamp: CandidateRow,
+  recipe: Pick<ComputeRecipe, "name">,
+): Promise<BytesRead | "later"> {
+  try {
+    return await readBounded(
+      results,
+      resultsOutputKey(stamp.job_id, recipeRequiredOutputs(recipe).record),
+      RECORD_READ_MAX_BYTES,
+    );
+  } catch {
+    console.log(`${LOG} reconcile_later stamp=${stamp.id} reason=read_failed`);
+    return "later";
+  }
+}
+
+/** A recordings table's own counts: its rows by status, and every row (the run's `total`). */
+function statusCounts(rows: readonly RecordingRow[]): ProgressCheckpointCounts {
+  const of = (status: RecordingRow["status"]) => rows.filter((r) => r.status === status).length;
+  return {
+    passed: of("succeeded"),
+    failed: of("failed"),
+    skipped: of("skipped"),
+    total: rows.length,
+  };
+}
+
+/**
+ * The dataset quality summary of a succeeded run (ADR 0137 decision 8), or null when none is kept, or
+ * `later`: the recipe's `desc-<label>_dataquality.json`, checked by `checkDatasetQualityDocument` against
+ * the stamp, the digest of the dataset record read for the run's link and the recordings table read for
+ * its counts. A summary that is missing or refused is not kept, with a fixed-word log line
+ * (`quality_not_written reason=<word>`), and never holds the reconciliation back.
+ */
+async function qualityDocumentStatement(
+  db: D1Database,
+  results: R2Bucket,
+  stamp: CandidateRow,
+  recipe: ComputeRecipe,
+  checkpoints: readonly RecipeCheckpoint[],
+  writeId: string,
+  rows: readonly RecordingRow[],
+  record: BytesRead,
+): Promise<D1PreparedStatement | null | "later"> {
+  const notWritten = (reason: string): null => {
+    console.log(`${LOG} quality_not_written stamp=${stamp.id} reason=${reason}`);
+    return null;
+  };
+  if (record.kind === "absent") return notWritten("record_missing");
+  if (record.kind === "too_large") return notWritten("record_too_large");
+  let document: BytesRead;
+  try {
+    document = await readBounded(
+      results,
+      resultsOutputKey(stamp.job_id, recipeQualityDocumentPath(recipe)),
+      DATA_QUALITY_MAX_BYTES,
+    );
+  } catch {
+    console.log(`${LOG} reconcile_later stamp=${stamp.id} reason=read_failed`);
+    return "later";
+  }
+  if (document.kind === "absent") return notWritten("document_missing");
+  if (document.kind === "too_large") return notWritten("document_too_large");
+  const check = checkDatasetQualityDocument(document.bytes, {
+    stamp: {
+      recipe: stamp.recipe,
+      recipeVersion: stamp.recipe_version,
+      version: stamp.version,
+      input: stamp.input,
+    },
+    plugins: recipeQualityPlugins({ checkpoints }),
+    recordSha256: await sha256HexOfBytes(record.bytes),
+    counts: statusCounts(rows),
+  });
+  if (!check.ok) return notWritten(check.reason);
+  return db
+    .prepare(QUALITY_DOCUMENT_SQL)
+    .bind(
+      stamp.id,
+      stamp.dataset_id,
+      stamp.recipe,
+      check.entryText,
+      check.entry.record_sha256,
+      writeId,
+    );
 }
 
 /**
@@ -630,7 +741,7 @@ async function reconcileRun(
     return "later";
   }
   const wanted = recipeRequiredOutputs(recipe);
-  let table: TextRead;
+  let table: BytesRead;
   try {
     table = await readBounded(
       results,
@@ -642,7 +753,7 @@ async function reconcileRun(
     return "later";
   }
   if (table.kind === "absent") return outcomeOnly(env, stamp, "table_missing");
-  const parsed = table.kind === "ok" ? parseRecordingsTable(table.text) : null;
+  const parsed = table.kind === "ok" ? parseRecordingsTable(textOf(table.bytes)) : null;
   if (!parsed || !parsed.ok) return outcomeOnly(env, stamp, "table_unreadable");
   const rows = parsed.rows;
 
@@ -706,10 +817,31 @@ async function reconcileRun(
   statements.push(rowStatement(STORED_CHECKPOINT, stored, storedFinal ? 1 : 0, []));
 
   // The signalJourney link: completed with the record's digest and version; failed for a failed run; for
-  // a succeeded run whose link cannot be built, the last final link stands.
-  const link = await finalLinkStatement(env, stamp, writeId);
+  // a succeeded run whose link cannot be built, the last final link stands. A succeeded run's record is
+  // read once, for its link and for the digest its quality summary must name.
+  let record: BytesRead | undefined;
+  if (stamp.state === "succeeded") {
+    const read = await readRunRecord(results, stamp, recipe);
+    if (read === "later") return "later";
+    record = read;
+  }
+  const link = await finalLinkStatement(env, stamp, writeId, record);
   if (link === "later") return "later";
   if (link !== null) statements.push(link);
+  if (record !== undefined) {
+    const quality = await qualityDocumentStatement(
+      db,
+      results,
+      stamp,
+      recipe,
+      checkpoints,
+      writeId,
+      rows,
+      record,
+    );
+    if (quality === "later") return "later";
+    if (quality !== null) statements.push(quality);
+  }
   if (storedFinal) {
     const entry = processingDatasetEntry({
       recipeVersion: stamp.recipe_version,
