@@ -207,6 +207,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /publish/:id/approve-dispatch": 1,
   // Epic #1610 phase 4: re-run the identifier screen of an active request.
   "POST /publish/:id/identifier-screen": 1,
+  // Epic #2182 card D3: batch acknowledgment on a public upstream; the body is parsed by hand.
+  "POST /publish/acknowledge-batch": 1,
   "POST /datasets/:id/s3-lock": 1,
 
   // Dataset lifecycle (sweeps, doctor, deletion, reindex, manifests)
@@ -403,7 +405,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(271);
+    expect(adminRoutes.routes.length).toBe(272);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware
