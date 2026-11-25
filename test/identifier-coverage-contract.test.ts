@@ -6,7 +6,7 @@
  * Real code paths throughout: the fleet scan's `scanDatasetFromManifest` runs unchanged over
  * entries whose bytes come from memory (the only stand-in is where the bytes live), and the
  * readers below are registered through the scan's public `readers` option. They exist only in
- * this file; the registry itself holds EDF/BDF alone.
+ * this file; the registry itself holds EDF/BDF, BrainVision and NIRx (phase A2).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -151,7 +151,12 @@ describe("recordings are read through the registry", () => {
     expect(report.scan?.read_by_format).toEqual({
       snirf: { files: 1, read: 1, partial: 0, failed: 0 },
     });
-    expect(report.scan?.readers).toEqual({ edf: EDF_READER.version, snirf: "test-1" });
+    expect(report.scan?.readers).toEqual({
+      edf: EDF_READER.version,
+      brainvision: "1",
+      nirx: "1",
+      snirf: "test-1",
+    });
     // The twin: without the reader the same file is a format nobody reads.
     const without = await scan(files, READERS);
     expect(without.report.scan?.status).toBe("not-screened");
@@ -313,7 +318,7 @@ describe("the registry and the page cache", () => {
 
   test("the EDF/BDF reader keeps its 256 bytes", () => {
     expect(EDF_READER.limits.maxBytes).toBe(256);
-    expect(READERS.map((r) => r.id)).toEqual(["edf"]);
+    expect(READERS.map((r) => r.id)).toEqual(["edf", "brainvision", "nirx"]);
   });
 });
 

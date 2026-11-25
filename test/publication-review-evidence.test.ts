@@ -796,6 +796,27 @@ describe("the structural summary is counts and closed words", () => {
     expect(answersOf(report).answers.complete_and_honest).toBe("unknown");
   });
 
+  test("BrainVision and NIRx count under the extensions their readers match (phase A2)", async () => {
+    const ds = newDataset("summary-text-headers", {
+      ...files([
+        "sub-b1/eeg/sub-b1_task-r_eeg.vhdr",
+        "sub-b1/eeg/sub-b1_task-r_eeg.vmrk",
+        "sub-b1/eeg/sub-b1_task-r_eeg.eeg",
+        "sub-b1/nirs/NIRS-2019-10-02_003.hdr",
+        "sub-b1/nirs/NIRS-2019-10-02_003.inf",
+        "sub-b1/nirs/NIRS-2019-10-02_003.wl1",
+        "sub-b1/nirs/NIRS-2019-10-02_003.wl2",
+        "sub-b1/nirs/NIRS-2019-10-02_003.dat",
+      ]),
+      ...WITHOUT_DEFAULT_SUBJECT,
+    });
+    const s = structuralSummary(ds.dir, await readTree(ds.dir, ds.head));
+    // The companions (.eeg, .wl1, .wl2, .dat) are part of their header's recording.
+    expect(s.formats).toEqual({ ".vhdr": 1, ".vmrk": 1, ".hdr": 1, ".inf": 1 });
+    expect(s.recordings).toBe(4);
+    expect(Object.keys(s.formats).every((k) => REVIEW_FORMATS.has(k))).toBe(true);
+  });
+
   test("no path, file name or label can reach the summary's output", async () => {
     const ds = newDataset("summary-leak", {
       ...files(["sub-ZEBRA/ses-PLUM/eeg/sub-ZEBRA_ses-PLUM_task-WALRUS_eeg.edf"]),
