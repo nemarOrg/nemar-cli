@@ -22,6 +22,7 @@ import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyIdentifierScreenCallbackToken } from "../../services/github.js";
 import { notifyAdminsOfScreen, storeScreenResult } from "../../services/identifier-screen.js";
 import { startPublicationReviewForScreen } from "../../services/publication-review.js";
+import { settleBatchEntry } from "../../services/screen-batch.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
 import { deferAfterAnswer } from "./defer.js";
@@ -142,9 +143,20 @@ export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
     // not run past the workflow's POST timeout, whose retry would find the token spent. They stay
     // in one task, in that order. A test harness has no execution context, so the task is awaited
     // there instead.
+    //
+    // A screen of a paced re-screen (`services/screen-batch.ts`) was stored with its mail covered
+    // by the batch's digest, so `notifyAdminsOfScreen` claims nothing for it; it is counted last,
+    // and the report that completes the batch sends the digest.
     const afterAnswer = (async () => {
       await startPublicationReviewForScreen(c.env, { requestId, datasetId });
       await notifyAdminsOfScreen(c.env, requestId);
+      const batch = await c.env.DB.prepare(
+        "SELECT identifier_screen_batch_id AS batch FROM publication_requests WHERE id = ?",
+      )
+        .bind(requestId)
+        .first<{ batch: number | null }>()
+        .catch(() => null);
+      if (batch?.batch != null) await settleBatchEntry(c.env, batch.batch);
     })();
     if (!deferAfterAnswer(c)(afterAnswer)) await afterAnswer;
     return c.json({

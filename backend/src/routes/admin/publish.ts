@@ -73,6 +73,7 @@ import {
   applyObjectLockBatch,
   lockObjectKeys,
 } from "../../services/s3";
+import { noteBatchDispatch, readScreenBatch, settleBatchEntry } from "../../services/screen-batch";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
 
@@ -1086,11 +1087,60 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                             it passed the screen when it started
    *   409 identifier_screen_pending  a screen dispatched under
    *                             SCREEN_REPORT_DEADLINE_MINUTES ago has not reported
+   *
+   * The body is optional: `{ batch_id }` makes this one screen of a paced re-screen
+   * (`services/screen-batch.ts`, `nemar admin repo publish screen-batch`). The dispatch, the stored
+   * result, the gate and the review are the same; what differs is the mail: no per-request mail to
+   * the administrators and none to the depositor, because the batch sends one digest that names it.
+   * Every answer that means this request will never report (a refusal, a screen that could not
+   * start) counts as settled for the batch, so a digest is never waiting on it.
+   *   400 batch_id_invalid, not_in_batch    the batch id is not a number, or the dataset is not in it
+   *   404 screen_batch_not_found
+   *   409 screen_batch_closed               its digest has already been sent
    */
   admin.post("/publish/:id/identifier-screen", async (c) => {
     const datasetId = c.req.param("id");
     const adminUser = c.get("user");
     const db = c.env.DB;
+
+    // The optional body. A body that is not JSON is no body; `batch_id`, when present, is validated.
+    const body: unknown = await c.req.json().catch(() => null);
+    let batchId: number | null = null;
+    if (body !== null && typeof body === "object" && "batch_id" in body) {
+      const raw = (body as { batch_id: unknown }).batch_id;
+      if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 1) {
+        return c.json(
+          { error: "batch_id_invalid", message: "batch_id must be a positive integer." },
+          400,
+        );
+      }
+      batchId = raw;
+    }
+    let batchRequestId: number | null = null;
+    if (batchId !== null) {
+      const batch = await readScreenBatch(c.env, batchId);
+      if (!batch) {
+        return c.json({ error: "screen_batch_not_found", message: "No such screen batch." }, 404);
+      }
+      if (batch.digestSent) {
+        return c.json(
+          {
+            error: "screen_batch_closed",
+            message: "This batch has finished and its digest was sent. Start a new batch.",
+          },
+          409,
+        );
+      }
+      const entry = batch.selection.find((e) => e[1] === datasetId);
+      if (!entry) {
+        return c.json({ error: "not_in_batch", message: "This dataset is not in the batch." }, 400);
+      }
+      batchRequestId = entry[0];
+    }
+    // The batch is waiting on this request: every way out below that is not a dispatch settles it.
+    const settled = async (): Promise<void> => {
+      if (batchId !== null) await settleBatchEntry(c.env, batchId);
+    };
 
     if (isScreenExempt(datasetId)) {
       return c.json(
@@ -1106,9 +1156,23 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       .bind(datasetId)
       .first<{ id: number; status: string; steps_completed: string | null }>();
     if (!request) {
+      await settled();
       return c.json({ error: "not_found", message: "No active publication request found" }, 404);
     }
+    if (batchRequestId !== null && request.id !== batchRequestId) {
+      // The request the batch selected was withdrawn, denied or replaced since.
+      await settled();
+      return c.json(
+        {
+          error: "batch_request_changed",
+          message:
+            "The request this batch selected is no longer the dataset's active request, so it was not screened.",
+        },
+        409,
+      );
+    }
     if (request.status === "approving" && hasStartedPublishing(request.steps_completed)) {
+      await settled();
       return c.json(APPROVAL_IN_PROGRESS, 409);
     }
     const dataset = await db
@@ -1122,9 +1186,11 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         c.env,
         { requestId: request.id, datasetId, githubRepo: dataset?.github_repo ?? null },
         RERUN_GUARD_SQL,
+        batchId,
       );
     } catch (err) {
       console.error(`[identifier-screen] re-run for ${datasetId} failed:`, errorMessage(err));
+      await settled();
       return c.json(
         {
           error: "identifier_screen_rerun_failed",
@@ -1138,9 +1204,15 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       // the true one: the request may have stopped being active (or started
       // publishing) since it was read, or a recent screen is still running.
       const now = await db
-        .prepare("SELECT status, steps_completed FROM publication_requests WHERE id = ?")
+        .prepare(
+          `SELECT status, steps_completed, identifier_screen_batch_id AS batch
+             FROM publication_requests WHERE id = ?`,
+        )
         .bind(request.id)
-        .first<{ status: string; steps_completed: string | null }>();
+        .first<{ status: string; steps_completed: string | null; batch: number | null }>();
+      // A repeated call for a request this batch already dispatched finds its screen pending:
+      // that screen is still the batch's to wait for, so it is not settled a second time.
+      if (batchId === null || now?.batch !== batchId) await settled();
       if (!now || !["requested", "blocked", "approving"].includes(now.status)) {
         return c.json({ error: "not_found", message: "No active publication request found" }, 404);
       }
@@ -1155,7 +1227,12 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         409,
       );
     }
-    if (started.kind === "failed") {
+    if (batchId !== null) {
+      // The digest covers the mail of a screen that could not start, and the batch is no longer
+      // waiting on it; a dispatched one reports through the callback, which settles it.
+      if (started.kind === "failed") await settled();
+      else await noteBatchDispatch(c.env, batchId);
+    } else if (started.kind === "failed") {
       await notifyAdminsOfScreen(c.env, request.id);
     }
     try {
@@ -1164,7 +1241,11 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         action: "identifier_screen_rerun",
         resourceType: "dataset",
         resourceId: datasetId,
-        details: JSON.stringify({ request_id: request.id, outcome: started.kind }),
+        details: JSON.stringify({
+          request_id: request.id,
+          outcome: started.kind,
+          ...(batchId === null ? {} : { batch_id: batchId }),
+        }),
       }).run();
     } catch (auditErr) {
       console.error(
