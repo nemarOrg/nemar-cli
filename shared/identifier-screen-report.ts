@@ -65,6 +65,11 @@ const KIND_TABLE: Record<FindingKind, true> = {
   "image-or-document-file": true,
   "tooling-debris": true,
   "local-user-path": true,
+  "brainvision-comment-name": true,
+  "brainvision-segment-date": true,
+  "nirx-subject-name": true,
+  "nirx-demographics": true,
+  "nirx-header-date": true,
 };
 export const FINDING_KINDS: readonly FindingKind[] = Object.keys(KIND_TABLE) as FindingKind[];
 const KIND_SET: ReadonlySet<string> = new Set(FINDING_KINDS);
@@ -1095,9 +1100,17 @@ export interface PreflightScan {
 export const KNOWN_FORMATS: ReadonlySet<string> = new Set([
   ...OTHER_RECORDING_EXTENSIONS,
   ...DIRECTORY_FORMATS.map((format) => `${format}/`),
-  // BIDS data and companion extensions not already in the scanner's list.
+  // BIDS data and companion extensions not already in the scanner's list. The BrainVision and
+  // NIRx names stay here after their readers took them off that list: a stored report, or an
+  // orphan companion, still names them.
+  ".vhdr",
   ".eeg",
   ".vmrk",
+  ".hdr",
+  ".inf",
+  ".wl1",
+  ".wl2",
+  ".evt",
   ".mef",
   ".kdf",
   ".mrk",

@@ -44,6 +44,10 @@ const HEADER = "the identification fields of the EDF/BDF header (its first 256 b
 const EDF_REMEDY =
   "Blank the field or replace it with a code (for EDF/BDF, the patient and recording fields of the header) and upload again.";
 
+const BRAINVISION =
+  "the text of BrainVision header (.vhdr) and marker (.vmrk) files, up to 1 MiB each";
+const NIRX = "the text of NIRx header (.hdr) and information (.inf) files, up to 1 MiB each";
+
 const kind = (statement: string, read: string, remedy: string, name: FindingKind): Copy => ({
   statement,
   read,
@@ -173,10 +177,40 @@ export const KIND_COPY: Record<FindingKind, Copy> = {
     "tooling-debris",
   ),
   "local-user-path": kind(
-    "A code or text file holds a path into someone's home directory.",
-    "small code and text files under code/ and sourcedata/",
-    "Replace the path with a relative one and upload again.",
+    "A code, text or recording header file holds a path into someone's home directory, or a header names its companion by an absolute path.",
+    "small code and text files under code/ and sourcedata/, and the companion file names in BrainVision headers",
+    "Replace the path with a relative one (for a BrainVision header, the companion's file name alone) and upload again.",
     "local-user-path",
+  ),
+  "brainvision-comment-name": kind(
+    "The [Comment] section of a BrainVision header holds a word that may be a name.",
+    BRAINVISION,
+    "Check the [Comment] section of the .vhdr file; remove any name and upload again.",
+    "brainvision-comment-name",
+  ),
+  "brainvision-segment-date": kind(
+    "A New Segment marker of a BrainVision marker file holds an acquisition date finer than year and month.",
+    BRAINVISION,
+    "Remove or coarsen the date if it could identify someone.",
+    "brainvision-segment-date",
+  ),
+  "nirx-subject-name": kind(
+    "The Name field of a NIRx .inf file holds a name rather than the subject's code.",
+    NIRX,
+    "Blank the Name field of the .inf file or replace it with the subject's code, and upload again.",
+    "nirx-subject-name",
+  ),
+  "nirx-demographics": kind(
+    "The demographics of a NIRx .inf file hold an age or a birth date.",
+    NIRX,
+    "Check the [Subject Demographics] section of the .inf file; blank the age or birth date if it could identify someone, and upload again.",
+    "nirx-demographics",
+  ),
+  "nirx-header-date": kind(
+    "The header of a NIRx recording holds an acquisition date finer than year and month.",
+    NIRX,
+    "Remove or coarsen the date if it could identify someone.",
+    "nirx-header-date",
   ),
 };
 
@@ -442,9 +476,9 @@ export const INCOMPLETE_COPY: Record<IncompleteReason, Copy> = {
     "time",
   ),
   "companion-missing": reason(
-    "A recording's header names a companion file that is not in the dataset.",
-    "the dataset's paths",
-    "Add the missing companion file, or remove the header that names it.",
+    "A recording's header needs a companion file that is not beside it, or names a file the screen could not match by name to the files beside it.",
+    "the dataset's paths, and the companion file names in the header",
+    "Add the missing companion file next to its header, or make the file name the header gives match the companion's name exactly, and upload again.",
     "companion-missing",
   ),
   encrypted: reason(

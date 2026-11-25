@@ -54,7 +54,12 @@ export type FindingKind =
   | "acq-time-dated"
   | "image-or-document-file"
   | "tooling-debris"
-  | "local-user-path";
+  | "local-user-path"
+  | "brainvision-comment-name"
+  | "brainvision-segment-date"
+  | "nirx-subject-name"
+  | "nirx-demographics"
+  | "nirx-header-date";
 
 /**
  * Finding kinds that name a person or a clinical record: what must not stay public. A finding
@@ -71,6 +76,7 @@ export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-recording-freetext",
   "json-identifier-key",
   "participants-identifier-column",
+  "nirx-subject-name",
 ]);
 
 /**
@@ -82,6 +88,8 @@ export const DATE_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-startdate",
   "edf-recording-startdate",
   "acq-time-dated",
+  "brainvision-segment-date",
+  "nirx-header-date",
 ]);
 
 /** The shape of some text: produced only by {@link shapeOf}, so a raw value cannot be assigned to it. */
@@ -386,8 +394,11 @@ function isNameLikePart(part: string, strict: boolean): boolean {
   return runs.some((run) => run.length >= 4 && !exempt(run));
 }
 
-/** A whitespace token that could be a name, after splitting on delimiters such as `^ , / = :`. */
-function isNameLike(token: string, strict = false): boolean {
+/**
+ * A whitespace token that could be a name, after splitting on delimiters such as `^ , / = :`.
+ * Exported for the text-header readers (`shared/readers/`), so every format asks the same question.
+ */
+export function isNameLike(token: string, strict = false): boolean {
   if (token === "" || isCodeLike(token)) return false;
   return token.split(PART_SPLIT).some((part) => isNameLikePart(part, strict));
 }
@@ -551,6 +562,15 @@ function findDates(text: string): DateMatch[] {
           d.index + d.text.length <= o.index + o.text.length,
       ),
   );
+}
+
+/**
+ * True when the text holds a calendar date finer than the year (any date that is not 1 January
+ * under every reading), by the same layouts {@link scanEdfHeader} reads. For the text-header
+ * readers (`shared/readers/`).
+ */
+export function hasDateFinerThanYear(text: string): boolean {
+  return findDates(text).some((d) => !isYearOnly(d.candidates));
 }
 
 /** The text with every date found in it replaced by a space, so month names are not read as names. */
@@ -1143,7 +1163,6 @@ export const DIRECTORY_FORMATS: readonly string[] = [".ds", ".mff", ".mefd", ".z
  * registered reader reads them. An extension leaves this list when a reader is registered for it.
  */
 export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
-  ".vhdr",
   ".set",
   ".fdt",
   ".fif",
