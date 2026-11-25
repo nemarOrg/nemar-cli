@@ -1,0 +1,34 @@
+{
+  "drift": {
+    "cutoffHz": [
+      0.25
+    ],
+    "function": "eegprep.pop_eegfiltnew",
+    "kernelLength": 1321,
+    "kernelSha256": "f0e2b3b4440ddc73fd67d7c05d227fbaf413221d0ac7f33de464fe859e66e2c4",
+    "order": 1320,
+    "passbandHz": 0.5,
+    "transitionHz": 0.5,
+    "zeroPhase": true
+  },
+  "lineNoise": {
+    "afterDb": {
+      "50": 0.073,
+      "60": 7.48
+    },
+    "beforeDb": {
+      "50": 0.073,
+      "60": 7.48
+    },
+    "candidatesHz": [
+      50,
+      60
+    ],
+    "filters": [],
+    "powerLineHzDeclared": 60,
+    "remeasured": false,
+    "thresholdDb": 10.0
+  },
+  "recipe": "nemar-ica",
+  "recipeVersion": "1.0.0-b2"
+}

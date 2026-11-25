@@ -1,0 +1,23 @@
+name	type	status	status_description	nemar_reason
+Fp1	EEG	good	n/a	n/a
+Fp2	EEG	good	n/a	n/a
+F3	EEG	good	n/a	n/a
+F4	EEG	good	n/a	n/a
+C3	EEG	good	n/a	n/a
+C4	EEG	good	n/a	n/a
+P3	EEG	good	n/a	n/a
+P4	EEG	good	n/a	n/a
+O1	EEG	bad	low correlation with RANSAC estimate or high noise	ransac_correlation_or_noise
+O2	EEG	good	n/a	n/a
+F7	EEG	good	n/a	n/a
+F8	EEG	good	n/a	n/a
+T3	EEG	good	n/a	n/a
+T4	EEG	good	n/a	n/a
+T5	EEG	good	n/a	n/a
+T6	EEG	bad	low correlation with RANSAC estimate or high noise	ransac_correlation_or_noise
+FZ	EEG	good	n/a	n/a
+CZ	EEG	good	n/a	n/a
+PZ	EEG	good	n/a	n/a
+Pg1	EEG	good	no coordinates: judged on the noise criterion only	noise_only
+Pg2	EEG	good	no coordinates: judged on the noise criterion only	noise_only
+ECG	ECG	n/a	n/a	not_assessed
