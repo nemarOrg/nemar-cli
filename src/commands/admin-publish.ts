@@ -21,10 +21,12 @@ import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { lineageExitCode, lineageLines } from "../../shared/license-lineage.js";
 import { DENIAL_REASON_MAX_LENGTH } from "../../shared/publication-limits.js";
 import { searchLimitProblem } from "../../shared/publish-list-search.js";
 import { RESUBMISSION_NOTE_LABEL } from "../../shared/resubmission-note.js";
 import { checkedDatasetId, failMessage, failWith, requireSignedIn } from "../lib/admin-command.js";
+import { getLicenseLineage } from "../lib/api/admin.js";
 import { denyPublication, listPublishRequests, rerunIdentifierScreen } from "../lib/api/publish.js";
 import {
   type ConfirmOptions,
@@ -481,6 +483,51 @@ Examples:
       }
     } catch (error) {
       failWith(error, spinner, "Failed to re-run the identifier screen");
+    }
+  });
+
+// `nemar admin dataset publish license-lineage <id>` (epic #2182 card D1, ADR 0139 decision 7):
+// read-only. It sits in the publish group because ADR 0135 caps `admin dataset` at twelve children.
+publishCommand
+  .command("license-lineage")
+  .description("A dataset's upstream license lineage, computed on demand (read-only)")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000480)")
+  .option("--json", "Print the result as one JSON document")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Reads the dataset's declared upstream sources (SourceDatasets, the
+  enrichment's IsDerivedFrom and IsIdenticalTo, the deposit attestation and
+  the README) and each source's license record, and prints the outcome with
+  its evidence, remedy and docs link. It is the same resolver the depositor
+  runs with 'nemar dataset license-check <path>'. Writes nothing.
+
+Exit codes:
+  0  compatible, compatible_attribution or compatible_nc
+  1  the request failed
+  2  any other outcome
+
+Examples:
+  $ nemar admin dataset publish license-lineage nm000480
+  $ nemar admin dataset publish license-lineage nm000480 --json`,
+  )
+  .action(async (rawId: string, options: { json?: boolean }) => {
+    if (!requireSignedIn(options.json)) return;
+    const datasetId = checkedDatasetId(rawId, options.json);
+    if (!datasetId) return;
+    try {
+      const result = await getLicenseLineage(datasetId);
+      if (options.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`Dataset: ${result.dataset_id}`);
+        for (const line of lineageLines(result)) console.log(line);
+      }
+      process.exitCode = lineageExitCode(result.outcome);
+    } catch (error) {
+      failWith(error, null, "Failed to read the license lineage", undefined, {
+        json: options.json,
+      });
     }
   });
 
