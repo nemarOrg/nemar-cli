@@ -134,7 +134,8 @@ function tallies(raw: unknown): Record<string, CoverageTally> | null {
 /**
  * The screen's coverage counts per format for the reviewed commit. Version 2: each reader's files
  * and how their reads ended. Version 1: the EDF and BDF files and their header reads, which is all
- * that version counted as read, and each format it left unscreened, none of whose files was read.
+ * that version counted as read (under the version-2 reader's id, `edf`, which reads both), and
+ * each format it left unscreened, none of whose files was read.
  * A report of another commit, or none, is `none`: no counts are invented for it.
  */
 export function coverageOf(
@@ -152,7 +153,7 @@ export function coverageOf(
     source = "screen_v1";
     const f = report.files;
     if (f.edf_bdf > 0) {
-      formats.edf_bdf = {
+      formats.edf = {
         files: f.edf_bdf,
         read: Math.min(f.header_read, f.edf_bdf),
         partial: 0,
@@ -296,6 +297,17 @@ export async function publicationReviewInputs(
       enrichment_updated_at: string | null;
     }>();
   if (!request || !dataset) return { kind: "unavailable" };
+  // The note as the Worker keeps it (`readResubmissionNote`, the rule the request route stored it
+  // under). One that no longer reads was changed by hand: it is not sent in part, and not dropped
+  // silently either; the job reviews nothing.
+  const note = readResubmissionNote(request.resubmission_note);
+  if (!note.ok) {
+    console.warn(
+      `[publication-review-inputs] review ${reviewId} (${datasetId}): stored note does not read (${note.refusal})`,
+    );
+    return { kind: "unavailable" };
+  }
+
   const repo = dataset.github_repo ? extractRepoName(dataset.github_repo) : null;
   if (!repo) return { kind: "unavailable" };
 
@@ -328,17 +340,6 @@ export async function publicationReviewInputs(
     },
     { cache: workerLineageCache() },
   );
-
-  // The note as the Worker keeps it (`readResubmissionNote`, the rule the request route stored it
-  // under). One that no longer reads was changed by hand: it is not sent in part, and not dropped
-  // silently either; the job reviews nothing.
-  const note = readResubmissionNote(request.resubmission_note);
-  if (!note.ok) {
-    console.warn(
-      `[publication-review-inputs] review ${reviewId} (${datasetId}): stored note does not read (${note.refusal})`,
-    );
-    return { kind: "unavailable" };
-  }
 
   const doc = parseObject(dataset.enrichment_json);
   const anonymous = request.anonymous === 1;
