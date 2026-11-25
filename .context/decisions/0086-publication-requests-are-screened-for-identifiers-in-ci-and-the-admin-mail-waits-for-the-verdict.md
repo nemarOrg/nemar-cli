@@ -235,3 +235,24 @@ Each acknowledgment records a reason naming the upstream, its license and the un
 The weekly re-screen (ADR 0088) reads these datasets again as readers are added.
 
 The rule, the recorded reason and the copy every outcome prints are `shared/upstream-ack.ts`; the act is `POST /admin/publish/acknowledge-batch` and `nemar admin dataset publish acknowledge-batch`, a dry run unless `--apply`.
+
+## Amendment 2026-11-25 (epic #2182, card D4): a paced re-screen mails one digest
+
+`nemar admin repo publish screen-batch` re-screens many requests, one dispatch at a time, `--per-minute` apart (default 4, at most 10, because each screen is a GitHub Actions run).
+It is a dry run unless `--apply` is given.
+
+The mail rule above holds for every screen except those of a batch, where the per-request mail is replaced by ONE digest and is never dropped silently.
+A request screened in a batch is stored exactly as a single screen stores it, and its gate and its review start are unchanged.
+What differs:
+
+- **The per-request administrator mail is not sent.** The result is stored with its mail marked as covered by the digest (`identifier_screen_emailed_at`, in the same statement), so the callback, the review's result and the watchdog all find nothing to send.
+- **The depositor's block mail is not sent**, and the digest names the request as blocked by the batch, so an administrator knows whom to tell.
+- **A blocked request is screened and stays blocked**, whatever the result; the batch never lifts a block.
+- **The digest** (`screen_batches`, migration 0150) goes to the administrators who receive `publication_request` mail.
+  It is claimed with a lease in one conditional UPDATE, so of two callbacks racing for the last report exactly one sends, and a send that reached nobody is released and retried by the watchdog.
+  It is due when every request has settled (a stored report, a screen that could not start, or a dispatch the Worker refused), or two hours after the last dispatch.
+  It states the screen states before and after, the finding kinds, the requests whose state changed, the requests the batch blocked and the requests that did not report, by dataset id.
+- **A report that arrives after the digest** is an ordinary report and is mailed as before, because the digest said it had not reported.
+- **Ctrl-C** stops dispatching and closes the batch on the screens already started; the requests never dispatched are named as not having reported.
+
+A screen started any other way (a single `screen`, a depositor's request, a re-pull) resets the request's batch membership with the rest of its screen columns, and mails as it always did.

@@ -36,3 +36,14 @@ export const APPROVAL_DISPATCH_ID_RE: Readonly<{ production: RegExp; dev: RegExp
   production: /^(nm|on)\d{6}$/,
   dev: /^(nm|on|xx)\d{6}$/,
 };
+
+/**
+ * The paced re-screen (`nemar admin repo publish screen-batch`, ADR 0086 amendment of 2026-11-25):
+ * the most requests one batch holds (its selection is one JSON column, and D1 bounds a statement
+ * at 100 KB), and the dispatch pace in screens per minute. Each screen is one GitHub Actions run
+ * in the central workflow repository, so the pace is bounded on the client, and the maximum is
+ * the one an administrator can raise a default to, never past.
+ */
+export const SCREEN_BATCH_MAX_SIZE = 500;
+export const SCREEN_BATCH_DEFAULT_PER_MINUTE = 4;
+export const SCREEN_BATCH_MAX_PER_MINUTE = 10;

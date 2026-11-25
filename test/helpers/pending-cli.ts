@@ -110,6 +110,7 @@ export const ACCEPTED_BODY = {
   dataset_id: DATASET_ID,
   status: "requested",
   anonymous: false,
+  resubmission_note_recorded: false,
   identifier_screen: {
     state: "pending",
     headline: "Identifier screen: running",
@@ -139,6 +140,7 @@ export function statusBody(over: Record<string, unknown> = {}) {
     approved_at: null,
     denied_at: null,
     denied_reason: null,
+    denied_by_kind: null,
     withdrawn: false,
     withdrawn_at: null,
     block_reason: "bids_validation_pending",

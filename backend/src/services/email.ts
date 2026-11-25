@@ -12,8 +12,16 @@ import {
   type CommunityMailPreferences,
 } from "../../../shared/contract/mail-categories.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
+import {
+  RESUBMISSION_NOTE_LABEL,
+  RESUBMISSION_NOTE_PROVENANCE,
+  resubmissionNoteText,
+  resubmissionNoteUnreadable,
+} from "../../../shared/resubmission-note.js";
 import { escapeHtml } from "../lib/escape";
 import { htmlToText } from "../lib/html-to-text";
+import { SCREEN_REPORT_DEADLINE_MINUTES } from "./identifier-screen-stored";
+import type { NoteRead } from "./resubmission-note";
 import { STALENESS_LIMIT_DAYS } from "./staleness";
 
 /** Fallback sender when FROM_EMAIL env var is unset. Mirrors the FROM_EMAIL set
@@ -611,6 +619,7 @@ export async function sendEmail(
   deliveryEnv?: EmailDeliveryEnv,
   timeoutMs?: number,
   headers?: Record<string, string>,
+  text?: string,
 ): Promise<SendResult> {
   // Validated first, before the fence or any provider: a rejected header is a caller bug.
   const extraHeaders = validateMailHeaders(headers, deliveryEnv?.API_BASE_URL);
@@ -636,6 +645,7 @@ export async function sendEmail(
         replyTo,
         timeoutMs,
         extraHeaders,
+        text,
       );
     } catch (error) {
       const fallbackOn = (deliveryEnv?.EMAIL_FALLBACK ?? "").trim().toLowerCase() === "resend";
@@ -657,6 +667,7 @@ export async function sendEmail(
           replyTo,
           timeoutMs,
           extraHeaders,
+          text,
         );
       } catch (resendError) {
         console.error(
@@ -675,6 +686,7 @@ export async function sendEmail(
     replyTo,
     timeoutMs,
     extraHeaders,
+    text,
   );
 }
 
@@ -867,6 +879,7 @@ async function sendViaResend(
   replyTo?: string,
   timeoutMs?: number,
   headers?: Record<string, string>,
+  text?: string,
 ): Promise<SendResult> {
   const body: Record<string, unknown> = {
     from: fromEmail,
@@ -874,6 +887,8 @@ async function sendViaResend(
     subject,
     html,
   };
+  // A caller's own text part; without one Resend gets the HTML alone.
+  if (text !== undefined) body.text = text;
   if (replyTo) body.reply_to = replyTo;
   if (headers) body.headers = headers;
   const response = await fetch(RESEND_API_URL, {
@@ -908,6 +923,7 @@ async function sendViaCloudflare(
   replyTo?: string,
   timeoutMs?: number,
   headers?: Record<string, string>,
+  textPart?: string,
 ): Promise<SendResult> {
   // Before the binding is touched: one platform-controlled header fails the whole send there.
   assertCloudflareHeaders(headers);
@@ -920,7 +936,7 @@ async function sendViaCloudflare(
       html,
       // Resend gets the HTML alone; this provider is sent a text part too, for clients and
       // spam filters that prefer one.
-      text: htmlToText(html),
+      text: textPart ?? htmlToText(html),
       ...(replyTo ? { replyTo: parseMailbox(replyTo) } : {}),
       ...(headers ? { headers } : {}),
     });
@@ -2052,6 +2068,30 @@ function sectionHtml(section: PublicationScreenSection | PublicationReviewSectio
 }
 
 /**
+ * The depositor's resubmission note, as a labeled, quoted block (ADR 0139, decision 5). The label
+ * and the provenance sentence come from the one copy (`shared/resubmission-note.ts`); the note is
+ * the depositor's text, so it is escaped whole, its line breaks are kept by `white-space`, and it
+ * sits in a block that reads as a quotation, never as part of the mail's own words. This is the
+ * ADMINISTRATORS' mail: no mail to the depositor carries the note.
+ */
+export function resubmissionNoteHtml(note: string): string {
+  return `
+  <div style="border-left: 4px solid #6b7280; background: #f9fafb; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
+    <strong>${escapeHtml(RESUBMISSION_NOTE_LABEL)}</strong>
+    <p style="margin: 4px 0 8px 0; color: #666; font-size: 13px;">${escapeHtml(RESUBMISSION_NOTE_PROVENANCE)}</p>
+    <blockquote style="margin: 0; padding: 8px 12px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: monospace; font-size: 13px;">${escapeHtml(note)}</blockquote>
+  </div>`;
+}
+
+/** The fixed sentence for a note that could not be read for the mail, in the note's own block. */
+function resubmissionNoteUnreadableHtml(datasetId: string): string {
+  return `
+  <div style="border-left: 4px solid #d97706; background: #f9fafb; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
+    <p style="margin: 0;">${escapeHtml(resubmissionNoteUnreadable(datasetId))}</p>
+  </div>`;
+}
+
+/**
  * The verdict as it appears at the end of the subject line:
  * "IDENTIFIER SCREEN: FOUND IDENTIFIERS", "IDENTIFIER SCREEN: clean". The
  * prefix is shouted so the verdict survives an inbox that truncates subjects.
@@ -2083,6 +2123,11 @@ export async function sendPublicationRequestEmail(
     anonymous?: boolean;
     screen?: PublicationScreenSection;
     review?: PublicationReviewSection;
+    /**
+     * What a read of the depositor's resubmission note found (ADR 0139, decision 5): a note, none,
+     * or a read that failed, which the mail says in a fixed sentence and never words as "none".
+     */
+    resubmissionNote?: NoteRead;
   },
 ): Promise<AdminNotificationOutcome> {
   // #1408: an anonymous release and a publication are different runs with
@@ -2105,7 +2150,8 @@ export async function sendPublicationRequestEmail(
   // Placed on the screen's own line below: with no review the mail is byte for byte what it was
   // before the review existed.
   const reviewSection = opts?.review ? sectionHtml(opts.review) : "";
-  const html = `
+  const noteRead = opts?.resubmissionNote ?? { kind: "none" as const };
+  const render = (noteSection: string): string => `
 <!DOCTYPE html>
 <html>
 <head>
@@ -2117,7 +2163,7 @@ export async function sendPublicationRequestEmail(
 
   <p>User <strong>${escapeHtml(username)}</strong> has requested ${anonymous ? "an anonymous release" : "publication"} of dataset <strong>${escapeHtml(datasetId)}</strong>.</p>
 ${anonymousNotice}
-${screenSection}${reviewSection}
+${screenSection}${reviewSection}${noteSection}
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review the dataset and approve or deny the request:</p>
@@ -2139,6 +2185,24 @@ ${screenSection}${reviewSection}
 </body>
 </html>
   `;
+  const html = render(
+    noteRead.kind === "note"
+      ? resubmissionNoteHtml(noteRead.note)
+      : noteRead.kind === "unreadable"
+        ? resubmissionNoteUnreadableHtml(datasetId)
+        : "",
+  );
+  // The plain-text part is sent only for a note: it keeps the note's line breaks as quoted lines,
+  // which the generic conversion of the HTML (it folds all whitespace) cannot. The marker stands
+  // where the note goes and is replaced after the conversion, so the note is never decoded or
+  // scanned again as markup; it is not in the HTML the conversion reads.
+  const NOTE_MARKER = "NEMAR-RESUBMISSION-NOTE-HERE";
+  const text =
+    noteRead.kind === "note"
+      ? htmlToText(render(`<p>${NOTE_MARKER}</p>`)).replace(NOTE_MARKER, () =>
+          resubmissionNoteText(noteRead.note),
+        )
+      : undefined;
 
   const subject = `[NEMAR] ${anonymous ? "Anonymous release" : "Publication"} request: ${datasetId} by ${username}${
     screen ? ` - ${screenSubjectSuffix(screen.headline)}` : ""
@@ -2159,6 +2223,9 @@ ${screenSection}${reviewSection}
         replyTo,
         isDev,
         deliveryEnv,
+        undefined,
+        undefined,
+        text,
       );
       outcome.delivered++;
     } catch (error) {
@@ -2253,6 +2320,230 @@ export async function sendIdentifierScreenBlockedEmail(
     if (error instanceof Error) error.message = redactAddressIn((error as Error).message, to);
     throw error;
   }
+}
+
+/**
+ * What the digest of a paced re-screen says (`services/screen-batch.ts`, ADR 0086 amendment of
+ * 2026-11-25). Counts, dataset ids, fixed state labels and finding kinds; never a value a workflow
+ * wrote.
+ */
+export interface ScreenBatchDigest {
+  batchId: number;
+  /** Requests the batch was created for. */
+  total: number;
+  /** Requests whose result is stored. */
+  reported: number;
+  /** Screen states of the selection before the batch, as [label, count]. */
+  before: [string, number][];
+  /** Screen states after it, with `did not report` as a state of its own. */
+  after: [string, number][];
+  /** Findings by kind across the reported requests, in `kindsPhrase`'s words; empty when none. */
+  kinds: string;
+  /** Requests whose screen state or status changed. */
+  changed: { datasetId: string; from: string; to: string; nowBlocked: boolean }[];
+  /** Requests the batch blocked; their depositors were NOT mailed. */
+  blocked: string[];
+  /** Requests that were blocked before the batch and still are, with the result the screen found. */
+  stillBlocked: { datasetId: string; from: string; to: string }[];
+  /** Requests that could not start, or whose dispatch was refused, or was never made, with the reason. */
+  notStarted: { datasetId: string; reason: string }[];
+  /** Requests screened again outside the batch while it ran (their latest screen is not the batch's). */
+  rescreened: string[];
+  /** Requests dispatched whose screen did not report by the deadline, by dataset id. */
+  notReported: string[];
+}
+
+/**
+ * Why a dispatch of a batch was refused, in the words the digest states. Closed: the route names
+ * one of these and nothing the request carried is quoted.
+ */
+export const SCREEN_BATCH_REFUSAL_TEXT = {
+  "no-request": "it has no active publication request",
+  "request-changed": "its request changed after the batch selected it",
+  "publishing-started": "its approval had already started publishing",
+  "screen-running": `it could not be started now (a recent screen may still be running; one dispatched less than ${SCREEN_REPORT_DEADLINE_MINUTES} minutes before had not reported)`,
+  "write-failed": "the database refused the write",
+  "already-screened": "this batch had already screened it and counted the result",
+  rescreened: "it was screened again outside the batch",
+  "not-dispatched":
+    "the batch never dispatched it (it was stopped first, or the request was screened again since)",
+} as const;
+export type ScreenBatchRefusal = keyof typeof SCREEN_BATCH_REFUSAL_TEXT;
+
+/**
+ * The words of the digest, in one place (the style of the other copy tables): the template below
+ * holds markup and no sentence. A batch sends no per-request mail, so every sentence that says
+ * what that mail would have said is here.
+ */
+const SCREEN_BATCH_DIGEST_COPY = {
+  subject: (d: ScreenBatchDigest): string => {
+    const parts =
+      d.notStarted.length + d.notReported.length + d.rescreened.length === 0
+        ? `all ${d.total} reported`
+        : [
+            `${d.reported} of ${d.total} reported`,
+            ...(d.notStarted.length > 0 ? [`${d.notStarted.length} not started`] : []),
+            ...(d.rescreened.length > 0 ? [`${d.rescreened.length} screened again elsewhere`] : []),
+            ...(d.notReported.length > 0 ? [`${d.notReported.length} did not report`] : []),
+          ].join(", ");
+    return `[NEMAR] Re-screen batch ${d.batchId} finished: ${parts}`;
+  },
+  heading: (d: ScreenBatchDigest): string => `Re-screen batch ${d.batchId}`,
+  intro: (d: ScreenBatchDigest): string =>
+    `${d.reported} of ${d.total} publication requests reported. This batch sent no per-request mail to administrators and no mail to depositors; everything it would have said is below.`,
+  lateNote:
+    "A report that arrives while this digest is being sent is named above as not reported and is not mailed separately. One that arrives after it is mailed to the administrators on its own, as for any single screen.",
+  beforeHeading: "Screen states before",
+  afterHeading: "Screen states after",
+  kindsHeading: "Findings by kind",
+  noKinds: "No findings.",
+  changedHeading: "Requests whose state changed",
+  noChanges: "None.",
+  nowBlockedSuffix: "now blocked",
+  blockedHeading: "Blocked by this batch; the depositor was not mailed",
+  stillBlockedHeading: "Still blocked (a batch never changes a block), with the new result",
+  rescreenedHeading: "Screened again outside the batch",
+  rescreenedNext:
+    "A single re-screen replaced the batch's screen of these requests, so their result is not in this digest; it is mailed as for any single screen.",
+  blockedNext:
+    "Each depositor still has to be told what to fix. A request blocked on findings is released by a clear screen after the data is fixed.",
+  notStartedHeading: "Could not start, or refused (not screened by this batch)",
+  notStartedNext:
+    "These were not screened. Re-run one with: nemar admin repo publish screen <dataset-id>.",
+  notReportedHeading: "Did not report by the deadline",
+  notReportedNext:
+    "Their screens were dispatched and no result is stored. To run one again: nemar admin repo publish screen <dataset-id>.",
+  none: "None.",
+} as const;
+
+function digestCounts(rows: [string, number][]): string {
+  return rows.length === 0
+    ? ""
+    : `<ul style="margin: 8px 0 16px 0; padding-left: 20px;">${rows
+        .map(([label, n]) => `<li>${escapeHtml(label)}: ${n}</li>`)
+        .join("")}</ul>`;
+}
+
+function digestIds(ids: string[]): string {
+  return ids.length === 0
+    ? `<p>${SCREEN_BATCH_DIGEST_COPY.none}</p>`
+    : `<ul style="margin: 8px 0 16px 0; padding-left: 20px;">${ids
+        .map((id) => `<li><code>${escapeHtml(id)}</code></li>`)
+        .join("")}</ul>`;
+}
+
+/**
+ * Tell the administrators that a paced re-screen has finished (`screen-batch`). One mail per batch:
+ * the batch itself sends no other. Same recipients as the publication request mail, tried one by
+ * one, and the same per-recipient outcome, so the caller can release its claim when nobody
+ * received it.
+ */
+export async function sendScreenBatchDigestEmail(
+  adminEmails: string[],
+  digest: ScreenBatchDigest,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<AdminNotificationOutcome> {
+  const copy = SCREEN_BATCH_DIGEST_COPY;
+  const changedHtml =
+    digest.changed.length === 0
+      ? `<p>${copy.noChanges}</p>`
+      : `<ul style="margin: 8px 0 16px 0; padding-left: 20px;">${digest.changed
+          .map(
+            (c) =>
+              `<li><code>${escapeHtml(c.datasetId)}</code>: ${escapeHtml(c.from)} to ${escapeHtml(c.to)}${
+                c.nowBlocked ? ` (${copy.nowBlockedSuffix})` : ""
+              }</li>`,
+          )
+          .join("")}</ul>`;
+  const stillBlockedHtml =
+    digest.stillBlocked.length === 0
+      ? `<p>${copy.none}</p>`
+      : `<ul style="margin: 8px 0 16px 0; padding-left: 20px;">${digest.stillBlocked
+          .map(
+            (b) =>
+              `<li><code>${escapeHtml(b.datasetId)}</code>: ${escapeHtml(b.from)} to ${escapeHtml(b.to)}</li>`,
+          )
+          .join("")}</ul>`;
+  const notStartedHtml =
+    digest.notStarted.length === 0
+      ? `<p>${copy.none}</p>`
+      : `<ul style="margin: 8px 0 16px 0; padding-left: 20px;">${digest.notStarted
+          .map((n) => `<li><code>${escapeHtml(n.datasetId)}</code>: ${escapeHtml(n.reason)}</li>`)
+          .join("")}</ul>`;
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">${escapeHtml(copy.heading(digest))}</h1>
+  <p>${escapeHtml(copy.intro(digest))}</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.beforeHeading}</h2>
+  ${digestCounts(digest.before)}
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.afterHeading}</h2>
+  ${digestCounts(digest.after)}
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.kindsHeading}</h2>
+  <p>${digest.kinds ? escapeHtml(digest.kinds) : copy.noKinds}</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.changedHeading}</h2>
+  ${changedHtml}
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.stillBlockedHeading}</h2>
+  ${stillBlockedHtml}
+  <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.blockedHeading}</h2>
+  ${digestIds(digest.blocked)}
+  ${digest.blocked.length > 0 ? `<p>${copy.blockedNext}</p>` : ""}
+  <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.notStartedHeading}</h2>
+  ${notStartedHtml}
+  ${digest.notStarted.length > 0 ? `<p>${escapeHtml(copy.notStartedNext)}</p>` : ""}
+  <h2 style="color: #333; font-size: 18px; margin-top: 24px;">${copy.rescreenedHeading}</h2>
+  ${digestIds(digest.rescreened)}
+  ${digest.rescreened.length > 0 ? `<p>${escapeHtml(copy.rescreenedNext)}</p>` : ""}
+  <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.notReportedHeading}</h2>
+  ${digestIds(digest.notReported)}
+  ${digest.notReported.length > 0 ? `<p>${escapeHtml(copy.notReportedNext)}</p>` : ""}
+
+  <p style="color: #666; font-size: 14px;">${escapeHtml(copy.lateNote)}</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+  const subject = copy.subject(digest);
+  const outcome: AdminNotificationOutcome = {
+    attempted: adminEmails.length,
+    delivered: 0,
+    failures: [],
+  };
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        subject,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+      );
+      outcome.delivered++;
+    } catch (error) {
+      const detail = sendFailureText(error, adminEmail);
+      console.error(`Failed to send re-screen digest to ${redactRecipient(adminEmail)}: ${detail}`);
+      outcome.failures.push({ recipient: redactRecipient(adminEmail), error: detail });
+    }
+  }
+  return outcome;
 }
 
 /**

@@ -251,6 +251,18 @@ export interface PublicationReviewDetail {
   /** The request's block reason when it is blocked, as a plain word (`shownBlockReason`), else null. */
   block_reason: string | null;
   /**
+   * The depositor's resubmission note (ADR 0139, decision 5), or null when there is none. The
+   * depositor's own text: shown to administrators under a label that names its author
+   * (`RESUBMISSION_NOTE_LABEL`), never as NEMAR's words. Optional because an older Worker sends
+   * none; absent means unknown, never "no note".
+   */
+  resubmission_note?: string | null;
+  /**
+   * The id of the denied request this one answers (migration 0151), or null for a first request
+   * and for one that follows a withdrawal. Optional for the same reason as the note.
+   */
+  previous_request_id?: number | null;
+  /**
    * The request is `approving`, or `blocked` by the owner-name walk-back, and a step after the
    * validation-only ones completed (`hasStartedPublishing`): a resume passes no gate, and
    * `approve` without `--resume` would start the run over.
