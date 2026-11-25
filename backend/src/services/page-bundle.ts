@@ -28,6 +28,7 @@
  */
 import type { Bindings } from "../types/bindings";
 import { withheldWhileAnonymous } from "./anonymity";
+import { readPipelineExtensions } from "./compute-pipeline-progress";
 import {
   type DatasetVersionRow,
   type LandingArchive,
@@ -70,6 +71,12 @@ export interface PageBundle {
    * failed; enrichment_degraded=true means it loaded with reduced fidelity.
    */
   enrichment_degraded: boolean;
+  /**
+   * True when the pipeline's namespaces (`extensions.processing`, `signalJourney` and `dataQuality`) could
+   * not be read: the metadata is served without them, and the bundle is not `complete`, so it is not
+   * cached (#2375 review). Name, description and the rest of the metadata stand.
+   */
+  pipeline_degraded: boolean;
   summary: PageBundleComponent<unknown>;
   catalog_row: PageBundleComponent<CatalogRow | null>;
 }
@@ -157,6 +164,8 @@ interface EnrichedMetadataResult {
    * dataset and re-run the enrichment workflow.
    */
   enrichment_degraded: boolean;
+  /** True when the pipeline's namespaces could not be read; see {@link PageBundle.pipeline_degraded}. */
+  pipeline_degraded: boolean;
 }
 
 async function loadEnrichedMetadata(
@@ -284,7 +293,26 @@ async function loadEnrichedMetadata(
     latestManifest: null,
     githubOrg: ORG_NAME,
   });
-  return { metadata, enrichment_degraded: enrichmentDegraded };
+  // The pipeline's `processing`, `signalJourney` and `dataQuality` namespaces (ADR 0134, ADR 0137 decision
+  // 8, #2331), by the very read `/<id>/metadata.json` serves, behind the same gate: the caller admitted a
+  // public dataset, and a concealed deposit gets none. A failed read leaves them out, as `metadata.json`
+  // does, and flags them missing, so the bundle is not `complete` and is never cached without them.
+  let pipelineDegraded = false;
+  if (row.anonymous !== 1) {
+    try {
+      Object.assign(metadata.extensions, await readPipelineExtensions(env.DB, datasetId));
+    } catch (err) {
+      pipelineDegraded = true;
+      console.error(
+        `[page-bundle] pipeline extensions unavailable dataset=${datasetId} class=${err instanceof Error ? err.name : typeof err}`,
+      );
+    }
+  }
+  return {
+    metadata,
+    enrichment_degraded: enrichmentDegraded,
+    pipeline_degraded: pipelineDegraded,
+  };
 }
 
 export function pickVersion(
@@ -353,6 +381,7 @@ export function settled<T>(result: PromiseSettledResult<T>, label: string): Page
  *   - all ok AND published version AND summary.data present: true
  *   - all ok AND published version AND summary.data null: false
  *     (S3 had no summary.json for a published version — backfill needed)
+ *   - the pipeline's namespaces could not be read (`pipelineDegraded`): false
  *
  * Cache poisoning class: returning `true` for any partial-failure case would
  * let the caller cache an empty/broken bundle for the full SWR window. The
@@ -368,9 +397,12 @@ export function isBundleComplete(input: {
   summary: PageBundleComponent<unknown>;
   catalogRow: PageBundleComponent<unknown>;
   resolvedVersion: string | null;
+  /** The metadata was served without the pipeline's namespaces, which could not be read. */
+  pipelineDegraded?: boolean;
 }): boolean {
   const { landing, metadata, summary, catalogRow, resolvedVersion } = input;
   if (!landing.ok || !metadata.ok || !summary.ok || !catalogRow.ok) return false;
+  if (input.pipelineDegraded === true) return false;
   if (resolvedVersion === null) return true; // no version, no summary expected
   return summary.data !== null;
 }
@@ -469,6 +501,7 @@ export async function buildPageBundle(
     ? { ok: true, data: metadataComponent.data.metadata }
     : metadataComponent;
   const enrichmentDegraded = metadataComponent.ok && metadataComponent.data.enrichment_degraded;
+  const pipelineDegraded = metadataComponent.ok && metadataComponent.data.pipeline_degraded;
 
   // #1518: versionRows is ordered newest-first (pickVersion's own "fall
   // through to latest" default relies on the same assumption), so the
@@ -487,10 +520,18 @@ export async function buildPageBundle(
     dataset_id: datasetId,
     version: resolvedVersion,
     served_at: new Date().toISOString(),
-    complete: isBundleComplete({ landing, metadata, summary, catalogRow, resolvedVersion }),
+    complete: isBundleComplete({
+      landing,
+      metadata,
+      summary,
+      catalogRow,
+      resolvedVersion,
+      pipelineDegraded,
+    }),
     landing,
     metadata,
     enrichment_degraded: enrichmentDegraded,
+    pipeline_degraded: pipelineDegraded,
     summary,
     catalog_row: catalogRow,
   };

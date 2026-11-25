@@ -23,7 +23,7 @@ import {
   MAX_SERVABLE_CHUNKS,
   resolveAnnexDelivery,
 } from "../services/chunked-delivery";
-import { liveSignalJourneyLinks } from "../services/compute-pipeline-progress";
+import { readPipelineExtensions } from "../services/compute-pipeline-progress";
 import {
   type CatalogIndexBuildResult,
   type CatalogIndexRow,
@@ -31,7 +31,6 @@ import {
   type DatasetVersionRow,
   type ManifestDigest,
   PUBLIC_DATASET_VERSIONS_SQL,
-  type PipelineDocumentRow,
   type PublicManifestEntry,
   type ResolvedVersion,
   type VersionPickerEntry,
@@ -47,7 +46,6 @@ import {
   encodeBidsPath,
   findLastSeenVersionBy,
   pickResponseFormat,
-  pipelineExtensions,
   renderCatalogIndexHtml,
   renderDatasetLandingHtml,
   renderIndexHtml,
@@ -1898,19 +1896,15 @@ async function metadataJsonHandler(
     githubOrg: ORG_NAME,
   });
 
-  // The dataset-level neuroschema `processing` and `signalJourney` entries of NEMAR's pipeline (ADR 0134,
-  // epic #2324 phase 2), behind the same public gate as the rest of this document; never for a concealed
-  // deposit. The stored entries are final; a reporting run's `in_progress` link is worked out here. A read
-  // that fails leaves them out and the document stands.
+  // The dataset-level neuroschema `processing`, `signalJourney` and `dataQuality` entries of NEMAR's
+  // pipeline (ADR 0134, ADR 0137 decision 8, epic #2324), behind the same public gate as the rest of this
+  // document; never for a concealed deposit. The stored entries are final; a reporting run's `in_progress`
+  // link is worked out here; a quality summary is served only for a recipe's current public (promoted)
+  // derivative. A read that fails leaves them out and the document stands. The page bundle serves the same
+  // read (`readPipelineExtensions`).
   if (row.anonymous !== 1) {
     try {
-      const docs = await env.DB.prepare(
-        "SELECT namespace, recipe, entry FROM compute_pipeline_documents WHERE dataset_id = ?1 ORDER BY recipe",
-      )
-        .bind(datasetId)
-        .all<PipelineDocumentRow>();
-      const live = await liveSignalJourneyLinks(env.DB, datasetId);
-      Object.assign(payload.extensions, pipelineExtensions(docs.results ?? [], live));
+      Object.assign(payload.extensions, await readPipelineExtensions(env.DB, datasetId));
     } catch (err) {
       console.warn(
         `[data] metadata.json: pipeline documents unavailable dataset=${datasetId} class=${err instanceof Error ? err.name : typeof err}`,

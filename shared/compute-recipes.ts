@@ -320,9 +320,10 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
       checkpoint("iclabel", ["iclabel"]),
       checkpoint("quality", ["nemar-quality", "nemar-spectrum"]),
     ]),
-    // About 16 files per recording with its views (ADR 0137: `_chanlocs.tsv`, `_icclasses.json` and
-    // `_spectrum.tsv` beside the 13 it wrote), plus the dataset's: the policy's 5,000 stops at about 312
-    // recordings; 25,000 admits about 1,560, headroom over a 1,000-recording dataset.
+    // 17 files per recording with its views, the record included (the floor's five, the recipe's nine, the
+    // two plugin views `_icclasses.json` and `_spectrum.tsv`, and the record; ADR 0137, nemar-process P7),
+    // plus the dataset's three: the policy's 5,000 stops at about 294 recordings; 25,000 admits about
+    // 1,470, headroom over a 1,000-recording dataset.
     resultLimits: Object.freeze({ maxFiles: 25_000 }),
   }),
 ]) as readonly ComputeRecipe[];
@@ -386,6 +387,26 @@ export function recipeRequiredOutputs(recipe: Pick<ComputeRecipe, "name">): {
     record: `${RECIPE_PRODUCT_OUTPUT_PREFIX}desc-${label}_signalJourney.json`,
     table: `${RECIPE_PRODUCT_OUTPUT_PREFIX}desc-${label}_recordings.tsv`,
   };
+}
+
+/**
+ * Where a finished run of the recipe writes its dataset `dataQuality` summary, relative to the job's
+ * outputs directory: beside its dataset record, at most 65,536 bytes (ADR 0137 decision 8, nemar-process
+ * `common/dataquality.py`). Not a required output: a run of a recipe that predates it has none.
+ */
+export function recipeQualityDocumentPath(recipe: Pick<ComputeRecipe, "name">): string {
+  return `${RECIPE_PRODUCT_OUTPUT_PREFIX}desc-${recipeLabel(recipe)}_dataquality.json`;
+}
+
+/**
+ * The quality plugins a recipe version runs: the steps of its `quality` checkpoint that are plugins
+ * ({@link RECIPE_PLUGIN_STEPS}), in order. A plugin's metrics are named `<plugin>:<name>`, so these are the
+ * only prefixes a run's metrics may carry; a recipe without plugins reports bare names only.
+ */
+export function recipeQualityPlugins(recipe: Pick<ComputeRecipe, "checkpoints">): string[] {
+  const plugins: readonly string[] = RECIPE_PLUGIN_STEPS;
+  const quality = recipe.checkpoints.find((c) => c.checkpoint === "quality");
+  return (quality?.steps ?? []).filter((s) => plugins.includes(s));
 }
 
 /**

@@ -152,8 +152,18 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
   The recipe drift test reads nemar-process's `PLUGINS` literal once a `steps.py` declares it, leaves the plugin steps out of the comparison until then, and fails on a `PLUGINS` assignment it cannot read.
 - **A pipeline job is held to its recipe's own result limit (owner decision of 2026-11-23).**
   A registry entry may declare `resultLimits.maxFiles` (never above 100,000); the outputs route, its body cap and the launcher-document bound let it raise the limit (never lower it) for a NEMAR pipeline job a stamp names, and every other job keeps the owner's policy.
-  `nemar-floor` and `nemar-ica` declare 25,000: about 6 and 13 files per recording, so the policy's 5,000 stopped at about 830 and 384 recordings.
+  `nemar-floor` and `nemar-ica` declare 25,000: about 6 and 17 files per recording, so the policy's 5,000 stopped at about 830 and 294 recordings.
   The launcher still caps its outputs request at 1 MiB (about 8,000 entries), so raising its cap is a nemar-process change before a job lists more.
+- **Dataset quality summaries in D1 and `metadata.json` (ADR 0137 decision 8, epic #2324 phase B1).**
+  When a succeeded run is reconciled, the backend reads its dataset `dataQuality` document (`product/desc-<label>_dataquality.json`, at most 65,536 bytes) and keeps the recipe's entry for the run's stamp (migration 0151, `compute_quality_documents`) once it has checked it.
+  The checks: UTF-8 I-JSON (no duplicate member, lone surrogate, noncharacter or nesting past 64); the zod mirror of neuroschema 0.6.0 (`level` and `recipes` only, every integer at most 2^53 - 1); the writer's rules run again (counts that add up, the listed and left-out recordings, each histogram's `n`, the `observed_range`); the stamp's recipe, recipe version, dataset version and input; the digest of the dataset record the run wrote; the recordings table's counts; metric names that are the recipe's own or a plugin's it runs; and an entry, written again, of at most 65,536 characters (`entry_too_large`, since a number such as `1000e17` prints longer than it was written).
+  The counts rule (owner ruling of 2026-11-25): `passed` is the recordings that succeeded, so a recording whose plugin was skipped still counts as passed, as nemar-process writes it; neuroschema's `processing-extensions.md`, which ties `passed` to the last checkpoint's, is to change in 0.6.1.
+  A refused document is logged with a fixed word (`quality_not_written reason=...`) and never holds the run back; the dataset a summary belongs to is the stamp's, never the document's.
+  `/<id>/metadata.json` serves `extensions.dataQuality` (`level: dataset`) with the summary of each recipe's current public derivative only: stored, `catalog` or `published`, not a superseded `catalog` row (a `published` row stays public, superseded or not) and not past its date, the newest by `stored_at`.
+  A `canary` run shows nothing until an administrator promotes it, a superseded `catalog` run is replaced by the one that superseded it, and a concealed deposit or a withdrawn dataset gets none.
+  `/<id>/page-bundle.json` now carries `processing`, `signalJourney` and `dataQuality` by the same read (#2331); when that read fails, the bundle keeps its metadata without them, says so in `pipeline_degraded`, and is not `complete` (so `no-store`).
+  `shared/contract/view-digest.ts` holds the I-JSON reader and `nemar.view-digest.v1` (RFC 8785), replaying neuroschema's nine cases and fourteen refusals; `shared/contract/data-quality.ts` holds `nemar.record-checks.v1`.
+  The projection of a recording's entry (served by phase B2) takes the recipe's metrics from `extensions.nemar.metrics` and each plugin's from its step's `qualityMetrics`, and admits nemar-process's own `views_skipped` words.
 
 ### Changed
 

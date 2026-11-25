@@ -1,0 +1,615 @@
+{
+  "asr": {
+    "channels": [
+      "Fp1",
+      "Fp2",
+      "F3",
+      "F4",
+      "C3",
+      "C4",
+      "P3",
+      "P4",
+      "O2",
+      "F7",
+      "F8",
+      "T3",
+      "T4",
+      "T5",
+      "FZ",
+      "CZ",
+      "PZ",
+      "Pg1",
+      "Pg2"
+    ],
+    "cutoff": 30.0,
+    "max_dims": 0.66,
+    "maxmem_mb": 1024,
+    "state_sha256": "b283f72d043fc071c48d8d39bddb3d29b58745a892c75a1807831f0ad551f46f",
+    "step_size": 50,
+    "window_len_s": 0.5
+  },
+  "asr_burst_fraction": 0.294025,
+  "asr_bursts": {
+    "fraction": 0.294025,
+    "n_repaired": 16583,
+    "n_samples": 56400,
+    "spans": [
+      [
+        0,
+        199
+      ],
+      [
+        250,
+        399
+      ],
+      [
+        650,
+        749
+      ],
+      [
+        850,
+        999
+      ],
+      [
+        1150,
+        2149
+      ],
+      [
+        2300,
+        2449
+      ],
+      [
+        2450,
+        2799
+      ],
+      [
+        2900,
+        3349
+      ],
+      [
+        3500,
+        3699
+      ],
+      [
+        3750,
+        3899
+      ],
+      [
+        3950,
+        4049
+      ],
+      [
+        4450,
+        5249
+      ],
+      [
+        5350,
+        5449
+      ],
+      [
+        5650,
+        5799
+      ],
+      [
+        6450,
+        6749
+      ],
+      [
+        7000,
+        7199
+      ],
+      [
+        9350,
+        9499
+      ],
+      [
+        10050,
+        10149
+      ],
+      [
+        10300,
+        10549
+      ],
+      [
+        10650,
+        10799
+      ],
+      [
+        10850,
+        11349
+      ],
+      [
+        11950,
+        12149
+      ],
+      [
+        12450,
+        12599
+      ],
+      [
+        12700,
+        12799
+      ],
+      [
+        12800,
+        13049
+      ],
+      [
+        13050,
+        13199
+      ],
+      [
+        13200,
+        13649
+      ],
+      [
+        14150,
+        14249
+      ],
+      [
+        14300,
+        14499
+      ],
+      [
+        17100,
+        17199
+      ],
+      [
+        18400,
+        18649
+      ],
+      [
+        18650,
+        18799
+      ],
+      [
+        18900,
+        19249
+      ],
+      [
+        19400,
+        19549
+      ],
+      [
+        19850,
+        20499
+      ],
+      [
+        20500,
+        20799
+      ],
+      [
+        21200,
+        21599
+      ],
+      [
+        21850,
+        22049
+      ],
+      [
+        22050,
+        22399
+      ],
+      [
+        22550,
+        22849
+      ],
+      [
+        22950,
+        23749
+      ],
+      [
+        24500,
+        24749
+      ],
+      [
+        24950,
+        25199
+      ],
+      [
+        25400,
+        25799
+      ],
+      [
+        25800,
+        26249
+      ],
+      [
+        26500,
+        26699
+      ],
+      [
+        27050,
+        27249
+      ],
+      [
+        27450,
+        27549
+      ],
+      [
+        33925,
+        34074
+      ],
+      [
+        38675,
+        38824
+      ],
+      [
+        39525,
+        39674
+      ],
+      [
+        45125,
+        45274
+      ],
+      [
+        45625,
+        45774
+      ],
+      [
+        45875,
+        46024
+      ],
+      [
+        46075,
+        46224
+      ],
+      [
+        46525,
+        47074
+      ],
+      [
+        47075,
+        47224
+      ],
+      [
+        47275,
+        47524
+      ],
+      [
+        47575,
+        47724
+      ],
+      [
+        47825,
+        47924
+      ],
+      [
+        47975,
+        48124
+      ],
+      [
+        49975,
+        50074
+      ],
+      [
+        52175,
+        52324
+      ],
+      [
+        52325,
+        52424
+      ],
+      [
+        52475,
+        52674
+      ],
+      [
+        53825,
+        53974
+      ],
+      [
+        53975,
+        54374
+      ]
+    ],
+    "threshold_uv": 1e-08
+  },
+  "best_iter": 4,
+  "best_ll": -2.7449900144324153,
+  "bit_reproducible": true,
+  "block_size": 131072,
+  "browser_transform": {
+    "applies_to": "serving_copy channels matched by label, in microvolts: the view converts by the store's unit field and refuses an unknown unit or any channel it cannot match",
+    "caption": "not checked against the decomposition input",
+    "columns": [
+      "Fp1",
+      "Fp2",
+      "F3",
+      "F4",
+      "C3",
+      "C4",
+      "P3",
+      "P4",
+      "O2",
+      "F7",
+      "F8",
+      "T3",
+      "T4",
+      "T5",
+      "FZ",
+      "CZ",
+      "PZ",
+      "Pg1",
+      "Pg2"
+    ],
+    "match": "label",
+    "matrix": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_servingunmixing.tsv",
+    "note": "no preprocessing; activations approximate the decomposition input",
+    "rows": null,
+    "shaded": {
+      "files": [
+        "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_badsegments.tsv"
+      ],
+      "label": "burst"
+    },
+    "unit": "uV"
+  },
+  "browser_transform_reason": null,
+  "decomposition_input": {
+    "channel_types": [
+      [
+        "Fp1",
+        "EEG"
+      ],
+      [
+        "Fp2",
+        "EEG"
+      ],
+      [
+        "F3",
+        "EEG"
+      ],
+      [
+        "F4",
+        "EEG"
+      ],
+      [
+        "C3",
+        "EEG"
+      ],
+      [
+        "C4",
+        "EEG"
+      ],
+      [
+        "P3",
+        "EEG"
+      ],
+      [
+        "P4",
+        "EEG"
+      ],
+      [
+        "O1",
+        "EEG"
+      ],
+      [
+        "O2",
+        "EEG"
+      ],
+      [
+        "F7",
+        "EEG"
+      ],
+      [
+        "F8",
+        "EEG"
+      ],
+      [
+        "T3",
+        "EEG"
+      ],
+      [
+        "T4",
+        "EEG"
+      ],
+      [
+        "T5",
+        "EEG"
+      ],
+      [
+        "T6",
+        "EEG"
+      ],
+      [
+        "FZ",
+        "EEG"
+      ],
+      [
+        "CZ",
+        "EEG"
+      ],
+      [
+        "PZ",
+        "EEG"
+      ],
+      [
+        "Pg1",
+        "EEG"
+      ],
+      [
+        "Pg2",
+        "EEG"
+      ],
+      [
+        "ECG",
+        "ECG"
+      ]
+    ],
+    "channel_types_sha256": "3c5002233aa36a975b1de9586e438e98ccff404371159626ae56335d244280d2",
+    "channels": [
+      "Fp1",
+      "Fp2",
+      "F3",
+      "F4",
+      "C3",
+      "C4",
+      "P3",
+      "P4",
+      "O2",
+      "F7",
+      "F8",
+      "T3",
+      "T4",
+      "T5",
+      "FZ",
+      "CZ",
+      "PZ",
+      "Pg1",
+      "Pg2"
+    ],
+    "preprocessing": [
+      {
+        "function": "eegprep.pop_select",
+        "step": "signal_channels"
+      },
+      {
+        "function": "eegprep.clean_flatlines",
+        "step": "flatline"
+      },
+      {
+        "function": "eegprep.pop_eegfiltnew",
+        "step": "drift"
+      },
+      {
+        "function": "eegprep.clean_channels",
+        "step": "bad_channels"
+      },
+      {
+        "function": "eegprep.clean_asr",
+        "step": "asr"
+      },
+      {
+        "function": "eegprep.pop_reref",
+        "step": "reref"
+      }
+    ],
+    "reference": "average",
+    "source": "archive",
+    "unit": "uV"
+  },
+  "device": "cpu",
+  "device_reason": "requested",
+  "device_requested": "cpu",
+  "did_converge": false,
+  "dtype": "float64",
+  "engine": "pamica-torch",
+  "engine_input_dtype": "float64",
+  "fallback": false,
+  "final_ll": -2.7449900144324153,
+  "good_channels": [
+    "Fp1",
+    "Fp2",
+    "F3",
+    "F4",
+    "C3",
+    "C4",
+    "P3",
+    "P4",
+    "O2",
+    "F7",
+    "F8",
+    "T3",
+    "T4",
+    "T5",
+    "FZ",
+    "CZ",
+    "PZ",
+    "Pg1",
+    "Pg2"
+  ],
+  "gpu_allocator_limit_mb": null,
+  "gpu_memory_cap_mb": null,
+  "gpu_name": null,
+  "iclabel": {
+    "version": "default",
+    "weights_sha256": "8949a3e1faf61fee997034eca50a94475b78d58b35beb38ba48f0b208444d929"
+  },
+  "image_flavor": null,
+  "input_profile": "archive",
+  "iterations": 5,
+  "max_iter": 5,
+  "n_good_channels": 19,
+  "n_mix": 3,
+  "n_models": 1,
+  "pamica": {
+    "backend": "AMICATorchNG",
+    "best_iter": 4,
+    "best_ll": -2.7449900144324153,
+    "block_size": 131072,
+    "device": "cpu",
+    "did_converge": false,
+    "do_mean": true,
+    "do_newton": true,
+    "do_reject": false,
+    "do_sphere": true,
+    "dtype": "float64",
+    "final_ll": -2.7449900144324153,
+    "invsigmax": 100.0,
+    "invsigmin": 1e-05,
+    "iterations": 5,
+    "lrate": 0.05,
+    "max_iter": 5,
+    "maxdecs": 3,
+    "maxincs": 5,
+    "maxrej": 3,
+    "min_dll": 1e-09,
+    "min_nd": 1e-07,
+    "minlrate": 1e-08,
+    "n_mix": 3,
+    "n_models": 1,
+    "newt_start": 50,
+    "newtrate": 1.0,
+    "pcakeep": 18,
+    "pipeline": "pamica.AMICA(backend='torch').fit",
+    "rank": 18,
+    "rejint": 3,
+    "rejsig": 3.0,
+    "rejstart": 2,
+    "rho0": 1.5,
+    "rholratefact": 0.5,
+    "seed": 5489,
+    "stop_reason": "max_iter",
+    "threads": 1,
+    "torch": "2.12.1",
+    "use_grad_norm": true,
+    "use_min_dll": true,
+    "version": "0.4.0"
+  },
+  "pcakeep": 18,
+  "positions": {
+    "coordinate_system": "MNI305",
+    "coordinate_units": "mm",
+    "source": "electrodes.tsv",
+    "withheld": null
+  },
+  "rank": 18,
+  "recipe": "nemar-ica",
+  "recipeVersion": "1.0.0-b2",
+  "reference": "average",
+  "reorder": "on",
+  "seed": 5489,
+  "serving_index": {
+    "dataset_id": "on007823",
+    "reason": null,
+    "row": {
+      "group": "eeg_200hz",
+      "n_samples": 56400,
+      "path": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf",
+      "rate": 200.0
+    },
+    "sha256": "fb030cb42dbf97a3e76f3bd890991c95e703fd5a42198b9d0d7adda0e6efcf0c",
+    "source_commit": "5555555555555555555555555555555555555555"
+  },
+  "start": "pamica_seed",
+  "stop_reason": "max_iter",
+  "threads": 1,
+  "torch_cuda": null,
+  "torch_version": "2.12.1",
+  "versions": {
+    "eegprep": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
+    "pamica": "0.4.0",
+    "torch": "2.12.1"
+  }
+}

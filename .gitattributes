@@ -11,3 +11,6 @@ scripts/neurobagel/*.py.lock linguist-generated
 # The neuroschema view files are vendored byte for byte and held to their SHA256SUMS.json
 # (shared/contract/neuroschema/build-vendor.mjs), so git must never normalize them.
 shared/contract/neuroschema/views/** -text linguist-generated
+
+# nemar-process's product, copied byte for byte and held to its SHA256SUMS.json: never normalized.
+test/fixtures/quality/** -text
