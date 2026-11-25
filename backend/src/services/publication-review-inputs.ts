@@ -34,6 +34,7 @@ import {
   type ReviewInputsBody,
 } from "../../../shared/publication-review.js";
 import { README_CANDIDATES } from "../../../shared/readme-candidates.js";
+import { readResubmissionNote } from "../../../shared/resubmission-note.js";
 import { workerLineageCache } from "../routes/admin/license-lineage.js";
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsToken } from "./github-auth.js";
@@ -328,6 +329,17 @@ export async function publicationReviewInputs(
     { cache: workerLineageCache() },
   );
 
+  // The note as the Worker keeps it (`readResubmissionNote`, the rule the request route stored it
+  // under). One that no longer reads was changed by hand: it is not sent in part, and not dropped
+  // silently either; the job reviews nothing.
+  const note = readResubmissionNote(request.resubmission_note);
+  if (!note.ok) {
+    console.warn(
+      `[publication-review-inputs] review ${reviewId} (${datasetId}): stored note does not read (${note.refusal})`,
+    );
+    return { kind: "unavailable" };
+  }
+
   const doc = parseObject(dataset.enrichment_json);
   const anonymous = request.anonymous === 1;
   const body: ReviewInputsBody = {
@@ -358,10 +370,7 @@ export async function publicationReviewInputs(
       })),
       resolver_version: lineage.resolver_version,
     },
-    resubmission_note:
-      typeof request.resubmission_note === "string" && request.resubmission_note.trim() !== ""
-        ? request.resubmission_note
-        : null,
+    resubmission_note: note.note,
     coverage: coverageOf(readNarrowScreenReport(request.identifier_screen_report), row.headSha),
   };
   return { kind: "ok", body };
