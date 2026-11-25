@@ -64,6 +64,8 @@ const repoFiles = new Map<string, Record<string, string>>();
 const heads = new Map<string, string>();
 /** The blob paths of the screened commit; `"truncated"` or `"fail"` for those conditions. */
 const trees = new Map<string, string[] | "truncated" | "fail">();
+/** Runs once, on the next repository-file read (a write landed between a read and a write). */
+let onContentsRead: (() => void) | null = null;
 const DEFAULT_TREE = ["dataset_description.json", "sub-01/eeg/sub-01_eeg.set", "code/plot_erp.png"];
 const githubServer = Bun.serve({
   port: 0,
@@ -83,6 +85,11 @@ const githubServer = Bun.serve({
       });
     }
     const m = /^\/repos\/nemarDatasets\/([^/]+)\/contents\/(.+)$/.exec(path);
+    if (m && onContentsRead) {
+      const once = onContentsRead;
+      onContentsRead = null;
+      once();
+    }
     const content = m ? repoFiles.get(m[1])?.[decodeURIComponent(m[2])] : undefined;
     if (content === undefined) return Response.json({ message: "Not Found" }, { status: 404 });
     return Response.json({ encoding: "base64", content: Buffer.from(content).toString("base64") });
@@ -173,6 +180,7 @@ beforeEach(async () => {
   repoFiles.clear();
   heads.clear();
   trees.clear();
+  onContentsRead = null;
   requestIds.clear();
   db = freshDb();
   d1 = realD1(db);
@@ -415,14 +423,13 @@ describe("apply", () => {
     const rewritten = JSON.stringify(
       report(ELIGIBLE, "not-screened", { kinds: { "image-or-document-file": 1 } }),
     );
-    d1 = interceptingD1(realD1(db), (sql) => {
-      if (sql.includes("SET identifier_screen_ack_by")) {
-        db.run("UPDATE publication_requests SET identifier_screen_report = ? WHERE id = ?", [
-          rewritten,
-          requestIds.get(ELIGIBLE) as number,
-        ]);
-      }
-    });
+    // The route reads the lineage files after it reads the row and before it writes: the stand-in
+    // rewrites the report while answering that read.
+    onContentsRead = () =>
+      db.run("UPDATE publication_requests SET identifier_screen_report = ? WHERE id = ?", [
+        rewritten,
+        requestIds.get(ELIGIBLE) as number,
+      ]);
     const applied = await applyEligible(send(), dry);
     expect(byId(applied)).toEqual({ [ELIGIBLE]: "state_moved" });
     expect(ackRow(ELIGIBLE)?.identifier_screen_ack_at).toBeNull();
@@ -451,13 +458,11 @@ describe("apply", () => {
 });
 
 describe("failures stay with their request (review round 1)", () => {
-  test("a failed audit write undoes the acknowledgment: never acknowledged without its audit row", async () => {
+  test("a failed audit write lands neither write: never acknowledged without its audit row", async () => {
     const dry = await dryRun(send(), { ids: [ELIGIBLE, IMAGES] });
-    d1 = interceptingD1(realD1(db), (sql, binds) => {
-      if (sql.includes("INSERT INTO audit_log") && binds[3] === ELIGIBLE) {
-        throw new Error("audit insert refused");
-      }
-    });
+    // A real failure of the audit insert, in the database itself, for one request only.
+    db.run(`CREATE TRIGGER refuse_audit BEFORE INSERT ON audit_log
+            WHEN NEW.resource_id = '${ELIGIBLE}' BEGIN SELECT RAISE(ABORT, 'audit refused'); END`);
     const applied = await applyEligible(send(), dry);
     expect(byId(applied)).toEqual({ [ELIGIBLE]: "state_moved", [IMAGES]: "acknowledged" });
     const row = ackRow(ELIGIBLE);
@@ -466,7 +471,7 @@ describe("failures stay with their request (review round 1)", () => {
     expect(row?.identifier_screen_ack_at).toBeNull();
     expect(auditRows().map((a) => a.resource_id)).toEqual([IMAGES]);
     // The next dry run reads it as eligible again.
-    d1 = realD1(db);
+    db.run("DROP TRIGGER refuse_audit");
     expect(byId(await dryRun(send(), { ids: [ELIGIBLE] }))).toEqual({ [ELIGIBLE]: "eligible" });
   });
 
@@ -494,18 +499,19 @@ describe("failures stay with their request (review round 1)", () => {
     });
     expect(ackRow(ELIGIBLE)?.identifier_screen_ack_at).toBeNull();
 
-    // A record that throws: state_moved, nothing recorded.
-    d1 = interceptingD1(realD1(db), (sql, binds) => {
-      if (sql.includes("SET identifier_screen_ack_by = ?,") && binds[2] === throwOnRead) {
-        throw new Error("write refused");
-      }
-    });
+    // A record that throws (the acknowledgment UPDATE refused by the database): state_moved, and
+    // the audit insert in the same transaction is rolled back with it.
+    d1 = realD1(db);
+    const auditsBefore = auditRows().length;
+    db.run(`CREATE TRIGGER refuse_ack BEFORE UPDATE OF identifier_screen_ack_by ON publication_requests
+            WHEN NEW.id = ${throwOnRead} BEGIN SELECT RAISE(ABORT, 'write refused'); END`);
     const again = await applyEligible(
       send(),
       dry.filter((r) => r.dataset_id === ELIGIBLE),
     );
     expect(byId(again)).toEqual({ [ELIGIBLE]: "state_moved" });
     expect(ackRow(ELIGIBLE)?.identifier_screen_ack_at).toBeNull();
+    expect(auditRows().length).toBe(auditsBefore);
   });
 
   test("refusals carry the copy table's words", async () => {
