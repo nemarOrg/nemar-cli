@@ -45,6 +45,8 @@ export interface StandIn {
   origin: string;
   requests: string[];
   misses: string[];
+  /** Answer `GET <origin>/api<path>` (the NEMAR API a spawned CLI is configured with) with `body`. */
+  setApi(path: string, body: unknown): void;
   /** Set an HTTP condition on every request whose key contains `match`. */
   override(match: string, o: Override): void;
   stop(): void;
@@ -56,6 +58,7 @@ export function startStandIn(): StandIn {
     table.set(keyOf(r.method, r.registry, r.path, r.body?.query), r);
   }
   const overrides: Array<[string, Override]> = [];
+  const api = new Map<string, unknown>();
   const requests: string[] = [];
   const misses: string[] = [];
   const server = Bun.serve({
@@ -71,8 +74,11 @@ export function startStandIn(): StandIn {
       }
       const key = keyOf(req.method, registry, path, body);
       requests.push(key);
-      if (registry === "api" && url.pathname === "/api/notices") {
-        return Response.json({ notices: [] });
+      if (registry === "api") {
+        const sub = url.pathname.slice("/api".length);
+        if (sub === "/notices") return Response.json({ notices: [] });
+        if (api.has(sub)) return Response.json(api.get(sub));
+        return Response.json({ error: "Not found" }, { status: 404 });
       }
       const o = overrides.find(([m]) => key.includes(m))?.[1];
       if (o?.delayMs) await Bun.sleep(o.delayMs);
@@ -100,6 +106,9 @@ export function startStandIn(): StandIn {
     origin,
     requests,
     misses,
+    setApi: (path, body) => {
+      api.set(path, body);
+    },
     override: (match, o) => {
       overrides.push([match, o]);
     },

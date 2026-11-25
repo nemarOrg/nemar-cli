@@ -16,7 +16,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
-import { LINEAGE_COPY, type LineageResult } from "../shared/license-lineage";
+import {
+  LINEAGE_COPY,
+  type LineageResult,
+  lineageLines,
+  resolveLicenseLineage,
+} from "../shared/license-lineage";
 import { type StandIn, startStandIn } from "./fixtures/license-lineage/stand-in";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
@@ -52,7 +57,7 @@ function writeDataset(description: Record<string, unknown>, readme?: string): vo
   if (readme !== undefined) writeFileSync(join(dataset, "README"), readme);
 }
 
-async function licenseCheck(args: string[]) {
+async function cli(args: string[]) {
   const env: Record<string, string> = {
     PATH: dirname(process.execPath),
     HOME: scratch,
@@ -67,7 +72,7 @@ async function licenseCheck(args: string[]) {
     NEMAR_LICENSE_PHYSIONET_URL: standIn.bases.physionet,
   };
   const proc = spawn({
-    cmd: [process.execPath, "run", CLI_ENTRY, "dataset", "license-check", ...args],
+    cmd: [process.execPath, "run", CLI_ENTRY, ...args],
     cwd: REPO_ROOT,
     env,
     stdin: "ignore",
@@ -78,6 +83,8 @@ async function licenseCheck(args: string[]) {
   const stderr = await new Response(proc.stderr).text();
   return { stdout, stderr, exitCode: await proc.exited };
 }
+
+const licenseCheck = (args: string[]) => cli(["dataset", "license-check", ...args]);
 
 describe("nemar dataset license-check", () => {
   test("an OpenNeuro CC0 source and a PhysioNet ODC-By source: compatible_attribution, exit 0", async () => {
@@ -150,5 +157,40 @@ describe("nemar dataset license-check", () => {
     const { exitCode, stderr } = await licenseCheck([join(scratch, "absent")]);
     expect(exitCode).toBe(1);
     expect(stderr).toContain("Path not found");
+  }, 30_000);
+});
+
+describe("nemar admin dataset publish license-lineage", () => {
+  test("prints the Worker's result with the same lines, and exits by the outcome", async () => {
+    // The Worker's answer, computed by the same resolver over the recorded registries.
+    const result = await resolveLicenseLineage(
+      {
+        datasetDescription: { License: "CC0", SourceDatasets: [{ DOI: "10.13026/5ntk-km72" }] },
+        relatedIdentifiers: null,
+        attestationUpstreamSource: null,
+        readme: null,
+      },
+      { bases: standIn.bases },
+    );
+    standIn.setApi("/admin/datasets/nm000480/license-lineage", {
+      dataset_id: "nm000480",
+      ...result,
+    });
+    const { stdout, exitCode } = await cli([
+      "admin",
+      "dataset",
+      "publish",
+      "license-lineage",
+      "nm000480",
+    ]);
+    expect(stdout).toContain("Dataset: nm000480");
+    for (const line of lineageLines(result)) expect(stdout).toContain(line);
+    expect(exitCode).toBe(2);
+  }, 30_000);
+
+  test("a malformed id is refused before any request", async () => {
+    const { exitCode } = await cli(["admin", "dataset", "publish", "license-lineage", "nope"]);
+    expect(exitCode).toBe(1);
+    expect(standIn.requests.some((k) => k.includes("license-lineage"))).toBe(false);
   }, 30_000);
 });
