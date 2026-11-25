@@ -167,6 +167,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /datasets/:id/doi/concept": 2,
   "POST /datasets/:id/doi/publish": 2,
   "GET /datasets/:id/doi": 1,
+  // Epic #2182 card D1 (ADR 0139 decision 7): the upstream license lineage, read-only.
+  "GET /datasets/:id/license-lineage": 1,
   "POST /datasets/:id/doi/update": 2,
   "POST /datasets/:id/enrichment": 2,
   "GET /datasets/:id/files": 1,
@@ -406,7 +408,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(273);
+    expect(adminRoutes.routes.length).toBe(274);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware
