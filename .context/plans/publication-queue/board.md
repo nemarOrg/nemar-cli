@@ -48,7 +48,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 4 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 6 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -63,19 +63,19 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | O1 | Approve the 3 clean requests (checkpoints.md O1) |  | owner |  |  | owner |  |  |  |  |  | owner runs the O1 commands |
 | O3 | 37 blocked on ethics statement: depositor remedy (O3) |  | owner |  |  | owner |  |  |  |  |  | owner tells the depositor |
-| D1 | [License lineage](cards/D1.md) |  | worker-hard |  | claude-worker | active |  |  |  | 2026-11-25T11:12 | 2d | implementer running |
-| D2 | [Measure every blocker, HEAD+history](cards/D2.md) |  | worker |  | claude-worker | active |  |  |  | 2026-11-25T11:12 | 1d | implementer running |
-| A1 | [Coverage contract and registry](cards/A1.md) |  | worker-hard |  | claude-worker | active |  |  |  | 2026-11-25T11:12 | 3d | implementer running |
-| D4 | [Quiet paced re-screen](cards/D4.md) |  | worker |  |  | todo |  |  |  |  | 1d | dispatch |
+| D1 | [License lineage](cards/D1.md) |  | worker-hard |  | claude-worker | review |  | 2372 |  | 2026-11-25T11:12 | 2d | fixes from lead, then review panel |
+| D2 | [Measure every blocker, HEAD+history](cards/D2.md) |  | worker |  | claude-worker | review |  | 2371 |  | 2026-11-25T11:12 | 1d | review running |
+| A1 | [Coverage contract and registry](cards/A1.md) |  | worker-hard |  | claude-worker | review |  | 2374 |  | 2026-11-25T11:12 | 3d | fixes from lead, then review panel |
+| D4 | [Quiet paced re-screen](cards/D4.md) |  | worker |  | claude-worker | review |  | 2373 |  | 2026-11-25T11:25 | 1d | fixes from lead, then review panel |
 | A3 | [Pure-TS HDF5 metadata reader](cards/A3.md) |  | worker-hard |  |  | todo |  |  |  |  | 2d | dispatch |
-| D0 | [Review in prod, shadow 20](cards/D0.md) |  | lead |  |  | owner |  | 2370 |  |  | 4h | draft PR; owner confirms item 7 query, ADR 0105 q, items 5/6/8, cap |
+| D0 | [Review in prod, shadow 20](cards/D0.md) |  | lead |  |  | owner |  | 2370 | r1 code+tests+comments: 0 important, 2 suggestions fixed |  | 4h | draft #2370; owner checklist, then owner merges and releases |
 | B2 | ADR 0139 auto-deny (draft on decide branch) |  | lead |  |  | done |  |  |  |  |  | accepted 2026-11-25 |
 | A2 | [BrainVision and NIRx](cards/A2.md) |  | worker-hard |  |  | todo | A1 |  |  |  | 1d | after A1 |
 | A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  |  | todo | A1, A3 |  |  |  | 1.5d | after A1, A3 |
 | A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  |  | todo | A1 |  |  |  | 1d | after A1 |
 | A9 | [nemar dataset screen](cards/A9.md) |  | worker |  |  | todo | A1 |  |  |  | 1d | after A1 |
 | A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  |  | todo | A1, A4 |  |  |  | 2d | after A4 |
-| D3 | Batch acknowledgment by documented group |  | worker-hard |  |  | outline | D2 |  |  |  |  | CP-D1 |
+| D3 | [Batch ack on public upstream](cards/D3.md) |  | worker-hard |  |  | todo | D1, D2 |  |  |  | 2d | after D1 and D2 merge |
 | B3 | [Resubmission note](cards/B3.md) |  | worker |  |  | todo | B2 |  |  |  | 1d | ready (B2 done) |
 | B4 | [Review inputs and record](cards/B4.md) |  | worker-hard |  |  | todo | D1, B2 |  |  |  | 2d | after D1 |
 | B5 | [Auto-deny and ready mail](cards/B5.md) |  | worker-hard |  |  | todo | B2, B3, B4, D4 |  |  |  | 2.5d | after B3, B4, D4 |
@@ -83,6 +83,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | C1 | Calibration in prod shadow mode |  | owner |  |  | outline | CPD3, D0 |  |  |  |  | owner labels |
 | A10 | docs.nemar.org pages from copy tables |  | worker |  |  | outline | A2, A4, A5, A6, A9 |  |  |  |  | CP-E1 |
 | CPE2 | Seam review; evidence epic to dev; release E; O2 |  | lead |  |  | outline | A10 |  |  |  |  | CP-E2 |
+| O4 | Empty repos nm000589, nm000978 have publication requests |  | owner |  |  | owner |  |  |  |  |  | owner: nemar admin repo publish deny nm000589 / nm000978 (reason in checkpoints.md) |
 
 ## Questions
 
@@ -100,6 +101,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Agent | Role | Slot | Model | Step | Started | State |
 |---|---|---|---|---|---|---|
 | D1 | implementer | claude-worker | Opus 5.5 | D1 | 2026-11-25T11:12 | running |
-| D2 | implementer | claude-worker | Sonnet 5.5 | D2 | 2026-11-25T11:12 | running |
+| D2 | implementer | claude-worker | Sonnet 5.5 | D2 | 2026-11-25T11:12 | done |
 | A1 | implementer | claude-worker | Opus 5.5 | A1 | 2026-11-25T11:12 | running |
-| rev-2370 | reviewer | claude-worker | Sonnet 5.5 | D0 | 2026-11-25T11:22 | running |
+| rev-2370 | reviewer | claude-worker | Sonnet 5.5 | D0 | 2026-11-25T11:22 | done |
+| D4 | implementer | claude-worker | Sonnet 5.5 | D4 | 2026-11-25T11:25 | running |
+| rev-2371 | reviewer | claude-worker | Sonnet 5.5 | D2 | 2026-11-25T11:25 | running |

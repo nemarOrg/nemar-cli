@@ -35,3 +35,12 @@ nemar admin repo publish screen-batch --all-active --per-minute 4 --apply
 ```
 
 Wait for the digest, then compare it with the counts in plan.md.
+
+## O4: the two empty repositories (owner, now)
+
+```bash
+nemar admin repo publish deny nm000589 --reason "The dataset repository has no content (no commit). Please upload the dataset again and request publication once the upload has finished."
+nemar admin repo publish deny nm000978 --reason "The dataset repository has no content (no commit). Please upload the dataset again and request publication once the upload has finished."
+```
+
+Check `nemar admin repo publish deny --help` for the exact name of the reason option before running these.
