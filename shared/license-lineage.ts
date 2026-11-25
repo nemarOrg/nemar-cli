@@ -54,6 +54,7 @@ export const NORMALIZED_LICENSES = [
   "cc0",
   "pddl",
   "cc-by",
+  "permissive-attribution",
   "odc-by",
   "cc-by-sa",
   "odbl",
@@ -152,7 +153,7 @@ export const LINEAGE_COPY: Record<LineageOutcome, Copy> = {
   },
   compatible_attribution: {
     statement:
-      "An upstream source requires attribution (CC BY, ODC-By, or a matching share-alike license).",
+      "An upstream source requires attribution (CC BY, ODC-By, a matching share-alike license, or MIT, BSD or Apache-2.0, which are software licenses applied to data and still require attribution).",
     read: READ_SOURCES,
     remedy:
       "Declare each source in dataset_description.json SourceDatasets (it becomes IsDerivedFrom on the DOI) and credit it in the README. A CC0 target is allowed, but the attribution duty persists.",
@@ -301,6 +302,9 @@ export function normalizeLicense(text: string | null | undefined): NormalizedLic
     return { license: "physionet-restricted", version: versionOf(raw) };
   }
 
+  const software = permissiveSoftwareLicense(lower);
+  if (software) return software;
+
   const ccUri = /creativecommons\.org\/(licenses|publicdomain)\/([a-z-]+)(?:\/(\d(?:\.\d)?))?/.exec(
     lower,
   );
@@ -308,7 +312,11 @@ export function normalizeLicense(text: string | null | undefined): NormalizedLic
     const [, kind, code, ver] = ccUri;
     const version = ver ? (ver.includes(".") ? ver : `${ver}.0`) : null;
     if (kind === "publicdomain") {
-      return code === "zero" ? { license: "cc0", version } : { license: "other", version: null };
+      // CC0 and the Public Domain Mark both place the work in the public domain (lead ruling
+      // 2026-11-25); any other public-domain tool is not recognized.
+      return code === "zero" || code === "mark"
+        ? { license: "cc0", version }
+        : { license: "other", version: null };
     }
     const parts = code.split("-");
     if (parts[0] !== "by") return { license: "other", version: null };
@@ -345,7 +353,7 @@ export function normalizeLicense(text: string | null | undefined): NormalizedLic
   }
 
   // Free text.
-  if (/creative commons zero|\bcc0\b|public domain dedication/.test(lower)) {
+  if (/creative commons zero|\bcc0\b|public domain dedication|public domain mark/.test(lower)) {
     return { license: "cc0", version: versionOf(raw) };
   }
   if (/open data commons public domain/.test(lower)) {
@@ -378,12 +386,40 @@ export function normalizeLicense(text: string | null | undefined): NormalizedLic
   return { license: "other", version: null };
 }
 
+/**
+ * MIT, BSD (2- and 3-clause) and Apache-2.0: software licenses applied to data, read as requiring
+ * attribution (lead ruling 2026-11-25). Other versions and clauses (BSD-4-Clause, Apache-1.1) are
+ * not recognized here and stay `other`.
+ */
+function permissiveSoftwareLicense(lower: string): NormalizedLicenseValue | null {
+  const t = lower.trim();
+  if (/^mit$|^mit license$|opensource\.org\/licenses\/mit\b|^expat$/.test(t)) {
+    return { license: "permissive-attribution", version: null };
+  }
+  if (
+    /^bsd[- ]?[23][- ]?clause\b|opensource\.org\/licenses\/bsd-[23]-clause|^bsd [23]-clause\b/.test(
+      t,
+    )
+  ) {
+    return { license: "permissive-attribution", version: null };
+  }
+  if (
+    /^apache[- ]2(\.0)?$|^apache license,? (version )?2\.0$|apache\.org\/licenses\/license-2\.0|opensource\.org\/licenses\/apache-2\.0/.test(
+      t,
+    )
+  ) {
+    return { license: "permissive-attribution", version: "2.0" };
+  }
+  return null;
+}
+
 /** Restrictiveness of a license on its own, used to pick one license when a record lists several. */
 const LICENSE_RANK: Record<NormalizedLicense, number> = {
   cc0: 0,
   pddl: 1,
   "odc-by": 2,
   "cc-by": 3,
+  "permissive-attribution": 3.5,
   "cc-by-sa": 4,
   odbl: 5,
   "cc-by-nc": 6,
@@ -1007,6 +1043,7 @@ export function sourceOutcome(
     case "pddl":
       return "compatible";
     case "cc-by":
+    case "permissive-attribution":
     case "odc-by":
       return "compatible_attribution";
     case "cc-by-nc":

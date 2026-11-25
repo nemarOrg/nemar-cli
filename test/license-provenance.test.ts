@@ -247,6 +247,15 @@ describe("validateLicenseCompatibility", () => {
     expect(result.outcome).toBe("needs_permission");
   });
 
+  // Software licenses applied to data require attribution (lead ruling 2026-11-25).
+  test("MIT, BSD-2/3-Clause and Apache-2.0 sources are compatible with attribution", () => {
+    for (const source of ["MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0"]) {
+      const result = validateLicenseCompatibility(source, "CC0-1.0");
+      expect(result.outcome).toBe("compatible_attribution");
+      expect(result.compatible).toBe(true);
+    }
+  });
+
   test("NoDerivatives sources need permission whatever the target", () => {
     expect(validateLicenseCompatibility("CC-BY-ND-4.0", "CC-BY-ND-4.0").outcome).toBe(
       "needs_permission",
