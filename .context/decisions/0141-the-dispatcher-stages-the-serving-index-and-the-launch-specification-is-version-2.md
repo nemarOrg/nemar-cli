@@ -1,9 +1,10 @@
 # ADR 0141: The dispatcher stages the serving index, and the launch specification is version 2
 
-**Status:** accepted
+**Status:** proposed
 **Date:** 2026-11-25
-**Accepted:** 2026-11-26
 **Owner:** Seyed Yahya Shirazi
+
+This record moves to accepted when the nemar-process epic that builds the launcher's part (decision 5) reaches nemar-process `dev`; the nemar-cli epic (#2324) alone does not complete it.
 
 Refines [ADR 0140](0140-a-run-handed-the-serving-index-names-it-in-its-derivative-key.md) decision 3 and [ADR 0118](0118-the-compute-gateway-records-every-tenant-job-and-keeps-the-ledger-in-expanse-service-units.md) where it fixes the launch specification `nemar.launch-spec.v1`.
 Every key ADR 0140 defines keeps its bytes.
