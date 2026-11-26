@@ -13,6 +13,38 @@ import {
 } from "../../../shared/contract/mail-categories.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import {
+  AUTO_DENY_CODE_COPY,
+  AUTO_DENY_DIGEST_HEADLINE,
+  AUTO_DENY_DIGEST_INTRO,
+  AUTO_DENY_DIGEST_RESTORE,
+  AUTO_DENY_DIGEST_SUBJECT,
+  AUTO_DENY_MAIL_HEADLINE,
+  AUTO_DENY_MAIL_MAY_DIFFER,
+  AUTO_DENY_MAIL_REASONS_HEADING,
+  AUTO_DENY_MAIL_REASONS_INTRO,
+  AUTO_DENY_MAIL_RECORD_HEADING,
+  AUTO_DENY_MAIL_RECORD_INTRO,
+  AUTO_DENY_MAIL_REPLY,
+  AUTO_DENY_MAIL_REPRODUCE_HEADING,
+  AUTO_DENY_MAIL_REPRODUCE_INTRO,
+  AUTO_DENY_MAIL_RESUBMIT_HEADING,
+  AUTO_DENY_REPRODUCE_COMMANDS,
+  AUTO_DENY_STATE_COPY,
+  type AutoDenyCode,
+  type AutoDenyMode,
+  DIGEST_STATES,
+  DIGEST_STATE_HEADING,
+  autoDenyDigestMode,
+  autoDenyMailOpening,
+  autoDenyMailResubmit,
+  autoDenyMailSubject,
+  autoDenyRecordLabel,
+} from "../../../shared/publication-auto-deny.js";
+import {
+  type PublicationReviewReproducibility,
+  reproducibilityLines,
+} from "../../../shared/publication-review.js";
+import {
   RESUBMISSION_NOTE_LABEL,
   RESUBMISSION_NOTE_PROVENANCE,
   resubmissionNoteText,
@@ -2662,6 +2694,190 @@ export async function sendPublicationDeniedEmail(
     isDev,
     deliveryEnv,
   );
+}
+
+/** One review's record in the automatic denial's mail. */
+export interface AutoDenyMailRecord {
+  kind: "first" | "confirming";
+  record: PublicationReviewReproducibility;
+}
+
+/**
+ * Tell a depositor, or the dataset's owner, that an automated agent denied the publication request
+ * (ADR 0139, decision 4). Every sentence comes from `shared/publication-auto-deny.ts`; the mail
+ * adds the dataset id, the closed codes' copy and the review records' checked values. It never
+ * carries a word a model wrote, the README or any finding's value: it is built from the codes and
+ * the records alone, and is given nothing else.
+ *
+ * Like every sender here it goes through `sendEmail`'s delivery fence, so the dev Worker reaches
+ * only `DEV_EMAIL_ALLOWLIST`; a send that does not go throws, and the caller logs it.
+ */
+export async function sendAutoDeniedEmail(
+  to: string,
+  username: string,
+  datasetId: string,
+  codes: readonly AutoDenyCode[],
+  records: readonly AutoDenyMailRecord[],
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const box = "background: #f4f4f5; padding: 12px 16px; border-radius: 8px; margin: 12px 0;";
+  const mono = "font-family: monospace; font-size: 13px;";
+  const reasons = codes
+    .map((code) => {
+      const c = AUTO_DENY_CODE_COPY[code];
+      return `<li><strong>${escapeHtml(c.statement)}</strong> ${escapeHtml(c.remedy)} <a href="${escapeHtml(c.anchor)}">${escapeHtml(c.anchor)}</a></li>`;
+    })
+    .join("");
+  const commands = AUTO_DENY_REPRODUCE_COMMANDS.map(
+    (cmd) => `<div style="${mono}">${escapeHtml(cmd)}</div>`,
+  ).join("");
+  const recordBlocks = records
+    .map(
+      (r) => `
+  <p style="margin: 12px 0 4px 0;"><strong>${escapeHtml(autoDenyRecordLabel(r.kind))}</strong></p>
+  <ul style="margin: 0; padding-left: 20px; ${mono}">${reproducibilityLines(r.record)
+    .map((line) => `<li>${escapeHtml(line)}</li>`)
+    .join("")}</ul>`,
+    )
+    .join("");
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #f59e0b;">${escapeHtml(AUTO_DENY_MAIL_HEADLINE)}</h1>
+
+  <p>Hello ${escapeHtml(username)},</p>
+
+  <p>${escapeHtml(autoDenyMailOpening(datasetId))}</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">${escapeHtml(AUTO_DENY_MAIL_REASONS_HEADING)}</h2>
+  <p>${escapeHtml(AUTO_DENY_MAIL_REASONS_INTRO)}</p>
+  <ul>${reasons}</ul>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">${escapeHtml(AUTO_DENY_MAIL_REPRODUCE_HEADING)}</h2>
+  <p>${escapeHtml(AUTO_DENY_MAIL_REPRODUCE_INTRO)}</p>
+  <div style="${box}">${commands}</div>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">${escapeHtml(AUTO_DENY_MAIL_RECORD_HEADING)}</h2>
+  <p>${escapeHtml(AUTO_DENY_MAIL_RECORD_INTRO)}</p>
+  ${recordBlocks}
+  <p>${escapeHtml(AUTO_DENY_MAIL_MAY_DIFFER)}</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">${escapeHtml(AUTO_DENY_MAIL_RESUBMIT_HEADING)}</h2>
+  <p>${escapeHtml(autoDenyMailResubmit(datasetId))}</p>
+
+  <p><strong>${escapeHtml(AUTO_DENY_MAIL_REPLY)}</strong></p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+  await sendEmail(
+    to,
+    autoDenyMailSubject(datasetId),
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
+}
+
+/** One line of the administrators' automatic-denial digest: ids and closed words only. */
+export interface AutoDenyDigestRow {
+  state: (typeof DIGEST_STATES)[number];
+  datasetId: string;
+  requestId: number;
+  codes: AutoDenyCode[];
+}
+
+/**
+ * The administrators' daily digest of the automatic denial (ADR 0139, decisions 3 and 4): per
+ * state, the datasets, their requests and the closed codes. The caller passes the recipients of
+ * `getAdminEmailsForCategory`, which is production-only.
+ */
+export async function sendAutoDenyDigestEmail(
+  adminEmails: string[],
+  rows: readonly AutoDenyDigestRow[],
+  mode: AutoDenyMode,
+  cap: number,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<AdminNotificationOutcome> {
+  const sections = DIGEST_STATES.map((state) => {
+    const of = rows.filter((r) => r.state === state);
+    if (of.length === 0) return "";
+    const items = of
+      .map(
+        (r) =>
+          `<li><code>${escapeHtml(r.datasetId)}</code> request ${r.requestId}${
+            r.codes.length > 0 ? `: ${escapeHtml(r.codes.join(", "))}` : ""
+          }</li>`,
+      )
+      .join("");
+    return `
+  <h2 style="color: #333; font-size: 16px; margin-top: 24px;">${escapeHtml(DIGEST_STATE_HEADING[state])} (${of.length})</h2>
+  <p style="color: #666; font-size: 13px;">${escapeHtml(AUTO_DENY_STATE_COPY[state].statement)}</p>
+  <ul>${items}</ul>`;
+  }).join("");
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">${escapeHtml(AUTO_DENY_DIGEST_HEADLINE)}</h1>
+  <p>${escapeHtml(AUTO_DENY_DIGEST_INTRO)}</p>
+  <p>${escapeHtml(autoDenyDigestMode(mode, cap))}</p>
+${sections}
+  <p>${escapeHtml(AUTO_DENY_DIGEST_RESTORE)}</p>
+</body>
+</html>
+  `;
+  const outcome: AdminNotificationOutcome = {
+    attempted: adminEmails.length,
+    delivered: 0,
+    failures: [],
+  };
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        AUTO_DENY_DIGEST_SUBJECT,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+      );
+      outcome.delivered++;
+    } catch (error) {
+      const detail = sendFailureText(error, adminEmail);
+      console.error(
+        `Failed to send the automatic-denial digest to ${redactRecipient(adminEmail)}: ${detail}`,
+      );
+      outcome.failures.push({ recipient: redactRecipient(adminEmail), error: detail });
+    }
+  }
+  return outcome;
 }
 
 /**
