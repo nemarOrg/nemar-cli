@@ -1,0 +1,28 @@
+versions: mne 1.12.1 | biosigio 1.2.13 | numpy 2.5.5 | python 3.15.2
+spec-validate gap.edf ('D', [0.0, 1.0, 10.0, 11.0], [0.0, 8.0, 0.0])
+spec-validate gap2.edf ('D', [0.0, 1.0, 3.0, 4.0], [0.0, 1.0, 0.0])
+spec-validate cont.edf ('C', [0.0, 1.0, 2.0, 3.0], [0.0, 0.0, 0.0])
+
+== MNE direct ==
+  cont: n=40  sample 20 (index 2.0 s on axis) holds value 2.00 uV (true time 2.00 s) ; ann onsets=[(np.float64(0.5), np.str_('E1')), (np.float64(2.5), np.str_('E2'))]
+  cont: max |true_time(value) - mne_time_axis| = 0.000 s ; times[-1]=3.9
+  gap: n=40  sample 20 (index 2.0 s on axis) holds value 10.00 uV (true time 10.00 s) ; ann onsets=[(np.float64(0.5), np.str_('E1'))]
+  gap: max |true_time(value) - mne_time_axis| = 8.000 s ; times[-1]=3.9
+  oracle control (jumpy ramp, no gap marker): error=8.000 s  -> detector fires (>0)
+
+== MNE direct, small-gap file (annotation survives cropping) ==
+  gap2 annotations: [(np.float64(0.5), np.str_('E1')), (np.float64(3.5), np.str_('E2'))] | value at the sample E2 marks (axis 3.5 s -> idx 35) = 4.5 uV = TRUE time 4.5 s (E2 true onset 3.5 s)
+  gap2 value[20..21] (axis 2.0 s, true 3.0 s): [3.  3.1]  max placement error = 1.0 s
+
+== biosigIO in-memory (EDFImporter.load) ==
+  cont: n=40 value[20]=2.00 placement_error=0.000s events=[[0.5, 'E1'], [2.5, 'E2']] duration=4.0 tolerant=None
+  gap: n=40 value[20]=10.00 placement_error=8.000s events=[[0.5, 'E1']] duration=4.0 tolerant=discontinuous_datarecords
+  gap2: n=40 value[20]=3.00 placement_error=1.000s events=[[0.5, 'E1'], [3.5, 'E2']] duration=4.0 tolerant=discontinuous_datarecords
+
+== biosigIO stream_to_zarr (float32) ==
+  cont eeg_10hz/0 shape=(1, 40) value@idx20=2.00 placement_error=0.000s
+   cont events arrays: [] | root attrs: {}
+  gap eeg_10hz/0 shape=(1, 40) value@idx20=10.00 placement_error=8.000s
+   gap events arrays: [] | root attrs: {}
+  gap2 eeg_10hz/0 shape=(1, 40) value@idx20=3.00 placement_error=1.000s
+   gap2 events arrays: [] | root attrs: {}

@@ -1,0 +1,160 @@
+[
+  {
+    "dataset_id": "nm000169",
+    "version": "1.0.2",
+    "prev": "1.0.1",
+    "compare_status": "ahead",
+    "commits_in_range": 4,
+    "prs_in_range": [
+      {
+        "number": 2,
+        "author": "bruAristimunha",
+        "title": "Record which subject each sourcedata file came from"
+      }
+    ]
+  },
+  {
+    "dataset_id": "nm000191",
+    "version": "1.0.1",
+    "prev": "1.0.0",
+    "compare_status": "ahead",
+    "commits_in_range": 10,
+    "prs_in_range": []
+  },
+  {
+    "dataset_id": "nm000191",
+    "version": "1.0.2",
+    "prev": "1.0.1",
+    "compare_status": "ahead",
+    "commits_in_range": 4,
+    "prs_in_range": []
+  },
+  {
+    "dataset_id": "nm000197",
+    "version": "1.0.1",
+    "prev": "1.0.0",
+    "compare_status": "ahead",
+    "commits_in_range": 4,
+    "prs_in_range": []
+  },
+  {
+    "dataset_id": "nm000197",
+    "version": "1.0.2",
+    "prev": "1.0.1",
+    "compare_status": "ahead",
+    "commits_in_range": 4,
+    "prs_in_range": []
+  },
+  {
+    "dataset_id": "nm000199",
+    "version": "1.0.2",
+    "prev": "1.0.1",
+    "compare_status": "ahead",
+    "commits_in_range": 4,
+    "prs_in_range": [
+      {
+        "number": 2,
+        "author": "bruAristimunha",
+        "title": "Record which subject each sourcedata file came from"
+      }
+    ]
+  },
+  {
+    "dataset_id": "nm000199",
+    "version": "1.0.3",
+    "prev": "1.0.2",
+    "compare_status": "ahead",
+    "commits_in_range": 4,
+    "prs_in_range": [
+      {
+        "number": 3,
+        "author": "bruAristimunha",
+        "title": "events.tsv (342 files): onset set to trigger time (removed MOABB epoching offset of -0.2 s; sample column adjusted); duration set to 0.1 s (stimulus/trial duration; previous value was the MOABB epoching window) (v1.0.3)"
+      }
+    ]
+  },
+  {
+    "dataset_id": "nm000199",
+    "version": "1.0.4",
+    "prev": "1.0.3",
+    "compare_status": "ahead",
+    "commits_in_range": 3,
+    "prs_in_range": [
+      {
+        "number": 4,
+        "author": "bruAristimunha",
+        "title": "sourcedata: add the data files that the recording headers need (Huebner2017)"
+      }
+    ]
+  },
+  {
+    "dataset_id": "nm000240",
+    "version": "1.0.4",
+    "prev": "1.0.3",
+    "compare_status": "ahead",
+    "commits_in_range": 4,
+    "prs_in_range": [
+      {
+        "number": 4,
+        "author": "bruAristimunha",
+        "title": "Record which subject each sourcedata file came from"
+      }
+    ]
+  },
+  {
+    "dataset_id": "nm000240",
+    "version": "1.0.5",
+    "prev": "1.0.4",
+    "compare_status": "ahead",
+    "commits_in_range": 4,
+    "prs_in_range": [
+      {
+        "number": 5,
+        "author": "bruAristimunha",
+        "title": "events.tsv (383 files): duration set to n/a (previous value was the MOABB epoching window, not the stimulus duration) (v1.0.5)"
+      }
+    ]
+  },
+  {
+    "dataset_id": "nm000346",
+    "version": "1.0.2",
+    "prev": "1.0.1",
+    "compare_status": "ahead",
+    "commits_in_range": 4,
+    "prs_in_range": [
+      {
+        "number": 2,
+        "author": "bruAristimunha",
+        "title": "Record which subject each sourcedata file came from"
+      }
+    ]
+  },
+  {
+    "dataset_id": "nm000346",
+    "version": "1.0.3",
+    "prev": "1.0.2",
+    "compare_status": "ahead",
+    "commits_in_range": 4,
+    "prs_in_range": [
+      {
+        "number": 3,
+        "author": "bruAristimunha",
+        "title": "events.tsv (12 files): duration set to n/a (previous value was the MOABB epoching window, not the stimulus duration) (v1.0.3)"
+      }
+    ]
+  },
+  {
+    "dataset_id": "on003343",
+    "version": "1.0.2",
+    "prev": "1.0.0",
+    "compare_status": "ahead",
+    "commits_in_range": 11,
+    "prs_in_range": [
+      {
+        "number": 1,
+        "author": "AmanJaiswal1503",
+        "title": "Update on003343 to v1.0.2"
+      }
+    ]
+  }
+]

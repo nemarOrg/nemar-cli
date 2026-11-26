@@ -71,6 +71,7 @@ import {
 } from "./import-weekly-summary.js";
 import { readLedger } from "./neurobagel-plan.js";
 import { VERIFY_ACTIONS, parseHeartbeat } from "./neurobagel-verify.js";
+import { gatherRfcFacts } from "./rfc-weekly.js";
 import { gatherRepullFacts } from "./upstream-repull-weekly.js";
 import { runUpstreamFleetSummary } from "./upstream-status.js";
 
@@ -337,6 +338,7 @@ export async function runWeeklyImportSummary(
     neurobagelFindings: null,
     upstream: null,
     repulls: null,
+    rfcs: null,
     errors: [],
   };
 
@@ -384,6 +386,7 @@ export async function runWeeklyImportSummary(
   await gatherNeurobagel(env, facts, now);
   await gatherUpstream(env, facts);
   await gatherRepulls(env, facts, now);
+  await gatherRfcs(env, facts, now, deps);
 
   // Rendered before posting, and returned whether or not the post happens: a dry
   // run's whole value is seeing this.
@@ -473,6 +476,35 @@ async function gatherRepulls(env: Bindings, facts: WeeklySummaryFacts, now: Date
   } catch (err) {
     facts.repulls = null;
     facts.errors.push({ stage: "repulls", error: errText(err) });
+  }
+}
+
+/**
+ * The RFC clock (RFC program card R3, risk K1): three reads of the public repository
+ * `nemarOrg/rfcs` (`rfc-weekly.ts`), so that a clock GitHub switched off after 60 days without
+ * repository activity shows within a week. The token is obtained HERE, with `deps.token ?? getDatasetsToken`,
+ * because the run holds none while facts are gathered (`postWeeklySummary` obtains one in the post
+ * phase, after this); a token that cannot be obtained sends the reads without one.
+ *
+ * Each read is its own try inside the gather: a failed read leaves its part null (unknown, never
+ * zero) and lists a failed part with stage `rfcs`. If the gather itself throws, `rfcs` is null.
+ * No new cron, no switch, no mail: it rides the weekly report behind its once-per-week gate.
+ */
+async function gatherRfcs(
+  env: Bindings,
+  facts: WeeklySummaryFacts,
+  now: Date,
+  deps: WeeklySummaryDeps,
+): Promise<void> {
+  try {
+    const { facts: rfcs, errors } = await gatherRfcFacts(env, now, {
+      token: deps.token ?? getDatasetsToken,
+    });
+    facts.rfcs = rfcs;
+    for (const error of errors) facts.errors.push({ stage: "rfcs", error });
+  } catch (err) {
+    facts.rfcs = null;
+    facts.errors.push({ stage: "rfcs", error: errText(err) });
   }
 }
 
