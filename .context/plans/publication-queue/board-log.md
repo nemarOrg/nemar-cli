@@ -66,3 +66,5 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T18:36-08:00 | CP-D3 seam review: ready-with-fixes (CHANGELOG missing; command wording drift); tests pass except known parallel/compute and stale-website failures |
 | 2026-11-25T19:53-08:00 | A5 PR #2395: FP gate mostly within bounds; .mat cfg paths 7.09/100 and .set comments 6.10/100 over; R15 memory risk recorded |
 | 2026-11-25T20:20-08:00 | Decide epic PR #2397 into dev opened (mergeable); owner merges |
+| 2026-11-25T20:56-08:00 | A5 #2395 merged into evidence |
+| 2026-11-25T21:06-08:00 | A10 verified (2398 c99a426d, docs#143 d5e174d); docs#143 waits for owner merge |
