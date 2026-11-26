@@ -30,13 +30,18 @@ import { runCommand } from "./git-annex/run-command.js";
 import { configureS3Remote, toS3Credentials } from "./git-annex/s3-remote.js";
 import { batchSetKeysPresent, getRemoteUuid } from "./git-annex/transfer.js";
 import {
+  UploadFailed,
   type UploadStrategy,
   annexCopyUpload,
   normalizeImportedTree,
   stripLargefilesAttributes,
 } from "./import-normalize.js";
 import { findUnannexedData } from "./import-openneuro.js";
-import { isKeyPresentAtDeclaredSize, listExistingObjects } from "./s3-server-copy.js";
+import {
+  annexKeyDeclaredSize,
+  isKeyPresentAtDeclaredSize,
+  listExistingObjects,
+} from "./s3-server-copy.js";
 
 const REMOTE_NAME = "nemar-s3";
 
@@ -675,8 +680,9 @@ export function awsCliUpload(options: {
           cwd: datasetPath,
         });
         if (located.exitCode !== 0 || !located.stdout.trim()) {
-          throw new Error(
+          throw new UploadFailed(
             `git-annex cannot locate the content it just took for ${file.path} (${file.key}). Not uploading: the key would be registered with nothing behind it.`,
+            "git-annex cannot locate content it just annexed",
           );
         }
         const link = await runCommand(
@@ -684,7 +690,10 @@ export function awsCliUpload(options: {
           {},
         );
         if (link.exitCode !== 0) {
-          throw new Error(`Could not stage ${file.key} for upload: ${link.stderr.trim()}`);
+          throw new UploadFailed(
+            `Could not stage ${file.key} for upload: ${link.stderr.trim()}`,
+            "an object could not be staged for upload",
+          );
         }
       }
 
@@ -704,8 +713,9 @@ export function awsCliUpload(options: {
         {},
       );
       if (sync.exitCode !== 0) {
-        throw new Error(
+        throw new UploadFailed(
           `aws s3 sync to ${destination} failed: ${(sync.stderr || sync.stdout).trim().slice(0, 600)}. Not committing: the pushed tree would name keys with no content behind them.`,
+          `aws s3 sync exited ${sync.exitCode}`,
         );
       }
 
@@ -715,23 +725,37 @@ export function awsCliUpload(options: {
         options.remoteUuid,
       );
       if (registered.failed > 0) {
-        throw new Error(
+        throw new UploadFailed(
           `Uploaded ${files.length} object(s) but ${registered.failed} key registration(s) failed. Not committing: clones could not find content that is actually there.`,
+          `${registered.failed} of ${files.length} key registration(s) failed`,
         );
       }
 
-      const existing = await listExistingObjects(
-        options.bucket,
-        `${options.datasetId}/objects/`,
-        options.region,
-      );
+      let existing: Map<string, number>;
+      try {
+        existing = await listExistingObjects(
+          options.bucket,
+          `${options.datasetId}/objects/`,
+          options.region,
+        );
+      } catch (err) {
+        throw new UploadFailed(
+          err instanceof Error ? err.message : String(err),
+          "the uploaded objects could not be listed",
+        );
+      }
       const missing = files.filter((f) => !isKeyPresentAtDeclaredSize(f.key, existing));
       if (missing.length > 0) {
-        throw new Error(
+        // Sizes and counts only: the first mismatch's sizes are what tell a truncated or
+        // re-encoded upload from an absent one.
+        const first = missing[0] as (typeof missing)[number];
+        const held = existing.get(first.key);
+        throw new UploadFailed(
           `${missing.length} of ${files.length} object(s) are absent from ${destination} or the wrong size (${missing
             .slice(0, 3)
             .map((f) => f.path)
             .join(", ")}${missing.length > 3 ? ", ..." : ""}). Not committing.`,
+          `${missing.length} of ${files.length} object(s) absent from the bucket or the wrong size (first: ${annexKeyDeclaredSize(first.key) ?? "unknown"} byte(s) declared, ${held === undefined ? "absent" : `${held} byte(s) held`})`,
         );
       }
 
