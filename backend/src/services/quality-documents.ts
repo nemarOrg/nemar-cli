@@ -394,20 +394,15 @@ export const CURRENT_QUALITY_DOCUMENTS_SQL = `SELECT cd.recipe, q.entry
   ORDER BY cd.recipe`;
 
 /**
- * The `recipes` of a dataset's `dataQuality` at `level: dataset`: the summary of each recipe's current
- * public derivative, none for a withdrawn dataset. A stored entry that does not parse as an object is left
- * out with a log line. The caller gates the dataset (public, not concealed) before it calls this.
+ * The `recipes` of a dataset's `dataQuality` at `level: dataset`, from the rows of
+ * {@link CURRENT_QUALITY_DOCUMENTS_SQL}: the summary of each recipe's current public derivative, none for a
+ * withdrawn dataset. A stored entry that does not parse as an object is left out with a log line. The
+ * caller gates the dataset (public, not concealed) before it reads the rows.
  */
-export async function currentQualityDocuments(
-  db: D1Database,
+export function qualityEntriesOf(
   datasetId: string,
-): Promise<Record<string, unknown>> {
-  const rows = (
-    await db
-      .prepare(CURRENT_QUALITY_DOCUMENTS_SQL)
-      .bind(datasetId)
-      .all<{ recipe: string; entry: string }>()
-  ).results;
+  rows: readonly { recipe: string; entry: string }[],
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const row of rows) {
     let entry: unknown;

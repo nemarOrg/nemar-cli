@@ -5,9 +5,9 @@
  *
  * What is pinned: every CHECK refuses its violating row by name and accepts its valid one; a run row has
  * an outcome exactly when it is reconciled; two stamps may share a job (a hold stamp does); a progress row never counts past its total
- * and a reconciled one sums to it; live counts are whole or absent; a document's namespace is one of the
- * two; the primary keys hold; no column is named for a person; no foreign key; every GLOB is within D1's
- * 50 characters.
+ * and a reconciled one sums to it; live counts are whole or absent; the primary keys hold; no column is
+ * named for a person; no foreign key; every GLOB is within D1's 50 characters. Its third table,
+ * `compute_pipeline_documents`, is dropped by migration 0154 (`compute-pipeline-promoted-run-migration.test.ts`).
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -72,14 +72,6 @@ const progress = (over: Row = {}): Row => ({
   skipped: 0,
   total: 3,
   reported_at: NOW,
-  ...over,
-});
-const doc = (over: Row = {}): Row => ({
-  dataset_id: `nm${String(next()).padStart(6, "0")}`,
-  namespace: "processing",
-  recipe: "nemar-floor",
-  stamp_id: next(),
-  entry: '{"recipe_version":"1.0.0"}',
   ...over,
 });
 
@@ -233,45 +225,4 @@ describe("compute_pipeline_progress", () => {
       ).toBeNull();
     },
   );
-});
-
-describe("compute_pipeline_documents", () => {
-  onEveryEngine("a valid row has a write time, and the table holds no live flag", async (e) => {
-    const row = doc();
-    expect(await insert(e, "compute_pipeline_documents", row)).toBeNull();
-    const [got] = await e.all<Row>(
-      "SELECT * FROM compute_pipeline_documents WHERE dataset_id = ?",
-      row.dataset_id,
-    );
-    expect(typeof got?.written_at).toBe("string");
-    expect(Object.keys(got ?? {})).not.toContain("final");
-  });
-
-  onEveryEngine("each CHECK refuses its bad value by name", async (e) => {
-    const cases: [string, Row][] = [
-      ["compute_pipeline_documents_dataset", { dataset_id: "NM000001" }],
-      ["compute_pipeline_documents_namespace", { namespace: "dataQuality" }],
-      ["compute_pipeline_documents_recipe", { recipe: "Nemar_Floor" }],
-      ["compute_pipeline_documents_stamp", { stamp_id: 0 }],
-      ["compute_pipeline_documents_entry", { entry: "[]" }],
-      ["compute_pipeline_documents_entry", { entry: `{${"x".repeat(65536)}}` }],
-    ];
-    for (const [name, over] of cases) {
-      expect(await insert(e, "compute_pipeline_documents", doc(over)), name).toMatch(NAMED(name));
-    }
-  });
-
-  onEveryEngine("one entry per dataset, namespace and recipe", async (e) => {
-    const row = doc();
-    expect(await insert(e, "compute_pipeline_documents", row)).toBeNull();
-    expect(await insert(e, "compute_pipeline_documents", { ...row, stamp_id: next() })).toMatch(
-      UNIQUE,
-    );
-    expect(
-      await insert(e, "compute_pipeline_documents", { ...row, namespace: "signalJourney" }),
-    ).toBeNull();
-    expect(
-      await insert(e, "compute_pipeline_documents", { ...row, recipe: "nemar-ica" }),
-    ).toBeNull();
-  });
 });

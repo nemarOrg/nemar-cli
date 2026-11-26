@@ -1898,11 +1898,11 @@ async function metadataJsonHandler(
   });
 
   // The dataset-level neuroschema `processing`, `signalJourney` and `dataQuality` entries of NEMAR's
-  // pipeline (ADR 0134, ADR 0137 decision 8, epic #2324), behind the same public gate as the rest of this
-  // document; never for a concealed deposit. The stored entries are final; a reporting run's `in_progress`
-  // link is worked out here; a quality summary is served only for a recipe's current public (promoted)
-  // derivative. A read that fails leaves them out and the document stands. The page bundle serves the same
-  // read (`readPipelineExtensions`).
+  // pipeline (ADR 0134 decision 9 as amended 2026-11-26, ADR 0137 decision 8, epic #2324), behind the same
+  // public gate as the rest of this document; never for a concealed deposit. All three describe each
+  // recipe's PROMOTED run (its current public derivative), built on read: a run in progress, a canary run
+  // and a failed run show nothing here. A read that fails leaves them out and the document stands. The page
+  // bundle serves the same read (`readPipelineExtensions`).
   if (row.anonymous !== 1) {
     try {
       Object.assign(payload.extensions, await readPipelineExtensions(env.DB, datasetId));

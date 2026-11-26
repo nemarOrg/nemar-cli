@@ -440,8 +440,7 @@ describe("read only unless asked", () => {
         await env.DB.prepare(
           `SELECT (SELECT json_group_array(json_object('s', state, 'u', updated_at)) FROM compute_pipeline_stamps) AS stamps,
                   (SELECT COUNT(*) FROM compute_pipeline_progress_runs) AS runs,
-                  (SELECT COUNT(*) FROM compute_pipeline_progress) AS rows,
-                  (SELECT COUNT(*) FROM compute_pipeline_documents) AS docs`,
+                  (SELECT COUNT(*) FROM compute_pipeline_progress) AS rows`,
         ).first(),
       );
     const before = await snapshot();

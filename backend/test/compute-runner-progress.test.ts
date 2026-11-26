@@ -18,7 +18,7 @@ import { PROGRESS_FORMAT, type Progress } from "../../shared/contract/compute-pr
 import { RUNNER_PROTOCOL, RunnerClaimResponseSchema } from "../../shared/contract/compute-runner";
 import { computeRunnerRoutes } from "../src/routes/compute-runners";
 import { dispatchPipelineJob } from "../src/services/compute-pipeline";
-import { liveSignalJourneyLinks } from "../src/services/compute-pipeline-progress";
+import { readPipelineExtensions } from "../src/services/compute-pipeline-progress";
 import {
   exchangeRunnerSecret,
   registerRunner,
@@ -241,16 +241,8 @@ describe("progress on the heartbeat", () => {
       reports: 1,
       reconciled_at: null,
     });
-    // Nothing live is a document: the in_progress link is worked out on read.
-    const stored = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM compute_pipeline_documents WHERE dataset_id = ?1",
-    )
-      .bind(datasetId)
-      .first<{ n: number }>();
-    expect(stored?.n).toBe(0);
-    expect(await liveSignalJourneyLinks(env.DB, datasetId)).toMatchObject({
-      "nemar-floor": { processing_status: "in_progress", location: null },
-    });
+    // Nothing live is public: a run in progress shows nothing on the dataset's pages.
+    expect(await readPipelineExtensions(env.DB, datasetId)).toEqual({});
   });
 
   test("a second report within the floor renews the lease and stores nothing; after the floor it is stored (MUTATION: drop the reported_at floor)", async () => {

@@ -1186,7 +1186,7 @@ describe("a deleted dataset", () => {
     expect(await jobCount(env)).toBe(2);
   });
 
-  test("loses its live progress, run rows, documents and quality summaries, and another dataset keeps its own (MUTATION: drop any of the four deletes)", async () => {
+  test("loses its live progress, run rows (with their links) and quality summaries, and another dataset keeps its own (MUTATION: drop any of the three deletes)", async () => {
     const { env } = await world();
     const owner = await seedUser(env.DB, {});
     await env.DB.prepare("UPDATE datasets SET owner_user_id = ?1 WHERE dataset_id = 'nm000104'")
@@ -1211,11 +1211,6 @@ describe("a deleted dataset", () => {
         .bind(stampId)
         .run();
       await env.DB.prepare(
-        "INSERT INTO compute_pipeline_documents (dataset_id, namespace, recipe, stamp_id, entry) VALUES (?1, 'signalJourney', 'nemar-floor', ?2, '{}')",
-      )
-        .bind(datasetId, stampId)
-        .run();
-      await env.DB.prepare(
         "INSERT INTO compute_quality_documents (stamp_id, dataset_id, recipe, entry, record_sha256) VALUES (?1, ?2, 'nemar-floor', '{}', ?3)",
       )
         .bind(stampId, datasetId, "a".repeat(64))
@@ -1236,11 +1231,9 @@ describe("a deleted dataset", () => {
     expect(result.steps.d1.success).toBe(true);
     expect(await count("compute_pipeline_progress", "stamp_id = ?1", a.stampId)).toBe(0);
     expect(await count("compute_pipeline_progress_runs", "stamp_id = ?1", a.stampId)).toBe(0);
-    expect(await count("compute_pipeline_documents", "dataset_id = ?1", "nm000104")).toBe(0);
     expect(await count("compute_quality_documents", "dataset_id = ?1", "nm000104")).toBe(0);
     expect(await count("compute_pipeline_progress", "stamp_id = ?1", b.stampId)).toBe(1);
     expect(await count("compute_pipeline_progress_runs", "stamp_id = ?1", b.stampId)).toBe(1);
-    expect(await count("compute_pipeline_documents", "dataset_id = ?1", "nm000105")).toBe(1);
     expect(await count("compute_quality_documents", "dataset_id = ?1", "nm000105")).toBe(1);
   });
 });

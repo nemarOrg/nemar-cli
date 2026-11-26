@@ -1,26 +1,27 @@
 /**
- * Reconciliation of live progress when a pipeline run ends (ADR 0134 decision 4, epic #2324 phase 2), and
- * the write gate of a report, driven through `syncPipelineStamps`, `reconcilePipelineProgress` and
- * `recordProgress` over real migrations, the Tapis stand-in and Miniflare's R2: a real `nemar-floor` job
- * dispatched and taken to its end, its recordings table written by the launcher the lifecycle fixture plays.
- * Job and stamp states, live rows and derivative decisions are set with SQL the tables accept, where a case
- * is about what the code does with a row in that shape.
+ * Reconciliation of live progress when a pipeline run ends (ADR 0134 decision 4, epic #2324 phase 2), the
+ * write gate of a report, and what a public page shows of a reconciled run (ADR 0134 decision 9 as amended
+ * 2026-11-26, phase B4), driven through `syncPipelineStamps`, `reconcilePipelineProgress`, `recordProgress`
+ * and `readPipelineExtensions` over real migrations, the Tapis stand-in and Miniflare's R2: a real
+ * `nemar-floor` job dispatched and taken to its end, its recordings table written by the launcher the
+ * lifecycle fixture plays. Job and stamp states, live rows and derivative rows are set with SQL the tables
+ * accept, where a case is about what the code does with a row in that shape.
  *
  * What is pinned:
- *  - a finished run is reconciled from its table (counts, failures, a pending `stored` row, a completed link
- *    with the record's digest and version); live counts that ran ahead are a disagreement, lag is not;
- *  - a failed run counts the recordings it never wrote as skipped `not_run`; its `processing` entry and a
- *    `failed` link are final; a failed stamp's outcome without counts writes a final `failed` link, and a
- *    succeeded stamp's writes the `completed` link of its record (it needs no checkpoint map), never `failed`;
- *  - a succeeded run whose link cannot be built keeps the last final link (no `in_progress` left standing);
- *  - a new run's live report never erases the last completed link;
+ *  - a finished run is reconciled from its table (counts, failures, a pending `stored` row, and on its run
+ *    row the completed link with the record's digest and version); live counts that ran ahead are a
+ *    disagreement, lag is not;
+ *  - a failed run counts the recordings it never wrote as skipped `not_run`, its `stored` is final, and it
+ *    keeps no link; a succeeded stamp's outcome without counts keeps the `completed` link of its record (it
+ *    needs no checkpoint map), and a record that makes no link keeps none;
+ *  - a public page shows the PROMOTED run only: its counts (with `stored` worked out as kept) and its link;
+ *    a run in progress, a canary run, a failed run and a newer unpromoted run never replace them;
  *  - a `tuple_mismatch` hold stamp shares a job and is never reconciled: the queue moves on;
- *  - `stored` resolves from the declared order the run recorded, never the live registry; a row that cannot
- *    make an entry is resolved without one and never blocks the rows behind it; each derivative decision;
+ *  - `stored` resolves from the declared order the run recorded, never the live registry; a row whose order
+ *    cannot be read is resolved anyway and never blocks the rows behind it; each derivative decision;
  *  - the write gates: a report for a job that left an accepted state, of another lease or runner, or for an
  *    ended stamp writes nothing; a second reconcile gate and a stale write id write nothing;
- *  - a second sync changes nothing; an older stamp never overwrites a newer document; the stalled SQL
- *    agrees with `pipelineRunStatus`.
+ *  - a second sync changes nothing; the stalled SQL agrees with `pipelineRunStatus`.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -39,17 +40,16 @@ import {
   syncPipelineStamps,
 } from "../src/services/compute-pipeline";
 import {
-  FINAL_DOCUMENT_SQL,
   HOLD_STAMP_WORD,
   PIPELINE_STALLED_SQL,
   RECONCILE_GATE_SQL,
+  RECONCILE_ROW_SQL,
   STORED_CLAIM_SQL,
-  liveSignalJourneyLinks,
+  readPipelineExtensions,
   reconcilePipelineProgress,
   recordProgress,
   stampForJob,
 } from "../src/services/compute-pipeline-progress";
-import { pipelineExtensions } from "../src/services/data-router";
 import type { Bindings } from "../src/types/bindings";
 import { type LifecycleFixture, startLifecycleFixture } from "./helpers/compute-lifecycle-fixture";
 import {
@@ -61,6 +61,8 @@ import {
   seedEegDataset,
   seedPipelinesAccount,
 } from "./helpers/compute-pipeline-fixture";
+import { logged } from "./helpers/logs";
+import { seedDerivative } from "./helpers/quality-fixture";
 
 let fx: LifecycleFixture;
 let env: Bindings;
@@ -168,26 +170,31 @@ const runRow = (stampId: number) =>
   env.DB.prepare("SELECT * FROM compute_pipeline_progress_runs WHERE stamp_id = ?1")
     .bind(stampId)
     .first<Loose>();
-const doc = async (datasetId: string, namespace: string) => {
-  const r = await env.DB.prepare(
-    "SELECT stamp_id, entry FROM compute_pipeline_documents WHERE dataset_id = ?1 AND namespace = ?2 AND recipe = 'nemar-floor'",
-  )
-    .bind(datasetId, namespace)
-    .first<{ stamp_id: number; entry: string }>();
-  return r ? { ...r, entry: JSON.parse(r.entry) } : null;
+/** The link reconciliation kept on a run's row (migration 0154), parsed, or null. */
+const linkOf = async (stampId: number) => {
+  const r = await runRow(stampId);
+  return r?.link ? JSON.parse(r.link) : null;
 };
-/** What metadata.json serves for a dataset's pipeline: the stored final documents and live links. */
-const served = async (datasetId: string) =>
-  pipelineExtensions(
-    (
-      await env.DB.prepare(
-        "SELECT namespace, recipe, entry FROM compute_pipeline_documents WHERE dataset_id = ?1",
-      )
-        .bind(datasetId)
-        .all<{ namespace: string; recipe: string; entry: string }>()
-    ).results,
-    await liveSignalJourneyLinks(env.DB, datasetId),
-  );
+/** What metadata.json and the page bundle serve of a dataset's pipeline: its promoted runs' entries. */
+const served = (datasetId: string) => readPipelineExtensions(env.DB, datasetId);
+/**
+ * Promote a run: its derivative row, stored and `catalog`, as the derivative store and an administrator's
+ * promotion leave it (`stored_at` orders the current public one, as ADR 0137 decision 7 does).
+ */
+const promote = (
+  d: { stampId: number; jobId: string; datasetId: string },
+  storedAt = "2026-11-20 10:00:00",
+) =>
+  seedDerivative(env.DB, {
+    datasetId: d.datasetId,
+    stampId: d.stampId,
+    jobId: d.jobId,
+    recipe: "nemar-floor",
+    recipeVersion: floor.version,
+    retention: "catalog",
+    storedAt,
+    qualityPlugins: "[]",
+  });
 const stampState = (stampId: number) =>
   env.DB.prepare("SELECT state FROM compute_pipeline_stamps WHERE id = ?1")
     .bind(stampId)
@@ -270,14 +277,15 @@ describe("a finished run", () => {
       recipe_version: floor.version,
       declared: JSON.stringify(["import", "preprocess", "quality", "stored"]),
     });
-    expect((await doc(datasetId, "signalJourney"))?.entry).toEqual({
+    expect(await linkOf(stampId)).toEqual({
       recipe_version: floor.version,
       processing_status: "completed",
       location: wanted.record.replace(/^product\//, ""),
       sha256: await sha256Hex(RECORD),
       sj_version: "0.1.0",
     });
-    expect(await doc(datasetId, "processing")).toBeNull();
+    // Reconciled is not promoted: a public page shows nothing of a run with no public derivative.
+    expect(await served(datasetId)).toEqual({});
   });
 
   test("live counts that ran ahead are a disagreement; live counts that lag are not (MUTATION: compare totals only)", async () => {
@@ -325,10 +333,10 @@ describe("a finished run", () => {
     expect(await rows(stampId)).toEqual(before);
   });
 
-  test("a succeeded run whose link cannot be built keeps the last final link and leaves no in_progress standing", async () => {
+  test("a succeeded run whose record makes no link keeps none, and the earlier run's link stands (MUTATION: keep a link without a signalJourney version)", async () => {
     const first = await finished();
     await syncPipelineStamps(env);
-    const completed = (await doc(first.datasetId, "signalJourney"))?.entry;
+    const completed = await linkOf(first.stampId);
     expect(completed?.processing_status).toBe("completed");
     const second = await reportingRun(first.datasetId);
     await finishAtTapis(fx, env, second.jobId, {
@@ -336,26 +344,113 @@ describe("a finished run", () => {
     });
     await syncPipelineStamps(env);
     expect((await runRow(second.stampId))?.outcome).toBe("reconciled");
-    expect((await served(first.datasetId)).signalJourney?.recipes["nemar-floor"]).toEqual(
-      completed,
-    );
+    expect(await linkOf(second.stampId)).toBeNull();
+    expect(await linkOf(first.stampId)).toEqual(completed);
   });
 });
 
-describe("live links are never documents", () => {
-  test("a new run's live report does not erase the last completed link (MUTATION: store the live link)", async () => {
+describe("what a public page shows: the promoted run", () => {
+  test("the promoted run's counts, with stored kept, and its link; the extensions validate (MUTATION: show stored as reconciled, still pending)", async () => {
+    const d = await finished();
+    await syncPipelineStamps(env);
+    // The derivative is stored and promoted; its pending stored row has not been resolved yet.
+    await promote(d);
+    expect((await rows(d.stampId)).stored.reconciled).toBe(0);
+    const shown = await served(d.datasetId);
+    expect(shown.processing?.recipes["nemar-floor"]).toEqual({
+      recipe_version: floor.version,
+      declared_checkpoints: ["import", "preprocess", "quality", "stored"],
+      counts: {
+        import: { passed: 3, failed: 1, skipped: 0, total: 4 },
+        preprocess: { passed: 2, failed: 1, skipped: 1, total: 4 },
+        quality: { passed: 2, failed: 0, skipped: 2, total: 4 },
+        stored: { passed: 2, failed: 0, skipped: 2, total: 4 },
+      },
+    });
+    expect(shown.signalJourney?.recipes["nemar-floor"]).toEqual(await linkOf(d.stampId));
+    const nsc = compileNeuroschemaValidator("nsc:/extensions/extensionsContainer.schema.json");
+    if (!nsc(shown)) throw new Error(formatAjvErrors(nsc));
+    // The stored row, once resolved from the same stored derivative, says the same.
+    expect((await reconcilePipelineProgress(env)).reconciled).toBe(1);
+    const stored = (await rows(d.stampId)).stored;
+    expect({
+      passed: stored.passed,
+      failed: stored.failed,
+      skipped: stored.skipped,
+      total: stored.total,
+    }).toEqual(shown.processing?.recipes["nemar-floor"].counts.stored);
+  });
+
+  test("a run in progress, a newer canary run and a newer failed run never replace the promoted run (MUTATION: pick the newest stamp)", async () => {
     const first = await finished();
     await syncPipelineStamps(env);
-    const completed = await doc(first.datasetId, "signalJourney");
-    expect(completed?.entry.processing_status).toBe("completed");
-    await reportingRun(first.datasetId);
-    expect(await doc(first.datasetId, "signalJourney")).toEqual(completed);
-    expect((await served(first.datasetId)).signalJourney?.recipes["nemar-floor"]).toMatchObject({
-      processing_status: "in_progress",
+    await promote(first);
+    const before = await served(first.datasetId);
+    expect(before.processing?.recipes["nemar-floor"]).toBeDefined();
+    // A newer run reporting now.
+    const second = await reportingRun(first.datasetId);
+    expect(await served(first.datasetId)).toEqual(before);
+    // It ends, is reconciled and stored as a canary: still not shown.
+    await finishAtTapis(fx, env, second.jobId, { outputs: floorOutputs(RECORD, TABLE) });
+    await syncPipelineStamps(env);
+    expect((await runRow(second.stampId))?.outcome).toBe("reconciled");
+    await seedDerivative(env.DB, {
+      datasetId: second.datasetId,
+      stampId: second.stampId,
+      jobId: second.jobId,
+      recipe: "nemar-floor",
+      recipeVersion: floor.version,
+      retention: "canary",
+      storedAt: "2026-11-21 10:00:00",
+      qualityPlugins: "[]",
+    });
+    expect(await served(first.datasetId)).toEqual(before);
+    // A third run fails: nothing of it is shown either.
+    await env.DB.prepare(
+      "INSERT INTO dataset_versions (dataset_id, version, doi, provider, created_at) VALUES (?1, '1.0.2', ?2, 'ezid', '2026-02-03 03:04:05')",
+    )
+      .bind(first.datasetId, `10.82901/nemar.${first.datasetId}.v1.0.2`)
+      .run();
+    const r = await dispatchPipelineJob(env, {
+      recipe: "nemar-floor",
+      datasetId: first.datasetId,
+      actor: { kind: "admin", userId: 1 },
+    });
+    if (!r.ok) throw new Error(r.code);
+    await env.DB.prepare(
+      "UPDATE compute_jobs SET state = 'failed', failure_code = 'runtime_error', ended_at = datetime('now') WHERE id = ?1",
+    )
+      .bind(r.jobId)
+      .run();
+    await syncPipelineStamps(env);
+    expect((await runRow(r.stampId))?.outcome).toBe("table_missing");
+    expect(await served(first.datasetId)).toEqual(before);
+  });
+
+  test("a promoted newer run replaces the older one on both namespaces together", async () => {
+    const first = await finished();
+    await syncPipelineStamps(env);
+    await promote(first, "2026-11-20 10:00:00");
+    const second = await dispatchFor(first.datasetId);
+    const other = recordOf({ note: "second run" });
+    const table = floorTable([
+      ["sub-01/eeg/a.edf", "succeeded", null, null],
+      ["sub-02/eeg/b.edf", "succeeded", null, null],
+    ]);
+    await finishAtTapis(fx, env, second.jobId, { outputs: floorOutputs(other, table) });
+    await syncPipelineStamps(env);
+    await promote(second, "2026-11-21 10:00:00");
+    const shown = await served(first.datasetId);
+    expect(shown.signalJourney?.recipes["nemar-floor"].sha256).toBe(await sha256Hex(other));
+    expect(shown.processing?.recipes["nemar-floor"].counts.stored).toEqual({
+      passed: 2,
+      failed: 0,
+      skipped: 0,
+      total: 2,
     });
   });
 
-  test("a succeeded run with no checkpoint map replaces the last completed link with its own completed link, never failed (round 2 I1; MUTATION: write failed for every outcome)", async () => {
+  test("a promoted run with no checkpoint map shows its own link and no processing (MUTATION: write no link for an outcome without counts)", async () => {
     // Both runs of one dataset end before the sync: the second's record names another version, so its stamp
     // has no checkpoint map and the registry drifts.
     const first = await dispatched();
@@ -366,110 +461,51 @@ describe("live links are never documents", () => {
     await syncPipelineStamps(env);
     expect((await runRow(first.stampId))?.outcome).toBe("reconciled");
     expect((await runRow(second.stampId))?.outcome).toBe("no_checkpoint_map");
-    expect((await served(first.datasetId)).signalJourney?.recipes["nemar-floor"]).toEqual({
+    const link = {
       recipe_version: "9.0.0",
       processing_status: "completed",
       location: wanted.record.replace(/^product\//, ""),
       sha256: await sha256Hex(drifted),
       sj_version: "0.1.0",
-    });
+    };
+    expect(await linkOf(second.stampId)).toEqual(link);
+    await promote(second);
+    const shown = await served(first.datasetId);
+    expect(shown.signalJourney?.recipes["nemar-floor"]).toEqual(link);
+    expect(shown.processing).toBeUndefined();
   });
 
-  test("a succeeded run of a recipe the registry no longer knows leaves the last final link standing", async () => {
-    const first = await finished();
-    await syncPipelineStamps(env);
-    const completed = await doc(first.datasetId, "signalJourney");
-    const second = await dispatchFor(first.datasetId);
-    await finishAtTapis(fx, env, second.jobId, { outputs: floorOutputs(RECORD, TABLE) });
-    await syncPipelineStamps(env, 50);
-    // The run is moved to a recipe the registry does not know before it is reconciled.
-    await env.DB.prepare("DELETE FROM compute_pipeline_progress WHERE stamp_id = ?1")
-      .bind(second.stampId)
-      .run();
-    await env.DB.prepare("DELETE FROM compute_pipeline_progress_runs WHERE stamp_id = ?1")
-      .bind(second.stampId)
-      .run();
-    await env.DB.prepare("DELETE FROM compute_pipeline_documents WHERE stamp_id = ?1")
-      .bind(second.stampId)
-      .run();
-    await env.DB.prepare(
-      "INSERT INTO compute_pipeline_documents (dataset_id, namespace, recipe, stamp_id, entry) VALUES (?1, 'signalJourney', 'nemar-gone', ?2, ?3)",
-    )
-      .bind(first.datasetId, first.stampId, JSON.stringify(completed?.entry))
-      .run();
+  test("a succeeded run of a recipe the registry no longer knows keeps no link", async () => {
+    const d = await finished();
     await env.DB.prepare("UPDATE compute_pipeline_stamps SET recipe = 'nemar-gone' WHERE id = ?1")
-      .bind(second.stampId)
-      .run();
-    await reconcilePipelineProgress(env);
-    expect((await runRow(second.stampId))?.outcome).toBe("recipe_unknown");
-    const kept = await env.DB.prepare(
-      "SELECT stamp_id, entry FROM compute_pipeline_documents WHERE dataset_id = ?1 AND recipe = 'nemar-gone'",
-    )
-      .bind(first.datasetId)
-      .first<{ stamp_id: number; entry: string }>();
-    expect(kept?.stamp_id).toBe(first.stampId);
-    expect(JSON.parse(kept?.entry ?? "{}").processing_status).toBe("completed");
-  });
-
-  test("an ended stamp whose run reported and was never reconciled serves no in_progress (S1; MUTATION: drop the dispatched term)", async () => {
-    const d = await reportingRun();
-    await env.DB.prepare("UPDATE compute_pipeline_stamps SET state = 'succeeded' WHERE id = ?1")
       .bind(d.stampId)
       .run();
-    expect(await liveSignalJourneyLinks(env.DB, d.datasetId)).toEqual({});
+    await syncPipelineStamps(env, 50);
+    expect((await runRow(d.stampId))?.outcome).toBe("recipe_unknown");
+    expect(await linkOf(d.stampId)).toBeNull();
   });
 
-  test("in_progress only while the job is under way: archiving yes, finished or unreported no (S3; MUTATION: drop the job term)", async () => {
-    const d = await reportingRun();
-    for (const [state, live] of [
-      ["submitted", true],
-      ["archiving", true],
-      ["finished", false],
-      ["cancelled", false],
-      ["unreported", false],
-    ] as const) {
-      await env.DB.prepare("UPDATE compute_jobs SET state = ?1 WHERE id = ?2")
-        .bind(state, d.jobId)
-        .run();
-      const links = await liveSignalJourneyLinks(env.DB, d.datasetId);
-      expect([state, Object.keys(links)]).toEqual([state, live ? ["nemar-floor"] : []]);
-    }
-  });
-
-  test("a failed run with no table serves a failed link, not in_progress (reviewer repro 1)", async () => {
-    const d = await reportingRun();
+  test("a promoted run whose counts break the writer's rules shows its link and no processing, with a log line", async () => {
+    const d = await finished();
+    await syncPipelineStamps(env);
+    await promote(d);
     await env.DB.prepare(
-      "UPDATE compute_jobs SET state = 'failed', failure_code = 'runtime_error', ended_at = datetime('now') WHERE id = ?1",
+      "DELETE FROM compute_pipeline_progress WHERE stamp_id = ?1 AND checkpoint = 'preprocess'",
     )
-      .bind(d.jobId)
+      .bind(d.stampId)
       .run();
-    await syncPipelineStamps(env);
-    expect((await runRow(d.stampId))?.outcome).toBe("table_missing");
-    expect((await served(d.datasetId)).signalJourney?.recipes["nemar-floor"]).toEqual({
-      recipe_version: floor.version,
-      processing_status: "failed",
-      location: null,
-      sha256: null,
-      sj_version: null,
+    let shown: Awaited<ReturnType<typeof served>> = {};
+    const lines = await logged(async () => {
+      shown = await served(d.datasetId);
     });
-  });
-
-  test("a succeeded run whose link cannot be built, with no earlier link, serves no link (reviewer repro 2)", async () => {
-    const d = await reportingRun();
-    await finishAtTapis(fx, env, d.jobId, {
-      outputs: floorOutputs(
-        recordOf({}, false),
-        floorTable([["sub-01/eeg/a.edf", "succeeded", null, null]]),
-      ),
-    });
-    await syncPipelineStamps(env);
-    expect((await runRow(d.stampId))?.outcome).toBe("reconciled");
-    expect((await served(d.datasetId)).signalJourney).toBeUndefined();
+    expect(shown.processing).toBeUndefined();
+    expect(shown.signalJourney?.recipes["nemar-floor"]).toEqual(await linkOf(d.stampId));
+    expect(lines.join("\n")).toContain("processing_not_shown");
   });
 });
 
 describe("a failed run", () => {
-  test("with a partial table: unwritten recordings are skipped not_run, stored is all skipped, and processing is final", async () => {
+  test("with a partial table: unwritten recordings are skipped not_run, stored is final and all skipped, and no link is kept or shown", async () => {
     const d = await failedRun(floorTable([["sub-01/eeg/a.edf", "succeeded", null, null]]));
     await seedLive(d.stampId, d.jobId, {
       import: [1, 0, 0, 3],
@@ -481,30 +517,20 @@ describe("a failed run", () => {
     const r = await rows(d.stampId);
     expect(r.import).toMatchObject({ passed: 1, failed: 0, skipped: 2, total: 3 });
     expect(r.stored).toMatchObject({ passed: 0, failed: 0, skipped: 3, total: 3, reconciled: 1 });
-    const processing = await doc(d.datasetId, "processing");
-    const nsc = compileNeuroschemaValidator("nsc:/extensions/processing.schema.json");
-    if (!nsc({ level: "dataset", recipes: { "nemar-floor": processing?.entry } })) {
-      throw new Error(formatAjvErrors(nsc));
-    }
-    expect((await doc(d.datasetId, "signalJourney"))?.entry).toMatchObject({
-      processing_status: "failed",
-      location: null,
-    });
+    expect(await linkOf(d.stampId)).toBeNull();
+    expect(await served(d.datasetId)).toEqual({});
   });
 
   test.each([
     ["no table", null, "table_missing"],
     ["a table with no step column", "path\tstatus\tcode\na\tsucceeded\tn/a\n", "table_unreadable"],
-  ])(
-    "%s: the outcome is %s, no counts, and a final failed link",
-    async (_label, table, outcome) => {
-      const d = await failedRun(table);
-      await syncPipelineStamps(env);
-      expect((await runRow(d.stampId))?.outcome).toBe(outcome);
-      expect(await rows(d.stampId)).toEqual({});
-      expect((await doc(d.datasetId, "signalJourney"))?.entry.processing_status).toBe("failed");
-    },
-  );
+  ])("%s: the outcome is %s, no counts, and no link", async (_label, table, outcome) => {
+    const d = await failedRun(table);
+    await syncPipelineStamps(env);
+    expect((await runRow(d.stampId))?.outcome).toBe(outcome);
+    expect(await rows(d.stampId)).toEqual({});
+    expect(await linkOf(d.stampId)).toBeNull();
+  });
 
   test("a recipe version with no map, and a recipe the registry does not know, get their outcome", async () => {
     const a = await failedRun(TABLE);
@@ -545,8 +571,8 @@ describe("a hold stamp", () => {
     expect(sync.reconcile_errored).toBe(0);
     expect((await runRow(d.stampId))?.outcome).toBe("no_checkpoint_map");
     expect(await runRow(stamps[1].id)).toBeNull();
-    // The succeeded run's own record gives its completed link; a hold never writes `failed` over it.
-    expect((await served(d.datasetId)).signalJourney?.recipes["nemar-floor"]).toMatchObject({
+    // The succeeded run's own record gives its completed link; a hold has no run row to write over it.
+    expect(await linkOf(d.stampId)).toMatchObject({
       processing_status: "completed",
       recipe_version: "9.0.0",
     });
@@ -600,7 +626,7 @@ describe("stored", () => {
     ["expired", true, { passed: 2, failed: 0, skipped: 2 }],
     ["expired", false, { passed: 0, failed: 0, skipped: 4 }],
   ] as const)(
-    "derivative %s (stored_at %s) resolves stored as %o, and processing is final and valid",
+    "derivative %s (stored_at %s) resolves stored as %o, once (MUTATION: swap kept and lost)",
     async (state, storedAt, expected) => {
       const d = await pending();
       await derivative(d, state, storedAt);
@@ -610,17 +636,11 @@ describe("stored", () => {
         total: 4,
         reconciled: 1,
       });
-      const processing = await doc(d.datasetId, "processing");
-      expect(processing?.entry.counts.stored).toEqual({ ...expected, total: 4 });
-      const nsc = compileNeuroschemaValidator("nsc:/extensions/processing.schema.json");
-      if (!nsc({ level: "dataset", recipes: { "nemar-floor": processing?.entry } })) {
-        throw new Error(formatAjvErrors(nsc));
-      }
       expect((await reconcilePipelineProgress(env)).reconciled).toBe(0);
     },
   );
 
-  test("two resolvers racing for one stored row resolve it once and write its entry (S2)", async () => {
+  test("two resolvers racing for one stored row resolve it once (S2)", async () => {
     const d = await pending();
     await skip(d.stampId);
     const [a, b] = await Promise.all([
@@ -628,11 +648,12 @@ describe("stored", () => {
       reconcilePipelineProgress(env),
     ]);
     expect(a.reconciled + b.reconciled).toBe(1);
-    expect((await doc(d.datasetId, "processing"))?.entry.counts.stored).toEqual({
+    expect((await rows(d.stampId)).stored).toMatchObject({
       passed: 0,
       failed: 0,
       skipped: 4,
       total: 4,
+      reconciled: 1,
     });
   });
 
@@ -644,22 +665,23 @@ describe("stored", () => {
     expect(claim.meta.changes).toBe(0);
   });
 
-  test("resolves from the order the run recorded, after the stamp's version moved (I2; reviewer repro 3)", async () => {
+  test("resolves from the order the run recorded, after the stamp's version moved, and the promoted run shows that order (I2; reviewer repro 3)", async () => {
     const d = await pending();
     await env.DB.prepare(
       "UPDATE compute_pipeline_stamps SET recipe_version = '9.9.9' WHERE id = ?1",
     )
       .bind(d.stampId)
       .run();
-    await skip(d.stampId);
+    await promote(d);
     expect((await reconcilePipelineProgress(env, 1)).reconciled).toBe(1);
-    expect((await doc(d.datasetId, "processing"))?.entry).toMatchObject({
+    expect((await rows(d.stampId)).stored).toMatchObject({ passed: 2, skipped: 2, reconciled: 1 });
+    expect((await served(d.datasetId)).processing?.recipes["nemar-floor"]).toMatchObject({
       recipe_version: floor.version,
       declared_checkpoints: ["import", "preprocess", "quality", "stored"],
     });
   });
 
-  test("a missing middle row resolves stored without a document", async () => {
+  test("a missing middle row still resolves stored", async () => {
     const d = await pending();
     await env.DB.prepare(
       "DELETE FROM compute_pipeline_progress WHERE stamp_id = ?1 AND checkpoint = 'preprocess'",
@@ -669,10 +691,9 @@ describe("stored", () => {
     await skip(d.stampId);
     expect((await reconcilePipelineProgress(env)).reconciled).toBe(1);
     expect((await rows(d.stampId)).stored.reconciled).toBe(1);
-    expect(await doc(d.datasetId, "processing")).toBeNull();
   });
 
-  test("with a limit of 1, a bad row ahead of a good one does not block it", async () => {
+  test("with a limit of 1, a row whose order cannot be read is resolved with a log line and does not block the next (MUTATION: skip it unresolved)", async () => {
     const bad = await pending();
     const good = await pending();
     expect(bad.stampId).toBeLessThan(good.stampId);
@@ -683,13 +704,15 @@ describe("stored", () => {
       .run();
     await skip(bad.stampId);
     await skip(good.stampId);
-    await reconcilePipelineProgress(env, 1);
-    await reconcilePipelineProgress(env, 1);
+    const lines = await logged(async () => {
+      await reconcilePipelineProgress(env, 1);
+      await reconcilePipelineProgress(env, 1);
+    });
     expect(
       await anyCount("compute_pipeline_progress", "checkpoint = 'stored' AND reconciled = 0"),
     ).toBe(0);
-    expect(await doc(bad.datasetId, "processing")).toBeNull();
-    expect((await doc(good.datasetId, "processing"))?.entry.counts.stored.total).toBe(4);
+    expect(lines.join("\n")).toContain(`stored_without_order stamp=${bad.stampId}`);
+    expect((await rows(good.stampId)).stored.total).toBe(4);
   });
 });
 
@@ -769,36 +792,19 @@ describe("the gates", () => {
     expect(await anyCount("compute_pipeline_progress_runs", "stamp_id = ?1", d.stampId)).toBe(0);
   });
 
-  test("the reconcile gate wins once, and a document with a stale write id is not written (MUTATION: drop the write-id guard)", async () => {
+  test("the reconcile gate wins once, and a row with a stale write id is not written (MUTATION: drop the write-id guard)", async () => {
     const d = await failedRun(null);
     const gate = (writeId: string) =>
       env.DB.prepare(RECONCILE_GATE_SQL)
-        .bind(d.stampId, d.jobId, writeId, "table_missing", 0, floor.version, null)
+        .bind(d.stampId, d.jobId, writeId, "table_missing", 0, floor.version, null, null)
         .run();
     expect((await gate("1".repeat(32))).meta.changes).toBe(1);
     expect((await gate("2".repeat(32))).meta.changes).toBe(0);
-    const stale = await env.DB.prepare(FINAL_DOCUMENT_SQL)
-      .bind(d.datasetId, "signalJourney", "nemar-floor", d.stampId, "{}", "2".repeat(32))
+    const stale = await env.DB.prepare(RECONCILE_ROW_SQL)
+      .bind(d.stampId, "import", 1, 0, 0, 1, "[]", null, null, null, null, 1, 0, "2".repeat(32))
       .run();
     expect(stale.meta.changes).toBe(0);
-    expect(await anyCount("compute_pipeline_documents", "dataset_id = ?1", d.datasetId)).toBe(0);
-  });
-});
-
-describe("documents", () => {
-  test("an older stamp never overwrites a newer stamp's document (MUTATION: drop the stamp order)", async () => {
-    const d = await failedRun(TABLE);
-    const newer = d.stampId + 1000;
-    await env.DB.prepare(
-      "INSERT INTO compute_pipeline_documents (dataset_id, namespace, recipe, stamp_id, entry) VALUES (?1, 'signalJourney', 'nemar-floor', ?2, '{\"newer\":true}')",
-    )
-      .bind(d.datasetId, newer)
-      .run();
-    await syncPipelineStamps(env);
-    expect(await doc(d.datasetId, "signalJourney")).toMatchObject({
-      stamp_id: newer,
-      entry: { newer: true },
-    });
+    expect(await anyCount("compute_pipeline_progress", "stamp_id = ?1", d.stampId)).toBe(0);
   });
 });
 
