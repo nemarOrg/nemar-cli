@@ -34,6 +34,7 @@ import { registerPrReviewRoutes } from "./pr-reviews";
 import { registerPublicationReviewRoutes } from "./publication-review";
 import { registerPublishRoutes } from "./publish";
 import { registerPublishCommentRoutes } from "./publish-comment";
+import { registerQualityViewAdminRoutes } from "./quality-views";
 import type { AdminRouter } from "./shared";
 import { registerUnpublishRoutes } from "./unpublish";
 import { registerUpstreamBackfillRoutes } from "./upstream-backfill";
@@ -102,6 +103,9 @@ registerMailRoutes(adminRoutes);
 registerComputeAdminRoutes(adminRoutes);
 registerComputeJobAdminRoutes(adminRoutes);
 registerComputePipelineAdminRoutes(adminRoutes);
+// A run's quality record and files by stamp, canaries included (epic #2324 phase B3b; ADR 0137): no
+// dataset gate and no cache, so registered after the run's quality page and never on a public router.
+registerQualityViewAdminRoutes(adminRoutes);
 registerComputeReportingRoutes(adminRoutes);
 // Compute access: the administrator's decisions on a person's request (epic #2021 phase D1; ADR 0118).
 registerComputeAccessAdminRoutes(adminRoutes);
