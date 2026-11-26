@@ -84,6 +84,43 @@ function asInt16(bytes: Uint8Array): Int16Array {
   return new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
 }
 
+const ZSTD_MAGIC = 0xfd2fb528;
+
+/** The decompressed size a zstd frame declares (its Frame_Content_Size), or null when the
+ *  frame declares none. Throws when `payload` does not start with a zstd frame header. Read
+ *  before decompressing so a frame cannot make `fzstd` allocate what it likes: without an
+ *  output buffer, `fzstd` allocates the declared size, or the window size (up to 2 GiB) when
+ *  there is none. */
+function zstdContentSize(payload: Uint8Array, block: number): number | null {
+  if (payload.length < 5) {
+    throw new Error(`blosc-decode: block ${block} is too short for a zstd frame header`);
+  }
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  if (view.getUint32(0, true) !== ZSTD_MAGIC) {
+    throw new Error(`blosc-decode: block ${block} does not start with a zstd frame`);
+  }
+  const descriptor = payload[4];
+  const fcsFlag = descriptor >> 6;
+  const singleSegment = (descriptor >> 5) & 1;
+  const dictIdFlag = descriptor & 3;
+  const fcsBytes = fcsFlag === 0 ? singleSegment : 1 << fcsFlag;
+  if (fcsBytes === 0) return null;
+  const at = 5 + (singleSegment ? 0 : 1) + [0, 1, 2, 4][dictIdFlag];
+  if (at + fcsBytes > payload.length) {
+    throw new Error(`blosc-decode: block ${block} zstd frame header is truncated`);
+  }
+  switch (fcsBytes) {
+    case 1:
+      return payload[at];
+    case 2:
+      return view.getUint16(at, true) + 256;
+    case 4:
+      return view.getUint32(at, true);
+    default:
+      return view.getUint32(at, true) + view.getUint32(at + 4, true) * 2 ** 32;
+  }
+}
+
 /**
  * Decode one blosc2/zstd/byte-shuffle inner chunk (a served array's level-0
  * or view chunk) to an `Int16Array`. Pure JS, no WASM -- parses the blosc2
@@ -91,8 +128,15 @@ function asInt16(bytes: Uint8Array): Int16Array {
  * block's zstd payload with `fzstd`, and unshuffles. Throws on a header
  * shape this decoder does not handle (memcpyed frames, bit-shuffle, a
  * non-int16 typesize, or a truncated/corrupt buffer) rather than guessing.
+ *
+ * `expectedBytes` is the decoded size the caller's geometry fixes (channels x
+ * chunk samples x 2 for a level-0 chunk). The header's `nbytes` and every
+ * block's declared zstd content size are checked against it BEFORE anything
+ * is allocated, and each block decompresses into a buffer of its expected
+ * size, so the bytes (which the data host serves) cannot choose how much this
+ * allocates: a u32 `nbytes` could otherwise ask for 4 GiB.
  */
-export function decodeBloscZstdInt16(bytes: Uint8Array): Int16Array {
+export function decodeBloscZstdInt16(bytes: Uint8Array, expectedBytes: number): Int16Array {
   if (bytes.length < 16) {
     throw new Error(
       `blosc-decode: ${bytes.length} bytes is shorter than the 16-byte blosc2 header`,
@@ -123,6 +167,11 @@ export function decodeBloscZstdInt16(bytes: Uint8Array): Int16Array {
   if (header.nbytes % header.typesize !== 0) {
     throw new Error(
       `blosc-decode: nbytes ${header.nbytes} is not a multiple of typesize ${header.typesize}`,
+    );
+  }
+  if (header.nbytes !== expectedBytes) {
+    throw new Error(
+      `blosc-decode: header nbytes ${header.nbytes} is not the ${expectedBytes} bytes the chunk must decode to`,
     );
   }
   if (header.cbytes !== bytes.length) {
@@ -157,8 +206,15 @@ export function decodeBloscZstdInt16(bytes: Uint8Array): Int16Array {
       );
     }
     const payload = bytes.subarray(payloadStart, payloadStart + compressedLen);
-    const decompressed = fzstdDecompress(payload);
     const blockNbytes = Math.min(header.blocksize, header.nbytes - written);
+    const declared = zstdContentSize(payload, i);
+    if (declared !== blockNbytes) {
+      throw new Error(
+        `blosc-decode: block ${i} declares ${declared ?? "no"} decompressed bytes, expected ${blockNbytes}`,
+      );
+    }
+    // Decompressed into a buffer of exactly the block's size: fzstd allocates nothing larger.
+    const decompressed = fzstdDecompress(payload, new Uint8Array(blockNbytes));
     if (decompressed.length !== blockNbytes) {
       throw new Error(
         `blosc-decode: block ${i} decompressed to ${decompressed.length} bytes, expected ${blockNbytes}`,
