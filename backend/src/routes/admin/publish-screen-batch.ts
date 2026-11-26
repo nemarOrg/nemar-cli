@@ -1,5 +1,5 @@
 /**
- * Admin routes of the paced re-screen (`nemar admin repo publish screen-batch`; epic #2182,
+ * Admin routes of the paced re-screen (`nemar admin dataset publish screen-batch`; epic #2182,
  * card D4; ADR 0086, amendment of 2026-11-25). The logic is `services/screen-batch.ts`; the
  * screens themselves are dispatched one at a time through `POST /admin/publish/:id/identifier-screen`
  * with the batch's id.

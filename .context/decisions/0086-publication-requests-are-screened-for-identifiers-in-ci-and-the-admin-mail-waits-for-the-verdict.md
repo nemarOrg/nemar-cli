@@ -238,7 +238,7 @@ The rule, the recorded reason and the copy every outcome prints are `shared/upst
 
 ## Amendment 2026-11-25 (epic #2182, card D4): a paced re-screen mails one digest
 
-`nemar admin repo publish screen-batch` re-screens many requests, one dispatch at a time, `--per-minute` apart (default 4, at most 10, because each screen is a GitHub Actions run).
+`nemar admin dataset publish screen-batch` re-screens many requests, one dispatch at a time, `--per-minute` apart (default 4, at most 10, because each screen is a GitHub Actions run).
 It is a dry run unless `--apply` is given.
 
 The mail rule above holds for every screen except those of a batch, where the per-request mail is replaced by ONE digest and is never dropped silently.

@@ -2,7 +2,7 @@
  * A paced re-screen of many publication requests, mailed as one digest (epic #2182, card D4;
  * ADR 0086, amendment of 2026-11-25).
  *
- * `nemar admin repo publish screen-batch --apply` creates a batch ({@link createScreenBatch}),
+ * `nemar admin dataset publish screen-batch --apply` creates a batch ({@link createScreenBatch}),
  * then dispatches the screens one at a time through the ordinary re-run route with the batch's
  * id. Each screen stores exactly the result a single `screen` stores, and the gate and the
  * review start are unchanged. What a batch changes is the mail:

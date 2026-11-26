@@ -2455,10 +2455,10 @@ const SCREEN_BATCH_DIGEST_COPY = {
     "Each depositor still has to be told what to fix. A request blocked on findings is released by a clear screen after the data is fixed.",
   notStartedHeading: "Could not start, or refused (not screened by this batch)",
   notStartedNext:
-    "These were not screened. Re-run one with: nemar admin repo publish screen <dataset-id>.",
+    "These were not screened. Re-run one with: nemar admin dataset publish screen <dataset-id>.",
   notReportedHeading: "Did not report by the deadline",
   notReportedNext:
-    "Their screens were dispatched and no result is stored. To run one again: nemar admin repo publish screen <dataset-id>.",
+    "Their screens were dispatched and no result is stored. To run one again: nemar admin dataset publish screen <dataset-id>.",
   none: "None.",
 } as const;
 

@@ -1,5 +1,5 @@
 /**
- * The rules of `nemar admin repo publish screen-batch` that need no terminal and no server
+ * The rules of `nemar admin dataset publish screen-batch` that need no terminal and no server
  * (ADR 0086, amendment of 2026-11-25): the pace, the ids file, and the dispatch loop.
  * The loop's two dependencies are its I/O (what a dispatch answers, how long to wait), which is
  * where a unit test must stand; what it decides (when to wait, when to stop, what to count) is
