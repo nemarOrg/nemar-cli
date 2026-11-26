@@ -94,6 +94,12 @@ export interface MatEntry {
   /** Characters: one string per row. Numbers: the real parts, column-major. */
   value: string[] | number[] | null;
   skipped?: "size" | "type";
+  /**
+   * An array skipped for its size in an uncompressed element: the file range of its data (after
+   * its tag, flags, dimensions and name), which the walk never read. Absent inside a compressed
+   * element, which has no file offsets.
+   */
+  unread?: { offset: number; bytes: number };
 }
 
 /** A variable at the top of the file: where its element lies, for callers that check ranges. */
@@ -248,7 +254,12 @@ class Direct implements Forward {
   }
 }
 
-/** The compressed bytes of an element are fetched this many at a time. */
+/**
+ * The compressed bytes of an element are fetched 4 KiB first, doubling up to 64 KiB: a variable
+ * that turns out to be a large signal is left after its first fetch, and the inflater never
+ * runs more than one fetch ahead of what the walk asked for.
+ */
+const COMPRESSED_FIRST = 4 * 1024;
 const COMPRESSED_CHUNK = 64 * 1024;
 
 /**
@@ -274,6 +285,7 @@ class Inflating implements Forward {
     private readonly spend: (n: number) => void,
   ) {
     let at = start;
+    let chunk = COMPRESSED_FIRST;
     const stop = start + length;
     const failed = (error: unknown) => {
       this.sourceError ??= { error };
@@ -284,7 +296,8 @@ class Inflating implements Forward {
           controller.close();
           return;
         }
-        const want = Math.min(COMPRESSED_CHUNK, stop - at);
+        const want = Math.min(chunk, stop - at);
+        chunk = Math.min(COMPRESSED_CHUNK, chunk * 2);
         let got: Uint8Array;
         try {
           got = await src.read(at, want);
@@ -684,7 +697,9 @@ class MatWalker {
         }
       }
     } else if (count > this.limits.numericElements) {
-      this.entries.push({ fields: path, class: cls, dims, value: null, skipped: "size" });
+      const entry: MatEntry = { fields: path, class: cls, dims, value: null, skipped: "size" };
+      if (r instanceof Direct) entry.unread = { offset: r.pos, bytes: end - r.pos };
+      this.entries.push(entry);
     } else {
       const real = await this.element(r, end);
       this.entries.push({
