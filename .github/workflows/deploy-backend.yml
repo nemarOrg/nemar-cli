@@ -261,25 +261,39 @@ jobs:
           mapfile -t files < "$RUNNER_TEMP/unit-pure-files.txt"
           [ "${#files[@]}" -gt 0 ] || { echo "::error::the classifier listed no pure test files"; exit 1; }
           echo "Running shard $shard/$SHARD_TOTAL of ${#files[@]} pure test files"
-          log="$RUNNER_TEMP/test-gate-shard.log"
-          # --timings is read-only here: it only balances the shards. Two workers, not one per
+          # Two bun processes per shard, each half of its files, as test.yml's unit-pure-shard runs
+          # them and for the same reason (#2351): a bun worker keeps what each finished file used,
+          # and one process over the heaviest shard ran the runner out of memory, which hangs the
+          # job. --timings is read-only here: it only balances the parts. Two workers, not one per
           # core: see the same flag in test.yml's unit-pure-shard for why.
-          bun test --timings test/unit-pure-timings.json --shard="$shard/$SHARD_TOTAL" --parallel=2 "${files[@]}" 2>&1 | tee "$log"
-
-          # An empty shard is not an error to bun ("Ran 0 tests across 0 files", exit 0), and the
-          # classified list must match what bun found, so read the run's own header and summary.
+          halves=2
           esc=$(printf '\033')
-          plain=$(sed -E "s/${esc}\[[0-9;]*m//g" "$log")
-          header=$(grep -E -m1 '^--shard=[0-9]+/[0-9]+: running [0-9]+/[0-9]+ test files' <<<"$plain" || true)
-          summary=$(grep -E '^Ran [0-9]+ tests? across [0-9]+ files?' <<<"$plain" | tail -1 || true)
-          if [ -z "$header" ] || [ -z "$summary" ]; then
-            echo "::error::bun printed no shard header or run summary, so what this shard ran is unknown"
-            exit 1
-          fi
-          read -r planned discovered < <(sed -E 's#^--shard=[0-9]+/[0-9]+: running ([0-9]+)/([0-9]+) test files.*#\1 \2#' <<<"$header")
-          read -r tests ran < <(sed -E 's#^Ran ([0-9]+) tests? across ([0-9]+) files?.*#\1 \2#' <<<"$summary")
-          if [ "$ran" -lt 1 ] || [ "$tests" -lt 1 ] || [ "$ran" != "$planned" ] || [ "$discovered" != "${#files[@]}" ]; then
-            echo "::error::shard $shard/$SHARD_TOTAL planned $planned of $discovered files, ran $ran files and $tests tests; the classifier listed ${#files[@]}"
+          failed=0
+          for half in $(seq 1 "$halves"); do
+            part=$(( (shard - 1) * halves + half ))
+            parts=$(( SHARD_TOTAL * halves ))
+            log="$RUNNER_TEMP/test-gate-shard-$half.log"
+            bun test --timings test/unit-pure-timings.json --shard="$part/$parts" --parallel=2 "${files[@]}" 2>&1 | tee "$log" \
+              || failed=1
+
+            # An empty part is not an error to bun ("Ran 0 tests across 0 files", exit 0), and the
+            # classified list must match what bun found, so read the run's own header and summary.
+            plain=$(sed -E "s/${esc}\[[0-9;]*m//g" "$log")
+            header=$(grep -E -m1 '^--shard=[0-9]+/[0-9]+: running [0-9]+/[0-9]+ test files' <<<"$plain" || true)
+            summary=$(grep -E '^Ran [0-9]+ tests? across [0-9]+ files?' <<<"$plain" | tail -1 || true)
+            if [ -z "$header" ] || [ -z "$summary" ]; then
+              echo "::error::bun printed no shard header or run summary for part $part/$parts, so what this shard ran is unknown"
+              exit 1
+            fi
+            read -r planned discovered < <(sed -E 's#^--shard=[0-9]+/[0-9]+: running ([0-9]+)/([0-9]+) test files.*#\1 \2#' <<<"$header")
+            read -r tests ran < <(sed -E 's#^Ran ([0-9]+) tests? across ([0-9]+) files?.*#\1 \2#' <<<"$summary")
+            if [ "$ran" -lt 1 ] || [ "$tests" -lt 1 ] || [ "$ran" != "$planned" ] || [ "$discovered" != "${#files[@]}" ]; then
+              echo "::error::part $part/$parts planned $planned of $discovered files, ran $ran files and $tests tests; the classifier listed ${#files[@]}"
+              exit 1
+            fi
+          done
+          if [ "$failed" != 0 ]; then
+            echo "::error::a test failed in shard $shard/$SHARD_TOTAL (see the failures above)"
             exit 1
           fi
 
