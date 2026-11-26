@@ -5,14 +5,16 @@
  *
  *  1. The checkpoint map of the derivative's recipe version: the one its row recorded when it was made
  *     (`compute_derivatives.checkpoint_map`, migration 0154), else the registry's while the registry holds
- *     that very version; with neither, nothing is shown (`checkpoint_map_unknown`).
+ *     that very version (the derivative sync writes that map into the row); with neither, the outcomes
+ *     cannot be read (`record_unreadable`, `checkpoint_map_unknown`).
  *  2. The recording's row of the run's recordings table (`<key>/desc-<label>_recordings.tsv`), found by a
  *     scan of ranged reads that holds one part and a line, at most `QUALITY_TABLE_MAX_BYTES` and lines of at
- *     most `QUALITY_TABLE_LINE_MAX`, and stops at the first line whose `path` cell is the recording, exactly
- *     (no normalization). The header and the row are read by the counting rules' own readers
+ *     most `QUALITY_TABLE_LINE_MAX`: the line whose `path` cell is the recording, exactly (no
+ *     normalization), and refused when two lines are (`duplicate_path`). The header and the row are read by the counting rules' own readers
  *     (`readRecordingsHeader`, `readRecordingsRow`), so a row reads here as reconciliation read it.
- *  3. The outcomes (`processingRecordEntry`): each declared checkpoint's, then `stored`, which a promoted
- *     derivative has kept, checked by `processingRecordProblem`.
+ *  3. The outcomes (`processingRecordEntry`): each declared checkpoint's, then `stored`, which follows the
+ *     last declared checkpoint (a promoted derivative was kept, so a recording that passed it is stored, and
+ *     one whose quality plugin was skipped is not), checked by `processingRecordProblem`.
  *  4. The link: a succeeded recording's record (at most `QUALITY_RECORD_MAX_BYTES`) must be UTF-8 I-JSON that
  *     names the derivative ROW's dataset, this recording and the derivative's recipe and version; the link
  *     carries its location, the SHA-256 of its bytes and its `sj_version`. A recording that failed or was
@@ -61,12 +63,13 @@ export interface ProcessingDerivative extends ServedDerivative {
   checkpoint_map: string | null;
 }
 
-const PROCESSING_SCHEMA_ID = "nsc:/extensions/processing.schema.json";
-const SIGNAL_JOURNEY_SCHEMA_ID = "nsc:/extensions/signalJourney.schema.json";
+/** The vendored neuroschema extensions both levels of a run's entries are checked against. */
+export const PROCESSING_SCHEMA_ID = "nsc:/extensions/processing.schema.json";
+export const SIGNAL_JOURNEY_SCHEMA_ID = "nsc:/extensions/signalJourney.schema.json";
 
 let schemas: SchemaSet | null = null;
 
-/** The vendored schemas the two entries reach, built once per isolate. */
+/** The vendored schemas the two extensions reach, built once per isolate. */
 function processingSchemas(): SchemaSet {
   if (schemas === null) {
     const all = (bundle as { schemas: Record<string, unknown>[] }).schemas;
@@ -84,6 +87,18 @@ function processingSchemas(): SchemaSet {
     schemas = new SchemaSet(reached);
   }
   return schemas;
+}
+
+/**
+ * Whether a `processing` or `signalJourney` document (either level) is valid against the vendored schema,
+ * with the Worker's own checker (`shared/contract/schema-check.ts`): every entry either level serves passes
+ * it first.
+ */
+export function pipelineDocumentValid(
+  schemaId: typeof PROCESSING_SCHEMA_ID | typeof SIGNAL_JOURNEY_SCHEMA_ID,
+  document: unknown,
+): boolean {
+  return processingSchemas().check(schemaId, document).valid;
 }
 
 /** The checkpoints a recipe may declare: the standard ones but `stored`, which only the backend sets. */
@@ -140,9 +155,10 @@ export const TABLE_PART_BYTES = 4 * 1024 * 1024;
 
 /**
  * The recording's row of a recordings table, by a scan of ranged reads (see the header, step 2). Text is
- * decoded as reconciliation decodes a table (UTF-8, a byte order mark dropped, CRLF tolerated); the scan
- * stops at the first line whose `path` cell is `recording`. A derivative's objects never change, and a part
- * whose etag is not the object's refuses the scan (`table_changed`).
+ * decoded as reconciliation decodes a table (UTF-8, a byte order mark dropped, CRLF tolerated). The scan
+ * reads the whole table, within its bounds, because a recording has one row: a second line whose `path`
+ * cell is `recording` refuses the table (`duplicate_path`), as reconciliation refuses it. A derivative's
+ * objects never change, and a part whose etag is not the object's refuses the scan (`table_changed`).
  */
 async function scanRecordingRow(
   bucket: R2Bucket,
@@ -154,8 +170,9 @@ async function scanRecordingRow(
   if (head.size > QUALITY_TABLE_MAX_BYTES) return { kind: "unreadable", reason: "table_too_large" };
   const decoder = new TextDecoder();
   let header: RecordingsHeader | null = null;
+  let match: RecordingRow | null = null;
   let pending = "";
-  /** One line: the header, or a row that may be the recording's. A result ends the scan. */
+  /** One line: the header, or a row that may be the recording's. A refusal ends the scan. */
   const take = (raw: string): RowScan | null => {
     if (raw.length > QUALITY_TABLE_LINE_MAX) return { kind: "unreadable", reason: "line_too_long" };
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
@@ -167,15 +184,18 @@ async function scanRecordingRow(
     }
     if (!line.includes(recording)) return null;
     if (line.split("\t")[header.path] !== recording) return null;
+    if (match !== null) return { kind: "unreadable", reason: "duplicate_path" };
     const row = readRecordingsRow(line, header);
-    return row.ok ? { kind: "row", row: row.row } : { kind: "unreadable", reason: row.reason };
+    if (!row.ok) return { kind: "unreadable", reason: row.reason };
+    match = row.row;
+    return null;
   };
   /** Every whole line of `pending`, leaving the last, partial one. */
   const drain = (): RowScan | null => {
     let at = pending.indexOf("\n");
     while (at >= 0) {
-      const found = take(pending.slice(0, at));
-      if (found !== null) return found;
+      const refused = take(pending.slice(0, at));
+      if (refused !== null) return refused;
       pending = pending.slice(at + 1);
       at = pending.indexOf("\n");
     }
@@ -193,17 +213,14 @@ async function scanRecordingRow(
     if (bytes.byteLength === 0) return { kind: "unreadable", reason: "table_changed" };
     offset += bytes.byteLength;
     pending += decoder.decode(bytes, { stream: true });
-    const found = drain();
-    if (found !== null) return found;
+    const refused = drain();
+    if (refused !== null) return refused;
   }
   pending += decoder.decode();
-  const found = drain();
-  if (found !== null) return found;
-  if (pending !== "") {
-    const last = take(pending);
-    if (last !== null) return last;
-  }
-  return header === null ? { kind: "unreadable", reason: "empty_table" } : { kind: "absent" };
+  const refused = drain() ?? (pending === "" ? null : take(pending));
+  if (refused !== null) return refused;
+  if (header === null) return { kind: "unreadable", reason: "empty_table" };
+  return match === null ? { kind: "absent" } : { kind: "row", row: match };
 }
 
 const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -247,6 +264,12 @@ function recordVersion(
 }
 
 /**
+ * A processing answer, or its refusal; `absent` marks the one refusal that depends only on the derivative's
+ * immutable table (the recording has no row), which the public route remembers in its edge cache.
+ */
+export type ProcessingServed = Served | { ok: false; word: "quality_not_found"; absent: true };
+
+/**
  * A recording's processing answer over a derivative a route has decided may be read (see the header).
  * `log` is the log line's tag and the context it leads with.
  */
@@ -255,7 +278,7 @@ export async function serveRecordingProcessing(
   row: ProcessingDerivative,
   recording: string,
   log: { tag: string; context?: string },
-): Promise<Served> {
+): Promise<ProcessingServed> {
   const lead = log.context === undefined ? `[${log.tag}]` : `[${log.tag}] ${log.context}`;
   const refused = (word: "quality_not_found" | "record_unreadable", reason: string): Served => {
     console.warn(
@@ -273,13 +296,13 @@ export async function serveRecordingProcessing(
     if (map === null) return refused("record_unreadable", "checkpoint_map_invalid");
   } else {
     map = recipeCheckpointMap(recipe.name, row.recipe_version);
-    if (map === null) return refused("quality_not_found", "checkpoint_map_unknown");
+    if (map === null) return refused("record_unreadable", "checkpoint_map_unknown");
   }
 
   // 2. The recording's row.
   const tableKey = `${DERIVATIVE_OBJECT_PREFIX}${row.key}/${recipeRequiredOutputs(recipe).table.slice(RECIPE_PRODUCT_OUTPUT_PREFIX.length)}`;
   const scan = await scanRecordingRow(bucket, tableKey, recording);
-  if (scan.kind === "absent") return { ok: false, word: "quality_not_found" };
+  if (scan.kind === "absent") return { ok: false, word: "quality_not_found", absent: true };
   if (scan.kind === "missing") return refused("record_unreadable", "table_missing");
   if (scan.kind === "unreadable") return refused("record_unreadable", scan.reason);
 
@@ -329,10 +352,10 @@ export async function serveRecordingProcessing(
     recipes: { [recipe.name]: entry as { recipe_version: string; checkpoints: object } },
   };
   const signalJourney = { recipes: { [recipe.name]: link } };
-  if (!processingSchemas().check(PROCESSING_SCHEMA_ID, processing).valid) {
+  if (!pipelineDocumentValid(PROCESSING_SCHEMA_ID, processing)) {
     return refused("record_unreadable", "processing_invalid");
   }
-  if (!processingSchemas().check(SIGNAL_JOURNEY_SCHEMA_ID, signalJourney).valid) {
+  if (!pipelineDocumentValid(SIGNAL_JOURNEY_SCHEMA_ID, signalJourney)) {
     return refused("record_unreadable", "link_invalid");
   }
 

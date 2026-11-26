@@ -31,7 +31,10 @@
  * (`routes/admin/quality-views.ts`) calls too; only this route caches. For `processing`, steps 4 and 5 are
  * `serveRecordingProcessing` (`services/quality-processing.ts`): the recording's row of the derivative's
  * recordings table and, for a recording that succeeded, its record, read with the same bounds, the same
- * dataset binding and the same gate, cache and headers.
+ * dataset binding and the same gate, cache and headers. A processing miss reads the whole table, so it is
+ * charged to the caller's data miss budget (`checkDataMissBudget`, as a brokered git file's miss is), and a
+ * recording the table does not list is remembered in the edge cache under the same key (the client still
+ * gets `quality_not_found`, `no-store`), so repeated probes scan a table once per derivative and epoch.
  *
  * Public answers carry `Cache-Control: public, max-age=300`, `Cache-Tag: nemar-dq-<id>` and a strong `ETag`
  * (the SHA-256 of the body's bytes). Every refusal is `no-store` and is never put in the cache. A log line
@@ -59,6 +62,7 @@ import {
   isQualityRecordingPath,
   qualityCacheTag,
 } from "../../../shared/contract/quality-route.js";
+import { checkDataMissBudget } from "../middleware/rateLimit.js";
 import { derivativesBound } from "../services/compute-derivatives.js";
 import { isValidDatasetId } from "../services/datasetId.js";
 import type { ManifestCache } from "../services/manifest-source.js";
@@ -98,6 +102,12 @@ export const QUALITY_NAMED_SQL = `SELECT ${DERIVATIVE_FIELDS},
             THEN 1 ELSE 0 END AS expired
   ${GATED_FROM}
    AND cd.key = ?3`;
+
+/**
+ * The header of the edge-cache entry that remembers a recording the derivative's table does not list. It is
+ * only ever in the Worker's own cache: the client is answered `quality_not_found`, `no-store`.
+ */
+const QUALITY_ABSENT_MARK = "X-Nemar-Quality-Absent";
 
 interface DerivativeRead extends ProcessingDerivative {
   epoch: number;
@@ -227,6 +237,12 @@ export async function qualityHandler(
   );
   if (cache !== null) {
     const hit = await cache.match(cacheKey);
+    if (hit?.headers.get(QUALITY_ABSENT_MARK) === "1") {
+      // A recording the derivative's table does not list, remembered: the client is answered as on the
+      // first request (no-store), and the table is not scanned again.
+      await hit.body?.cancel();
+      return refuse("quality_not_found");
+    }
     if (hit) {
       // The Workers Cache API strips `Cache-Tag` from what it stores, so the tag is set again: a browser or
       // an outer cache keeps the answer under the dataset's tag, which an unpublish purges.
@@ -236,13 +252,41 @@ export async function qualityHandler(
     }
   }
 
+  // A processing miss scans the derivative's whole recordings table (up to `QUALITY_TABLE_MAX_BYTES` in
+  // ranged reads), so it is charged to the caller's miss budget, as a brokered git file's miss is; a hit is
+  // never charged. With no Cache API there is no counter to charge, and the budget itself would fail open.
+  if (asked.kind === "processing" && cache !== null) {
+    const budget = await checkDataMissBudget(env, request, defer);
+    if (!budget.allowed) return budget.response;
+  }
+
   // 4 and 5. The record, checked whole, and a declared file, read again and hashed (`quality-serve.ts`,
   // the steps the admin mount runs too); or the recording's outcomes and link (`quality-processing.ts`).
   const served =
     asked.kind === "processing"
       ? await serveRecordingProcessing(bucket, row, asked.recording, { tag: "quality" })
       : await serveRecordingViews(bucket, row, asked, { tag: "quality" });
-  if (!served.ok) return refuse(served.word);
+  if (!served.ok) {
+    // The derivative's table is immutable, so a recording it does not list stays unlisted under this key:
+    // remembered in the edge cache (never sent to a client, which still gets no-store), so a probe of
+    // recordings that do not exist scans the table once per key.
+    if ("absent" in served && cache !== null) {
+      const mark = new Response(null, {
+        headers: {
+          [QUALITY_ABSENT_MARK]: "1",
+          "Cache-Control": `public, max-age=${QUALITY_PUBLIC_MAX_AGE}`,
+        },
+      });
+      const write = cache.put(cacheKey, mark).catch((err: unknown) => {
+        console.warn(
+          `[quality] cache_put_failed dataset=${datasetId} error=${err instanceof Error ? err.name : typeof err}`,
+        );
+      });
+      if (defer) defer(write);
+      else await write;
+    }
+    return refuse(served.word);
+  }
   const response = new Response(served.bytes, {
     headers: { ...served.headers, ...publicHeaders(datasetId, served.sha256) },
   });

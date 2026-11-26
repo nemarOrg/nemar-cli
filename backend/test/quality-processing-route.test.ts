@@ -12,11 +12,14 @@
  *  - a recording's `processing` entry (each declared checkpoint, then `stored`) and its `signalJourney` link,
  *    valid against the vendored neuroschema, the link naming the very record bytes the record endpoint's
  *    `dataQuality` names; a failed or skipped recording's outcomes and its `failed` link; over a run's rows the
- *    outcomes sum to the run's reconciled counts with `stored` kept;
- *  - the recording is found by its exact path, and a recording with no row is not found;
- *  - a table or record that cannot be read or does not check is `record_unreadable`, never a link to nothing;
- *  - the derivative row's checkpoint map is used when the registry has moved past its version;
- *  - the quality route's gate, derivative choice, path rule, headers and epoch-keyed edge cache.
+ *    outcomes sum to the counts `metadata.json` serves after the real reconciliation of the same run;
+ *  - the recording is found by its exact path, a recording with no row is not found, and a recording two rows
+ *    name refuses the table; the scan reads the whole table within its bounds, and none past them;
+ *  - a table or record that cannot be read or does not check is `record_unreadable`, by its reason, never a
+ *    link to nothing;
+ *  - the derivative row's checkpoint map wins over the registry's, and with neither nothing is read;
+ *  - the quality route's gate, derivative choice, path rule, headers and epoch-keyed edge cache; a miss is
+ *    charged to the data miss budget, and a recording the table does not list is remembered.
  */
 
 import type { Database } from "bun:sqlite";
@@ -24,17 +27,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { Miniflare } from "miniflare";
-import {
-  type RecordingRow,
-  countRecordings,
-  readRecordingsHeader,
-  readRecordingsRow,
-  storedCounts,
-} from "../../shared/compute-checkpoints";
 import { declaredCheckpoints } from "../../shared/compute-recipes";
+import { resultsOutputKey } from "../../shared/contract/compute-launch";
 import {
   QUALITY_PROCESSING_FORMAT,
   QUALITY_TABLE_LINE_MAX,
+  QUALITY_TABLE_MAX_BYTES,
   qualityProcessingPath,
   qualityRecordPath,
 } from "../../shared/contract/quality-route";
@@ -42,7 +40,9 @@ import {
   compileNeuroschemaValidator,
   formatAjvErrors,
 } from "../../test/contract/neuroschema-validator";
+import { __limits } from "../src/middleware/rateLimit";
 import { dataRoutes } from "../src/routes/data";
+import { reconcilePipelineProgress } from "../src/services/compute-pipeline-progress";
 import { TABLE_PART_BYTES } from "../src/services/quality-processing";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { InMemoryCache } from "./helpers/cache";
@@ -114,6 +114,7 @@ let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let host: Miniflare;
 let bucket: R2Bucket;
+let results: R2Bucket;
 
 const env = (over: Partial<Bindings> = {}): Bindings =>
   ({
@@ -129,24 +130,26 @@ beforeAll(async () => {
     modules: true,
     script: "export default { fetch() { return new Response('ok') } }",
     compatibilityDate: "2024-12-01",
-    r2Buckets: ["COMPUTE_DERIVATIVES"],
+    r2Buckets: ["COMPUTE_DERIVATIVES", "COMPUTE_RESULTS"],
   });
   bucket = (await host.getR2Bucket("COMPUTE_DERIVATIVES")) as unknown as R2Bucket;
+  results = (await host.getR2Bucket("COMPUTE_RESULTS")) as unknown as R2Bucket;
 }, 120_000);
 
 afterAll(async () => {
   await host?.dispose();
 }, 30_000);
 
-async function emptyBucket(): Promise<void> {
+async function emptyBucket(which: R2Bucket = bucket): Promise<void> {
   for (;;) {
-    const listed = await bucket.list({ limit: 1000 });
+    const listed = await which.list({ limit: 1000 });
     if (listed.objects.length === 0) return;
-    await bucket.delete(listed.objects.map((o) => o.key));
+    await which.delete(listed.objects.map((o) => o.key));
   }
 }
 
 function seedDataset(id: string): void {
+  // A real dataset row, public and published.
   db.run(
     `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox, anonymous, modalities,
                            first_published_at)
@@ -164,6 +167,18 @@ async function derivative(
     table?: string | null;
   } = {},
 ): Promise<string> {
+  return (await run(over)).key;
+}
+
+/** As {@link derivative}, and the run's job and stamp. */
+async function run(
+  over: {
+    retention?: "canary" | "catalog" | "published";
+    storedAt?: string;
+    recipeVersion?: string;
+    table?: string | null;
+  } = {},
+): Promise<{ key: string; jobId: string; stampId: number }> {
   const d1 = realD1(db);
   const jobId = newJobId();
   const runs = (
@@ -183,10 +198,11 @@ async function derivative(
   for (const [path, bytes] of PRODUCT) await bucket.put(`d/${key}/${path}`, bytes);
   if (over.table === null) await bucket.delete(`d/${key}/${TABLE_PATH}`);
   else if (over.table !== undefined) await bucket.put(`d/${key}/${TABLE_PATH}`, over.table);
-  return key;
+  return { key, jobId, stampId };
 }
 
-const get = (path: string, over: Partial<Bindings> = {}) => app.request(path, {}, env(over));
+const get = (path: string, over: Partial<Bindings> = {}, headers: Record<string, string> = {}) =>
+  app.request(path, { headers }, env(over));
 const url = (recording = RECORDING, id = DATASET) =>
   qualityProcessingPath(id, "nemar-ica", recording);
 
@@ -202,6 +218,7 @@ beforeEach(async () => {
   app = new Hono();
   app.route("/", dataRoutes);
   await emptyBucket();
+  await emptyBucket(results);
   seedDataset(DATASET);
   (globalThis as { caches?: unknown }).caches = undefined;
 });
@@ -315,30 +332,42 @@ describe("a recording's outcomes and link, from the current public derivative", 
     }
   });
 
-  test("over every row of the run, the recordings' outcomes sum to the run's reconciled counts with stored kept", async () => {
-    await derivative({ table: MIXED_TABLE });
-    const lines = MIXED_TABLE.trimEnd().split("\n");
-    const head = readRecordingsHeader(lines[0] as string);
-    if (!head.ok) throw new Error(head.reason);
-    const rows = lines.slice(1).map((l) => {
-      const r = readRecordingsRow(l, head.header);
-      if (!r.ok) throw new Error(r.reason);
-      return r.row;
-    }) as RecordingRow[];
+  test("over every row of the run, the recordings' outcomes sum to the counts metadata.json serves for the same run, reconciled by the real reconciliation (MUTATION: stored passed for every row)", async () => {
+    const r = await run({ table: MIXED_TABLE });
+    // The run's product where the launcher uploads it, and the real reconciliation of its stamp.
+    for (const [path, bytes] of PRODUCT) {
+      await results.put(
+        resultsOutputKey(r.jobId, `product/${path}`),
+        path === TABLE_PATH ? MIXED_TABLE : bytes,
+      );
+    }
+    // The run is reconciled, and its stored row resolved from its stored derivative, in one call.
+    await logged(async () => {
+      expect(await reconcilePipelineProgress(env({ COMPUTE_RESULTS: results }))).toEqual({
+        reconciled: 2,
+        later: 0,
+        errored: 0,
+      });
+    });
+    const served = (await (await get(`/${DATASET}/metadata.json`)).json()) as Loose;
+    const counts = served.extensions.processing.recipes["nemar-ica"].counts;
     const declared = declaredCheckpoints(ICA);
+    expect(Object.keys(counts)).toEqual(declared);
     const sums: Loose = Object.fromEntries(
       declared.map((c) => [c, { passed: 0, failed: 0, skipped: 0, total: 0 }]),
     );
-    for (const r of rows) {
-      const body = (await (await get(url(r.path))).json()) as Loose;
+    const paths = MIXED_TABLE.trimEnd()
+      .split("\n")
+      .slice(1)
+      .map((l) => l.split("\t")[COLUMNS.indexOf("path")] as string);
+    for (const path of paths) {
+      const body = (await (await get(url(path))).json()) as Loose;
       for (const c of declared) {
         sums[c][body.processing.recipes["nemar-ica"].checkpoints[c].status] += 1;
         sums[c].total += 1;
       }
     }
-    const counts = countRecordings(rows, ICA.checkpoints);
-    const last = counts.quality;
-    expect(sums).toEqual({ ...counts, stored: storedCounts("kept", last.passed, last.total) });
+    expect(sums).toEqual(counts);
   });
 
   test("the recording is its exact path: another case, a longer path or a recording the run did not list is not found (MUTATION: match by substring)", async () => {
@@ -389,19 +418,53 @@ describe("what cannot be read or does not check is record_unreadable, logged, ne
     ]);
   });
 
-  test("a table with no step column, an empty table, and the recording's row of the wrong width", async () => {
-    for (const table of [
-      TABLE_TEXT.replace("\tstep\t", "\tstage\t"),
-      "",
-      `${HEADER}\n${RECORDING}\tsucceeded\n`,
-    ]) {
+  test("a table with no step column, an empty table, and the recording's row of the wrong width, each by its reason", async () => {
+    for (const [table, reason] of [
+      [TABLE_TEXT.replace("\tstep\t", "\tstage\t"), "missing_column"],
+      ["", "empty_table"],
+      [`${HEADER}\n${RECORDING}\tsucceeded\n`, "row_width"],
+    ] as const) {
       await emptyBucket();
       db.run("DELETE FROM compute_derivatives");
-      await derivative({ table });
-      expect(
-        await logged(async () => expect(await refused()).toBe("record_unreadable")),
-      ).toHaveLength(1);
+      const key = await derivative({ table });
+      const lines = await logged(async () => expect(await refused()).toBe("record_unreadable"));
+      expect(lines).toEqual([
+        `[quality] record_unreadable dataset=${DATASET} key=${key.slice(0, 12)} reason=${reason}`,
+      ]);
     }
+  });
+
+  test("a table over the bound is refused unread: no ranged read of it is made (MUTATION: drop the size check)", async () => {
+    const key = await derivative({ table: "x".repeat(QUALITY_TABLE_MAX_BYTES + 1) });
+    // The real bucket, counted: every read of the table is recorded.
+    const reads: string[] = [];
+    const counted = {
+      head: (k: string) => bucket.head(k),
+      get: (k: string, o?: Parameters<R2Bucket["get"]>[1]) => {
+        reads.push(k);
+        return bucket.get(k, o);
+      },
+    } as unknown as R2Bucket;
+    const lines = await logged(async () => {
+      const res = await get(url(), { COMPUTE_DERIVATIVES: counted });
+      expect(res.status).toBe(502);
+      expect(await word(res)).toBe("record_unreadable");
+    });
+    expect(lines.join("\n")).toContain("reason=table_too_large");
+    expect(reads.filter((k) => k === `d/${key}/${TABLE_PATH}`)).toEqual([]);
+  }, 60_000);
+
+  test("a table with a byte order mark and CRLF line ends reads as reconciliation reads it", async () => {
+    const crlf = `\uFEFF${MIXED_TABLE.trimEnd().split("\n").join("\r\n")}\r\n`;
+    await derivative({ table: crlf });
+    const ok = (await (await get(url())).json()) as Loose;
+    expect(ok.processing.recipes["nemar-ica"].checkpoints.stored).toEqual(PASSED);
+    const failed = (await (await get(url(rec("CUCOV104")))).json()) as Loose;
+    expect(failed.processing.recipes["nemar-ica"].checkpoints.import).toEqual({
+      status: "failed",
+      code: "disk_error",
+      step: null,
+    });
   });
 
   test("a line longer than the scan takes, before the recording's (MUTATION: drop the line bound)", async () => {
@@ -436,9 +499,28 @@ describe("what cannot be read or does not check is record_unreadable, logged, ne
     expect(second.processing.recipes["nemar-ica"].checkpoints.ica.status).toBe("failed");
   }, 60_000);
 
-  test("the scan stops at the recording's row: a later line is never read", async () => {
-    await derivative({ table: `${HEADER}\n${SUCCEEDED}\nnot a row at all\n` });
-    expect((await get(url())).status).toBe(200);
+  test("the scan reads to the end: a line over the bound after the recording's row refuses the table (MUTATION: stop at the first match)", async () => {
+    const long = `${"y".repeat(QUALITY_TABLE_LINE_MAX + 1)}\n`;
+    await derivative({ table: `${HEADER}\n${SUCCEEDED}\n${long}` });
+    const lines = await logged(async () => expect(await refused()).toBe("record_unreadable"));
+    expect(lines.join("\n")).toContain("reason=line_too_long");
+  });
+
+  test("a recording two rows name refuses the table, wherever the second row is (MUTATION: keep the first match)", async () => {
+    for (const second of [
+      // A later row of the same path, failed: the two rows disagree.
+      line({ path: RECORDING, datatype: "eeg", status: "failed", code: "disk_error" }),
+      // An exact repeat.
+      SUCCEEDED,
+    ]) {
+      await emptyBucket();
+      db.run("DELETE FROM compute_derivatives");
+      await derivative({ table: `${HEADER}\n${SUCCEEDED}\n${FAILED_ICA}\n${second}\n` });
+      const lines = await logged(async () => expect(await refused()).toBe("record_unreadable"));
+      expect(lines.join("\n")).toContain("reason=duplicate_path");
+    }
+    // Another recording of the same table is still read: only the repeated one is refused.
+    expect((await get(url(rec("CUCOV102")))).status).toBe(200);
   });
 
   test("a succeeded recording whose record is missing, names another recording, or has no signalJourney version (MUTATION: drop the identity check)", async () => {
@@ -454,6 +536,20 @@ describe("what cannot be read or does not check is record_unreadable, logged, ne
         "another dataset",
         (doc) => {
           doc.extensions.nemar.dataset.id = "nm000001";
+        },
+        "record_elsewhere",
+      ],
+      [
+        "another recipe",
+        (doc) => {
+          doc.extensions.nemar.recipe.id = "nemar-floor";
+        },
+        "record_elsewhere",
+      ],
+      [
+        "another recipe version",
+        (doc) => {
+          doc.extensions.nemar.recipe.version = "0.9.0";
         },
         "record_elsewhere",
       ],
@@ -481,15 +577,21 @@ describe("what cannot be read or does not check is record_unreadable, logged, ne
     await bucket.delete(`d/${key}/${RECORD_PATH}`);
     const lines = await logged(async () => expect(await refused()).toBe("record_unreadable"));
     expect(lines.join("\n")).toContain("reason=record_missing");
+    // A record that is not UTF-8.
+    await bucket.put(`d/${key}/${RECORD_PATH}`, new Uint8Array([0x7b, 0xff, 0xfe, 0x7d]));
+    const bad = await logged(async () => expect(await refused()).toBe("record_unreadable"));
+    expect(bad.join("\n")).toContain("reason=record_unreadable");
   });
 });
 
 describe("the checkpoint map of the derivative's own version", () => {
   test("a derivative of a version the registry moved past is read with the map its row recorded (MUTATION: read the registry's map only)", async () => {
     const key = await derivative({ recipeVersion: "0.9.0", table: MIXED_TABLE });
-    // Without a recorded map, nothing says which steps were which checkpoint's.
+    // Without a recorded map, nothing says which steps were which checkpoint's: the outcomes cannot be read.
     const lines = await logged(async () => {
-      expect(await word(await get(url(rec("CUCOV101"))))).toBe("quality_not_found");
+      const res = await get(url(rec("CUCOV101")));
+      expect(res.status).toBe(502);
+      expect(await word(res)).toBe("record_unreadable");
     });
     expect(lines.join("\n")).toContain("reason=checkpoint_map_unknown");
     // That version's map: bad channels counted at import.
@@ -512,18 +614,45 @@ describe("the checkpoint map of the derivative's own version", () => {
     });
   });
 
-  test("a recorded map that is not one is record_unreadable", async () => {
-    const key = await derivative();
+  test("the row's map wins over the registry's even while the registry holds the version (MUTATION: prefer the registry's map)", async () => {
+    const key = await derivative({ table: MIXED_TABLE });
     db.run("UPDATE compute_derivatives SET checkpoint_map = ? WHERE key = ?", [
-      JSON.stringify([{ checkpoint: "stored", steps: [] }]),
+      JSON.stringify([{ checkpoint: "import", steps: ["load", "bad_channels"] }]),
       key,
     ]);
-    const lines = await logged(async () => {
-      const res = await get(url());
-      expect(res.status).toBe(502);
-      expect(await word(res)).toBe("record_unreadable");
+    const body = (await (await get(url(rec("CUCOV101")))).json()) as Loose;
+    expect(body.processing.recipes["nemar-ica"].checkpoints).toEqual({
+      import: { status: "failed", code: "all_channels_flagged", step: "bad_channels" },
+      stored: { status: "skipped", code: "all_channels_flagged", step: "bad_channels" },
     });
-    expect(lines.join("\n")).toContain("reason=checkpoint_map_invalid");
+  });
+
+  test("a recorded map that is not one is record_unreadable: stored, a repeated checkpoint, a step that is not a word", async () => {
+    for (const map of [
+      [{ checkpoint: "stored", steps: [] }],
+      [
+        { checkpoint: "import", steps: ["load"] },
+        { checkpoint: "import", steps: ["bad_channels"] },
+      ],
+      [{ checkpoint: "import", steps: ["load", 7] }],
+      [],
+    ]) {
+      const key = await derivative();
+      db.run("UPDATE compute_derivatives SET checkpoint_map = ? WHERE key = ?", [
+        JSON.stringify(map),
+        key,
+      ]);
+      const lines = await logged(async () => {
+        const res = await get(url());
+        expect(res.status).toBe(502);
+        expect(await word(res)).toBe("record_unreadable");
+      });
+      expect([JSON.stringify(map), lines.join("\n")]).toEqual([
+        JSON.stringify(map),
+        expect.stringContaining("reason=checkpoint_map_invalid"),
+      ]);
+      db.run("DELETE FROM compute_derivatives");
+    }
   });
 });
 
@@ -536,6 +665,8 @@ describe("the quality route's gate, paths and cache", () => {
   for (const [name, statement] of [
     ["private", "UPDATE datasets SET visibility = 'private' WHERE dataset_id = ?"],
     ["withdrawn", "UPDATE datasets SET withdrawn_at = '2026-11-01 00:00:00' WHERE dataset_id = ?"],
+    ["tombstoned", "UPDATE datasets SET ezid_status = 'unavailable' WHERE dataset_id = ?"],
+    ["never published", "UPDATE datasets SET first_published_at = NULL WHERE dataset_id = ?"],
     [
       "an anonymous deposit",
       "UPDATE datasets SET first_published_at = NULL, anonymous = 1 WHERE dataset_id = ?",
@@ -595,6 +726,56 @@ describe("the quality route's gate, paths and cache", () => {
         expect(await word(again)).toBe("record_unreadable");
       });
       expect(res.join("\n")).toContain("reason=table_missing");
+    });
+
+    test("a recording the table does not list is remembered: the table is not scanned again, and the client still gets no-store (MUTATION: do not remember an absent row)", async () => {
+      const key = await derivative();
+      const missing = rec("CUCOV999");
+      const first = await get(url(missing));
+      expect(first.status).toBe(404);
+      expect(first.headers.get("X-Nemar-Quality-Absent")).toBeNull();
+      expect(await word(first)).toBe("quality_not_found");
+      // The table goes: a scan now would be record_unreadable, so a 404 is the remembered answer.
+      await bucket.delete(`d/${key}/${TABLE_PATH}`);
+      const again = await get(url(missing));
+      expect(again.status).toBe(404);
+      expect(again.headers.get("X-Nemar-Quality-Absent")).toBeNull();
+      expect(await word(again)).toBe("quality_not_found");
+      // A recording that was never asked is scanned, and finds the table gone.
+      await logged(async () => {
+        expect((await get(url())).status).toBe(502);
+      });
+      // A change of the gate moves to a new epoch, where nothing is remembered.
+      db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = ?", [DATASET]);
+      db.run("UPDATE datasets SET visibility = 'public' WHERE dataset_id = ?", [DATASET]);
+      await logged(async () => {
+        expect((await get(url(missing))).status).toBe(502);
+      });
+    });
+
+    test("a miss is charged to the caller's data miss budget and refused past it; a hit is not charged (MUTATION: drop the charge)", async () => {
+      await derivative();
+      const ip = "203.0.113.77";
+      const other = "203.0.113.78";
+      // A hit, cached by another caller first.
+      expect((await get(url(), {}, { "CF-Connecting-IP": other })).status).toBe(200);
+      // The caller's miss budget, spent (the record checkDataMissBudget itself writes).
+      await cache.put(
+        new Request(`https://rate-limit.internal/rl:data-miss-ip:${ip}`),
+        new Response(
+          JSON.stringify({
+            count: __limits.DATA_MISS_MAX_REQUESTS,
+            warned: false,
+            windowEnd: Date.now() + 60_000,
+          }),
+          { headers: { "Content-Type": "application/json", "Cache-Control": "max-age=60" } },
+        ),
+      );
+      const hit = await get(url(), {}, { "CF-Connecting-IP": ip });
+      expect(hit.status).toBe(200);
+      const miss = await get(url(rec("CUCOV999")), {}, { "CF-Connecting-IP": ip });
+      expect(miss.status).toBe(429);
+      expect(miss.headers.get("X-RateLimit-Bucket")).toBe("data-miss-ip");
     });
 
     test("no refusal is cached, and the processing and record answers never share an entry", async () => {
