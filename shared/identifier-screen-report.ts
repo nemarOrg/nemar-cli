@@ -83,6 +83,7 @@ const KIND_TABLE: Record<FindingKind, true> = {
   "eeglab-subject-freetext": true,
   "eeglab-event-name": true,
   "eeglab-history-name": true,
+  "eeglab-setname-name": true,
   "mat-freetext": true,
   "mat-freetext-name": true,
   "mat-identifier-field": true,

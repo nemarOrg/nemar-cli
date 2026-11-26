@@ -283,6 +283,12 @@ export const KIND_COPY: Record<FindingKind, Copy> = {
     "Check EEG.history; remove any name from it, save the dataset and upload again.",
     "eeglab-history-name",
   ),
+  "eeglab-setname-name": kind(
+    "The set name of an EEGLAB .set file holds what looks like a person's name.",
+    EEGLAB,
+    "Check EEG.setname; replace any name with the BIDS subject label, save the dataset and upload again.",
+    "eeglab-setname-name",
+  ),
   "mat-freetext": kind(
     "A text value in a MATLAB file holds a path into someone's home directory, contact details, or text in a person's field that may name someone.",
     MATLAB_TEXT,

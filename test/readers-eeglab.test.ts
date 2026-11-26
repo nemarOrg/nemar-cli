@@ -279,9 +279,9 @@ describe("the EEGLAB field rules", () => {
       kinds(scanEeglabEntries([char(fields, v)], path));
     expect(column(["urevent", "Subject"], "go")).toEqual([]);
     expect(column(["epoch", "eventhistory"], "/Users/qmarlow/x")).toEqual([]);
-    expect(column(["event", "experimenter"], "Quillfeather Marlow")).toEqual([
-      "eeglab-event-name/review",
-    ]);
+    // Only `type`: every other column is not scanned (lead ruling P1').
+    expect(column(["event", "experimenter"], "Quillfeather Marlow")).toEqual([]);
+    expect(column(["event", "code"], "New Segment")).toEqual([]);
     // The twin outside the event tables: the person-field rule applies.
     expect(column(["etc", "experimenter"], "go")).toEqual(["mat-freetext-name/identifier"]);
     expect(
@@ -347,6 +347,13 @@ describe("the EEGLAB field rules", () => {
     expect(k(["BIDS", "gInfo", "Contact"], "q.marlow@example.invalid")).toEqual([
       "mat-identifier-field/review",
     ]);
+  });
+
+  test("setname: the person-name rule, never the path rule", () => {
+    const k = (v: string) => kinds(scanEeglabEntries([char(["setname"], v)], path));
+    expect(k("Quillfeather Marlow rest")).toEqual(["eeglab-setname-name/review"]);
+    expect(k("/Users/qmarlow/studies/rest")).toEqual([]);
+    expect(k("sub-07 rest epochs")).toEqual([]);
   });
 
   test("personNameIn and withoutPaths", () => {

@@ -13,10 +13,11 @@
  * - `filepath`, and every other location field (`isLocationField`, shared by every format:
  *   `chaninfo.filename`, `splinefile`, `dipfit.hdmfile`, `etc.original_mff`, ...): not scanned. They record
  *   where the researcher kept the file and name no participant.
- * - `history`: the person-name rule only ({@link personNameIn}), as `eeglab-history-name`
- *   (review); never the path rule.
- * - The event tables (`event`, `urevent`, `epoch`), every column: the person-name rule only,
- *   as `eeglab-event-name` (review); numeric and code-like values never fire.
+ * - `history` and `setname`: the person-name rule only ({@link personNameIn}), as
+ *   `eeglab-history-name` and `eeglab-setname-name` (review); never the path rule.
+ * - The event tables (`event`, `urevent`, `epoch`): `type` gets the person-name rule only, as
+ *   `eeglab-event-name` (review), and numeric and code-like types never fire; every other column
+ *   is not scanned, as BIDS `events.tsv` is not (lead ruling P1').
  * - Channel labels never fire.
  * - `datfile` (or `data` as text): the `.fdt` file holding the signal, which must sit beside the
  *   `.set` ({@link ReaderResult.needs}); a miss is a missing companion, not a finding. The
@@ -135,7 +136,6 @@ export function fdtNamed(entries: readonly MatEntry[]): string | null {
 /** The EEGLAB rules over a walk's arrays, for the file at `path`. */
 export function scanEeglabEntries(entries: readonly MatEntry[], path: string): Finding[] {
   const out: Finding[] = [];
-  let historyFired = false;
   for (const entry of entries) {
     const f = eeglabFields(entry);
     const top = f[0] ?? "";
@@ -159,32 +159,33 @@ export function scanEeglabEntries(entries: readonly MatEntry[], path: string): F
       });
       continue;
     }
-    if (top === "history" && f.length === 1) {
-      if (historyFired || entry.class !== "char") continue;
+    // `history` and `setname`: the person-name rule only, never the path rule (lead rulings:
+    // a path there is where the researcher kept the recording).
+    if ((top === "history" || top === "setname") && f.length === 1) {
+      if (entry.class !== "char") continue;
       const hit = linesOf(entry)
         .map(personNameIn)
         .find((h) => h !== null);
       if (hit) {
-        historyFired = true;
         out.push({
-          kind: "eeglab-history-name",
+          kind: top === "history" ? "eeglab-history-name" : "eeglab-setname-name",
           severity: "review",
-          field: "eeglab.history",
+          field: `eeglab.${top}`,
           shape: shapeOf(hit),
         });
       }
       continue;
     }
-    // The event tables' columns (lead rulings: types, then every column): the person-name rule
-    // only, never the path or person-field rules; numbers and codes never fire.
+    // The event tables (lead ruling P1'): `type` gets the person-name rule only; every other
+    // column is not scanned, as BIDS events.tsv is not.
     if (EVENT_TABLES.has(top) && f.length >= 2) {
-      if (entry.class !== "char") continue;
+      if (f.length !== 2 || f[1] !== "type" || entry.class !== "char") continue;
       const hit = personNameIn(textOf(entry));
       if (hit) {
         out.push({
           kind: "eeglab-event-name",
           severity: "review",
-          field: f[1] === "type" && f.length === 2 ? "eeglab.event.type" : "eeglab.event.field",
+          field: "eeglab.event.type",
           shape: shapeOf(hit),
         });
       }

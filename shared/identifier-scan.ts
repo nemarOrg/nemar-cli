@@ -72,6 +72,7 @@ export type FindingKind =
   | "eeglab-subject-freetext"
   | "eeglab-event-name"
   | "eeglab-history-name"
+  | "eeglab-setname-name"
   | "mat-freetext"
   | "mat-freetext-name"
   | "mat-identifier-field";
