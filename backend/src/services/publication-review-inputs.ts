@@ -437,5 +437,17 @@ export async function publicationReviewInputs(
     previous_denial: await previousDenialOf(db, datasetId, request.previous_request_id),
     coverage: coverageOf(readNarrowScreenReport(request.identifier_screen_report), row.headSha),
   };
+  // The job now holds its inputs and may call the model: stamped once, on the claimed row still
+  // waiting, so a later `inputs_unavailable` from it is stored as `workflow_failed` (it counts).
+  // A stamp that cannot be written serves nothing, so no run is left able to make a call free.
+  const stamped = await db
+    .prepare(
+      `UPDATE publication_reviews SET inputs_served_at = COALESCE(inputs_served_at, datetime('now'))
+        WHERE id = ? AND dataset_id = ? AND claimed_at IS NOT NULL
+          AND state IN ('dispatched', 'unreported')`,
+    )
+    .bind(reviewId, datasetId)
+    .run();
+  if ((stamped.meta.changes ?? 0) !== 1) return { kind: "not_claimed" };
   return { kind: "ok", body };
 }

@@ -20,7 +20,10 @@
 -- reported row written by a job from before this record (a version-1 report) leaves them NULL.
 --
 -- `detail` gains `inputs_unavailable`: the job could not read the review's widened inputs from the
--- Worker and reviewed nothing. SQLite cannot change a CHECK in place, so the table is rebuilt with
+-- Worker and reviewed nothing. `inputs_served_at` is when the Worker answered the job's inputs call
+-- with the inputs (it is set once, and only on a claimed row still waiting): a job that posts
+-- `inputs_unavailable` after it was served them may have called the model, so that word is then
+-- stored as `workflow_failed`, which counts against the caps, as a claimed `stale_head` is. SQLite cannot change a CHECK in place, so the table is rebuilt with
 -- every row, column and index it had; nothing references it (migration 0098 declares no foreign key
 -- either way), and no trigger or view reads it.
 
@@ -57,6 +60,7 @@ CREATE TABLE publication_reviews_new (
   prompt_version TEXT,
   input_digest TEXT CHECK (input_digest IS NULL OR length(input_digest) = 64),
   enrichment_source TEXT,
+  inputs_served_at TEXT,
   UNIQUE (request_id, head_sha, anonymous),
   -- A verdict, and a stored report, exist exactly when the review reported.
   CHECK ((state = 'reported') = (verdict IS NOT NULL)),

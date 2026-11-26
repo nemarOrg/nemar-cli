@@ -952,14 +952,21 @@ export const STORE_RESULT_SQL_MARKER = "SET state = ?, verdict = ?";
  * The reproducibility record (ADR 0139, decision 9) is written in the same statement, so a stored
  * report and its record cannot part: the seven columns of migration 0152, NULL for a run error.
  *
- * Binds, in order: the state, the verdict, the detail (twice), the report, the record's seven
+ * The same holds for `inputs_unavailable` (in `NEVER_REACHED_MODEL` too): it is the job's word for
+ * inputs it could not read, and once the Worker has served them (`inputs_served_at`) the run may
+ * have called the model, so the word is stored as `workflow_failed`, which counts.
+ *
+ * Binds, in order: the state, the verdict, the detail (three times), the report, the record's seven
  * columns ({@link RECORD_COLUMNS}), then `waitingRow`'s.
  */
 function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): string {
   return `UPDATE publication_reviews
       ${STORE_RESULT_SQL_MARKER},
           detail = CASE WHEN claimed_at IS NOT NULL AND ? = 'stale_head'
-                        THEN 'workflow_failed' ELSE ? END,
+                          THEN 'workflow_failed'
+                        WHEN inputs_served_at IS NOT NULL AND ? = 'inputs_unavailable'
+                          THEN 'workflow_failed'
+                        ELSE ? END,
           report = ?, nonce = NULL,
           ${RECORD_COLUMNS.map((c) => `${c} = ?`).join(", ")},
           decided_at = datetime('now')
@@ -1065,6 +1072,7 @@ export async function storePublicationReviewResult(
   const binds = [
     reported ? "reported" : "errored",
     reported ? verdictOf(reportReasons(reported)) : null,
+    outcomeToStore.kind === "error" ? outcomeToStore.error : null,
     outcomeToStore.kind === "error" ? outcomeToStore.error : null,
     outcomeToStore.kind === "error" ? outcomeToStore.error : null,
     reported ? JSON.stringify(reported) : null,

@@ -397,6 +397,28 @@ describe("the reproducibility record is stored with the report", () => {
     });
   });
 
+  test("inputs_unavailable before the inputs were served never reached a model; after, it counts", async () => {
+    // Not served: the job's word stands, and the attempt is free (NEVER_REACHED_MODEL).
+    const first = review();
+    await h.result(first.reviewId, { outcome: "error", error: "inputs_unavailable" });
+    expect(h.review(first.reviewId)).toMatchObject({
+      detail: "inputs_unavailable",
+      inputs_served_at: null,
+    });
+    h.db.run("DELETE FROM publication_reviews");
+    h.db.run("DELETE FROM publication_requests");
+    // Served: the run may have called the model, so the word is stored as workflow_failed.
+    const second = review();
+    const token = await h.tokenFor(second.reviewId);
+    expect((await inputs(second.reviewId, token)).status).toBe(200);
+    expect(h.review(second.reviewId).inputs_served_at).not.toBeNull();
+    await h.result(second.reviewId, { outcome: "error", error: "inputs_unavailable" }, token);
+    expect(h.review(second.reviewId)).toMatchObject({
+      state: "errored",
+      detail: "workflow_failed",
+    });
+  });
+
   test("a run error stores no record", async () => {
     const { reviewId } = review();
     await h.result(reviewId, { outcome: "error", error: "inputs_unavailable" });
