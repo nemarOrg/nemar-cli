@@ -2082,6 +2082,8 @@ export interface PublicationReviewSection {
   lines: string[];
   /** The command an administrator runs next, when it is theirs to run. */
   next?: string;
+  /** Set when the review could not be read and the section says so (`describeUnreadableReview`). */
+  unreadable?: true;
 }
 
 const SCREEN_TONE_COLOR: Record<PublicationScreenSection["tone"], string> = {

@@ -1127,6 +1127,7 @@ export async function publicationReviewEmailSection(
       tone: unreadable.tone,
       lines: unreadable.lines,
       next: unreadable.next ?? undefined,
+      unreadable: true,
     };
   }
 }

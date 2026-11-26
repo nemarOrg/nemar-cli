@@ -22,6 +22,7 @@ import {
   parsePermissionBasis,
   parseSourceIds,
   permissionCovers,
+  storedTargetLicense,
 } from "../../../shared/license-permission.js";
 import type { PublicationReviewReport } from "../../../shared/publication-review.js";
 import type { PublicationReviewRow } from "./publication-review-rows.js";
@@ -57,13 +58,10 @@ export async function coveringPermission(
   }>();
   for (const p of results ?? []) {
     const ids = parseSourceIds(p.source_ids);
-    if (ids === null) continue;
-    if (
-      permissionCovers(
-        { outcome: p.outcome, target_license: p.target_license, source_ids: ids },
-        basis,
-      )
-    ) {
+    const target = storedTargetLicense(p.target_license);
+    // A row whose words do not read covers nothing.
+    if (ids === null || target === undefined || !isActionRequiredOutcome(p.outcome)) continue;
+    if (permissionCovers({ outcome: p.outcome, target_license: target, source_ids: ids }, basis)) {
       return {
         id: Number(p.id),
         recorded_at: p.recorded_at,
@@ -111,7 +109,7 @@ export async function permissionFactOf(
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The depositor's message for a reviewed request whose lineage needs action, or null when it does
+ * The depositor's message for a reviewed request whose lineage needs action, or `[]` when it does
  * not: the lines the notice mail and the publication status print.
  */
 export function licenseNoticeLines(

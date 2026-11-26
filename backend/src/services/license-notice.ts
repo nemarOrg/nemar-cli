@@ -9,6 +9,7 @@ import { LICENSE_EVIDENCE_ADDRESS } from "../../../shared/license-lineage.js";
 import {
   type LicenseNoticeMailState,
   type ReadyMailOutcome,
+  type RecordedMail,
   isActionRequiredOutcome,
 } from "../../../shared/license-permission.js";
 import { READY_TO_APPROVE_HEADLINE } from "../../../shared/publication-auto-deny.js";
@@ -110,6 +111,11 @@ async function notice(env: Bindings, reviewId: number): Promise<LicenseNoticeOut
         state = err instanceof DevEmailFenceError ? "fenced" : "failed";
         console.error(`[license-notice] request ${request.id}: mail not sent (${errorWords(err)})`);
       }
+    } else {
+      state = "no_recipient";
+      console.warn(
+        `[license-notice] request ${request.id}: requester ${request.requested_by} has no address to mail`,
+      );
     }
   } finally {
     await db
@@ -138,7 +144,7 @@ async function notice(env: Bindings, reviewId: number): Promise<LicenseNoticeOut
 export async function afterPermissionRecorded(
   env: Bindings,
   requestId: number,
-): Promise<{ administrators: ReadyMailOutcome; depositor: LicenseNoticeMailState }> {
+): Promise<RecordedMail> {
   let administrators: ReadyMailOutcome = "undelivered";
   let depositor: LicenseNoticeMailState = "failed";
   try {
@@ -168,7 +174,10 @@ export async function afterPermissionRecorded(
     const review = await publicationReviewEmailSection(env, requestId, Date.now(), {
       screenStatusLine: screen.headline,
     });
-    if (review?.headline !== READY_TO_APPROVE_HEADLINE) {
+    // A review that could not be read is said so, never taken for one that is not ready.
+    if (review?.unreadable === true) {
+      administrators = "review_unreadable";
+    } else if (review?.headline !== READY_TO_APPROVE_HEADLINE) {
       administrators = "not_ready";
     } else {
       try {
@@ -207,6 +216,11 @@ export async function afterPermissionRecorded(
           `[license-permission] request ${requestId}: depositor mail not sent (${errorWords(err)})`,
         );
       }
+    } else {
+      depositor = "no_recipient";
+      console.warn(
+        `[license-permission] request ${requestId}: requester ${request.requested_by} has no address to mail`,
+      );
     }
   } catch (err) {
     console.error(

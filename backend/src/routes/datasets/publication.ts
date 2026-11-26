@@ -952,11 +952,18 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       if (reviewRow) {
         const view = rowViewOf(reviewRow, Date.now());
         const report = view.kind === "reported" ? view.report : null;
-        const permission = await permissionFactOf(db, request, reviewRow, report);
-        licenseLines =
-          permission !== null
-            ? [licensePermissionRecordedForDepositor(permission)]
-            : licenseNoticeLines(datasetId, reviewRow, report);
+        // Its own catch: a permission that cannot be read shows no lines, and never costs the record.
+        try {
+          const permission = await permissionFactOf(db, request, reviewRow, report);
+          licenseLines =
+            permission !== null
+              ? [licensePermissionRecordedForDepositor(permission)]
+              : licenseNoticeLines(datasetId, reviewRow, report);
+        } catch (err) {
+          console.error(
+            `[publish-status] could not read the license permission of request ${request.id}: ${errorWords(err)}`,
+          );
+        }
       }
     } catch (err) {
       console.error(
