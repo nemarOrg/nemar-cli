@@ -11,7 +11,8 @@
  *   (identifier) for a name-like word of letters only, `eeglab-subject-freetext` (review) for
  *   other text; nothing for a placeholder, the BIDS subject label or a short code.
  * - `filepath`, and every other location field (`isLocationField`, shared by every format:
- *   `chaninfo.filename`, `splinefile`, `dipfit.hdmfile`, `etc.original_mff`, ...): not scanned. They record
+ *   `chaninfo.filename`, `splinefile`, `dipfit.hdmfile`, `etc.original_mff`, ...): not scanned
+ *   (the free-text rules, `scanMatText`, skip them). They record
  *   where the researcher kept the file and name no participant.
  * - `history` and `setname`: the person-name rule only ({@link personNameIn}), as
  *   `eeglab-history-name` and `eeglab-setname-name` (review); never the path rule.
@@ -43,7 +44,6 @@ import {
   textOf,
   walkMatForReader,
 } from "./mat-generic";
-import { isLocationField } from "./person-fields";
 import { readSubjectId } from "./snirf";
 import { pairByName, stem } from "./text-header";
 
@@ -139,9 +139,6 @@ export function scanEeglabEntries(entries: readonly MatEntry[], path: string): F
   for (const entry of entries) {
     const f = eeglabFields(entry);
     const top = f[0] ?? "";
-    // Where the researcher kept a file (`filepath`, `chaninfo.filename`, the spline and dipfit
-    // files): never scanned, by the one shared rule.
-    if (isLocationField(f[f.length - 1] ?? "")) continue;
     if (f.length === 1 && (top === "datfile" || top === "data")) continue;
     if ((top === "chanlocs" || top === "urchanlocs") && f[1] === "labels") continue;
     if (startsWith(f, ["chaninfo", "nodatchans", "labels"])) continue;
