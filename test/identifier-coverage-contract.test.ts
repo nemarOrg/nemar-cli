@@ -631,6 +631,27 @@ describe("review round 1", () => {
     expect(report.scan?.status).toBe("direct-identifiers");
   });
 
+  test("a byte budget of size - 1 serves every byte but the last; asking for the last is refused", async () => {
+    const size = 2 * PAGE_BYTES + 100;
+    const data = bytes(size);
+    const tight = cachedSource(bufferSource(data), {
+      ...DEFAULT_READER_LIMITS,
+      maxBytes: size - 1,
+    });
+    expect((await tight.read(0, size - 1)).length).toBe(size - 1);
+    // Nothing a reader asked for was withheld: not limited.
+    expect(tight.limited).toBe(false);
+    await expect(tight.read(size - 1, 1)).rejects.toBeInstanceOf(LimitExceeded);
+    expect(tight.limited).toBe(true);
+    expect(tight.tally.bytes).toBe(size - 1);
+    // The boundary: a budget of exactly the size reads the whole file and is never limited.
+    const exact = cachedSource(bufferSource(data), { ...DEFAULT_READER_LIMITS, maxBytes: size });
+    expect((await exact.read(0, size)).length).toBe(size);
+    expect((await exact.read(size - 1, 1)).length).toBe(1);
+    expect(exact.limited).toBe(false);
+    expect(exact.tally.bytes).toBe(size);
+  });
+
   test("exactly maxReads reads reach the source, and the next is refused", async () => {
     const src = cachedSource(bufferSource(bytes(4 * PAGE_BYTES)), {
       ...DEFAULT_READER_LIMITS,
