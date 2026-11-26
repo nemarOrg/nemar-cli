@@ -29,6 +29,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // The launcher's callbacks: one handler each, authenticated inline by the `X-Compute-Job-Token`
   // header (a domain-tagged HMAC over the job and its nonce), with one refusal for every failure.
   "POST /jobs/:id/bundle": 1,
+  // The serving index the Worker staged for a pipeline job (ADR 0141): the same door as the bundle.
+  "POST /jobs/:id/serving-index": 1,
   "POST /jobs/:id/outputs": 1,
   "POST /jobs/:id/outputs/complete": 1,
   // Live progress of a NEMAR pipeline job on Tapis (ADR 0134, epic #2324 phase 2): the same door.
@@ -82,7 +84,7 @@ describe("compute route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(computeRoutes.routes.length).toBe(40);
+    expect(computeRoutes.routes.length).toBe(41);
   });
 
   test("no router-level middleware exists: the launcher's callbacks have no session", () => {
@@ -112,6 +114,7 @@ describe("compute route inventory", () => {
     }
     for (const path of [
       "/jobs/:id/bundle",
+      "/jobs/:id/serving-index",
       "/jobs/:id/outputs",
       "/jobs/:id/outputs/complete",
       "/jobs/:id/progress",
