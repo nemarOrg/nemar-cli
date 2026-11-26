@@ -20,9 +20,11 @@ earlier releases are described only by their generated notes.
 - **Live progress of NEMAR's pipeline runs (ADR 0134, epic #2324 phase 2).**
   A pipeline job reports a closed `nemar.progress.v1` object (counts per checkpoint and up to ten recent failures) at most once a minute: a runner in its heartbeat, a job on the supercomputer on the new job-token route `POST /compute/jobs/:id/progress`.
   A report sooner than 50 seconds after the last is refused `report_too_soon` (429) and stores nothing; a heartbeat's progress never costs its lease.
+  A failure's path follows neuroschema 0.6.0 `relativeLocation` (no `.` segment, no empty segment, no leading or trailing space, none of `%`, `?` or `#`), in `compute-progress.schema.json` as in the zod schema: a report that carries another path is refused, and the failure lists built from a recordings table leave its row out.
+  Until nemar-process's epic (its phase P2) reaches its `dev`, a recording path with `%`, `?`, `#` or a leading or trailing space passes nemar-process `dev`'s filter but is refused by the backend.
   Migration 0150 adds `compute_pipeline_progress_runs`, `compute_pipeline_progress` and `compute_pipeline_documents`.
   When a run ends, the stamp sync reconciles its counts from the recordings table it uploaded (a disagreement with the live counts is recorded), resolves `stored` from the derivative store with the checkpoint order the run recorded, and writes the final dataset-level neuroschema `processing` and `signalJourney` entries, which `/<id>/metadata.json` now serves for public datasets.
-  Only final entries are stored: a reporting run's `in_progress` link is worked out when the document is read, so it never outlives its run or replaces the last completed link.
+  Only final entries are stored: a reporting run's `in_progress` link is worked out when the document is read, so it never outlives its run or replaces the last completed link; a link whose `location` breaks `relativeLocation` is not written.
   A `tuple_mismatch` hold stamp, which shares its run's job, is never reconciled.
   `stalled` (no report for three minutes while `submitted`, `queued` or `running`, or `unreported`) is worked out on read; no schedule is added and no switch.
   The pipeline dispatcher's log line reports reconciliation that could not decide or threw.
@@ -33,9 +35,10 @@ earlier releases are described only by their generated notes.
   A plugin's checkpoint is `quality` only; its name follows neuroschema 0.6.0 `plugin.name` (a letter, then letters, digits, `_` and `-`, at most 64), and a metric name its `metricName`.
   The rule words are `bounds_reversed`, `plugin_without_output` (a plugin declares at least one metric or view) and `metric_not_prefixed` (every metric is `<plugin>:<name>` with its own name), checked in that order.
   `shared/compute-naming.ts` ports nemar-process `naming.py` (product and dataset file names), with `shared/contract/compute-naming-vectors.json` for nemar-process to replay.
-  nemar-process re-copies the manifest schema and the vectors at this commit (its phases P2 and P3); until then its loader still reads the 0.5-era manifest.
+  nemar-process's epic carries the copies (its phases P2 and P3); they reach nemar-process `dev` with that epic.
 - **The standalone launcher's contracts (ADR 0134 decision 8, epic #2324 phase 6):** the local launch specification `nemar.local-launch.v1` (the launch specification's members for what runs, plus a format word and dataset names; no job id, token, API address or limits), the recipe progress file `nemar.recipe-progress.v1` a job writes for the launcher to read, and the results report `nemar.results-report.v1` the launcher writes on a person's own machine.
   Each is a closed zod schema with a JSON Schema that nemar-process copies byte for byte; the recipe progress schema is held to the verdicts of nemar-process's own reader on files its recipe layer wrote.
+  A failure path in the results report follows the same `relativeLocation` rule as a live progress report's.
 - **The admin pipeline grid (ADR 0134 decision 5, epic #2324 phase 4a).**
   `GET /admin/compute/pipeline/grid` shows one recipe's runs over the eligible datasets, a row per dataset and a column per checkpoint, each cell `passed/total` with a mark, filtered by status, recipe version, executor, runner or dataset and paged by dataset id, with the counts over the whole filtered set.
   `GET /admin/compute/pipeline/coverage` gives each recipe's coverage (a succeeded run at the dataset's newest version with the registry's current recipe version; complete; at any recipe version) and a daily failure trend from the stamps (30 days by default, 90 at most).
@@ -100,9 +103,7 @@ earlier releases are described only by their generated notes.
 - **neuroschema 0.6.0 is vendored with a record root and the view files** (`NEUROSCHEMA_VERSION` 0.6.0, a minor bump over the deployed 0.4.1; ADR 0134 and 0137, epic #2324).
   The epic's earlier 0.5.0 step was never deployed. The live `schema_version` checks also accept 0.4.x, not 0.5.x, until the backend that serves 0.6.0 is deployed.
   neuroschema's view registry, parity vectors, montages (with their provenance) and example product are copied byte for byte into `shared/contract/neuroschema/views/`, each held to `views/SHA256SUMS.json` by the contract tests.
-  Two rules narrow to 0.6.0's: a live progress failure's path and a signalJourney link's `location` follow `relativeLocation` (no `.` segment, no empty segment, no leading or trailing space, none of `%`, `?` or `#`): a progress report that carries such a path is refused, the failure lists built from a recordings table leave its row out, and such a link is not written; and a `data_papers` DOI must be printable ASCII (`^10\.[0-9]{4,9}/[!-~]+$`): the sync refuses a list that holds any other DOI, and `metadata.json` serves no `data_papers` for a stored list that holds one.
-  `compute-progress.schema.json` and `compute-results-report.schema.json` change with the path rule; nemar-process re-copies them.
-  Until nemar-process adopts the narrowed rule (its phase P2), a recording path with `%`, `?`, `#` or a leading or trailing space passes nemar-process's filter but is refused by the backend.
+  A `data_papers` DOI narrows to 0.6.0's rule, printable ASCII (`^10\.[0-9]{4,9}/[!-~]+$`, where any DOI without whitespace passed before): the sync refuses a list that holds any other DOI, and `metadata.json` serves no `data_papers` for a stored list that holds one.
 - **`nemar-floor` and `nemar-ica` move to `1.0.0-b2` (epic #2324, nemarOrg/nemar-process#81).**
   nemar-process `v0.1.1`, a source release, already carries `1.0.0-b1` with the old decisions; `1.0.0-b2` names full ICA preprocessing, typed channel rows, the ASR burst fraction and the AMICA settings.
   The engine is unchanged; the deploy order and the effects on existing rows are the same as for `1.0.0-b1` in 0.10.40 below.
