@@ -430,6 +430,56 @@ describe("the visibility service (public and private)", () => {
     expect(reviewRulesetsOf(ID)).toEqual([]);
   });
 
+  describe("the quality views' cache tag (ADR 0137 decision 7, review of #2383)", () => {
+    let purge: ReturnType<typeof Bun.serve>;
+    const purges: Array<{ body: unknown; rowAtPurge: string | undefined }> = [];
+    let purgeStatus = 200;
+    beforeAll(() => {
+      purge = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        async fetch(req) {
+          // What the catalog row said when the purge arrived: the purge must follow the write.
+          purges.push({ body: await req.json(), rowAtPurge: rowOf(ID)?.visibility });
+          return Response.json({ success: purgeStatus === 200 }, { status: purgeStatus });
+        },
+      });
+      (globalThis as { NEMAR_CLOUDFLARE_API_URL?: string }).NEMAR_CLOUDFLARE_API_URL =
+        `http://127.0.0.1:${purge.port}`;
+    });
+    afterAll(() => {
+      (globalThis as { NEMAR_CLOUDFLARE_API_URL?: string }).NEMAR_CLOUDFLARE_API_URL = undefined;
+      purge.stop(true);
+    });
+    beforeEach(() => {
+      purges.length = 0;
+      purgeStatus = 200;
+      envOverrides = { CLOUDFLARE_API_TOKEN: "test-token", CLOUDFLARE_ZONE_ID: "zone123" };
+    });
+
+    test("making a dataset private (an unpublish, a withdrawal) purges nemar-dq-<id> after the row is private (MUTATION: drop the purge)", async () => {
+      seedPublished();
+      const r = await flip("private");
+      expect(r.status).toBe(200);
+      expect(purges).toEqual([{ body: { tags: [`nemar-dq-${ID}`] }, rowAtPurge: "private" }]);
+    });
+
+    test("a refused purge neither fails nor undoes the flip", async () => {
+      purgeStatus = 500;
+      seedPublished();
+      const r = await flip("private");
+      expect(r.status).toBe(200);
+      expect(rowOf(ID)).toMatchObject({ visibility: "private" });
+      expect(purges).toHaveLength(1);
+    });
+
+    test("making a dataset public purges nothing", async () => {
+      seedPrivate();
+      expect((await flip("public")).status).toBe(200);
+      expect(purges).toEqual([]);
+    });
+  });
+
   test("on, making a dataset private takes the review ruleset off", async () => {
     switchOn();
     seedPublished();

@@ -44,6 +44,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
+import { purgeQualityCache } from "./cloudflare.js";
 
 /**
  * The column `isAnonymous` reads.
@@ -434,6 +435,9 @@ export async function markAnonymous(
     .run();
 
   const changed = result.success && result.meta.changes > 0;
+  // A concealed deposit shows no quality view: drop any from Cloudflare's cache, after the write, best
+  // effort (ADR 0137 decision 7, ADR 0065).
+  if (changed) await purgeQualityCache(env, datasetId, "conceal");
   return { changed, repoMetadataStale: changed && before?.enriched === 1 };
 }
 

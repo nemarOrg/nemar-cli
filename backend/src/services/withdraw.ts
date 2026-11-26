@@ -48,6 +48,7 @@
 import { datasetLandingUrl, datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
+import { purgeQualityCache } from "./cloudflare.js";
 import { resolveEzidAuth } from "./doi.js";
 import { resolveDatasetLandingBase } from "./environment.js";
 import { conceptEzidIdentifier, ensureDoiScheme, makePublic, makeUnavailable } from "./ezid.js";
@@ -419,6 +420,9 @@ export async function withdrawDataset(
 
   // Stamp intent EARLY -- see file header + markWithdrawalIntent's doc comment.
   await markWithdrawalIntent(db, datasetId, reason);
+  // The dataset is withdrawn in D1: drop its quality views from Cloudflare's cache, best effort, after
+  // the write (ADR 0137 decision 7). A resumed withdrawal, already private, is purged again here.
+  await purgeQualityCache(env, datasetId, "withdraw");
 
   const auth = resolveEzidAuth(env, !!dataset.is_sandbox);
   const dois: DoiStepResult[] = [];
