@@ -79,6 +79,11 @@ import {
   checkDatasetQualityDocument,
   qualityEntriesOf,
 } from "./quality-documents.js";
+import {
+  PROCESSING_SCHEMA_ID,
+  SIGNAL_JOURNEY_SCHEMA_ID,
+  pipelineDocumentValid,
+} from "./quality-processing.js";
 
 /** The job states in which a job on the supercomputer may report (its state in D1 lags Tapis). */
 export const PROGRESS_TAPIS_STATES = ["submitted", "queued", "running"] as const;
@@ -408,10 +413,11 @@ function promotedProcessingEntry(
 /**
  * The pipeline's namespaces of a dataset document (`processing`, `signalJourney` and `dataQuality`), as
  * `/<id>/metadata.json` and the page bundle both serve them: one read, so the two documents cannot differ,
- * and one batch, so its three namespaces describe each recipe's one promoted run. A promoted run whose
- * counts make no entry (with a fixed-word log line), or that kept no link, shows the rest. The caller gates
- * the dataset first (public, and never a concealed deposit); the statements gate it again. A failed read
- * throws.
+ * and one batch, so its three namespaces describe each recipe's one promoted run. Each entry is checked
+ * against the vendored schema before it is shown, as a recording's is. A promoted run whose counts make no
+ * valid entry, or whose link is not a valid one, shows the rest, with a fixed-word log line; one that kept
+ * no link shows no link. The caller gates the dataset first (public, and never a concealed deposit); the
+ * statements gate it again. A failed read throws.
  */
 export async function readPipelineExtensions(
   db: D1Database,
@@ -430,14 +436,30 @@ export async function readPipelineExtensions(
       run,
       countRows.filter((c) => c.stamp_id === run.stamp_id),
     );
-    if (built.ok) processing[run.recipe] = built.entry;
-    else if (built.reason !== "not_reconciled") {
+    const reason = !built.ok
+      ? built.reason
+      : pipelineDocumentValid(PROCESSING_SCHEMA_ID, {
+            level: "dataset",
+            recipes: { [run.recipe]: built.entry },
+          })
+        ? null
+        : "processing_invalid";
+    if (built.ok && reason === null) processing[run.recipe] = built.entry;
+    else if (reason !== "not_reconciled") {
       console.warn(
-        `${LOG} processing_not_shown dataset=${datasetId} recipe=${run.recipe} reason=${built.reason}`,
+        `${LOG} processing_not_shown dataset=${datasetId} recipe=${run.recipe} reason=${reason}`,
       );
     }
-    // The column holds a JSON object or nothing (its CHECK, migration 0154).
-    if (run.link !== null) signalJourney[run.recipe] = JSON.parse(run.link);
+    // The column holds a JSON object or nothing (its CHECK, migration 0154); the link is shown only when it
+    // is a neuroschema link, as a recording's is.
+    if (run.link !== null) {
+      const link: unknown = JSON.parse(run.link);
+      if (pipelineDocumentValid(SIGNAL_JOURNEY_SCHEMA_ID, { recipes: { [run.recipe]: link } })) {
+        signalJourney[run.recipe] = link;
+      } else {
+        console.warn(`${LOG} link_not_shown dataset=${datasetId} recipe=${run.recipe}`);
+      }
+    }
   }
   return pipelineExtensions({
     processing,

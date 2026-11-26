@@ -10,8 +10,9 @@
  * (its current public derivative) and validate against the vendored neuroschema extensions container; the
  * `stored` counts are the kept rule over the last declared checkpoint; a run in progress, a canary run and
  * a failed run show nothing, and no `in_progress` link is ever served; a newer promoted run replaces an
- * older one; counts that break the writer's rules show no entry; a private dataset, a concealed deposit and a
- * withdrawn dataset get nothing.
+ * older one; counts that break the writer's rules show no entry, and a kept link that is not a neuroschema link
+ * shows none; a private dataset, a concealed deposit, and a withdrawn, tombstoned or never-published dataset
+ * get nothing, and each term of the read's own gate refuses on its own.
  */
 
 import type { Database } from "bun:sqlite";
@@ -22,6 +23,7 @@ import {
   formatAjvErrors,
 } from "../../test/contract/neuroschema-validator";
 import { dataRoutes } from "../src/routes/data";
+import { readPipelineExtensions } from "../src/services/compute-pipeline-progress";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { logged } from "./helpers/logs";
@@ -39,20 +41,31 @@ const env = (): Bindings => ({ DB: realD1(db), ENVIRONMENT: "test" }) as Binding
 
 function seed(
   id: string,
-  over: { visibility?: string; anonymous?: number; withdrawnAt?: string } = {},
+  over: {
+    visibility?: string;
+    anonymous?: number;
+    withdrawnAt?: string;
+    ezidStatus?: string;
+    firstPublishedAt?: string | null;
+  } = {},
 ): void {
   db.run(
     `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox, anonymous, modalities,
-                           first_published_at, withdrawn_at)
-     VALUES (?, ?, -1, 'active', ?, 0, ?, 'eeg', ?, ?)`,
+                           first_published_at, withdrawn_at, ezid_status)
+     VALUES (?, ?, -1, 'active', ?, 0, ?, 'eeg', ?, ?, ?)`,
     [
       id,
       id,
       over.visibility ?? "public",
       over.anonymous ?? 0,
       // A concealed deposit is never published (a trigger refuses the pair).
-      over.anonymous === 1 ? null : "2026-01-01 00:00:00",
+      over.firstPublishedAt !== undefined
+        ? over.firstPublishedAt
+        : over.anonymous === 1
+          ? null
+          : "2026-01-01 00:00:00",
       over.withdrawnAt ?? null,
+      over.ezidStatus ?? null,
     ],
   );
 }
@@ -274,6 +287,23 @@ describe("pipeline extensions in metadata.json describe the promoted run", () =>
     );
   });
 
+  test("a promoted run whose kept link is not a neuroschema link shows no link, with a log line (MUTATION: serve the stored link unchecked)", async () => {
+    seed("nm000510");
+    // A JSON object, as the column takes, that says completed and names no record.
+    await endedRun("nm000510", {
+      link: JSON.stringify({ ...linkFor("a"), location: null }),
+      derivative: { retention: "catalog" },
+    });
+    let answer: Awaited<ReturnType<typeof get>> | null = null;
+    const lines = await logged(async () => {
+      answer = await get("nm000510");
+    });
+    const body = (answer as Awaited<ReturnType<typeof get>> | null)?.body;
+    expect(body?.extensions).not.toHaveProperty("signalJourney");
+    expect(body?.extensions.processing.recipes["nemar-floor"]).toEqual(PROCESSING);
+    expect(lines.join("\n")).toContain("link_not_shown dataset=nm000510 recipe=nemar-floor");
+  });
+
   test("a private dataset, a concealed deposit and a withdrawn dataset get nothing", async () => {
     seed("nm000507", { visibility: "private" });
     await endedRun("nm000507", { derivative: { retention: "catalog" } });
@@ -284,10 +314,48 @@ describe("pipeline extensions in metadata.json describe the promoted run", () =>
     expect(concealed.status).toBe(200);
     expect(concealed.body?.extensions).not.toHaveProperty("processing");
     expect(concealed.body?.extensions).not.toHaveProperty("signalJourney");
-    seed("nm000509", { withdrawnAt: "2026-11-24 10:00:00" });
-    await endedRun("nm000509", { derivative: { retention: "catalog" } });
-    const withdrawn = await get("nm000509");
-    expect(withdrawn.body?.extensions).not.toHaveProperty("processing");
-    expect(withdrawn.body?.extensions).not.toHaveProperty("signalJourney");
+    // metadata.json itself answers a public dataset that is withdrawn, tombstoned or never published: only
+    // the pipeline read's own gate keeps its entries out.
+    for (const [id, over] of [
+      ["nm000509", { withdrawnAt: "2026-11-24 10:00:00" }],
+      ["nm000511", { ezidStatus: "unavailable" }],
+      ["nm000512", { firstPublishedAt: null }],
+    ] as const) {
+      seed(id, over);
+      await endedRun(id, { derivative: { retention: "catalog" } });
+      const answer = await get(id);
+      expect([id, answer.status]).toEqual([id, 200]);
+      expect(answer.body?.extensions).not.toHaveProperty("processing");
+      expect(answer.body?.extensions).not.toHaveProperty("signalJourney");
+    }
+  });
+
+  test("each term of the read's own gate refuses alone, beside the route's checks (MUTATION: drop the not_anonymous term; drop the first-publication term)", async () => {
+    const cases: Array<[string, string]> = [
+      ["private", "UPDATE datasets SET visibility = 'private' WHERE dataset_id = ?"],
+      ["archived", "UPDATE datasets SET status = 'archived' WHERE dataset_id = ?"],
+      [
+        "withdrawn",
+        "UPDATE datasets SET withdrawn_at = '2026-11-01 00:00:00' WHERE dataset_id = ?",
+      ],
+      ["tombstoned", "UPDATE datasets SET ezid_status = 'unavailable' WHERE dataset_id = ?"],
+      ["never published", "UPDATE datasets SET first_published_at = NULL WHERE dataset_id = ?"],
+      // A published dataset cannot become anonymous (migration 0085's trigger); the trigger is dropped so the
+      // anonymity term is shown to refuse on its own, as the quality route's test does (ADR 0065).
+      ["concealed", "UPDATE datasets SET anonymous = 1 WHERE dataset_id = ?"],
+    ];
+    db.run("DROP TRIGGER datasets_anonymous_unpublished_au");
+    let n = 520;
+    for (const [name, statement] of cases) {
+      const id = `nm000${n++}`;
+      seed(id);
+      await endedRun(id, { derivative: { retention: "catalog" } });
+      expect(Object.keys(await readPipelineExtensions(realD1(db), id))).toEqual([
+        "processing",
+        "signalJourney",
+      ]);
+      db.run(statement, [id]);
+      expect([name, await readPipelineExtensions(realD1(db), id)]).toEqual([name, {}]);
+    }
   });
 });

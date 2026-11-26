@@ -477,6 +477,23 @@ describe("what a public page shows: the promoted run", () => {
     expect(shown.processing).toBeUndefined();
   });
 
+  test("a succeeded run whose table names a recording twice gets no counts, and its promoted run shows its link and no processing (MUTATION: accept a repeated path)", async () => {
+    const d = await finished(
+      floorTable([
+        ["sub-01/eeg/a.edf", "succeeded", null, null],
+        ["sub-02/eeg/b.edf", "failed", "load_failed", "load"],
+        ["sub-01/eeg/a.edf", "failed", "step_failed", "bad_channels"],
+      ]),
+    );
+    await syncPipelineStamps(env);
+    expect((await runRow(d.stampId))?.outcome).toBe("table_unreadable");
+    expect(await rows(d.stampId)).toEqual({});
+    await promote(d);
+    const shown = await served(d.datasetId);
+    expect(shown.processing).toBeUndefined();
+    expect(shown.signalJourney?.recipes["nemar-floor"]).toEqual(await linkOf(d.stampId));
+  });
+
   test("a succeeded run of a recipe the registry no longer knows keeps no link", async () => {
     const d = await finished();
     await env.DB.prepare("UPDATE compute_pipeline_stamps SET recipe = 'nemar-gone' WHERE id = ?1")

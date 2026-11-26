@@ -322,7 +322,7 @@ describe("the dataset's gate", () => {
     expect((await bundleMetadata("nm000920")).status).toBe(404);
   });
 
-  test("a concealed deposit gets no pipeline namespace on either document (MUTATION: drop the anonymous gate)", async () => {
+  test("a concealed deposit gets no pipeline namespace on either document (guarded twice: the route's own check and the read's not_anonymous and first-publication terms; metadata-json-pipeline-route.test.ts holds each term alone)", async () => {
     seedDataset("nm000921", { anonymous: 1 });
     const concealed = await run("nm000921");
     // The run's link, which a public dataset's promoted run would show.
