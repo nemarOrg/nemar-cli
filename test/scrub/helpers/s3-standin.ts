@@ -33,6 +33,10 @@
  *  - PutObject with Object Lock parameters needs `Content-MD5` or an `x-amz-checksum-*` header,
  *    as an UploadPart of a lock-created upload does (documented for put-object, measured only for
  *    the part).
+ *  - PutObject and UploadPart with an `aws-chunked` body (`x-amz-content-sha256: STREAMING-*`,
+ *    what the CLI's CRT transfer client sends): decoded before it is stored, its length checked
+ *    against `x-amz-decoded-content-length` and its trailing checksum verified (`BadDigest`), as S3
+ *    documents; a verified trailing checksum counts as the request's checksum. See `readPayload`.
  *  - PutObject with `If-None-Match: *`: 412 PreconditionFailed when the key has a current version.
  *  - PutObject with `If-Match`: 412 PreconditionFailed when the current version's ETag is not the
  *    one named, and 404 NoSuchKey when the key has no current version, as S3 documents for
@@ -126,6 +130,8 @@ export interface StandinLogEntry {
   sessionTokenFingerprint?: string;
   /** A PutObject or UploadPart request that carried an `x-amz-checksum-*` header (or Content-MD5). */
   checksum?: boolean;
+  /** A PutObject or UploadPart request whose body was `aws-chunked` (decoded before storing). */
+  chunked?: boolean;
   size?: number;
   method?: string;
   /** A DeleteObjects request: what it named, in order, and whether it asked for the bypass. */
@@ -291,6 +297,154 @@ function parseLock(req: Request): { mode: string; until: Date } | undefined | "b
   const d = new Date(until);
   if (!["GOVERNANCE", "COMPLIANCE"].includes(mode) || Number.isNaN(d.getTime())) return "bad";
   return { mode, until: d };
+}
+
+// ---------------------------------------------------------------------------
+// aws-chunked bodies (S3's streaming upload encoding).
+// ---------------------------------------------------------------------------
+
+const CRC64NVME_TABLE = (() => {
+  const poly = 0x9a6c9329ac4bc9b5n;
+  const t: bigint[] = [];
+  for (let i = 0n; i < 256n; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1n ? (c >> 1n) ^ poly : c >> 1n;
+    t.push(c);
+  }
+  return t;
+})();
+
+const CRC32C_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1 ? (c >>> 1) ^ 0x82f63b78 : c >>> 1;
+    t[i] = c >>> 0;
+  }
+  return t;
+})();
+
+const CRC32_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1 ? (c >>> 1) ^ 0xedb88320 : c >>> 1;
+    t[i] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32With(table: Uint32Array, data: Uint8Array): Buffer {
+  let c = 0xffffffff;
+  for (const b of data) c = (table[(c ^ b) & 0xff] as number) ^ (c >>> 8);
+  const out = Buffer.alloc(4);
+  out.writeUInt32BE((c ^ 0xffffffff) >>> 0);
+  return out;
+}
+
+function crc64nvme(data: Uint8Array): Buffer {
+  const mask = 0xffffffffffffffffn;
+  let c = mask;
+  for (const b of data)
+    c = (CRC64NVME_TABLE[Number((c ^ BigInt(b)) & 0xffn)] as bigint) ^ (c >> 8n);
+  const out = Buffer.alloc(8);
+  out.writeBigUInt64BE((c ^ mask) & mask);
+  return out;
+}
+
+/** The base64 value S3 expects in `x-amz-checksum-<algorithm>`, or undefined for an unknown one. */
+export function s3ChecksumOf(algorithm: string, data: Uint8Array): string | undefined {
+  switch (algorithm) {
+    case "crc64nvme":
+      return crc64nvme(data).toString("base64");
+    case "crc32":
+      return crc32With(CRC32_TABLE, data).toString("base64");
+    case "crc32c":
+      return crc32With(CRC32C_TABLE, data).toString("base64");
+    case "sha1":
+      return createHash("sha1").update(data).digest("base64");
+    case "sha256":
+      return createHash("sha256").update(data).digest("base64");
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * A PutObject or UploadPart body as S3 stores it. A request whose `x-amz-content-sha256` is one
+ * of the `STREAMING-*` values carries an `aws-chunked` body: `<hex size>[;chunk-signature=..]\r\n`,
+ * the bytes and `\r\n` per chunk, a zero-size chunk, then trailer lines (`name:value\r\n`, the
+ * ones `x-amz-trailer` names) and an empty line. S3 decodes it, stores the decoded bytes, checks
+ * them against `x-amz-decoded-content-length` and the trailing checksum, and counts that checksum
+ * as the request's integrity check (as a header would be). The CRT transfer client the `aws` CLI
+ * uses for `aws s3` sends exactly this, with `STREAMING-UNSIGNED-PAYLOAD-TRAILER`, over http too
+ * (measured with aws-cli 2.42.1, which selects it under `AWS_MAX_ATTEMPTS=1` where 2.41.0 did
+ * not). Chunk signatures are not verified, as no request signature is.
+ */
+function readPayload(
+  req: Request,
+  raw: Uint8Array,
+): { body: Uint8Array; trailerChecksum: boolean; chunked: boolean } | { error: Response } {
+  const mode = req.headers.get("x-amz-content-sha256") ?? "";
+  if (!mode.startsWith("STREAMING-")) return { body: raw, trailerChecksum: false, chunked: false };
+  const bad = (code: string, message: string) => ({ error: s3Error(code, 400, message) });
+  const declared = req.headers.get("x-amz-decoded-content-length");
+  if (declared === null || !/^\d+$/.test(declared)) {
+    return bad("MissingContentLength", "x-amz-decoded-content-length is required");
+  }
+  const chunks: Uint8Array[] = [];
+  let at = 0;
+  const line = (): string | undefined => {
+    for (let i = at; i + 1 < raw.length; i++) {
+      if (raw[i] === 13 && raw[i + 1] === 10) {
+        const s = new TextDecoder().decode(raw.subarray(at, i));
+        at = i + 2;
+        return s;
+      }
+    }
+    return undefined;
+  };
+  for (;;) {
+    const header = line();
+    const size =
+      header === undefined ? Number.NaN : Number.parseInt(header.split(";")[0] ?? "", 16);
+    if (!Number.isInteger(size) || size < 0)
+      return bad("IncompleteBody", "malformed aws-chunked body");
+    if (size === 0) break;
+    if (at + size + 2 > raw.length || raw[at + size] !== 13 || raw[at + size + 1] !== 10) {
+      return bad("IncompleteBody", "malformed aws-chunked body");
+    }
+    chunks.push(raw.subarray(at, at + size));
+    at += size + 2;
+  }
+  const trailers = new Map<string, string>();
+  for (;;) {
+    const t = line();
+    if (t === undefined) return bad("IncompleteBody", "malformed aws-chunked trailer");
+    if (t === "") break;
+    const colon = t.indexOf(":");
+    if (colon < 1) return bad("IncompleteBody", "malformed aws-chunked trailer");
+    trailers.set(t.slice(0, colon).trim().toLowerCase(), t.slice(colon + 1).trim());
+  }
+  const body = Buffer.concat(chunks);
+  if (body.length !== Number(declared)) {
+    return bad("IncompleteBody", "the decoded body is not x-amz-decoded-content-length bytes");
+  }
+  let trailerChecksum = false;
+  for (const name of (req.headers.get("x-amz-trailer") ?? "").split(",").map((s) => s.trim())) {
+    if (!name) continue;
+    const value = trailers.get(name.toLowerCase());
+    if (value === undefined) return bad("IncompleteBody", `the trailer ${name} is missing`);
+    const m = /^x-amz-checksum-([a-z0-9]+)$/i.exec(name);
+    if (!m) continue;
+    const want = s3ChecksumOf((m[1] as string).toLowerCase(), body);
+    if (want === undefined) return bad("InvalidRequest", `unsupported checksum ${name}`);
+    if (want !== value) {
+      return bad("BadDigest", `the ${name} you specified did not match the calculated checksum`);
+    }
+    trailerChecksum = true;
+  }
+  return { body, trailerChecksum, chunked: true };
 }
 
 function parseRange(header: string | null, size: number): [number, number] | "bad" | null {
@@ -861,10 +1015,23 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
             { "x-amz-copy-source-version-id": reportedVersion(parsed.version, src.versionId) },
           );
         }
-        const body = new Uint8Array(await req.arrayBuffer());
-        const checksum = [...req.headers.keys()].some((h) => h.startsWith("x-amz-checksum-"));
+        const payload = readPayload(req, new Uint8Array(await req.arrayBuffer()));
+        if ("error" in payload) {
+          record({ op: "UploadPart", key, partNumber, status: 400 });
+          return payload.error;
+        }
+        const body = payload.body;
+        const checksum =
+          payload.trailerChecksum ||
+          [...req.headers.keys()].some((h) => h.startsWith("x-amz-checksum-"));
         const fault = enter("UploadPart", key);
-        const base = { op: "UploadPart" as const, key, partNumber, checksum };
+        const base = {
+          op: "UploadPart" as const,
+          key,
+          partNumber,
+          checksum,
+          chunked: payload.chunked,
+        };
         if (fault) {
           record({ ...base, status: fault.status });
           return s3Error(fault.code, fault.status, `induced ${fault.code} (test)`);
@@ -900,19 +1067,26 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
           record({ op: "CompleteMultipartUpload", key, status: 404 });
           return s3Error("NoSuchUpload", 404);
         }
-        const listed = [
-          ...text.matchAll(
-            /<Part>\s*<ETag>([^<]*)<\/ETag>\s*<PartNumber>(\d+)<\/PartNumber>\s*<\/Part>/g,
-          ),
-        ].map((m) => ({
-          etag: (m[1] as string).replace(/&quot;/g, '"'),
-          number: Number(m[2]),
-        }));
+        // Each <Part> by its elements, in any order, and its ETag with or without the quotes: the
+        // CRT transfer client sends it bare and adds each part's checksum (`<ChecksumCRC64NVME>`),
+        // which S3 accepts (aws-cli 2.42.1, captured).
+        const parsedParts = [...text.matchAll(/<Part>([\s\S]*?)<\/Part>/g)].map((m) => {
+          const inner = m[1] as string;
+          const etag = /<ETag>([^<]*)<\/ETag>/.exec(inner)?.[1];
+          const number = /<PartNumber>(\d+)<\/PartNumber>/.exec(inner)?.[1];
+          return etag === undefined || number === undefined
+            ? null
+            : {
+                etag: `"${etag.replace(/&quot;/g, '"').replace(/^"|"$/g, "")}"`,
+                number: Number(number),
+              };
+        });
         const bad = (code: string, status = 400) => {
           record({ op: "CompleteMultipartUpload", key, status });
           return s3Error(code, status);
         };
-        if (listed.length === 0) return bad("MalformedXML");
+        if (parsedParts.length === 0 || parsedParts.includes(null)) return bad("MalformedXML");
+        const listed = parsedParts as Array<{ etag: string; number: number }>;
         for (let i = 0; i < listed.length; i++) {
           const p = listed[i] as { etag: string; number: number };
           if (i > 0 && p.number <= (listed[i - 1] as { number: number }).number) {
@@ -1028,7 +1202,12 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
 
       // ---- PutObject ----
       if (req.method === "PUT" && !req.headers.has("x-amz-copy-source")) {
-        const body = new Uint8Array(await req.arrayBuffer());
+        const payload = readPayload(req, new Uint8Array(await req.arrayBuffer()));
+        if ("error" in payload) {
+          record({ op: "PutObject", key, status: 400 });
+          return payload.error;
+        }
+        const body = payload.body;
         const fault = enter("PutObject", key, keyId);
         if (fault) return fail("PutObject", fault);
         const lock = parseLock(req);
@@ -1039,6 +1218,7 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
         // S3 documents the same rule for a put with lock parameters as for a part of an upload
         // created with them (the part rule is measured; this one is documented, not measured).
         const checksum =
+          payload.trailerChecksum ||
           [...req.headers.keys()].some((h) => h.startsWith("x-amz-checksum-")) ||
           req.headers.has("content-md5");
         if (lock && !checksum) {
@@ -1096,6 +1276,7 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
           ifMatch,
           ifNoneMatch,
           checksum,
+          chunked: payload.chunked,
         });
         return new Response(null, { status: 200, headers: { ETag: etag, "x-amz-version-id": id } });
       }

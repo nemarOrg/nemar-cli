@@ -5,7 +5,10 @@
  */
 
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
+import path from "node:path";
+import { spawn } from "bun";
 import {
   AwsCliError,
   completeMultipart,
@@ -21,8 +24,17 @@ import {
   uploadPart,
   uploadPartCopy,
 } from "../../../scripts/scrub/s3/s3-lib";
-import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { BUCKET, MIB, SLOW, centuryFromNow, removeTempDirs, withCtx } from "./support";
+import { type S3Standin, s3ChecksumOf, startS3Standin } from "../helpers/s3-standin";
+import {
+  BUCKET,
+  MIB,
+  SLOW,
+  awsTestEnv,
+  centuryFromNow,
+  removeTempDirs,
+  tempDir,
+  withCtx,
+} from "./support";
 
 afterAll(removeTempDirs);
 
@@ -342,4 +354,100 @@ describe("S3 stand-in", () => {
     },
     SLOW,
   );
+
+  test(
+    "an aws-chunked upload (the CLI's CRT transfer client) stores the decoded bytes",
+    async () => {
+      // aws-cli 2.41.2 made the CRT client honor `max_attempts = 1`, so from 2.42 the suites'
+      // `AWS_MAX_ATTEMPTS=1` no longer sends `aws s3` to the classic client: every upload arrived
+      // `aws-chunked`, and the stand-in stored the chunk framing and trailer as the object
+      // (5 bytes became 54), which the re-pull's size check refused as "upload-failed". The client
+      // is pinned here so the case is exercised whatever CLI the host has.
+      standin = startS3Standin();
+      const dir = tempDir("chunked-upload");
+      const config = path.join(dir, "config");
+      writeFileSync(config, "[default]\ns3 =\n  preferred_transfer_client = crt\n");
+      const small = path.join(dir, "small.bin");
+      const large = path.join(dir, "large.bin");
+      const smallBytes = new TextEncoder().encode("hello");
+      // Over the CRT client's 8 MiB part size, so it goes as a multipart upload of chunked parts.
+      const largeBytes = new Uint8Array(17 * MIB).map((_, i) => (i * 31) % 251);
+      writeFileSync(small, smallBytes);
+      writeFileSync(large, largeBytes);
+      const cp = async (file: string, key: string) => {
+        const p = spawn({
+          cmd: ["aws", "s3", "cp", file, `s3://${BUCKET}/${key}`, "--region", "us-east-2"],
+          env: awsTestEnv(standin, { AWS_CONFIG_FILE: config }),
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stderr, exit] = await Promise.all([new Response(p.stderr).text(), p.exited]);
+        expect(exit, stderr).toBe(0);
+      };
+
+      await cp(small, "xx090411/objects/small.bin");
+      const put = standin.calls("PutObject").at(-1);
+      // Not vacuous: the CLI did send a chunked body with a trailing checksum.
+      expect(put?.chunked).toBe(true);
+      expect(put?.checksum).toBe(true);
+      expect(put?.size).toBe(5);
+      const stored = standin.current(BUCKET, "xx090411/objects/small.bin");
+      expect(Buffer.from(stored?.data ?? []).toString()).toBe("hello");
+      expect(stored?.etag).toBe('"5d41402abc4b2a76b9719d911017c592"');
+
+      await cp(large, "xx090411/objects/large.bin");
+      const parts = standin.calls("UploadPart");
+      expect(parts.length).toBeGreaterThan(1);
+      expect(parts.every((c) => c.chunked && c.checksum && c.status === 200)).toBe(true);
+      const big = standin.current(BUCKET, "xx090411/objects/large.bin")?.data;
+      expect(big?.length).toBe(largeBytes.length);
+      expect(Buffer.from(big ?? []).equals(Buffer.from(largeBytes))).toBe(true);
+    },
+    SLOW,
+  );
+
+  test("an aws-chunked body that is short or fails its trailing checksum is refused", async () => {
+    standin = startS3Standin();
+    const key = "xx090411/objects/framed.bin";
+    const frame = (data: string, trailer: string) =>
+      `${data.length.toString(16)}\r\n${data}\r\n0\r\nx-amz-checksum-crc32:${trailer}\r\n\r\n`;
+    const put = (body: string, decodedLength: number) =>
+      fetch(`${standin.url}/${BUCKET}/${key}`, {
+        method: "PUT",
+        headers: {
+          "content-encoding": "aws-chunked",
+          "x-amz-content-sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+          "x-amz-decoded-content-length": String(decodedLength),
+          "x-amz-trailer": "x-amz-checksum-crc32",
+        },
+        body,
+      });
+    const good = s3ChecksumOf("crc32", new TextEncoder().encode("hello")) as string;
+    const codeOf = async (r: Response) => /<Code>([^<]+)</.exec(await r.text())?.[1];
+
+    const short = await put(frame("hello", good), 6);
+    expect(short.status).toBe(400);
+    expect(await codeOf(short)).toBe("IncompleteBody");
+    const wrong = s3ChecksumOf("crc32", new TextEncoder().encode("hellp")) as string;
+    const bad = await put(frame("hello", wrong), 5);
+    expect(bad.status).toBe(400);
+    expect(await codeOf(bad)).toBe("BadDigest");
+    expect(standin.versions(BUCKET, key).length).toBe(0);
+
+    const ok = await put(frame("hello", good), 5);
+    expect(ok.status).toBe(200);
+    expect(Buffer.from(standin.current(BUCKET, key)?.data ?? []).toString()).toBe("hello");
+  });
+
+  test("the checksums match S3's published check values", () => {
+    const check = new TextEncoder().encode("123456789");
+    const hex = (algorithm: string, data: Uint8Array) =>
+      Buffer.from(s3ChecksumOf(algorithm, data) as string, "base64").toString("hex");
+    expect(hex("crc32", check)).toBe("cbf43926");
+    expect(hex("crc32c", check)).toBe("e3069283");
+    expect(hex("crc64nvme", check)).toBe("ae8b14860a799888");
+    // What aws-cli 2.42.1 sent in the trailer for "hello" (captured).
+    expect(s3ChecksumOf("crc64nvme", new TextEncoder().encode("hello"))).toBe("M3eFcAZSQlc=");
+    expect(s3ChecksumOf("md5", check)).toBeUndefined();
+  });
 });
