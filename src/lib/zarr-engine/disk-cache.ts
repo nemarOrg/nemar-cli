@@ -28,7 +28,9 @@
  * not a regular file, and an entry subdirectory that is not a real directory, are refused. When
  * the cache creates its root it writes a marker file there; `clear` refuses a directory without
  * one, and removes only files named like entries, so pointing the setting at a folder with other
- * things in it cannot lose them.
+ * things in it cannot lose them. Nor is such a folder changed: a root that already exists, is not
+ * empty and has no marker is never chmodded or written to. The cache is off for that instance,
+ * with one stderr line, and `stats` and `checkWritable` say why.
  *
  * **Several engines may share the directory.** Each instance rescans the directory total when its
  * own writes since the last scan pass a tenth of the limit, so the cache stays near its limit
@@ -86,6 +88,8 @@ export function defaultDiskCacheDir(): string {
 export interface DiskCacheStats {
   dir: string;
   enabled: boolean;
+  /** Why the cache is off although `enabled` (the directory is not the cache's own), or null. */
+  refused: string | null;
   bytes: number;
   entries: number;
   limitBytes: number;
@@ -95,6 +99,15 @@ interface Found {
   path: string;
   size: number;
   mtimeMs: number;
+}
+
+function existsSyncSafe(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isEnoent(err: unknown): boolean {
@@ -157,6 +170,9 @@ export class DiskCache {
   private reported = false;
   private writtenSinceScan = 0;
   private rootReady = false;
+  /** Why the root is refused, once decided: null when it is the cache's (or the cache made it),
+   *  undefined while the root does not exist yet (so it is looked at again). */
+  private refusal: string | null | undefined;
 
   /** `top` is the highest directory `privateDir` sets to 0700 (the directory itself unless
    *  the default location under the config directory is used). */
@@ -190,9 +206,45 @@ export class DiskCache {
     return { dir, file: join(dir, hash) };
   }
 
+  /** Why the root may not be used, or null when it may: it does not exist (the cache will make
+   *  it), it is empty, or it carries the marker. A directory that already holds other things and
+   *  no marker is someone else's, and is neither chmodded nor written to. Looks only; changes
+   *  nothing. */
+  private inspectRoot(): string | null {
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(this.dir);
+    } catch {
+      return null;
+    }
+    if (!st.isDirectory()) return null; // privateDir fails on it, which degrade reports
+    let names: string[];
+    try {
+      names = readdirSync(this.dir);
+    } catch {
+      return null; // unreadable: the write fails and degrade reports it
+    }
+    if (names.length === 0 || names.includes(CACHE_MARKER)) return null;
+    return `${this.dir} already holds other files and no ${CACHE_MARKER} file, so it is not the cache's own and is left untouched; the disk cache is off (name a new or empty directory)`;
+  }
+
+  /** {@link inspectRoot}, decided once per instance and logged once when it refuses. */
+  private rootRefused(): boolean {
+    if (this.refusal === undefined) {
+      const found = this.inspectRoot();
+      if (found !== null) {
+        this.refusal = found;
+        this.log(`[zarr-engine] disk cache: ${found}; reads continue without it`);
+      } else if (this.rootReady || existsSyncSafe(this.dir)) {
+        this.refusal = null;
+      }
+    }
+    return typeof this.refusal === "string";
+  }
+
   /** The cached body for `key`, or undefined (a miss, a bad entry or a disk error). */
   get(key: string): Uint8Array | undefined {
-    if (!this.enabled) return undefined;
+    if (!this.enabled || this.rootRefused()) return undefined;
     const { file } = this.paths(key);
     let data: Buffer;
     try {
@@ -235,7 +287,7 @@ export class DiskCache {
 
   /** Store `body` under `key`. Best effort: a failure is logged once and otherwise ignored. */
   put(key: string, body: Uint8Array): void {
-    if (!this.enabled) return;
+    if (!this.enabled || this.rootRefused()) return;
     const keyBytes = Buffer.from(key, "utf8");
     const size = HEADER_BYTES + keyBytes.length + body.length;
     if (size > this.maxBytes || body.length > 0xffffffff) return;
@@ -290,6 +342,10 @@ export class DiskCache {
       }
       this.rootReady = false;
     }
+    // Looked at again here, not only once: a root that was missing at the first look may have
+    // been filled by something else since.
+    const refused = this.inspectRoot();
+    if (refused !== null) throw new DiskCacheRefusal(refused);
     let existed = true;
     try {
       lstatSync(this.dir);
@@ -299,6 +355,7 @@ export class DiskCache {
     privateDir(this.dir, this.top);
     if (!existed || this.isEmptyRoot()) this.writeMarker();
     this.rootReady = true;
+    this.refusal = null;
   }
 
   private isEmptyRoot(): boolean {
@@ -408,6 +465,7 @@ export class DiskCache {
     return {
       dir: this.dir,
       enabled: this.enabled,
+      refused: this.enabled ? this.inspectRoot() : null,
       bytes: entries.reduce((n, f) => n + f.size, 0),
       entries: entries.length,
       limitBytes: this.maxBytes,
@@ -488,6 +546,8 @@ export class DiskCache {
 
   /** Is the directory usable (created at 0700 and written to)? For `nemar doctor`. */
   checkWritable(): { ok: true } | { ok: false; reason: string } {
+    const refused = this.inspectRoot();
+    if (refused !== null) return { ok: false, reason: refused };
     try {
       this.ensureRoot();
       const probe = join(this.dir, `.probe-${process.pid}-${randomBytes(4).toString("hex")}`);

@@ -344,6 +344,7 @@ describe("stats and clear", () => {
     expect(a.stats()).toEqual({
       dir: dir(),
       enabled: true,
+      refused: null,
       entries: 2,
       bytes: 114 + 214,
       limitBytes: 10_000,
@@ -540,6 +541,51 @@ describe("clear only removes what the cache made", () => {
     writeFileSync(join(other, "mine.txt"), "mine");
     make(1_000_000, other).put("k", body(10));
     expect(existsSync(join(other, CACHE_MARKER))).toBe(false);
+  });
+
+  test("an existing non-empty directory without the marker is neither chmodded nor written", () => {
+    const other = join(root, "other");
+    mkdirSync(other, { mode: 0o755 });
+    chmodSync(other, 0o755);
+    writeFileSync(join(other, "mine.txt"), "mine");
+    const a = make(1_000_000, other);
+    a.put("k", body(10));
+    a.put("k2", body(10));
+    expect(a.get("k")).toBeUndefined();
+    expect(statSync(other).mode & 0o777).toBe(0o755);
+    expect(readdirSync(other)).toEqual(["mine.txt"]);
+    // One stderr line for the instance, naming the directory and the missing marker.
+    expect(logged.length).toBe(1);
+    expect(logged[0]).toContain(other);
+    expect(logged[0]).toContain(`no ${CACHE_MARKER} file`);
+    expect(logged[0]).toContain("the disk cache is off");
+    // stats and checkWritable say so, and change nothing either.
+    expect(a.stats().refused).toContain(`no ${CACHE_MARKER} file`);
+    const check = a.checkWritable();
+    expect(check.ok).toBe(false);
+    expect(check.ok ? "" : check.reason).toContain("the disk cache is off");
+    expect(statSync(other).mode & 0o777).toBe(0o755);
+    expect(readdirSync(other)).toEqual(["mine.txt"]);
+  });
+
+  test("an existing empty directory, or one with the marker, is used and made private", () => {
+    const empty = join(root, "empty");
+    mkdirSync(empty, { mode: 0o755 });
+    chmodSync(empty, 0o755);
+    const a = make(1_000_000, empty);
+    a.put("k", body(10));
+    expect(a.get("k")).toEqual(body(10));
+    expect(statSync(empty).mode & 0o777).toBe(0o700);
+    expect(existsSync(join(empty, CACHE_MARKER))).toBe(true);
+    // The marker makes a directory with other files in it the cache's own.
+    writeFileSync(join(empty, "notes.txt"), "mine");
+    chmodSync(empty, 0o755);
+    const b = make(1_000_000, empty);
+    b.put("k2", body(10));
+    expect(b.get("k2")).toEqual(body(10));
+    expect(b.stats().refused).toBeNull();
+    expect(statSync(empty).mode & 0o777).toBe(0o700);
+    expect(logged).toEqual([]);
   });
 
   test("clear refuses a directory without the marker and removes nothing", () => {

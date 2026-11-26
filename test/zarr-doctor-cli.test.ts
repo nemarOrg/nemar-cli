@@ -14,7 +14,16 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { doctorSummary } from "../src/commands/doctor.js";
@@ -89,6 +98,19 @@ describe("nemar doctor: Zarr engine", () => {
     expect(cache).toMatch(/^✗ cache directory/);
     expect(cache).toContain(blocked);
     expect(existsSync(blocked)).toBe(false);
+  });
+
+  test("a directory that is not the cache's own is a cross, left untouched, and the exit code is still 0", async () => {
+    mkdirSync(cacheDir(), { mode: 0o755 });
+    chmodSync(cacheDir(), 0o755);
+    writeFileSync(join(cacheDir(), "mine.txt"), "mine");
+    const r = await doctor();
+    expect(r.exitCode).toBe(0);
+    const [, cache] = section(r.stdout);
+    expect(cache).toMatch(/^✗ cache directory/);
+    expect(cache).toContain("no .nemar-zarr-cache file");
+    expect(readdirSync(cacheDir())).toEqual(["mine.txt"]);
+    expect(statSync(cacheDir()).mode & 0o777).toBe(0o755);
   });
 
   test("a limit of 0 says the disk cache is off and checks nothing on disk", async () => {

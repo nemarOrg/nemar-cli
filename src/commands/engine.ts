@@ -80,6 +80,7 @@ export async function engineStatusAction(options: EngineOptions = {}): Promise<v
             cache: {
               dir: stats.dir,
               enabled: stats.enabled,
+              refused: stats.refused,
               bytes: stats.bytes,
               entries: stats.entries,
               limit_bytes: stats.limitBytes,
@@ -100,9 +101,11 @@ export async function engineStatusAction(options: EngineOptions = {}): Promise<v
     line("Data plane", bases.dataPlaneBase);
     line(
       "Cache",
-      stats.enabled
-        ? `${stats.dir}\n${" ".repeat(15)}${formatBytes(stats.bytes)} of ${formatBytes(stats.limitBytes)}, ${stats.entries} ${stats.entries === 1 ? "entry" : "entries"}`
-        : `off (NEMAR_ZARR_DISK_CACHE_BYTES=0); directory ${stats.dir}`,
+      stats.enabled && stats.refused !== null
+        ? `off: ${plain(stats.refused)}`
+        : stats.enabled
+          ? `${stats.dir}\n${" ".repeat(15)}${formatBytes(stats.bytes)} of ${formatBytes(stats.limitBytes)}, ${stats.entries} ${stats.entries === 1 ? "entry" : "entries"}`
+          : `off (NEMAR_ZARR_DISK_CACHE_BYTES=0); directory ${stats.dir}`,
     );
     console.log("");
   } catch (err) {

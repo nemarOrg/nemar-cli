@@ -23,6 +23,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -88,6 +89,7 @@ describe("nemar engine status", () => {
     expect(doc.cache).toEqual({
       dir: cacheDir(),
       enabled: true,
+      refused: null,
       bytes: 0,
       entries: 0,
       limit_bytes: 2 * 1024 * 1024 * 1024,
@@ -112,6 +114,22 @@ describe("nemar engine status", () => {
     expect(doc.zarr_base_source).toBe("default");
     const text = await nemar(["engine", "status"], { NEMAR_ZARR_BASE: "" });
     expect(text.stdout).toContain("the production default");
+  });
+
+  test("a directory that is not the cache's own says the cache is off and is left untouched", async () => {
+    mkdirSync(cacheDir(), { mode: 0o755 });
+    chmodSync(cacheDir(), 0o755);
+    writeFileSync(join(cacheDir(), "mine.txt"), "mine");
+    const r = await nemar(["engine", "status"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/Cache\s+off: .*no \.nemar-zarr-cache file/);
+    const doc = await status();
+    expect(doc.cache.enabled).toBe(true);
+    expect(doc.cache.refused).toContain("the disk cache is off");
+    // A read works and writes nothing there.
+    expect((await readWindow()).exitCode).toBe(0);
+    expect(readdirSync(cacheDir())).toEqual(["mine.txt"]);
+    expect(statSync(cacheDir()).mode & 0o777).toBe(0o755);
   });
 
   test("a limit of 0 says the cache is off", async () => {
