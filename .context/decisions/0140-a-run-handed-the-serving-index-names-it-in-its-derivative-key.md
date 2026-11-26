@@ -1,4 +1,4 @@
-# ADR 0138: A run handed the serving index names it in its derivative key
+# ADR 0140: A run handed the serving index names it in its derivative key
 
 **Status:** proposed
 **Date:** 2026-11-25

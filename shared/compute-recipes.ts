@@ -412,14 +412,14 @@ export function recipeQualityPlugins(recipe: Pick<ComputeRecipe, "checkpoints">)
 /**
  * The recipes whose run of the archive (`bids`) input can be handed the serving copy's index
  * (`--serving-index`, nemar-process P7) to declare the views of the serving copy: their derivative key on
- * that input names the index (ADR 0138, owner ruling of 2026-11-25, nemar-cli #2341).
+ * that input names the index (ADR 0140, owner ruling of 2026-11-25, nemar-cli #2341).
  */
 export const RECIPES_KEYING_SERVING_INDEX: readonly string[] = Object.freeze(["nemar-ica"]);
 
 /** The flag a run of the archive is handed the serving index with (nemar-process `nemar_ica/options.py`). */
 export const RECIPE_SERVING_INDEX_FLAG = "--serving-index";
 
-/** Whether a recipe's derivative key on this input carries `serving_index` (a version 2 key, ADR 0138). */
+/** Whether a recipe's derivative key on this input carries `serving_index` (a version 2 key, ADR 0140). */
 export function recipeKeysServingIndex(
   recipe: Pick<ComputeRecipe, "name">,
   input: RecipeInput,

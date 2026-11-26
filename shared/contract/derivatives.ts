@@ -68,7 +68,7 @@ export const LOCATIONS_NONE = "none";
 export const DERIVATIVE_KEY_FORMAT = "nemar.derivative-key.v1";
 
 /**
- * The first line of a version 2 key (ADR 0138): the eight lines of version 1 and a ninth,
+ * The first line of a version 2 key (ADR 0140): the eight lines of version 1 and a ninth,
  * `serving_index`. Only a key whose fields carry `serving_index` is version 2; every other key is
  * version 1, byte for byte, so no key made before version 2 existed changes.
  */
@@ -665,7 +665,7 @@ export const DERIVATIVE_KEY_FIELDS = Object.freeze([
 export type DerivativeKeyField = (typeof DERIVATIVE_KEY_FIELDS)[number];
 
 /**
- * The ninth field of a version 2 key (ADR 0138), given only for a recipe that reads the serving copy's
+ * The ninth field of a version 2 key (ADR 0140), given only for a recipe that reads the serving copy's
  * index on the archive input (`recipeKeysServingIndex` in `../compute-recipes.ts`: nemar-ica, owner
  * ruling of 2026-11-25, nemar-cli #2341): the serving index the run was handed changes its product (the
  * views of the serving copy are declared or skipped, and the record names the index), so it is part of
@@ -772,7 +772,7 @@ export function validateDerivativeKeyFields(fields: unknown): DerivativeKeyField
 /**
  * The text a derivative key hashes: `nemar.derivative-key.v1`, then the eight fields each as
  * `name SPACE value LF`, in order; or, when `serving_index` is given, `nemar.derivative-key.v2`, the
- * same eight lines and `serving_index SPACE value LF` (ADR 0138). The image digest is recorded with a derivative and is never part
+ * same eight lines and `serving_index SPACE value LF` (ADR 0140). The image digest is recorded with a derivative and is never part
  * of its key. A field outside its rule throws `DerivativeContractError`.
  */
 export function derivativeKeyText(fields: DerivativeKeyFields): string {

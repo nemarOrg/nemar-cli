@@ -1387,7 +1387,7 @@ describe("derivative key (vectors 6 and 7)", () => {
   });
 });
 
-describe("the serving index of a version 2 key (ADR 0138, owner ruling of 2026-11-25)", () => {
+describe("the serving index of a version 2 key (ADR 0140, owner ruling of 2026-11-25)", () => {
   const NONE = vectors.derivative_key[2].fields;
   const INDEXED = vectors.derivative_key[3].fields;
   const WITHOUT = Object.fromEntries(
