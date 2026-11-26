@@ -11,7 +11,7 @@
  * existing nemar-cli + git-annex flow.
  */
 
-import { type Context, Hono } from "hono";
+import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { PUBLISHED_FILE_MISSING_ERROR } from "../../../shared/contract/data-plane";
 import { checkDataMissBudget } from "../middleware/rateLimit";
 import { recordAccess } from "../services/access-metrics";
@@ -2146,6 +2146,29 @@ dataRoutes.get("/:datasetId/qa/*", (c) => {
 // Registered BEFORE `/:datasetId/:version` so `quality` is never read as a
 // version, and `/<id>/quality` itself answers the route's own 404.
 // ===========================================================================
+// The website reads a quality answer from a nemar.org page, so cross-origin, and checks the body against
+// its `ETag` (the SHA-256 of the bytes) before it parses it (nemarOrg/website#596). The api's global cors()
+// sets `Access-Control-Expose-Headers` before the handler runs and that preset value overwrites any the
+// handler sets, so `ETag` is added here, after the handler, on this route only: the shared list (and so
+// every other api route, the admin quality views included) stays as it was (#2324).
+const QUALITY_EXPOSED = "ETag";
+export const exposeQualityEtag: MiddlewareHandler<{
+  Bindings: Bindings;
+  Variables: Variables;
+}> = async (c, next) => {
+  await next();
+  // A refusal carries no ETag, so it exposes nothing more than the shared list.
+  if (!c.res.ok) return;
+  const listed = c.res.headers.get("Access-Control-Expose-Headers");
+  const names = (listed ?? "").split(",").map((n) => n.trim().toLowerCase());
+  if (names.includes(QUALITY_EXPOSED.toLowerCase())) return;
+  c.res.headers.set(
+    "Access-Control-Expose-Headers",
+    listed ? `${listed},${QUALITY_EXPOSED}` : QUALITY_EXPOSED,
+  );
+};
+dataRoutes.use("/:datasetId/quality/*", exposeQualityEtag);
+
 dataRoutes.get("/:datasetId/quality", (c) =>
   qualityHandler(c.env, c.req.raw, c.req.param("datasetId"), [], deferOf(c)),
 );

@@ -27,6 +27,7 @@ import { Hono } from "hono";
 import { Miniflare } from "miniflare";
 import {
   QUALITY_RECORD_FORMAT,
+  qualityAdminRecordPath,
   qualityFilePath,
   qualityRecordPath,
 } from "../../shared/contract/quality-route";
@@ -35,7 +36,8 @@ import {
   compileNeuroschemaValidator,
   formatAjvErrors,
 } from "../../test/contract/neuroschema-validator";
-import { dataRoutes } from "../src/routes/data";
+import worker from "../src/index";
+import { dataRoutes, exposeQualityEtag } from "../src/routes/data";
 import { viewFiles } from "../src/services/quality-views";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { InMemoryCache } from "./helpers/cache";
@@ -703,6 +705,107 @@ describe("the edge cache", () => {
     const newer = await derivative({ storedAt: "2026-11-20 10:00:00" });
     const res = await get(recordUrl());
     expect(((await res.json()) as Loose).derivative.key).toBe(newer);
+  });
+});
+
+describe("CORS through the real Worker: a nemar.org page can read the ETag (website#596)", () => {
+  const PAGE = "https://nemar.org";
+  const ctx = {
+    waitUntil: () => {},
+    passThroughOnException: () => {},
+  } as unknown as ExecutionContext;
+  /** The request as the website's page sends it: cross-origin, to the data host, at the root path. */
+  const fromPage = (path: string, over: Partial<Bindings> = {}) =>
+    worker.fetch(
+      new Request(`https://data.nemar.org${path}`, { headers: { Origin: PAGE } }),
+      env({ ENVIRONMENT: "production", ...over }),
+      ctx,
+    );
+  const exposed = (res: Response) =>
+    (res.headers.get("Access-Control-Expose-Headers") ?? "")
+      .split(",")
+      .map((n) => n.trim().toLowerCase());
+
+  test("the record and a file answer expose ETag, keep the shared list, and the ETag is the body's digest (MUTATION: drop the route's exposure)", async () => {
+    const key = await derivative();
+    const record = await fromPage(recordUrl());
+    expect(record.status).toBe(200);
+    expect(exposed(record)).toContain("etag");
+    expect(exposed(record)).toContain("x-request-id");
+    expect(exposed(record)).toContain("retry-after");
+    expect(exposed(record).filter((n) => n === "etag")).toHaveLength(1);
+    // The origin and credentials policy is the api's, unchanged.
+    expect(record.headers.get("Access-Control-Allow-Origin")).toBe(PAGE);
+    expect(record.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+    expect(record.headers.get("ETag")).toBe(`"${sha256(await record.text())}"`);
+
+    const file = await fromPage(fileUrl(key, SPECTRUM[0]));
+    expect(file.status).toBe(200);
+    expect(exposed(file)).toContain("etag");
+    expect(file.headers.get("ETag")).toBe(`"${SPECTRUM[0]}"`);
+    expect(sha256(new Uint8Array(await file.arrayBuffer()))).toBe(SPECTRUM[0]);
+  });
+
+  test("a cache hit exposes ETag too", async () => {
+    (globalThis as { caches?: unknown }).caches = { default: new InMemoryCache() };
+    try {
+      const key = await derivative();
+      expect((await fromPage(fileUrl(key, SPECTRUM[0]))).status).toBe(200);
+      // The store's copy goes bad, so a 200 now can only be the cached answer.
+      const bad = new Uint8Array(PRODUCT.get(SPECTRUM[1]) as Uint8Array);
+      bad[10] = bad[10] === 0x31 ? 0x32 : 0x31;
+      await bucket.put(`d/${key}/${SPECTRUM[1]}`, bad);
+      const hit = await fromPage(fileUrl(key, SPECTRUM[0]));
+      expect(hit.status).toBe(200);
+      expect(exposed(hit)).toContain("etag");
+      expect(hit.headers.get("ETag")).toBe(`"${SPECTRUM[0]}"`);
+    } finally {
+      (globalThis as { caches?: unknown }).caches = undefined;
+    }
+  });
+
+  test("a refusal is still no-store and carries no ETag", async () => {
+    const key = await derivative();
+    const missing = await fromPage(recordUrl("on009999"));
+    expect(missing.status).toBe(404);
+    expect(await word(missing)).toBe("quality_not_found");
+    expect(missing.headers.get("ETag")).toBeNull();
+    // A refusal exposes only the shared list (MUTATION: expose on refusals too).
+    expect(exposed(missing)).toContain("x-request-id");
+    expect(exposed(missing)).not.toContain("etag");
+    const undeclared = await fromPage(fileUrl(key, "0".repeat(64)));
+    expect(await word(undeclared)).toBe("view_not_declared");
+    expect(undeclared.headers.get("ETag")).toBeNull();
+  });
+
+  test("ETag already in the list is not added a second time (MUTATION: drop the listed-once guard)", async () => {
+    const inline = new Hono();
+    inline.use("*", async (c, next) => {
+      // As the global cors() does: the list is preset on the context before the handler.
+      c.res.headers.set("Access-Control-Expose-Headers", "X-Request-Id,etag");
+      await next();
+    });
+    inline.use("*", exposeQualityEtag);
+    inline.get("/ok", () => new Response("ok", { headers: { ETag: '"x"' } }));
+    const res = await inline.request("/ok");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Expose-Headers")).toBe("X-Request-Id,etag");
+  });
+
+  test("the admin quality views and the rest of the api do not gain ETag exposure", async () => {
+    const admin = await worker.fetch(
+      new Request(`http://api.test${qualityAdminRecordPath(1, RECORDING)}`, {
+        headers: { Origin: PAGE },
+      }),
+      env({ ENVIRONMENT: "production" }),
+      ctx,
+    );
+    expect(admin.status).toBe(401);
+    expect(exposed(admin)).toContain("x-request-id");
+    expect(exposed(admin)).not.toContain("etag");
+    const catalog = await fromPage("/");
+    expect(catalog.status).toBe(200);
+    expect(exposed(catalog)).not.toContain("etag");
   });
 });
 
