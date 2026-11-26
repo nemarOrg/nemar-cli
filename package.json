@@ -1,7 +1,7 @@
 {
   "name": "nemar-cli",
   "packageManager": "bun@1.4.3",
-  "version": "0.10.40",
+  "version": "0.10.41-dev2",
   "description": "CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management",
   "type": "module",
   "main": "dist/index.js",
@@ -62,6 +62,7 @@
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "conf": "^13.0.1",
+    "fzstd": "0.1.1",
     "inquirer": "^9.2.15",
     "ora": "^8.0.1",
     "semver": "^7.8.5",
