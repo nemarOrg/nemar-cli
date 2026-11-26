@@ -11,7 +11,7 @@
  *
  * - **Names.** Every entry name goes through `scanPaths` as `<archive>!/<entry>`. The path rules'
  *   hits are folded to one finding per kind per archive, with the number of entries it stands for
- *   in `entries` (lead ruling on #2392): an archive of 500 figures is one `image-or-document-file`.
+ *   in `count` (lead ruling on #2392): an archive of 500 figures is one `image-or-document-file`.
  * - **Inner recordings.** An entry is read when its extension has a reader, its method is stored
  *   (0) or deflate (8), its uncompressed size is at most {@link ZIP_ENTRY_MAX_BYTES} and it is
  *   not encrypted. A deflated entry is inflated lazily with `DecompressionStream("deflate-raw")`,
@@ -116,6 +116,12 @@ export interface ZipKit {
     readers: readonly FormatReader[],
   ): { claimed: Set<string>; missing: Map<string, number> };
   formatCoverage(paths: readonly string[], readers: readonly FormatReader[]): FormatCoverage;
+  /** The companions an entry's content names (`ReaderResult.needs`) that the archive lacks. */
+  namedCompanionsMissing(
+    path: string,
+    needs: readonly string[] | undefined,
+    paths: ReadonlySet<string>,
+  ): number;
   /** The registry's refusal past a reader's limits. */
   limitExceeded(): Error;
   /** The page size of the registry's cache: a read that starts mid-page costs the page. */
@@ -591,8 +597,8 @@ export function foldPathFindings(findings: readonly Finding[]): Finding[] {
   const byKind = new Map<string, Finding>();
   for (const f of findings) {
     const seen = byKind.get(f.kind);
-    if (seen) seen.entries = (seen.entries ?? 1) + 1;
-    else byKind.set(f.kind, { ...f, entries: 1 });
+    if (seen) seen.count = (seen.count ?? 1) + 1;
+    else byKind.set(f.kind, { ...f, count: 1 });
   }
   return [...byKind.values()];
 }
@@ -638,6 +644,7 @@ export async function scanZip(
     for (let i = 0; i < n; i++) count(key);
   }
   const { missing } = kit.companionsOf(names, inner);
+  const nameSet: ReadonlySet<string> = new Set(names);
 
   const archive = async (offset: number, length: number) => {
     try {
@@ -723,7 +730,10 @@ export async function scanZip(
         continue;
       }
       for (const f of result.findings) findings.push(f);
-      const lacking = missing.get(entry.name) ?? 0;
+      // Companions by name, and the ones the entry's content names (an EEGLAB `.set`'s `.fdt`).
+      const lacking =
+        (missing.get(entry.name) ?? 0) +
+        kit.namedCompanionsMissing(entry.name, result.needs, nameSet);
       const clean =
         result.coverage === "complete" && !cached.limited && lacking === 0 && !budget.hit;
       if (clean) continue;
