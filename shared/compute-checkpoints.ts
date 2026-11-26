@@ -65,6 +65,14 @@ export interface SkippedStep {
 /** The code of a recording a killed run discovered but never wrote a row for. */
 export const NOT_RUN_CODE = "not_run";
 
+/**
+ * The code a recording's record-level `processing` entry carries when its row's own code does not fit
+ * neuroschema's `failureCode` (`^[a-z][a-z0-9_]{0,63}$`), such as `ValueError`: a checkpoint that did not
+ * pass must carry a code, and the row's text is never passed through unchecked. Only the record-level entry
+ * uses it; the counts and the live failure lists are unchanged.
+ */
+export const UNRECORDED_CODE = "unrecorded_code";
+
 /** One row of the recordings table, as the counting rules read it: `n/a` is null. */
 export interface RecordingRow {
   path: string;
@@ -83,7 +91,8 @@ export type TableReadProblem =
   | "bad_status"
   | "missing_code"
   | "bad_skipped_steps"
-  | "too_many_rows";
+  | "too_many_rows"
+  | "duplicate_path";
 
 export type TableRead =
   | { ok: true; rows: RecordingRow[] }
@@ -193,8 +202,10 @@ export function readRecordingsRow(
 /**
  * Read a recordings table (tab-separated, a header row, `n/a` for an empty cell; CRLF tolerated). A
  * missing column, a row of the wrong width, a status that is not one of the three, a failed or skipped
- * row with no code, a malformed plugin pair in `skipped_steps`, or more rows than `PROGRESS_MAX_RECORDINGS`
- * is refused with a fixed reason. `skipped_steps` is optional and read only on a succeeded row.
+ * row with no code, a malformed plugin pair in `skipped_steps`, more rows than `PROGRESS_MAX_RECORDINGS`,
+ * or a `path` that two rows name (`duplicate_path`: one recording has one outcome, and the record-level
+ * read finds a recording by its path) is refused with a fixed reason. `skipped_steps` is optional and read
+ * only on a succeeded row.
  */
 export function parseRecordingsTable(text: string): TableRead {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
@@ -204,9 +215,12 @@ export function parseRecordingsTable(text: string): TableRead {
   if (!head.ok) return head;
   if (lines.length - 1 > PROGRESS_MAX_RECORDINGS) return { ok: false, reason: "too_many_rows" };
   const rows: RecordingRow[] = [];
+  const paths = new Set<string>();
   for (const line of lines.slice(1)) {
     const read = readRecordingsRow(line, head.header);
     if (!read.ok) return read;
+    if (paths.has(read.row.path)) return { ok: false, reason: "duplicate_path" };
+    paths.add(read.row.path);
     rows.push(read.row);
   }
   return { ok: true, rows };
@@ -612,10 +626,12 @@ export function processingEntryProblem(
 export type StoredDecision = "kept" | "lost" | "none";
 
 /**
- * The `stored` counts of a run from the passed count of its last declared checkpoint: a recording reaches
- * the store only when it passed that checkpoint, so the rest are skipped; a lost copy fails the ones that
- * would have been stored. Reconciliation resolves the stored row with it, and the public projection of a
- * promoted (stored) run computes it again, so the two cannot differ.
+ * The `stored` counts of a run from the passed count of its last declared checkpoint: a recording counts as
+ * stored only when it passed that checkpoint, so the rest are skipped; a lost copy fails the ones that would
+ * have been stored. `stored` therefore says a recording completed the recipe and was kept: one whose quality
+ * plugin was skipped (at `quality`, the last checkpoint) counts skipped although its other files were copied
+ * (ADR 0134 amendment of 2026-11-26). Reconciliation resolves the stored row with it, and the public
+ * projection of a promoted (stored) run computes it again, so the two cannot differ.
  */
 export function storedCounts(
   decision: StoredDecision,
@@ -641,26 +657,33 @@ export interface ProcessingRecordEntry {
  * One recording's record-level `processing` entry from its recordings-table row, over the recipe version's
  * checkpoints in order and then `stored`, for a run whose derivative is stored (the only run a public page
  * shows: ADR 0134 decision 9 as amended, ADR 0137 decision 7). Each declared checkpoint is
- * {@link recordingOutcomes}'s; `stored` is `passed` when the recording passed the last declared checkpoint,
- * and otherwise `skipped` with the code and step of its first checkpoint that did not pass, the recording's
- * share of {@link storedCounts}`("kept", ...)`. Summed over a run's rows, these outcomes are the run's
- * reconciled counts.
+ * {@link recordingOutcomes}'s, a code that does not fit `failureCode` written {@link UNRECORDED_CODE}.
+ *
+ * `stored` FOLLOWS THE LAST DECLARED CHECKPOINT, as {@link storedCounts} does at the dataset level:
+ * `passed` when the recording passed it, otherwise `skipped` with that checkpoint's code and step. So a
+ * recording whose quality plugin was skipped (a succeeded row with `skipped_steps`) shows `stored: skipped`
+ * with the plugin's code, although its other files were copied with the derivative: `stored` says the
+ * recording completed the recipe and was kept, not that some file of it exists. Summed over a run's rows,
+ * these outcomes are the run's reconciled counts.
  */
 export function processingRecordEntry(input: {
   recipeVersion: string;
   checkpoints: readonly RecipeCheckpoint[];
   row: RecordingRow;
 }): ProcessingRecordEntry {
-  const outcomes = recordingOutcomes(input.row, input.checkpoints);
+  const outcomes = recordingOutcomes(input.row, input.checkpoints).map(
+    (o): CheckpointOutcome =>
+      o.status !== "passed" && o.code === null ? { ...o, code: UNRECORDED_CODE } : o,
+  );
   const checkpoints: Record<string, CheckpointOutcome> = {};
   input.checkpoints.forEach((c, i) => {
     checkpoints[c.checkpoint] = outcomes[i];
   });
-  const first = outcomes.find((o) => o.status !== "passed");
+  const last = outcomes[outcomes.length - 1];
   checkpoints[STORED_CHECKPOINT] =
-    first === undefined
+    last.status === "passed"
       ? { status: "passed", code: null, step: null }
-      : { status: "skipped", code: first.code, step: first.step };
+      : { status: "skipped", code: last.code, step: last.step };
   return { recipe_version: input.recipeVersion, checkpoints };
 }
 
@@ -672,6 +695,11 @@ export const PROCESSING_RECORD_PROBLEMS = ["keys_differ", "cascade_broken"] as c
  * docs/processing-extensions.md): its checkpoints are exactly `declared`, in that order (`stored` last), and
  * after the recording's first checkpoint that did not pass, every later one is `skipped` with the same code
  * and step. Null when it holds.
+ *
+ * The cascade and the plugin rule of {@link recordingOutcomes} agree only because every plugin step sits in
+ * the LAST declared checkpoint (`test/compute-recipes.unit.test.ts` holds the registry to it): a plugin
+ * skipped at an earlier checkpoint would leave the next one `passed`, which this rule refuses
+ * (`cascade_broken`), and the record-level read would answer `record_unreadable` for that recording.
  */
 export function processingRecordProblem(
   entry: ProcessingRecordEntry,

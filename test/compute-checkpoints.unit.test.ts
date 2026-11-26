@@ -16,6 +16,7 @@ import {
   type PipelineCellMark,
   type PipelineGridStatus,
   type RecordingRow,
+  UNRECORDED_CODE,
   countRecordings,
   failuresByCheckpoint,
   firstCheckpointOf,
@@ -159,6 +160,11 @@ describe("parseRecordingsTable", () => {
 
   test("an empty table with only a header has no rows", () => {
     expect(parseRecordingsTable(`${header.join("\t")}\n`)).toEqual({ ok: true, rows: [] });
+  });
+
+  test("refuses a path two rows name: one recording has one outcome (MUTATION: accept a repeated path)", () => {
+    const text = `${header.join("\t")}\n${line("a.set", "succeeded", "n/a", "n/a")}\n${line("b.set", "succeeded", "n/a", "n/a")}\n${line("a.set", "failed", "load_failed", "load")}\n`;
+    expect(parseRecordingsTable(text)).toEqual({ ok: false, reason: "duplicate_path" });
   });
 
   test("refuses a table of more rows than PROGRESS_MAX_RECORDINGS", () => {
@@ -767,6 +773,27 @@ describe("record-level entries", () => {
       row: row("a.set", "succeeded", null, null),
     });
     expect(Object.values(passed.checkpoints).every((o) => o.status === "passed")).toBe(true);
+  });
+
+  test("a code that does not fit failureCode is written unrecorded_code, and the entry still validates (MUTATION: keep the row's null code)", () => {
+    for (const code of ["ValueError", "x".repeat(70)]) {
+      const entry = processingRecordEntry({
+        recipeVersion: floor.version,
+        checkpoints: F,
+        row: row("b.set", "failed", code, "bad_channels"),
+      });
+      expect(entry.checkpoints.preprocess).toEqual({
+        status: "failed",
+        code: UNRECORDED_CODE,
+        step: "bad_channels",
+      });
+      expect(entry.checkpoints.stored.code).toBe(UNRECORDED_CODE);
+      expect(processingRecordProblem(entry, declaredCheckpoints(floor))).toBeNull();
+      const doc = { level: "record", recipes: { "nemar-floor": entry } };
+      if (!nscProcessing(doc)) throw new Error(`${code}: ${formatAjvErrors(nscProcessing)}`);
+    }
+    // The counts and the live failure lists keep the row as it is.
+    expect(recordingOutcomes(row("b.set", "failed", "ValueError", "load"), F)[0].code).toBeNull();
   });
 
   test("processingRecordProblem: the declared keys in order, and the cascade (MUTATION: drop the code comparison)", () => {
