@@ -351,6 +351,35 @@ const VALID: Record<string, unknown> = {
     ],
     listed_codes: [{ checkpoint: "import", code: "load_failed", count: 1 }],
   },
+  ComputeRunQualityResponseSchema: {
+    stamp_id: 7,
+    dataset_id: "nm000104",
+    version: "v1.0.0",
+    recipe: "nemar-ica",
+    recipe_version: "1.0.0",
+    input: "bids",
+    stamp_state: "succeeded",
+    quality: "canary",
+    skip: null,
+    derivative: {
+      key: "a".repeat(64),
+      state: "stored",
+      retention: "canary",
+      failure: null,
+      created_at: "2026-11-20 09:00:00",
+      stored_at: "2026-11-20 10:00:00",
+      expires_at: "2026-12-20 10:00:00",
+      superseded_at: null,
+      serving_index: "none",
+    },
+    recordings: {
+      state: "listed",
+      succeeded: 1,
+      unlisted: 0,
+      items: [{ path: "sub-01/eeg/sub-01_task-rest_eeg.edf" }],
+      next_after: null,
+    },
+  },
   ComputePipelineResultSchema: pipelineResult,
   ComputePipelineRoomSchema: { daily_left: 4, live_left: 0, limited_by: "live_cap" },
   ComputePipelineStampViewSchema: pipelineStamp,
@@ -679,6 +708,8 @@ describe("the pipeline grid's words and bounds", () => {
       "COMPUTE_PIPELINE_GRID_STATUSES",
       "COMPUTE_PIPELINE_CELL_MARKS",
       "COMPUTE_PIPELINE_RUN_OUTCOMES",
+      "COMPUTE_RUN_QUALITY_STATES",
+      "COMPUTE_RUN_QUALITY_RECORDINGS_STATES",
     ]) {
       const m = source.match(new RegExp(`export const ${name} = \\[([^\\]]*)\\] as const;`));
       expect([name, m !== null]).toEqual([name, true]);
@@ -690,6 +721,7 @@ describe("the pipeline grid's words and bounds", () => {
       "COMPUTE_PIPELINE_GRID_PAGE_MAX",
       "COMPUTE_PIPELINE_TREND_DAYS_DEFAULT",
       "COMPUTE_PIPELINE_TREND_DAYS_MAX",
+      "COMPUTE_RUN_QUALITY_PAGE_SIZE",
     ]) {
       const m = source.match(new RegExp(`export const ${name} = ([0-9]+);`));
       expect([name, Number(m?.[1])]).toEqual([
@@ -697,6 +729,14 @@ describe("the pipeline grid's words and bounds", () => {
         (admin as unknown as Record<string, number>)[name],
       ]);
     }
+  });
+
+  test("a run's quality: a page is 100 recordings, and the stored words are the ones a table is read for", () => {
+    expect(admin.COMPUTE_RUN_QUALITY_PAGE_SIZE).toBe(100);
+    expect(new Set(admin.COMPUTE_RUN_QUALITY_STATES).size).toBe(
+      admin.COMPUTE_RUN_QUALITY_STATES.length,
+    );
+    expect(admin.COMPUTE_RUN_QUALITY_RECORDINGS_STATES[0]).toBe("listed");
   });
 
   test("a drill-down of a stamp that does not exist is 404 stamp_not_found", () => {
