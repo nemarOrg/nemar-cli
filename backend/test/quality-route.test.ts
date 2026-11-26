@@ -37,7 +37,7 @@ import {
   formatAjvErrors,
 } from "../../test/contract/neuroschema-validator";
 import worker from "../src/index";
-import { dataRoutes } from "../src/routes/data";
+import { dataRoutes, exposeQualityEtag } from "../src/routes/data";
 import { viewFiles } from "../src/services/quality-views";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { InMemoryCache } from "./helpers/cache";
@@ -770,9 +770,26 @@ describe("CORS through the real Worker: a nemar.org page can read the ETag (webs
     expect(missing.status).toBe(404);
     expect(await word(missing)).toBe("quality_not_found");
     expect(missing.headers.get("ETag")).toBeNull();
+    // A refusal exposes only the shared list (MUTATION: expose on refusals too).
+    expect(exposed(missing)).toContain("x-request-id");
+    expect(exposed(missing)).not.toContain("etag");
     const undeclared = await fromPage(fileUrl(key, "0".repeat(64)));
     expect(await word(undeclared)).toBe("view_not_declared");
     expect(undeclared.headers.get("ETag")).toBeNull();
+  });
+
+  test("ETag already in the list is not added a second time (MUTATION: drop the listed-once guard)", async () => {
+    const inline = new Hono();
+    inline.use("*", async (c, next) => {
+      // As the global cors() does: the list is preset on the context before the handler.
+      c.res.headers.set("Access-Control-Expose-Headers", "X-Request-Id,etag");
+      await next();
+    });
+    inline.use("*", exposeQualityEtag);
+    inline.get("/ok", () => new Response("ok", { headers: { ETag: '"x"' } }));
+    const res = await inline.request("/ok");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Expose-Headers")).toBe("X-Request-Id,etag");
   });
 
   test("the admin quality views and the rest of the api do not gain ETag exposure", async () => {
