@@ -41,6 +41,13 @@ const DEFAULT_API_URL = "https://api.nemar.org";
 export const IS_DEV_BUILD = DEFAULT_API_URL.includes("workers.dev");
 
 /**
+ * The environment variable that overrides the API base URL (tests and CI point the CLI at a
+ * stand-in or the dev Worker with it). Named once so a module that forwards it to a child, such
+ * as the Zarr engine's environment allowlist, and that module's tests refer to the same name.
+ */
+export const API_URL_OVERRIDE_ENV = "TEST_API_URL";
+
+/**
  * Get the API base URL from config or default.
  * Dev builds (injected URL) always use the dev backend regardless of stored config.
  *
@@ -50,8 +57,9 @@ export const IS_DEV_BUILD = DEFAULT_API_URL.includes("workers.dev");
  * second host that has to be kept in step.
  */
 export function getApiUrl(): string {
-  if (process.env.TEST_API_URL) {
-    return process.env.TEST_API_URL;
+  const override = process.env[API_URL_OVERRIDE_ENV];
+  if (override) {
+    return override;
   }
   if (IS_DEV_BUILD) {
     return DEFAULT_API_URL;

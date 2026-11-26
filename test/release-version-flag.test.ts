@@ -31,7 +31,9 @@ import {
   datasetCommand,
 } from "../src/commands/dataset";
 import { doctorCommand } from "../src/commands/doctor";
+import { engineCommand } from "../src/commands/engine";
 import { sandboxCommand } from "../src/commands/sandbox";
+import { zarrCommand } from "../src/commands/zarr";
 import {
   MisplacedShadowedOptionError,
   MissingShadowedValueError,
@@ -54,7 +56,9 @@ const SHARED_GROUPS = [
   computeCommand,
   datasetCommand,
   doctorCommand,
+  engineCommand,
   sandboxCommand,
+  zarrCommand,
 ];
 
 // Declared inline in src/index.ts rather than exported, so the tree below
