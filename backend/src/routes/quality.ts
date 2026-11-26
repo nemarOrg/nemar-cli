@@ -20,12 +20,14 @@
  *     change to a gate column advances) and the derivative key, so an entry is never read before the gate
  *     and never outlives a change of the dataset or of its current derivative.
  *  4. The recording's record (at most 512 KiB), projected and checked whole (`recordingViews`): the
- *     record's integers, its identity (the derivative's dataset and the recording asked for), every plugin
- *     view's plugin against the `quality` plugins the derivative row recorded for its recipe version when
- *     it was made (`compute_derivatives.quality_plugins`; a row without them serves nothing), the vendored
- *     schema, recording scope and `nemar.record-checks.v1`.
+ *     record's integers, its identity (the derivative row's dataset and the recording asked for), every
+ *     plugin view's plugin against the `quality` plugins the derivative row recorded for its recipe version
+ *     when it was made (`compute_derivatives.quality_plugins`; a row without them serves nothing), the
+ *     vendored schema, recording scope and `nemar.record-checks.v1`.
  *  5. For a file: the digest must be one a validated view declares; the object (at most 4 MiB) must be its
  *     declared size and is hashed again before a byte is served.
+ * Steps 4 and 5 are `serveRecordingViews` (`services/quality-serve.ts`), which the admin mount
+ * (`routes/admin/quality-views.ts`) calls too; only this route caches.
  *
  * Public answers carry `Cache-Control: public, max-age=300`, `Cache-Tag: nemar-dq-<id>` and a strong `ETag`
  * (the SHA-256 of the body's bytes). Every refusal is `no-store` and is never put in the cache. A log line
@@ -39,24 +41,19 @@
  * allows a browser 300 seconds); the bytes it covers were public when they were served.
  */
 
-import { label, matchRecording, productPath } from "../../../shared/compute-naming.js";
+import { matchRecording } from "../../../shared/compute-naming.js";
 import { findRecipe } from "../../../shared/compute-recipes.js";
 import {
-  QUALITY_FILE_MAX_BYTES,
   QUALITY_FILE_SEGMENT,
   QUALITY_PUBLIC_MAX_AGE,
   QUALITY_RECORDING_PATH_MAX,
-  QUALITY_RECORD_FORMAT,
-  QUALITY_RECORD_MAX_BYTES,
   QUALITY_RECORD_SEGMENT,
   QUALITY_ROUTE_VERSION,
   QUALITY_ROUTE_WORDS,
   type QualityRouteWord,
   qualityCacheTag,
-  qualityFileHeaders,
 } from "../../../shared/contract/quality-route.js";
-import { sha256HexOfBytes } from "../../../shared/contract/view-digest.js";
-import { DERIVATIVE_OBJECT_PREFIX, derivativesBound } from "../services/compute-derivatives.js";
+import { derivativesBound } from "../services/compute-derivatives.js";
 import { isValidDatasetId } from "../services/datasetId.js";
 import type { ManifestCache } from "../services/manifest-source.js";
 import {
@@ -64,10 +61,10 @@ import {
   QUALITY_DATASET_GATE_SQL,
   QUALITY_PATTERNS,
 } from "../services/quality-documents.js";
-import { recordingViews } from "../services/quality-views.js";
+import { type ServedDerivative, serveRecordingViews } from "../services/quality-serve.js";
 import type { Bindings } from "../types/bindings.js";
 
-const DERIVATIVE_FIELDS = `cd.key, cd.version, cd.recipe_version, cd.input, cd.retention, cd.stored_at,
+const DERIVATIVE_FIELDS = `cd.key, cd.dataset_id, cd.recipe, cd.version, cd.recipe_version, cd.input, cd.retention, cd.stored_at,
        cd.quality_plugins, COALESCE(e.epoch, 0) AS epoch`;
 
 const GATED_FROM = `FROM datasets d
@@ -92,32 +89,13 @@ export const QUALITY_NAMED_SQL = `SELECT ${DERIVATIVE_FIELDS},
   ${GATED_FROM}
    AND cd.key = ?3`;
 
-interface DerivativeRead {
-  key: string;
-  version: string;
-  recipe_version: string;
-  input: "bids" | "zarr";
-  retention: string;
-  stored_at: string;
-  quality_plugins: string | null;
+interface DerivativeRead extends ServedDerivative {
   epoch: number;
   current?: number;
   expired?: number;
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
-
-/** The plugin names a row's `quality_plugins` holds, or null when it holds none that can be read. */
-function pluginsOf(text: string | null): string[] | null {
-  if (text === null) return null;
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  return Array.isArray(value) && value.every((v) => typeof v === "string") ? value : null;
-}
 
 function refuse(word: QualityRouteWord): Response {
   return new Response(JSON.stringify({ error: word }), {
@@ -190,24 +168,6 @@ export function parseQualityPath(segments: readonly string[]): QualityRequest | 
   return "quality_not_found";
 }
 
-/** Read an object of at most `max` bytes, or say why not; a larger one is never read into memory. */
-async function readBounded(
-  bucket: R2Bucket,
-  key: string,
-  max: number,
-): Promise<
-  { kind: "ok"; bytes: Uint8Array } | { kind: "missing" } | { kind: "too_large"; size: number }
-> {
-  const object = await bucket.get(key);
-  if (object === null) return { kind: "missing" };
-  // A larger object's body is never read: it is left unconsumed, and the runtime releases it.
-  if (object.size > max) return { kind: "too_large", size: object.size };
-  const bytes = new Uint8Array(await object.arrayBuffer());
-  // The size the store stated is the size read, or the object changed under the read.
-  if (bytes.byteLength > max) return { kind: "too_large", size: bytes.byteLength };
-  return { kind: "ok", bytes };
-}
-
 /**
  * Answer one quality request. `datasetId` is the URL's; `segments` the raw path segments after
  * `/<id>/quality/`. `defer` hands the cache write to `waitUntil` where there is an execution context.
@@ -265,96 +225,13 @@ export async function qualityHandler(
     }
   }
 
-  // 4. The record, checked whole.
-  const short = row.key.slice(0, 12);
-  const recipe = findRecipe(asked.recipe);
-  // The recipe version's quality plugins as the row recorded them when it was made, so a derivative of a
-  // version the registry has moved past is checked against its own version's plugins.
-  const plugins = pluginsOf(row.quality_plugins);
-  if (recipe === null || plugins === null) {
-    console.warn(`[quality] quality_plugins_unknown dataset=${datasetId} key=${short}`);
-    return refuse("quality_not_found");
-  }
-  const recordPath = productPath(asked.recording, label(recipe.name), "signalJourney", "json");
-  const record = await readBounded(
-    bucket,
-    `${DERIVATIVE_OBJECT_PREFIX}${row.key}/${recordPath}`,
-    QUALITY_RECORD_MAX_BYTES,
-  );
-  if (record.kind === "missing") return refuse("quality_not_found");
-  if (record.kind === "too_large") {
-    console.warn(
-      `[quality] record_unreadable dataset=${datasetId} key=${short} reason=record_too_large`,
-    );
-    return refuse("record_unreadable");
-  }
-  const views = await recordingViews(
-    record.bytes,
-    {
-      recipe: recipe.name,
-      recipeVersion: row.recipe_version,
-      input: row.input,
-      plugins,
-    },
-    { datasetId, recording: asked.recording },
-  );
-  if (!views.ok) {
-    console.warn(
-      `[quality] record_unreadable dataset=${datasetId} key=${short} reason=${views.reason}`,
-    );
-    return refuse("record_unreadable");
-  }
-
-  let response: Response;
-  if (asked.kind === "record") {
-    const body = {
-      format: QUALITY_RECORD_FORMAT,
-      dataset_id: datasetId,
-      recipe: recipe.name,
-      recording: asked.recording,
-      derivative: {
-        key: row.key,
-        version: row.version,
-        recipe_version: row.recipe_version,
-        retention: row.retention,
-        stored_at: row.stored_at,
-      },
-      dataQuality: views.document,
-      view_digests: views.digests,
-    };
-    const bytes = new TextEncoder().encode(JSON.stringify(body));
-    response = new Response(bytes, {
-      headers: {
-        "Content-Type": "application/json",
-        "X-Content-Type-Options": "nosniff",
-        ...publicHeaders(datasetId, await sha256HexOfBytes(bytes)),
-      },
-    });
-  } else {
-    // 5. A declared file, read again and hashed.
-    const declared = views.files.get(asked.sha256);
-    if (declared === undefined) return refuse("view_not_declared");
-    const file = await readBounded(
-      bucket,
-      `${DERIVATIVE_OBJECT_PREFIX}${row.key}/${declared.location}`,
-      QUALITY_FILE_MAX_BYTES,
-    );
-    if (file.kind === "missing") return refuse("view_data_missing");
-    if (file.kind === "too_large" || file.bytes.byteLength !== declared.size) {
-      console.error(`[quality] view_data_corrupt dataset=${datasetId} key=${short} reason=size`);
-      return refuse("view_data_corrupt");
-    }
-    if ((await sha256HexOfBytes(file.bytes)) !== asked.sha256) {
-      console.error(`[quality] view_data_corrupt dataset=${datasetId} key=${short} reason=digest`);
-      return refuse("view_data_corrupt");
-    }
-    response = new Response(file.bytes, {
-      headers: {
-        ...qualityFileHeaders(declared.location, declared.format),
-        ...publicHeaders(datasetId, asked.sha256),
-      },
-    });
-  }
+  // 4 and 5. The record, checked whole, and a declared file, read again and hashed (`quality-serve.ts`,
+  // the steps the admin mount runs too).
+  const served = await serveRecordingViews(bucket, row, asked, "quality");
+  if (!served.ok) return refuse(served.word);
+  const response = new Response(served.bytes, {
+    headers: { ...served.headers, ...publicHeaders(datasetId, served.sha256) },
+  });
 
   if (cache !== null) {
     const write = cache.put(cacheKey, response.clone()).catch((err: unknown) => {
