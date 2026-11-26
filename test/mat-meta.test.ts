@@ -306,6 +306,12 @@ describe("declared counts and sizes do not drive the walk (review round 1)", () 
     expect(performance.now() - t).toBeLessThan(1000);
   });
 
+  test("a member count the bytes cannot hold is corrupt before it is charged or walked", async () => {
+    // Two million members declared, none present: corrupt, not a limit.
+    const cell = matrix(sub(6, u32(1, 0)), sub(5, i32(1, 2_000_000)), sub(1, ascii("c")));
+    expect((await walkMat(bufferSource(level5(cell)))).incomplete).toBe("corrupt");
+  });
+
   test("a cell's members are charged against the element cap before any is walked", async () => {
     const cell = matrix(
       sub(6, u32(1, 0)),
@@ -335,6 +341,14 @@ describe("declared counts and sizes do not drive the walk (review round 1)", () 
     const w = await walkMat(src);
     expect(w.incomplete).toBe("corrupt");
     expect(ranges.reduce((n, [, l]) => n + l, 0)).toBeLessThan(1024);
+    // A data tag one padded slot past the array's own size is not this array's either.
+    const over = matrix(
+      sub(6, u32(6, 0)),
+      sub(5, i32(1, 1)),
+      sub(1, ascii("X")),
+      sub(9, new Uint8Array(24)),
+    );
+    expect((await walkMat(bufferSource(level5(over)))).incomplete).toBe("corrupt");
     // The twin: a data tag of exactly one double reads.
     const one = matrix(
       sub(6, u32(6, 0)),
@@ -377,7 +391,12 @@ describe("declared counts and sizes do not drive the walk (review round 1)", () 
   test("a field-name width of 0, or names that do not fill whole slots, are corrupt", async () => {
     const zero = matrix(...structHead([1, 1], "s", 0, ascii("ab")), scalar);
     expect((await walkMat(bufferSource(level5(zero)))).incomplete).toBe("corrupt");
-    const ragged = matrix(...structHead([1, 1], "s", 8, ascii("a".padEnd(12, "\0"))), scalar);
+    // Twelve bytes of names in 8-byte slots, with two members as if there were two slots.
+    const ragged = matrix(
+      ...structHead([1, 1], "s", 8, ascii("a".padEnd(12, "\0"))),
+      scalar,
+      scalar,
+    );
     expect((await walkMat(bufferSource(level5(ragged)))).incomplete).toBe("corrupt");
   });
 
