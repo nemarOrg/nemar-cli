@@ -36,11 +36,22 @@ import {
 } from "../../shared/contract/compute-launch";
 import { createJob } from "../src/services/compute-jobs";
 import { buildLaunch } from "../src/services/compute-lifecycle";
-import { recipeJobSpec } from "../src/services/compute-pipeline";
+import {
+  SERVING_INDEX_DEFERRED_WORD,
+  recipeJobSpec,
+  servingIndexForRun,
+  servingIndexRefusal,
+} from "../src/services/compute-pipeline";
 import { servingIndexKey } from "../src/services/compute-records";
 import { signComputeToken } from "../src/services/compute-tokens";
 import { __resetInstallationTokenCacheForTests } from "../src/services/github-auth";
-import { stageServingIndex } from "../src/services/serving-index-staging";
+import { getZarrIndexResponse } from "../src/services/s3";
+import {
+  SERVING_INDEX_DEFER_MINUTES,
+  SERVING_INDEX_FAULT_REASONS,
+  isServingIndexFault,
+  stageServingIndex,
+} from "../src/services/serving-index-staging";
 import type { Bindings } from "../src/types/bindings";
 import {
   CALLBACK_SECRET,
@@ -50,12 +61,17 @@ import {
   reread,
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
-import { fundPipelines, seedPipelinesAccount } from "./helpers/compute-pipeline-fixture";
+import {
+  fundPipelines,
+  seedEegDataset,
+  seedPipelinesAccount,
+} from "./helpers/compute-pipeline-fixture";
 import { makeRoutesApp } from "./helpers/compute-routes-app";
 import {
   type GithubCompareStandin,
   startGithubCompareStandin,
 } from "./helpers/github-compare-standin";
+import { logged } from "./helpers/logs";
 
 let fx: LifecycleFixture;
 let github: GithubCompareStandin;
@@ -94,18 +110,28 @@ const TAG = "v1.0.0";
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 
 /** An index as the converter writes it, as TEXT: the digest is over these exact bytes. */
-const indexText = (commit: unknown) =>
-  `${JSON.stringify(
-    {
-      format_version: 3,
-      dataset_id: ID,
-      source_commit: commit,
-      store_count: 1,
-      stores: [{ path: "sub-01/eeg/sub-01_task-rest_eeg.zarr", source_path: "sub-01/eeg/x.set" }],
-    },
-    null,
-    2,
-  )}\n`;
+/** A store as the converter lists it, with one EEG group; `over` replaces members of the group. */
+const storeOf = (over: Record<string, unknown> = {}) => ({
+  path: "sub-01/eeg/sub-01_task-rest_eeg.set",
+  zarr: "sub-01/eeg/sub-01_task-rest_eeg.zarr",
+  groups: [
+    { name: "eeg_250hz", modality: "EEG", rate: 250, n_channels: 64, n_samples: 75000, ...over },
+  ],
+});
+
+/** An index document as the converter writes it; `over` replaces top-level members. */
+const indexDoc = (commit: unknown, over: Record<string, unknown> = {}) => ({
+  format_version: 3,
+  dataset_id: ID,
+  source_commit: commit,
+  store_count: 1,
+  stores: [storeOf()],
+  ...over,
+});
+
+/** The index as TEXT: the digest is over these exact bytes. */
+const indexText = (commit: unknown, over: Record<string, unknown> = {}) =>
+  `${JSON.stringify(indexDoc(commit, over), null, 2)}\n`;
 
 async function servingCopies(): Promise<string[]> {
   const listed = await fx.harness.records.list({ prefix: "serving-index/" });
@@ -190,7 +216,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
         github.tag(ID, TAG, T);
         github.index(ID, "{not json");
       },
-      "index_unreadable",
+      "index_unusable",
     ],
     [
       "an index that is a JSON array",
@@ -198,7 +224,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
         github.tag(ID, TAG, T);
         github.index(ID, "[]");
       },
-      "index_unreadable",
+      "index_unusable",
     ],
     [
       "an index without a commit",
@@ -258,10 +284,15 @@ describe("anything else stages nothing, with a word, and never throws", () => {
     github.tag(ID, TAG, T);
     github.index(ID, text);
     await fx.harness.records.put(servingIndexKey(sha(text)), "other bytes");
-    expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
-      staged: false,
-      reason: "index_not_stored",
+    let staged: unknown;
+    const lines = await logged(async () => {
+      staged = await stageServingIndex(devEnv(), ID, TAG);
     });
+    expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
+    // Its own line, with the digest, never the generic one (MUTATION: share the put failure's line).
+    expect(lines.filter((l) => l.startsWith("[serving-index]"))).toEqual([
+      `[serving-index] copy_conflict sha256=${sha(text)}`,
+    ]);
     const kept = await fx.harness.records.get(servingIndexKey(sha(text)));
     expect(await (kept as R2ObjectBody).text()).toBe("other bytes");
   });
@@ -279,14 +310,341 @@ describe("anything else stages nothing, with a word, and never throws", () => {
     github.tag(ID, TAG, T);
     github.index(ID, indexText(T));
     const env = devEnv();
-    expect(
-      await stageServingIndex(
+    let staged: unknown;
+    const lines = await logged(async () => {
+      staged = await stageServingIndex(
         { ...env, COMPUTE_RECORDS: undefined } as unknown as Bindings,
         ID,
         TAG,
-      ),
-    ).toEqual({ staged: false, reason: "index_not_stored" });
+      );
+    });
+    expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
+    // The store's throw is logged by the error's class name alone (MUTATION: log the conflict line).
+    expect(lines.filter((l) => l.startsWith("[serving-index]"))).toEqual([
+      "[serving-index] copy_put_failed error=Error",
+    ]);
   });
+
+  test("a store that throws mid-put is logged by its class name", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(T));
+    const env = devEnv();
+    const records = env.COMPUTE_RECORDS as R2Bucket;
+    const broken = {
+      head: (key: string) => records.head(key),
+      get: (key: string) => records.get(key),
+      put: () => {
+        throw new TypeError("the bucket refused");
+      },
+    } as unknown as R2Bucket;
+    let staged: unknown;
+    const lines = await logged(async () => {
+      staged = await stageServingIndex({ ...env, COMPUTE_RECORDS: broken }, ID, TAG);
+    });
+    expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
+    expect(lines.filter((l) => l.startsWith("[serving-index]"))).toEqual([
+      "[serving-index] copy_put_failed error=TypeError",
+    ]);
+  });
+});
+
+// --- (c2): an index the recipe would refuse is never staged -------------------------------------------------
+
+describe("an index the recipe cannot use is index_unusable, and the run goes ahead without it at once", () => {
+  const bad: Array<[string, string]> = [
+    ["a byte order mark", `\ufeff${indexText(T)}`],
+    [
+      "a repeated member name",
+      indexText(T).replace('"format_version": 3,', '"format_version": 3,\n  "store_count": 2,'),
+    ],
+    ["no list of stores", indexText(T, { stores: {} })],
+    ["a store count that is not whole", indexText(T, { store_count: 1.5 })],
+    ["a store count below zero", indexText(T, { store_count: -1 })],
+    ["a store that is not an object", indexText(T, { stores: ["x"] })],
+    ["an absolute store path", indexText(T, { stores: [{ ...storeOf(), path: "/sub-01/x.set" }] })],
+    [
+      "a store path with a dot segment",
+      indexText(T, { stores: [{ ...storeOf(), zarr: "sub-01/.partial/x.zarr" }] }),
+    ],
+    [
+      "a store path with a query character",
+      indexText(T, { stores: [{ ...storeOf(), path: "sub-01/x?.set" }] }),
+    ],
+    ["a store with no list of groups", indexText(T, { stores: [{ ...storeOf(), groups: null }] })],
+    ["a group with no name", indexText(T, { stores: [storeOf({ name: "" })] })],
+    [
+      "a group name with a control character",
+      indexText(T, { stores: [storeOf({ name: "eeg\u0001" })] }),
+    ],
+    ["a group with no modality", indexText(T, { stores: [storeOf({ modality: null })] })],
+    ["a rate of zero", indexText(T, { stores: [storeOf({ rate: 0 })] })],
+    ["a rate that is text", indexText(T, { stores: [storeOf({ rate: "250" })] })],
+    ["a rate that is a boolean", indexText(T, { stores: [storeOf({ rate: true })] })],
+    ["a fractional channel count", indexText(T, { stores: [storeOf({ n_channels: 1.5 })] })],
+    ["too many channels", indexText(T, { stores: [storeOf({ n_channels: 100_001 })] })],
+    ["a negative sample count", indexText(T, { stores: [storeOf({ n_samples: -1 })] })],
+    ["too many samples", indexText(T, { stores: [storeOf({ n_samples: 10 ** 11 + 1 })] })],
+  ];
+  for (const [label, text] of bad) {
+    test(`${label}: index_unusable, nothing kept, and no deferral`, async () => {
+      github.tag(ID, TAG, T);
+      github.index(ID, text);
+      expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
+        staged: false,
+        reason: "index_unusable",
+      });
+      expect(await servingCopies()).toEqual([]);
+      expect(isServingIndexFault("index_unusable")).toBe(false);
+    });
+  }
+
+  test("the edges the recipe accepts are staged: zero stores, zero channels and samples, the largest counts", async () => {
+    for (const over of [
+      { stores: [], store_count: 0 },
+      { stores: [storeOf({ n_channels: 0, n_samples: 0 })] },
+      { stores: [storeOf({ n_channels: 100_000, n_samples: 10 ** 11, rate: 0.5 })] },
+      { stores: [{ ...storeOf(), groups: [] }] },
+    ]) {
+      github.reset();
+      github.tag(ID, TAG, T);
+      github.index(ID, indexText(T, over));
+      expect((await stageServingIndex(devEnv(), ID, TAG)).staged, JSON.stringify(over)).toBe(true);
+    }
+  });
+});
+
+// --- (c3): a fault defers the run, for at most 24 hours ------------------------------------------------------
+
+describe("a fault defers the run; after 24 hours, or for an absent index, it runs without one", () => {
+  const run = (env: Bindings) => servingIndexForRun(env, ica, "bids", ID, TAG);
+  const deferredStamps = async (env: Bindings) =>
+    (
+      await env.DB.prepare(
+        "SELECT id, state, refusal_code, job_id FROM compute_pipeline_stamps WHERE dataset_id = ?1 ORDER BY id",
+      )
+        .bind(ID)
+        .all<{ id: number; state: string; refusal_code: string | null; job_id: string | null }>()
+    ).results;
+  const backdate = (env: Bindings, hours: number) =>
+    env.DB.prepare(
+      `UPDATE compute_pipeline_stamps SET created_at = datetime('now', '-${hours} hours') WHERE dataset_id = ?1`,
+    )
+      .bind(ID)
+      .run();
+
+  for (const [label, arrange, reason] of [
+    [
+      "GitHub cannot be read",
+      () => {
+        github.tag(ID, TAG, { http: 502 });
+        github.index(ID, indexText(T));
+      },
+      "github_unreadable",
+    ],
+    [
+      "the index cannot be read",
+      () => {
+        github.tag(ID, TAG, T);
+        github.index(ID, { http: 503 });
+      },
+      "index_unreadable",
+    ],
+    [
+      "the index answers 403",
+      () => {
+        github.tag(ID, TAG, T);
+        github.index(ID, { http: 403 });
+      },
+      "index_unreadable",
+    ],
+  ] as Array<[string, () => void, string]>) {
+    test(`${label}: deferred, a refused stamp records it, and nothing is dispatched (MUTATION: run on a fault)`, async () => {
+      const env = devEnv();
+      await seedEegDataset(env, ID);
+      arrange();
+      const decided = await run(env);
+      expect(decided).toMatchObject({ kind: "deferred", reason });
+      const stamps = await deferredStamps(env);
+      expect(stamps).toEqual([
+        {
+          id: (decided as { stampId: number }).stampId,
+          state: "refused",
+          refusal_code: SERVING_INDEX_DEFERRED_WORD,
+          job_id: null,
+        },
+      ]);
+      // The next pass defers again, and a refused stamp never blocks the claim of a run.
+      expect((await run(env)).kind).toBe("deferred");
+      expect(await deferredStamps(env)).toHaveLength(2);
+    });
+  }
+
+  test("a fault 24 hours after the first deferral runs without the index, recording the fault (MUTATION: defer for ever; measure from the newest deferral)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, indexText(T));
+    expect((await run(env)).kind).toBe("deferred");
+    expect((await run(env)).kind).toBe("deferred");
+    // The first deferral 25 hours ago and the second an hour ago: the wait is measured from the first.
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_stamps SET created_at = datetime('now', CASE WHEN id = (SELECT MIN(id) FROM compute_pipeline_stamps) THEN '-25 hours' ELSE '-1 hours' END)",
+    ).run();
+    expect(await run(env)).toEqual({
+      kind: "run",
+      servingIndex: { staged: false, reason: "github_unreadable" },
+    });
+    const spec = icaSpec({ staged: false, reason: "github_unreadable" });
+    expect(spec.serving_index).toEqual({ reason: "github_unreadable" });
+  });
+
+  test("a fault under 24 hours keeps deferring (MUTATION: end the wait early)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, { http: 502 });
+    expect((await run(env)).kind).toBe("deferred");
+    await backdate(env, 23);
+    expect((await run(env)).kind).toBe("deferred");
+  });
+
+  test("an earlier run's deferral never shortens a later run's wait", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, { http: 502 });
+    expect((await run(env)).kind).toBe("deferred");
+    await backdate(env, 48);
+    // That run went ahead and ended: a failed stamp of the same tuple.
+    await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, input, attempt, state, refusal_code)
+       VALUES (?1, ?2, ?3, ?4, ?5, 'bids', 99, 'failed', 'job_failed')`,
+    )
+      .bind(ID, TAG, ica.name, ica.version, ica.engine)
+      .run();
+    expect((await run(env)).kind).toBe("deferred");
+  });
+
+  for (const [label, arrange, reason] of [
+    ["no index", () => github.tag(ID, TAG, T), "no_index"],
+    [
+      "an index of another commit",
+      () => {
+        github.tag(ID, TAG, T);
+        github.index(ID, indexText(S));
+      },
+      "source_commit_differs",
+    ],
+    ["a tag GitHub does not have", () => github.index(ID, indexText(T)), "tag_absent"],
+    [
+      "an index the recipe cannot use",
+      () => {
+        github.tag(ID, TAG, T);
+        github.index(ID, indexText(T, { stores: {} }));
+      },
+      "index_unusable",
+    ],
+  ] as Array<[string, () => void, string]>) {
+    test(`${label}: runs at once without the index, and no stamp is written (MUTATION: defer every word)`, async () => {
+      const env = devEnv();
+      await seedEegDataset(env, ID);
+      arrange();
+      expect(await run(env)).toEqual({ kind: "run", servingIndex: { staged: false, reason } });
+      expect(await deferredStamps(env)).toEqual([]);
+    });
+  }
+
+  test("a staged index runs at once", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(T));
+    expect((await run(env)).kind).toBe("run");
+    expect(await deferredStamps(env)).toEqual([]);
+  });
+
+  test("a live stamp of the tuple refuses the deferral's claim as live_attempt_exists", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, { http: 502 });
+    await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, input, attempt, state)
+       VALUES (?1, ?2, ?3, ?4, ?5, 'bids', 1, 'dispatched')`,
+    )
+      .bind(ID, TAG, ica.name, ica.version, ica.engine)
+      .run();
+    expect(await run(env)).toEqual({ kind: "live_attempt_exists" });
+  });
+
+  test("the dispatch answers a deferral with zarr_source_unverifiable, the word and the stamp, and runs anything else (MUTATION: dispatch through a deferral)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, { http: 502 });
+    const deferred = await run(env);
+    const stampId = (deferred as { stampId: number }).stampId;
+    expect(servingIndexRefusal(deferred, ID, TAG)).toEqual({
+      ok: false,
+      code: "zarr_source_unverifiable",
+      datasetId: ID,
+      version: TAG,
+      reason: "github_unreadable",
+      stampId,
+    });
+    expect(servingIndexRefusal({ kind: "live_attempt_exists" }, ID, TAG)).toEqual({
+      ok: false,
+      code: "live_attempt_exists",
+      datasetId: ID,
+      version: TAG,
+    });
+    expect(
+      servingIndexRefusal(
+        { kind: "run", servingIndex: { staged: false, reason: "no_index" } },
+        ID,
+        TAG,
+      ),
+    ).toBeNull();
+  });
+
+  test("the fault words and the wait are the ruling's", () => {
+    expect([...SERVING_INDEX_FAULT_REASONS].sort()).toEqual(
+      [
+        "github_unreadable",
+        "index_not_stored",
+        "index_unreadable",
+        "no_github_credentials",
+        "token_mint_failed",
+      ].sort(),
+    );
+    expect(SERVING_INDEX_DEFER_MINUTES).toBe(24 * 60);
+  });
+});
+
+describe("the S3 read of the index: a 403 is a fault, never an absent index", () => {
+  const options = {
+    bucket: "example-bucket",
+    region: "us-east-2",
+    accessKeyId: "AKIAEXAMPLE",
+    secretAccessKey: "secret",
+  };
+  for (const [status, expected] of [
+    [404, "null"],
+    [403, "throws"],
+    [500, "throws"],
+    [200, "response"],
+  ] as Array<[number, string]>) {
+    test(`a ${status} answer: ${expected} (MUTATION: read a 403 as absent)`, async () => {
+      const real = globalThis.fetch;
+      // An HTTP response fixture for the object store's answer, the error path under test.
+      globalThis.fetch = (async () =>
+        new Response(status === 200 ? "{}" : "", { status })) as unknown as typeof fetch;
+      try {
+        const got = getZarrIndexResponse(options, ID);
+        if (expected === "throws") await expect(got).rejects.toThrow();
+        else if (expected === "null") expect(await got).toBeNull();
+        else expect((await got)?.status).toBe(200);
+      } finally {
+        globalThis.fetch = real;
+      }
+    });
+  }
 });
 
 // --- (d): the job --------------------------------------------------------------------------------------------

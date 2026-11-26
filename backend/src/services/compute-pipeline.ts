@@ -81,6 +81,7 @@ import {
   PARTITIONS,
   PIPELINES_TAPIS_OWNER,
   type PartitionName,
+  type ServingIndexAbsentReason,
   dataTagForVersion,
   estimateSuMilli,
   runnersPolicyOf,
@@ -123,7 +124,12 @@ import { readRuntimeImage } from "./compute-runtime-image.js";
 import { computeEnabled, computeRunnersEnabled } from "./compute-switches.js";
 import { tenantFacts, tenantRoom } from "./compute-tenant.js";
 import { isNonProductionEnv } from "./environment.js";
-import { type StagedServingIndex, stageServingIndex } from "./serving-index-staging.js";
+import {
+  SERVING_INDEX_DEFER_MINUTES,
+  type StagedServingIndex,
+  isServingIndexFault,
+  stageServingIndex,
+} from "./serving-index-staging.js";
 import { checkZarrSource } from "./zarr-source-check.js";
 
 // --- Words ------------------------------------------------------------------------------------------
@@ -683,6 +689,118 @@ export async function tupleHeld(
   return row !== null;
 }
 
+// --- The serving index of a run of the archive (ADR 0141, amended) ----------------------------------------
+
+/**
+ * The word of a `refused` stamp that records a run deferred because its serving index could not be staged for
+ * a fault (`isServingIndexFault`). It is the pending state of the deferral: a refused stamp holds no slot
+ * (the partial unique index is over live and succeeded stamps), never counts toward the cooldown or the cap
+ * (those read `failed` stamps), and is left out of the grid, so the dataset stays a candidate and the next
+ * dispatch pass tries again. No migration: the stamp's own columns carry it.
+ */
+export const SERVING_INDEX_DEFERRED_WORD = "serving_index_deferred";
+
+/**
+ * Minutes since the FIRST deferral of a tuple's current run (`?1` dataset, `?2` version, `?3` recipe, `?4`
+ * recipe version, `?5` engine, `?6` input), on SQLite's clock: the oldest deferred stamp newer than the
+ * tuple's newest stamp of any other kind, so an earlier run's deferrals never shorten a later run's wait.
+ * NULL when the run was never deferred.
+ */
+export const SERVING_INDEX_DEFERRAL_AGE_SQL = `SELECT (julianday('now') - julianday(MIN(d.created_at))) * 1440 AS minutes
+  FROM compute_pipeline_stamps d
+ WHERE d.dataset_id = ?1 AND d.version = ?2 AND d.recipe = ?3 AND d.recipe_version = ?4
+   AND d.engine = ?5 AND d.input = ?6
+   AND d.state = 'refused' AND d.refusal_code = '${SERVING_INDEX_DEFERRED_WORD}'
+   AND d.id > COALESCE((SELECT MAX(o.id) FROM compute_pipeline_stamps o
+                         WHERE o.dataset_id = ?1 AND o.version = ?2 AND o.recipe = ?3
+                           AND o.recipe_version = ?4 AND o.engine = ?5 AND o.input = ?6
+                           AND NOT (o.state = 'refused'
+                                    AND o.refusal_code = '${SERVING_INDEX_DEFERRED_WORD}')), 0)`;
+
+export type ServingIndexDecision =
+  | { kind: "run"; servingIndex: StagedServingIndex }
+  | { kind: "deferred"; reason: ServingIndexAbsentReason; stampId: number }
+  | { kind: "live_attempt_exists" };
+
+/**
+ * The dispatch's answer to a serving index decision that does not run (ADR 0141, amended): a deferral is
+ * `zarr_source_unverifiable` (503, try again later) with the fault's word and the stamp that records it, and a
+ * live stamp is `live_attempt_exists`; a decision to run is null.
+ */
+export function servingIndexRefusal(
+  decided: ServingIndexDecision,
+  datasetId: string,
+  tag: string,
+): DispatchResult | null {
+  if (decided.kind === "live_attempt_exists") {
+    return fail("live_attempt_exists", datasetId, { version: tag });
+  }
+  if (decided.kind === "deferred") {
+    return fail("zarr_source_unverifiable", datasetId, {
+      version: tag,
+      reason: decided.reason,
+      stampId: decided.stampId,
+    });
+  }
+  return null;
+}
+
+/**
+ * What a run of the archive by a recipe that keys the serving index is handed (ADR 0141, amended):
+ *  - a staged index, or a word that is not a fault (no index, another commit, too large, unusable): run now;
+ *  - a fault (GitHub or the index could not be read, the copy could not be kept): the run is DEFERRED, recorded
+ *    as a `refused` stamp with {@link SERVING_INDEX_DEFERRED_WORD}, and the dispatch refuses with
+ *    `zarr_source_unverifiable` and the fault's word, so a later pass tries again;
+ *  - a fault {@link SERVING_INDEX_DEFER_MINUTES} or more after the run's first deferral: run without the index,
+ *    and the specification records the fault's word.
+ * A live or succeeded stamp of the tuple makes the deferral's claim fail: `live_attempt_exists`, as the claim
+ * of a run would say.
+ */
+export async function servingIndexForRun(
+  env: Bindings,
+  recipe: ComputeRecipe,
+  input: RecipeInput,
+  datasetId: string,
+  tag: string,
+): Promise<ServingIndexDecision> {
+  const staged = await stageServingIndex(env, datasetId, tag);
+  if (staged.staged) return { kind: "run", servingIndex: staged };
+  if (!isServingIndexFault(staged.reason)) {
+    console.error(
+      `[compute-pipeline] serving_index_absent dataset=${datasetId} reason=${staged.reason}`,
+    );
+    return { kind: "run", servingIndex: staged };
+  }
+  const tuple = [datasetId, tag, recipe.name, recipe.version, recipe.engine, input] as const;
+  const age = await env.DB.prepare(SERVING_INDEX_DEFERRAL_AGE_SQL)
+    .bind(...tuple)
+    .first<{ minutes: number | null }>();
+  const minutes = age?.minutes ?? null;
+  if (minutes !== null && minutes >= SERVING_INDEX_DEFER_MINUTES) {
+    console.error(
+      `[compute-pipeline] serving_index_deferral_ended dataset=${datasetId} reason=${staged.reason}`,
+    );
+    return { kind: "run", servingIndex: staged };
+  }
+  let stampId: number;
+  try {
+    const claimed = await env.DB.prepare(CLAIM_STAMP_SQL)
+      .bind(...tuple)
+      .run();
+    const id = claimed.meta?.last_row_id;
+    if (typeof id !== "number") throw new Error("a stamp that was just claimed has no id");
+    stampId = id;
+  } catch (err) {
+    if (looksUnique(err)) return { kind: "live_attempt_exists" };
+    throw err;
+  }
+  await finishStamp(env.DB, stampId, "refused", SERVING_INDEX_DEFERRED_WORD);
+  console.error(
+    `[compute-pipeline] serving_index_deferred dataset=${datasetId} reason=${staged.reason} stamp=${stampId}`,
+  );
+  return { kind: "deferred", reason: staged.reason, stampId };
+}
+
 // --- dispatchPipelineJob ----------------------------------------------------------------------------
 
 const fail = (
@@ -754,22 +872,21 @@ export async function dispatchPipelineJob(
   if (!resolved.ok) return fail(resolved.code, datasetId, resolved.extra);
   const { tag } = resolved;
 
-  // A run of the archive by a recipe that keys the serving index is handed the index built from the tag's
-  // commit, or none with the word for why (ADR 0141). Before the claim, like the specification: it reads and
-  // keeps a content-addressed copy, and never refuses the run.
-  const servingIndex = recipeKeysServingIndex(recipe, recipeInput)
-    ? await stageServingIndex(env, datasetId, tag)
-    : undefined;
-  if (servingIndex !== undefined && !servingIndex.staged) {
-    console.error(
-      `[compute-pipeline] serving_index_absent dataset=${datasetId} reason=${servingIndex.reason}`,
-    );
-  }
-
   const image = readRuntimeImage(env);
   if (image.state !== "ok") return fail("runtime_unavailable", datasetId, { version: tag });
   const accountId = await pipelinesAccountId(db);
   if (accountId === null) return fail("pipelines_account_missing", datasetId, { version: tag });
+
+  // A run of the archive by a recipe that keys the serving index is handed the index built from the tag's
+  // commit, or none with the word for why; a fault defers it (ADR 0141, amended). Before the claim, like the
+  // specification.
+  let servingIndex: StagedServingIndex | undefined;
+  if (recipeKeysServingIndex(recipe, recipeInput)) {
+    const decided = await servingIndexForRun(env, recipe, recipeInput, datasetId, tag);
+    const refusal = servingIndexRefusal(decided, datasetId, tag);
+    if (refusal !== null) return refusal;
+    servingIndex = (decided as Extract<ServingIndexDecision, { kind: "run" }>).servingIndex;
+  }
 
   // The specification, BEFORE the claim: a registry entry or an image the job schema refuses is a word
   // (`invalid_spec`) with nothing written, never a throw that leaves a claimed stamp and aborts a run.
