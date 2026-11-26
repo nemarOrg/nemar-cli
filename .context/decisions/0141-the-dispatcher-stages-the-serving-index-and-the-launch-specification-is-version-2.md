@@ -1,7 +1,8 @@
 # ADR 0141: The dispatcher stages the serving index, and the launch specification is version 2
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-25
+**Accepted:** 2026-11-26
 **Owner:** Seyed Yahya Shirazi
 
 Refines [ADR 0140](0140-a-run-handed-the-serving-index-names-it-in-its-derivative-key.md) decision 3 and [ADR 0118](0118-the-compute-gateway-records-every-tenant-job-and-keeps-the-ledger-in-expanse-service-units.md) where it fixes the launch specification `nemar.launch-spec.v1`.
