@@ -306,3 +306,126 @@ describe("the proxy's forward path (epic #2324 phase B3b, the delta review of #2
     }
   });
 });
+
+describe("the forward path, under a seeded generator of rests", () => {
+  /** mulberry32: a small deterministic generator, so a failure names a seed that reproduces it. */
+  function generator(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const SEED = 2390;
+  const CASES = 5000;
+  // Raw characters, escapes (allowed and forbidden) and pieces a forger reaches for.
+  const PIECES = [
+    "a",
+    "Z",
+    "0",
+    "-",
+    "_",
+    ".",
+    "~",
+    "(",
+    ")",
+    "+",
+    ",",
+    ";",
+    "=",
+    ":",
+    "@",
+    "!",
+    "$",
+    "&",
+    "'",
+    "*",
+    "..",
+    "%20",
+    "%C2%B5",
+    "%2E",
+    "%2e",
+    "%2F",
+    "%2f",
+    "%5C",
+    "%25",
+    "%252F",
+    "%3F",
+    "%23",
+    "%00",
+    "%0A",
+    "%7F",
+    "%C2%85",
+    "%E2%80%AE",
+    "%ZZ",
+    "%",
+    "?",
+    "#",
+    " ",
+    "\\",
+    "µ",
+    "sub-01",
+    "task-rest",
+  ];
+  const ENDINGS = ["_eeg.edf", "_eeg.set", "_eeg.bdf", "_channels.tsv", "", ".", "/"];
+
+  function rest(next: () => number): string {
+    const pick = <T>(list: readonly T[]): T => list[Math.floor(next() * list.length)] as T;
+    const segments: string[] = [];
+    const count = 1 + Math.floor(next() * 4);
+    for (let i = 0; i < count; i++) {
+      let segment = "";
+      const parts = Math.floor(next() * 4);
+      for (let j = 0; j < parts; j++) segment += pick(PIECES);
+      if (next() < 0.1) segment = pick([".", "..", "%2e%2e", ".%2E", ""]);
+      segments.push(segment);
+    }
+    segments[segments.length - 1] = `${segments[segments.length - 1] || "x"}${pick(ENDINGS)}`;
+    const head =
+      next() < 0.5
+        ? "record"
+        : `file/${next() < 0.9 ? "c".repeat(64) : pick(["C".repeat(64), "c".repeat(63), "x"])}`;
+    return `${head}/${segments.join("/")}`;
+  }
+
+  test(`${CASES} generated rests (seed ${SEED}): every accepted one parses back to itself`, () => {
+    const next = generator(SEED);
+    let accepted = 0;
+    for (let i = 0; i < CASES; i++) {
+      const raw = rest(next);
+      const stamp = String(1 + Math.floor(next() * 1_000_000));
+      const forward = qualityAdminForwardPath(stamp, raw);
+      if (forward === null) continue;
+      accepted++;
+      const parsed = new URL(forward, "https://example.invalid");
+      expect([raw, parsed.pathname]).toEqual([raw, forward]);
+      expect([raw, parsed.search, parsed.hash]).toEqual([raw, "", ""]);
+      expect(forward.startsWith(`/admin/compute/pipeline/runs/${stamp}/quality/`)).toBe(true);
+    }
+    // Not vacuous: a share of the generated rests are inside the grammar, and most are not.
+    expect(accepted).toBeGreaterThan(CASES / 20);
+    expect(accepted).toBeLessThan(CASES / 2);
+  });
+});
+
+describe("the contract's imports stay leaves", () => {
+  const imports = (file: string): string[] =>
+    [
+      ...readFileSync(join(import.meta.dir, "..", file), "utf8").matchAll(
+        /^import[^;]*from "([^"]+)";/gm,
+      ),
+    ].map((m) => m[1] as string);
+
+  test("quality-route.ts imports only the recording-name rule and the stamp pattern, and those import nothing", () => {
+    expect(imports("shared/contract/quality-route.ts").sort()).toEqual([
+      "../compute-naming.js",
+      "./compute-stamp.js",
+    ]);
+    expect(imports("shared/compute-naming.ts")).toEqual([]);
+    expect(imports("shared/contract/compute-stamp.ts")).toEqual([]);
+  });
+});
