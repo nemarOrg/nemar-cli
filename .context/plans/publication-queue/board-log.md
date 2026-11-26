@@ -29,6 +29,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T16:06-08:00 | B4: inputs_unavailable after the Worker served inputs is rewritten to workflow_failed (counted), via inputs_served_at | lead |  |
 | 2026-11-25T16:25-08:00 | A4 deviations accepted (bare 'name' not a person field; rule B in person fields; byte bound on requested bytes; label role removed; extensions kept in OTHER list); SNIRF limits 48 MiB/1,000 fetches/180 s | lead |  |
 | 2026-11-25T16:50-08:00 | Shared person-field rule: describing-field exclusion (age, sex, gender, type, info, history, group, notes, remarks, date, contact) and token matching | lead |  |
+| 2026-11-25T17:20-08:00 | B5: errored confirming run = confirm_failed (never deny); confirming run excluded from depositor tally, kept in platform cap | lead |  |
+| 2026-11-25T17:37-08:00 | Owner raised today's agent limit to 60 (Q2) | owner |  |
 
 ## Log
 
