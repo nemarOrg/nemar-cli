@@ -385,7 +385,76 @@ describe("every pure test file has a measured duration in test/unit-pure-timings
       const run = scripts.find((s) => s.includes("--shard="));
       expect(run).toBeDefined();
       expect(run).toContain(TABLE);
-      expect(run).toMatch(/--timings /);
     }
+  });
+
+  // #2351: one bun process over a whole shard kept every finished file's memory until the
+  // runner ran out. Each matrix runs its shard as two bun parts of a 2N split, one at a time.
+  test("both shard matrices run each shard as two bun processes, parts of a 2N split", () => {
+    const deploy = parse(readFileSync(`${ROOT}.github/workflows/deploy-backend.yml`, "utf8")) as {
+      jobs: Record<string, Job>;
+    };
+    const gate = (deploy.jobs["test-gate-shard"]?.steps ?? []).flatMap((s) =>
+      s.run ? [s.run] : [],
+    );
+    for (const scripts of [scriptsOf("unit-pure-shard"), gate]) {
+      const run = scripts.find((s) => s.includes("--shard=")) ?? "";
+      expect(run).toMatch(/^\s*halves=2$/m);
+      expect(run).toMatch(/for half in \$\(seq 1 "\$halves"\)/);
+      expect(run).toContain("part=$(( (shard - 1) * halves + half ))");
+      expect(run).toContain("parts=$(( SHARD_TOTAL * halves ))");
+      const shardFlags = [...run.matchAll(/--shard="([^"]*)"/g)].map((m) => m[1]);
+      expect(shardFlags).toEqual(["$part/$parts"]);
+    }
+  });
+});
+
+/**
+ * The scrub suites balance on test/scrub/timings.json the same way, and the same pile-up
+ * follows a file it does not name. Their file set is what `bun run test:scrub` runs: every
+ * test file under test/scrub plus the identifier suites the script names.
+ */
+describe("every scrub suite has a measured duration in test/scrub/timings.json", () => {
+  const TABLE = "test/scrub/timings.json";
+  const table = JSON.parse(readFileSync(`${ROOT}${TABLE}`, "utf8")) as {
+    version: unknown;
+    files: Record<string, unknown>;
+  };
+  const pkg = JSON.parse(readFileSync(`${ROOT}package.json`, "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const script = pkg.scripts["test:scrub"] ?? "";
+  const named = script.split(/\s+/).filter((w) => w.endsWith(".test.ts"));
+  const scrub = [
+    ...readdirSync(`${ROOT}test/scrub`, { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith(".test.ts"))
+      .map((f) => `test/scrub/${f}`),
+    ...named,
+  ].sort();
+
+  test("the suite list is read from test:scrub and the tree, so an empty comparison cannot pass", () => {
+    expect(script).toContain("test/scrub");
+    expect(named.length).toBeGreaterThan(0);
+    expect(scrub.length).toBeGreaterThan(named.length);
+  });
+
+  test("every entry is a positive whole number of milliseconds", () => {
+    expect(table.version).toBe(1);
+    for (const [path, ms] of Object.entries(table.files)) {
+      expect(Number.isInteger(ms) && (ms as number) > 0, `${path}: ${String(ms)}`).toBe(true);
+    }
+  });
+
+  test("no scrub suite is missing from the table, and the table names nothing else", () => {
+    const refresh = `refresh ${TABLE} as the note above test.yml's scrub-tools-shard job says, or add the file with an estimate in milliseconds`;
+    expect(
+      scrub.filter((p) => !(p in table.files)),
+      refresh,
+    ).toEqual([]);
+    expect(
+      Object.keys(table.files).filter((p) => !scrub.includes(p)),
+      `remove these from ${TABLE}`,
+    ).toEqual([]);
   });
 });

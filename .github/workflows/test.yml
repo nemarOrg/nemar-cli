@@ -536,13 +536,14 @@ jobs:
   #
   # TO REFRESH test/scrub/timings.json (after files are added, removed or split, or when the
   # shards drift apart): every shard uploads the durations it measured as the artifact
-  # `scrub-shard-<n>`. From a green run on the branch:
-  #   gh run download <run-id> --pattern 'scrub-shard-*' --dir /tmp/scrub-shards
-  #   jq -S -s '{version: 1, files: (map(.files) | add)}' /tmp/scrub-shards/*/timings.json \
-  #     > test/scrub/timings.json
-  # A file missing from the timings file still runs; it is only balanced less well. A file's
-  # duration varies by up to a third between runs on the same code, so average two runs'
-  # artifacts rather than trusting one.
+  # `scrub-shard-<n>`. A file's duration varies by up to a third between runs on the same code,
+  # so average two green runs, with the recipe in the TO REFRESH note above `unit-pure-shard`
+  # (pattern 'scrub-shard-*', output test/scrub/timings.json).
+  # bun weighs a file the table does not name as almost nothing and cuts the sorted list into
+  # runs of equal summed time, so unnamed files pile into one shard (#2351 measured 262 of
+  # them in unit-pure shard 1). test/ci-tier-routing.unit.test.ts fails when a scrub suite is
+  # missing from this table or the table names a file that is gone; a new file can go in with
+  # an estimate in milliseconds.
   scrub-tools-shard:
     name: scrub-tools shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-latest
