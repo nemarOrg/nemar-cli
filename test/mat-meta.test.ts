@@ -288,6 +288,17 @@ describe("declared counts and sizes do not drive the walk (review round 1)", () 
     const w = await walkMat(bufferSource(level5(huge)));
     expect(performance.now() - started).toBeLessThan(1000);
     expect(w.incomplete).toBe("corrupt");
+    // A real 1 x 1 struct with no fields (MATLAB's `struct()`) holds nothing and is fine, and a
+    // 1e6 x 1e6 one returns at once too: no loop over a count with nothing in it.
+    const none = matrix(...structHead([1, 1], "X", 32, new Uint8Array(0)));
+    expect((await walkMat(bufferSource(level5(none)))).incomplete).toBeUndefined();
+    const wide = matrix(...structHead([1e6, 1e6], "X", 32, new Uint8Array(0)));
+    const t0 = performance.now();
+    expect((await walkMat(bufferSource(level5(wide)))).incomplete).toBeUndefined();
+    expect(performance.now() - t0).toBeLessThan(1000);
+    // A 1e9 x 1e9 count is past 2^53 with a field width the file states: corrupt, at once.
+    const past = matrix(...structHead([1e9, 1e9], "X", 32, new Uint8Array(0)));
+    expect((await walkMat(bufferSource(level5(past)))).incomplete).toBe("corrupt");
     // With a field and the same count, the bytes cannot hold the members: corrupt, at once.
     const many = matrix(...structHead([1e9, 1e9], "X", 8, ascii("a".padEnd(8, "\0"))));
     const t = performance.now();

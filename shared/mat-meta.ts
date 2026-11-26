@@ -698,9 +698,6 @@ class MatWalker {
       for (let at = 0; at < namesEl.data.length; at += width) {
         names.push(latin1.decode(namesEl.data.subarray(at, at + width)).replace(/\0.*$/s, ""));
       }
-      // A struct array with elements and no fields holds nothing to walk, and cannot be told
-      // from a count no file could hold.
-      if (names.length === 0 && count > 0) throw new MatProblem("corrupt");
       // One path per field, shared by every element of a struct array.
       await this.members(
         r,
@@ -751,6 +748,10 @@ class MatWalker {
     paths: string[][],
     depth: number,
   ): Promise<void> {
+    // A count no file could hold (the dimensions' product past 2^53) is damage.
+    if (!Number.isSafeInteger(count)) throw new MatProblem("corrupt");
+    // A struct array with no fields holds nothing (MATLAB writes `struct()` so): no loop.
+    if (paths.length === 0) return;
     const total = count * paths.length;
     if (!Number.isSafeInteger(total)) throw new MatProblem("corrupt");
     if (total * 8 > end - r.pos) throw new MatProblem("corrupt");
