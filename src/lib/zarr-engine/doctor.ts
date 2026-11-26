@@ -4,11 +4,17 @@
  * prints them and the exit code of `doctor` does not depend on them.
  */
 
+import { dlog } from "../debug-log.js";
 import { EngineClient, EngineClientError } from "./client.js";
-import { resolveDiskCache } from "./disk-cache.js";
+import { type DiskCache, resolveDiskCache } from "./disk-cache.js";
 import { EngineConfigError } from "./http.js";
 
 export const ENGINE_HELLO_TIMEOUT_MS = 10_000;
+
+/** The detail of a cache check that failed in a way nothing anticipated. Fixed text: `doctor`
+ *  always exits 0, so an unexpected error becomes this failed check, never a crash. */
+export const CACHE_CHECK_UNEXPECTED =
+  "the disk cache could not be checked (an unexpected error); run again with --debug and attach the log to an issue";
 
 export interface ZarrEngineCheck {
   name: string;
@@ -43,25 +49,38 @@ export async function checkZarrEngine(): Promise<ZarrEngineCheck[]> {
     await client.close();
   }
 
+  checks.push(checkCacheDirectory());
+  return checks;
+}
+
+/** The "cache directory" check. Never throws: a configuration error names the setting, and any
+ *  other error is a failed check with {@link CACHE_CHECK_UNEXPECTED}. `resolve` is the resolver
+ *  (the environment's, unless a test needs another). */
+export function checkCacheDirectory(
+  resolve: () => DiskCache = () => resolveDiskCache(),
+): ZarrEngineCheck {
   try {
-    const cache = resolveDiskCache();
+    const cache = resolve();
     if (!cache.enabled) {
-      checks.push({
+      return {
         name: "cache directory",
         ok: true,
         detail: "disk cache is off (NEMAR_ZARR_DISK_CACHE_BYTES=0)",
-      });
-    } else {
-      const writable = cache.checkWritable();
-      checks.push({
-        name: "cache directory",
-        ok: writable.ok,
-        detail: writable.ok ? `${cache.dir} is writable` : `${cache.dir}: ${writable.reason}`,
-      });
+      };
     }
+    const writable = cache.checkWritable();
+    return {
+      name: "cache directory",
+      ok: writable.ok,
+      detail: writable.ok ? `${cache.dir} is writable` : `${cache.dir}: ${writable.reason}`,
+    };
   } catch (err) {
-    if (!(err instanceof EngineConfigError)) throw err;
-    checks.push({ name: "cache directory", ok: false, detail: err.message });
+    if (err instanceof EngineConfigError) {
+      return { name: "cache directory", ok: false, detail: err.message };
+    }
+    dlog(
+      `zarr engine cache check: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+    );
+    return { name: "cache directory", ok: false, detail: CACHE_CHECK_UNEXPECTED };
   }
-  return checks;
 }

@@ -27,6 +27,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { doctorSummary } from "../src/commands/doctor.js";
+import { DiskCache } from "../src/lib/zarr-engine/disk-cache.js";
+import { CACHE_CHECK_UNEXPECTED, checkCacheDirectory } from "../src/lib/zarr-engine/doctor.js";
+import { EngineConfigError } from "../src/lib/zarr-engine/http.js";
 import { type Standin, runNemar, startStandin } from "./helpers/zarr-engine-standin.js";
 
 // `doctor` itself probes five external tools; give it the budget other doctor tests use.
@@ -135,6 +138,32 @@ describe("nemar doctor: Zarr engine", () => {
     expect(r.stdout.indexOf("NEMAR environment check")).toBeLessThan(
       r.stdout.indexOf("Zarr engine"),
     );
+  });
+});
+
+describe("checkCacheDirectory never throws", () => {
+  test("an unexpected error from the resolver is a failed check with the fixed message", () => {
+    const check = checkCacheDirectory(() => {
+      throw new TypeError("something nobody planned for");
+    });
+    expect(check).toEqual({ name: "cache directory", ok: false, detail: CACHE_CHECK_UNEXPECTED });
+  });
+
+  test("a configuration error names the setting", () => {
+    const check = checkCacheDirectory(() => {
+      throw new EngineConfigError("NEMAR_ZARR_DISK_CACHE_BYTES must be a non-negative integer");
+    });
+    expect(check).toEqual({
+      name: "cache directory",
+      ok: false,
+      detail: "NEMAR_ZARR_DISK_CACHE_BYTES must be a non-negative integer",
+    });
+  });
+
+  test("a usable directory passes", () => {
+    const dir = join(tmp, "direct");
+    const check = checkCacheDirectory(() => new DiskCache({ dir, maxBytes: 1000 }));
+    expect(check).toEqual({ name: "cache directory", ok: true, detail: `${dir} is writable` });
   });
 });
 
