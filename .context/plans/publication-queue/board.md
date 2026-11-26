@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-opus |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-25T18:11-08:00 |
-| Next tick | 2026-11-25T18:41-08:00 |
+| Last tick | 2026-11-25T20:20-08:00 |
+| Next tick | 2026-11-25T21:20-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-25T11:07-08:00 |
 
@@ -74,12 +74,12 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  | claude-worker | done | A1, A3 | 2385 | r1 panel: 2 important (unscanned strings, numeric id fields) + 5 fixed; seam fix (one person-field rule); r2 delta: all resolved, describing-field exclusion + token match + placeholder sent, lead verifies | 2026-11-25T15:23 | 1.5d | merged |
 | A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  | claude-worker | done | A1 | 2392 | r1 panel: 2 important (hidden entries, NaN hang) + 5 fixed; r2 delta: 1 important (directory end alignment) sent, 2 documented as out of scope; lead verifies | 2026-11-25T17:38 | 1d | merged |
 | A9 | [nemar dataset screen](cards/A9.md) |  | worker |  | claude-worker | done | A1 | 2389 | r1 panel: 4 important (update-check network, superseded honesty, git failure, copy) + 4 fixed; r2 delta clean, 1 sugg fixed, 1 rejected (fails closed) | 2026-11-25T17:38 | 1d | merged |
-| A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  | claude-worker | review | A1, A4 | 2395 |  | 2026-11-25T18:11 | 2d | review panel r1 running (head 2a0b7b2c); delta review needs tomorrow's budget |
+| A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  | claude-worker | review | A1, A4 | 2395 |  | 2026-11-25T18:11 | 2d | r1: 1 critical (struct loop hang) + 5 important + 5 sent; r2 delta needs tomorrow's budget; no merge before it |
 | D3 | [Batch ack on public upstream](cards/D3.md) |  | worker-hard |  | claude-worker | done | D1, D2 | 2380 | r1 panel: 2 important (audit fail-open, item isolation) + 4 + lead (D1 batch txn, no JSON bundle) fixed; r2 delta clean, 2 sugg fixed | 2026-11-25T14:32 | 2d | merged |
 | B3 | [Resubmission note](cards/B3.md) |  | worker |  | claude-worker | done | B2 | 2379 | r1 panel: 1 important + 7 fixed; r2 delta clean; 1 sugg rejected | 2026-11-25T14:10 | 1d | merged |
 | B4 | [Review inputs and record](cards/B4.md) |  | worker-hard |  | claude-worker | done | D1, B2 | 2382 | r1 panel: 1 important (screen codes) + 5 fixed, lead cap-gap fix; r2 delta clean, 3 sugg fixed | 2026-11-25T14:54 | 2d | merged |
 | B5 | [Auto-deny and ready mail](cards/B5.md) |  | worker-hard |  | claude-worker | done | B2, B3, B4, D4 | 2387 | r1 panel: 3 important (silent mail failure, confirm_failed gaps, recipients) + 6 fixed; r2 delta clean, 3 sugg fixed | 2026-11-25T16:29 | 2.5d | merged |
-| CPD3 | Seam review; decide epic to dev; release D |  | lead |  | claude-opus | active | D1, D3, D4, B3, B4, B5, B6 | 2394 |  | 2026-11-25T18:11-08:00 |  | seam-fix PR #2394 in review; then decide epic PR into dev (owner merges) |
+| CPD3 | Seam review; decide epic to dev; release D |  | lead |  | claude-opus | owner | D1, D3, D4, B3, B4, B5, B6 | 2397 | seam review ready-with-fixes; fixes merged in #2394 (r1 one reviewer, all fixed) | 2026-11-25T18:11-08:00 |  | owner: wait for full CI on #2397, merge into dev, release; then #2370 checklist and C1 shadow |
 | C1 | Calibration in prod shadow mode |  | owner |  |  | outline | CPD3, D0 |  |  |  |  | owner labels |
 | A10 | docs.nemar.org pages from copy tables |  | worker |  |  | outline | A2, A4, A5, A6, A9 |  |  |  |  | CP-E1; include a test that every copy-table anchor exists on the docs page |
 | CPE2 | Seam review; evidence epic to dev; release E; O2 |  | lead |  |  | outline | A10 |  |  |  |  | CP-E2 |
@@ -161,5 +161,5 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-2393b | reviewer | claude-worker | Sonnet 5.5 | B6 | 2026-11-25T19:18 | done |
 | rev-2393-r2 | reviewer | claude-worker | Sonnet 5.5 | B6 | 2026-11-25T19:29 | done |
 | rev-2394 | reviewer | claude-worker | Sonnet 5.5 | CPD3 | 2026-11-25T19:43 | done |
-| rev-2395a | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T19:53 | running |
-| rev-2395b | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T19:53 | running |
+| rev-2395a | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T19:53 | done |
+| rev-2395b | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T19:53 | done |

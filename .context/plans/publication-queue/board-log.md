@@ -40,6 +40,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T19:10-08:00 | A5: event tables name rule on 'type' only (other columns unscanned, like events.tsv); setname: no path rule, keeps the two-word name rule | lead |  |
 | 2026-11-25T19:15-08:00 | B6: deviations accepted (permission bound to sources, outcome and target license); basis_unrecorded -> start a new review; recording re-derives verdict, mails admins Ready to approve if pass+clear, tells depositor evidence recorded | lead |  |
 | 2026-11-25T19:20-08:00 | B6 ticket binding: trust the admin visibly (dry run shows ticket subject and sender, warns if sender is not the depositor, audit records both) | lead |  |
+| 2026-11-25T19:55-08:00 | A5 FieldTrip: pwd/cwd location words; skip cfg.version/callinfo/toolbox as provenance; not cfg.previous wholesale, not bare dataset; merge occurrences+entries into one Finding count | lead |  |
 
 ## Log
 
@@ -62,3 +63,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T16:47-08:00 | Seam: text-header.ts had its own isPersonField (drifted) and biome errors outside lint scope; A4 consolidates |
 | 2026-11-25T18:36-08:00 | CP-D3 seam review: ready-with-fixes (CHANGELOG missing; command wording drift); tests pass except known parallel/compute and stale-website failures |
 | 2026-11-25T19:53-08:00 | A5 PR #2395: FP gate mostly within bounds; .mat cfg paths 7.09/100 and .set comments 6.10/100 over; R15 memory risk recorded |
+| 2026-11-25T20:20-08:00 | Decide epic PR #2397 into dev opened (mergeable); owner merges |
