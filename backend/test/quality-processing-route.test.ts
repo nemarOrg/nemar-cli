@@ -27,6 +27,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { Miniflare } from "miniflare";
+import { UNRECORDED_CODE } from "../../shared/compute-checkpoints";
 import { declaredCheckpoints } from "../../shared/compute-recipes";
 import { resultsOutputKey } from "../../shared/contract/compute-launch";
 import {
@@ -368,6 +369,32 @@ describe("a recording's outcomes and link, from the current public derivative", 
       }
     }
     expect(sums).toEqual(counts);
+  });
+
+  test("a failed row whose code does not fit failureCode answers with unrecorded_code on the failed checkpoint and on stored (MUTATION: keep the row's null code)", async () => {
+    const odd = line({
+      path: rec("CUCOV105"),
+      datatype: "eeg",
+      status: "failed",
+      code: "ValueError",
+      step: "bad_channels",
+    });
+    await derivative({ table: `${HEADER}\n${SUCCEEDED}\n${odd}\n` });
+    const res = await get(url(rec("CUCOV105")));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Loose;
+    const checkpoints = body.processing.recipes["nemar-ica"].checkpoints;
+    expect(checkpoints.preprocess).toEqual({
+      status: "failed",
+      code: UNRECORDED_CODE,
+      step: "bad_channels",
+    });
+    expect(checkpoints.stored).toEqual({
+      status: "skipped",
+      code: UNRECORDED_CODE,
+      step: "bad_channels",
+    });
+    if (!validateProcessing(body.processing)) throw new Error(formatAjvErrors(validateProcessing));
   });
 
   test("the recording is its exact path: another case, a longer path or a recording the run did not list is not found (MUTATION: match by substring)", async () => {
@@ -778,7 +805,7 @@ describe("the quality route's gate, paths and cache", () => {
       expect(miss.headers.get("X-RateLimit-Bucket")).toBe("data-miss-ip");
     });
 
-    test("no refusal is cached, and the processing and record answers never share an entry", async () => {
+    test("an unreadable table is not cached (the absent-recording marker is the one refusal that is, and the client still gets no-store), and the processing and record answers never share an entry", async () => {
       const key = await derivative();
       await bucket.delete(`d/${key}/${TABLE_PATH}`);
       await logged(async () => {
@@ -790,6 +817,21 @@ describe("the quality route's gate, paths and cache", () => {
       expect(((await processing.json()) as Loose).format).toBe(QUALITY_PROCESSING_FORMAT);
       const record = await get(qualityRecordPath(DATASET, "nemar-ica", RECORDING));
       expect(((await record.json()) as Loose).format).not.toBe(QUALITY_PROCESSING_FORMAT);
+    });
+
+    test("a newer promoted derivative under the same epoch is read at once: neither the old answer nor the old remembered absence is served (MUTATION: drop the derivative key from the cache key)", async () => {
+      const older = await derivative({ storedAt: "2026-11-20 10:00:00" });
+      // The older run lists only RECORDING: its answer is cached, and CUCOV101's absence remembered.
+      const first = (await (await get(url())).json()) as Loose;
+      expect(first.derivative.key).toBe(older);
+      expect(await word(await get(url(rec("CUCOV101"))))).toBe("quality_not_found");
+      // A newer run is promoted; no gate column changes, so the epoch stays.
+      const newer = await derivative({ storedAt: "2026-11-21 10:00:00", table: MIXED_TABLE });
+      const again = (await (await get(url())).json()) as Loose;
+      expect(again.derivative.key).toBe(newer);
+      const listed = await get(url(rec("CUCOV101")));
+      expect(listed.status).toBe(200);
+      expect(((await listed.json()) as Loose).derivative.key).toBe(newer);
     });
   });
 });

@@ -37,8 +37,10 @@
  * gets `quality_not_found`, `no-store`), so repeated probes scan a table once per derivative and epoch.
  *
  * Public answers carry `Cache-Control: public, max-age=300`, `Cache-Tag: nemar-dq-<id>` and a strong `ETag`
- * (the SHA-256 of the body's bytes). Every refusal is `no-store` and is never put in the cache. A log line
- * carries the dataset id, the first twelve digits of a key and a fixed word, never a path.
+ * (the SHA-256 of the body's bytes). Every refusal is `no-store`, and only one is ever put in the cache: a
+ * recording the derivative's recordings table does not list (the processing endpoint), remembered under the
+ * same key as an internal marker that is never sent; the client still gets `quality_not_found`, `no-store`.
+ * A log line carries the dataset id, the first twelve digits of a key and a fixed word, never a path.
  *
  * WHAT AN UNPUBLISH REACHES, AND WHAT IT DOES NOT. The gate and the epoch take effect at this Worker's next
  * request, and an unpublish, a withdrawal or a concealment also purges the tag `nemar-dq-<id>` from
