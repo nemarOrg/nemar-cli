@@ -10,6 +10,12 @@
  *   GET /<dataset id>/quality/v1/<recipe>/file/<derivative key>/<sha256>/<recording path>
  *       The bytes of one file a view of that recording declares (a `data[]` entry or a file input), named
  *       by its SHA-256, read again from the store and hashed before it is served.
+ *   GET /<dataset id>/quality/v1/<recipe>/processing/<recording path>
+ *       The recording's neuroschema `processing` entry (`level: record`: each checkpoint's status, code and
+ *       step, `stored` last) and its `signalJourney` link (`completed` with its record's location, SHA-256
+ *       and signalJourney version, or `failed` when the run wrote no record for it), from the same current
+ *       public derivative's recordings table and record (ADR 0134 decision 9 as amended 2026-11-26). It
+ *       answers for every recording the run's table lists, a failed one included.
  *
  * `quality` is a reserved segment: it is never a version tag (a data-plane tag starts with `v` or is
  * `latest`), and the route is registered before the version routes.
@@ -29,18 +35,30 @@ import { COMPUTE_PIPELINE_STAMP_ID_RE } from "./compute-stamp.js";
 export const QUALITY_ROUTE_SEGMENT = "quality";
 export const QUALITY_ROUTE_VERSION = "v1";
 
-/** The two endpoints, the segment after the recipe. */
+/** The endpoints, the segment after the recipe. */
 export const QUALITY_RECORD_SEGMENT = "record";
 export const QUALITY_FILE_SEGMENT = "file";
+export const QUALITY_PROCESSING_SEGMENT = "processing";
 
 /** The format word of the record endpoint's answer. */
 export const QUALITY_RECORD_FORMAT = "nemar.quality-record.v1";
+
+/** The format word of the processing endpoint's answer. */
+export const QUALITY_PROCESSING_FORMAT = "nemar.processing-record.v1";
 
 /** The most bytes of a recording's signalJourney record the route reads (ADR 0137, plan C13). */
 export const QUALITY_RECORD_MAX_BYTES = 512 * 1024;
 
 /** The most bytes of one view file (neuroschema `caps.bytes_per_role`, the schema's `size` maximum). */
 export const QUALITY_FILE_MAX_BYTES = 4_194_304;
+
+/**
+ * The most bytes of a run's recordings table the processing endpoint scans (the bound reconciliation reads a
+ * table with), and the longest line it takes. The table is read as a stream and never held whole: the scan
+ * keeps one line and stops at the recording's.
+ */
+export const QUALITY_TABLE_MAX_BYTES = 32 * 1024 * 1024;
+export const QUALITY_TABLE_LINE_MAX = 65_536;
 
 /** The longest recording path the route takes (neuroschema `relativeLocation` `maxLength`). */
 export const QUALITY_RECORDING_PATH_MAX = 1024;
@@ -78,7 +96,7 @@ export const qualityCacheTag = (datasetId: string): string => `nemar-dq-${datase
 
 /** The route's words, each with its HTTP status. */
 export const QUALITY_ROUTE_WORDS = Object.freeze({
-  /** The dataset is not public (or concealed, withdrawn or tombstoned), or the recipe has no current public derivative, or the recording no record. */
+  /** The dataset is not public (or concealed, withdrawn or tombstoned), or the recipe has no current public derivative, or the recording no record (no row of the run's recordings table, for the processing endpoint). */
   quality_not_found: 404,
   /** The recording path, the key or the digest is not one this route takes (traversal included). */
   recording_path_invalid: 400,
@@ -90,7 +108,7 @@ export const QUALITY_ROUTE_WORDS = Object.freeze({
   view_data_missing: 404,
   /** A declared file's bytes are not its declared size or digest. Logged. */
   view_data_corrupt: 502,
-  /** The recording's record could not be read or did not check whole. Logged. */
+  /** The recording's record, or the run's recordings table, could not be read or did not check whole. Logged. */
   record_unreadable: 502,
 });
 
@@ -107,6 +125,15 @@ const encodePath = (path: string): string => path.split("/").map(encodeURICompon
 /** The record endpoint's path for a recording, under a data-plane origin. */
 export function qualityRecordPath(datasetId: string, recipe: string, recording: string): string {
   return `/${datasetId}/${QUALITY_ROUTE_SEGMENT}/${QUALITY_ROUTE_VERSION}/${recipe}/${QUALITY_RECORD_SEGMENT}/${encodePath(recording)}`;
+}
+
+/** The processing endpoint's path for a recording, under a data-plane origin. */
+export function qualityProcessingPath(
+  datasetId: string,
+  recipe: string,
+  recording: string,
+): string {
+  return `/${datasetId}/${QUALITY_ROUTE_SEGMENT}/${QUALITY_ROUTE_VERSION}/${recipe}/${QUALITY_PROCESSING_SEGMENT}/${encodePath(recording)}`;
 }
 
 /** The file endpoint's path for one declared file of a recording. */

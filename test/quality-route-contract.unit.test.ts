@@ -22,6 +22,7 @@ import {
   qualityCacheTag,
   qualityFileHeaders,
   qualityFilePath,
+  qualityProcessingPath,
   qualityRecordPath,
 } from "../shared/contract/quality-route.js";
 
@@ -90,6 +91,9 @@ describe("paths", () => {
     ).toBe(
       `/nm000103/quality/v1/nemar-ica/file/${"a".repeat(64)}/${"b".repeat(64)}/sub-01/eeg/x_eeg.edf`,
     );
+    expect(
+      qualityProcessingPath("nm000103", "nemar-ica", "sub-01/eeg/sub-01_tâche #1_eeg.edf"),
+    ).toBe("/nm000103/quality/v1/nemar-ica/processing/sub-01/eeg/sub-01_t%C3%A2che%20%231_eeg.edf");
   });
 });
 

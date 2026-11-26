@@ -1,6 +1,7 @@
 /**
  * The public quality view route (ADR 0137 decisions 6 and 7, epic #2324 phase B2): a recording's quality
- * views and the files they declare, from a recipe's CURRENT PUBLIC derivative only. Paths, words and bounds
+ * views and the files they declare, and its checkpoint outcomes and signalJourney link (ADR 0134 decision 9
+ * as amended 2026-11-26, phase B4), from a recipe's CURRENT PUBLIC derivative only. Paths, words and bounds
  * are `shared/contract/quality-route.ts`'s; the route is mounted on the data plane (`routes/data.ts`, before
  * the version routes, so `quality` is never read as a version).
  *
@@ -27,7 +28,10 @@
  *  5. For a file: the digest must be one a validated view declares; the object (at most 4 MiB) must be its
  *     declared size and is hashed again before a byte is served.
  * Steps 4 and 5 are `serveRecordingViews` (`services/quality-serve.ts`), which the admin mount
- * (`routes/admin/quality-views.ts`) calls too; only this route caches.
+ * (`routes/admin/quality-views.ts`) calls too; only this route caches. For `processing`, steps 4 and 5 are
+ * `serveRecordingProcessing` (`services/quality-processing.ts`): the recording's row of the derivative's
+ * recordings table and, for a recording that succeeded, its record, read with the same bounds, the same
+ * dataset binding and the same gate, cache and headers.
  *
  * Public answers carry `Cache-Control: public, max-age=300`, `Cache-Tag: nemar-dq-<id>` and a strong `ETag`
  * (the SHA-256 of the body's bytes). Every refusal is `no-store` and is never put in the cache. A log line
@@ -45,6 +49,7 @@ import { matchRecording } from "../../../shared/compute-naming.js";
 import { findRecipe } from "../../../shared/compute-recipes.js";
 import {
   QUALITY_FILE_SEGMENT,
+  QUALITY_PROCESSING_SEGMENT,
   QUALITY_PUBLIC_MAX_AGE,
   QUALITY_RECORDING_PATH_MAX,
   QUALITY_RECORD_SEGMENT,
@@ -62,11 +67,15 @@ import {
   QUALITY_DATASET_GATE_SQL,
   QUALITY_PATTERNS,
 } from "../services/quality-documents.js";
-import { type ServedDerivative, serveRecordingViews } from "../services/quality-serve.js";
+import {
+  type ProcessingDerivative,
+  serveRecordingProcessing,
+} from "../services/quality-processing.js";
+import { serveRecordingViews } from "../services/quality-serve.js";
 import type { Bindings } from "../types/bindings.js";
 
 const DERIVATIVE_FIELDS = `cd.key, cd.dataset_id, cd.recipe, cd.version, cd.recipe_version, cd.input, cd.retention, cd.stored_at,
-       cd.quality_plugins, COALESCE(e.epoch, 0) AS epoch`;
+       cd.quality_plugins, cd.checkpoint_map, COALESCE(e.epoch, 0) AS epoch`;
 
 const GATED_FROM = `FROM datasets d
   JOIN compute_derivatives cd ON cd.dataset_id = d.dataset_id AND cd.recipe = ?2
@@ -90,7 +99,7 @@ export const QUALITY_NAMED_SQL = `SELECT ${DERIVATIVE_FIELDS},
   ${GATED_FROM}
    AND cd.key = ?3`;
 
-interface DerivativeRead extends ServedDerivative {
+interface DerivativeRead extends ProcessingDerivative {
   epoch: number;
   current?: number;
   expired?: number;
@@ -141,6 +150,7 @@ export function recordingOf(segments: readonly string[]): string | null {
 
 type QualityRequest =
   | { kind: "record"; recipe: string; recording: string }
+  | { kind: "processing"; recipe: string; recording: string }
   | { kind: "file"; recipe: string; key: string; sha256: string; recording: string };
 
 /** The request a path after `/<id>/quality/` names, or the word it is refused with. */
@@ -149,9 +159,12 @@ export function parseQualityPath(segments: readonly string[]): QualityRequest | 
   if (version !== QUALITY_ROUTE_VERSION || recipe === undefined || findRecipe(recipe) === null) {
     return "quality_not_found";
   }
-  if (kind === QUALITY_RECORD_SEGMENT) {
+  if (kind === QUALITY_RECORD_SEGMENT || kind === QUALITY_PROCESSING_SEGMENT) {
     const recording = recordingOf(rest);
-    return recording === null ? "recording_path_invalid" : { kind: "record", recipe, recording };
+    if (recording === null) return "recording_path_invalid";
+    return kind === QUALITY_RECORD_SEGMENT
+      ? { kind: "record", recipe, recording }
+      : { kind: "processing", recipe, recording };
   }
   if (kind === QUALITY_FILE_SEGMENT) {
     const [key, sha256, ...path] = rest;
@@ -186,7 +199,7 @@ export async function qualityHandler(
 
   // 2. The dataset and the derivative, in one statement.
   let row: DerivativeRead | null;
-  if (asked.kind === "record") {
+  if (asked.kind === "record" || asked.kind === "processing") {
     row = await env.DB.prepare(QUALITY_CURRENT_SQL)
       .bind(datasetId, asked.recipe)
       .first<DerivativeRead>();
@@ -203,9 +216,9 @@ export async function qualityHandler(
   // 3. The edge cache, keyed by the dataset's epoch and the derivative.
   const cache = edgeCache();
   const tail =
-    asked.kind === "record"
-      ? `${QUALITY_RECORD_SEGMENT}/${asked.recording}`
-      : `${QUALITY_FILE_SEGMENT}/${asked.sha256}/${asked.recording}`;
+    asked.kind === "file"
+      ? `${QUALITY_FILE_SEGMENT}/${asked.sha256}/${asked.recording}`
+      : `${asked.kind === "record" ? QUALITY_RECORD_SEGMENT : QUALITY_PROCESSING_SEGMENT}/${asked.recording}`;
   const cacheKey = new Request(
     `${new URL(request.url).origin}/__quality-cache/${QUALITY_ROUTE_VERSION}/${datasetId}/e${row.epoch}/${row.key}/${tail
       .split("/")
@@ -224,8 +237,11 @@ export async function qualityHandler(
   }
 
   // 4 and 5. The record, checked whole, and a declared file, read again and hashed (`quality-serve.ts`,
-  // the steps the admin mount runs too).
-  const served = await serveRecordingViews(bucket, row, asked, { tag: "quality" });
+  // the steps the admin mount runs too); or the recording's outcomes and link (`quality-processing.ts`).
+  const served =
+    asked.kind === "processing"
+      ? await serveRecordingProcessing(bucket, row, asked.recording, { tag: "quality" })
+      : await serveRecordingViews(bucket, row, asked, { tag: "quality" });
   if (!served.ok) return refuse(served.word);
   const response = new Response(served.bytes, {
     headers: { ...served.headers, ...publicHeaders(datasetId, served.sha256) },
