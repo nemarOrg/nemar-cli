@@ -34,18 +34,22 @@ import {
   shapeOf,
 } from "../identifier-scan";
 import {
+  FREE_TEXT_MAX_CHARS,
   type IniSection,
   MARKER_FILE_LIMITS,
   TEXT_HEADER_LIMITS,
+  capText,
   checkReference,
-  contactIn,
   decodeHeader,
   entryValue,
+  freeTextFindings,
   pairByName,
   parseIni,
   readHeader,
   splitPath,
+  startsBinary,
   stem,
+  unplacedTextFindings,
 } from "./text-header";
 
 /**
@@ -325,35 +329,53 @@ function channelWords(section: IniSection | undefined): Set<string> {
   return out;
 }
 
-/** Every name-like token of a header's `[Comment]` section, in order. */
-function commentNameTokens(sections: Map<string, IniSection>): string[] {
+/**
+ * Every name-like token of a header's `[Comment]` section, in order, each line capped to
+ * {@link FREE_TEXT_MAX_CHARS}; `cut` says a line was longer.
+ */
+function commentNameTokens(sections: Map<string, IniSection>): { tokens: string[]; cut: boolean } {
   const exempt = new Set([...RECORDER_WORDS, ...channelWords(sections.get("channel infos"))]);
-  const out: string[] = [];
-  for (const line of sections.get("comment")?.lines ?? []) {
-    if (SPACED_HEADING.test(line)) continue;
-    for (const token of line.split(/\s+/)) {
-      if (token !== "" && commentTokenIsNameLike(token, exempt)) out.push(token);
+  const tokens: string[] = [];
+  let cut = false;
+  for (const raw of sections.get("comment")?.lines ?? []) {
+    const line = capText(raw);
+    cut ||= line.cut;
+    if (SPACED_HEADING.test(line.text)) continue;
+    for (const token of line.text.split(/\s+/)) {
+      if (token !== "" && commentTokenIsNameLike(token, exempt)) tokens.push(token);
     }
   }
-  return out;
+  return { tokens, cut };
 }
 
-/** The first marker description with a home-directory path, and the first with contact details. */
-function markerText(markers: IniSection | undefined): {
-  path: string | null;
-  contact: string | null;
-} {
-  let path: string | null = null;
-  let contact: string | null = null;
+/**
+ * The free-text rules over every marker description (each capped): a home-directory path and
+ * contact details, one finding per kind for the file; `cut` says a description was longer than
+ * the cap.
+ */
+function markerText(markers: IniSection | undefined): { findings: Finding[]; cut: boolean } {
+  const findings: Finding[] = [];
+  const seen = new Set<string>();
+  let cut = false;
   for (const { key, value } of markers?.entries ?? []) {
-    if (path !== null && contact !== null) break;
     if (!/^mk\d+$/i.test(key)) continue;
-    const description = (value.split(",")[1] ?? "").replace(/\\1/g, ",").trim();
+    const comma = value.indexOf(",");
+    if (comma < 0) continue;
+    const end = value.indexOf(",", comma + 1);
+    const description = value
+      .slice(comma + 1, end < 0 ? undefined : end)
+      .replace(/\\1/g, ",")
+      .trim();
     if (description === "") continue;
-    if (path === null && scanTextForLocalPaths(description).length > 0) path = description;
-    if (contact === null && contactIn(description) !== null) contact = description;
+    const screened = freeTextFindings(description, "brainvision-marker-text", "Marker");
+    cut ||= screened.cut;
+    for (const f of screened.findings) {
+      if (seen.has(f.kind)) continue;
+      seen.add(f.kind);
+      findings.push(f);
+    }
   }
-  return { path, contact };
+  return { findings, cut };
 }
 
 /** The first `New Segment` marker whose timestamp is a date that is not 1 January, or null. */
@@ -386,16 +408,27 @@ const VHDR_MAGIC = /^brain ?vision (core )?data (exchange|format) header file/i;
  * Screen one file's text. `path` decides whether it is a header or a marker file; `whole` says
  * whether the text is the whole file.
  */
-export function scanBrainVisionText(text: string, path: string, whole: boolean): ReaderResult {
+export function scanBrainVisionText(
+  text: string,
+  path: string,
+  whole: boolean,
+  binaryStart = false,
+): ReaderResult {
   const isHeader = path.toLowerCase().endsWith(VHDR);
   const findings: Finding[] = [];
   const firstLine = text.slice(0, 200).trimStart();
-  if (!(isHeader ? VHDR_MAGIC : VMRK_MAGIC).test(firstLine)) {
-    // Not a BrainVision file (an AppleDouble `._` file, say): unscreened, never a gap in a read.
-    return { findings, coverage: "not-applicable" };
-  }
   const sections = parseIni(text);
   const common = sections.get("common infos");
+  if (!(isHeader ? VHDR_MAGIC : VMRK_MAGIC).test(firstLine) && !common) {
+    // Neither the first line nor a `[Common Infos]` section. A binary file (an AppleDouble `._`
+    // file) is another format: unscreened. Text is screened as free text and is a partial read.
+    if (binaryStart) return { findings, coverage: "not-applicable" };
+    return {
+      findings: unplacedTextFindings(text, "brainvision-marker-text"),
+      coverage: "partial",
+      incomplete: "unsupported-version",
+    };
+  }
   const { name } = splitPath(path);
   const base = stem(name, isHeader ? VHDR : VMRK);
 
@@ -409,13 +442,16 @@ export function scanBrainVisionText(text: string, path: string, whole: boolean):
       ]
     : [["DataFile", `${base}${EEG}`]];
   let pathFlagged = false;
+  let cut = false;
   for (const [field, expected] of references) {
-    const value = entryValue(common, field);
-    if (value === undefined || value === "") {
+    const raw = entryValue(common, field);
+    if (raw === undefined || raw === "") {
       // A header must name its data file; a missing MarkerFile is allowed by the format.
       if (isHeader && field === "DataFile") unmatched = true;
       continue;
     }
+    const { text: value, cut: valueCut } = capText(raw);
+    cut ||= valueCut;
     const check = checkReference(value, base, expected);
     if (check !== "match") unmatched = true;
     if (pathFlagged) continue;
@@ -427,7 +463,9 @@ export function scanBrainVisionText(text: string, path: string, whole: boolean):
   }
 
   if (isHeader) {
-    const token = commentNameTokens(sections)[0];
+    const comment = commentNameTokens(sections);
+    cut ||= comment.cut;
+    const token = comment.tokens[0];
     if (token !== undefined) {
       findings.push({
         kind: "brainvision-comment-name",
@@ -439,21 +477,10 @@ export function scanBrainVisionText(text: string, path: string, whole: boolean):
   } else {
     const markers = sections.get("marker infos");
     const text = markerText(markers);
-    if (text.path !== null && !pathFlagged) {
-      findings.push({
-        kind: "local-user-path",
-        severity: "review",
-        field: "Marker",
-        shape: shapeOf(text.path),
-      });
-    }
-    if (text.contact !== null) {
-      findings.push({
-        kind: "brainvision-marker-text",
-        severity: "review",
-        field: "Marker",
-        shape: shapeOf(text.contact),
-      });
+    cut ||= text.cut;
+    for (const f of text.findings) {
+      if (f.kind === "local-user-path" && pathFlagged) continue;
+      findings.push(f);
     }
     const stamp = segmentDate(markers);
     if (stamp !== null) {
@@ -467,7 +494,8 @@ export function scanBrainVisionText(text: string, path: string, whole: boolean):
   }
 
   const notes = unmatched ? { notes: ["companion-name-mismatch" as const] } : {};
-  if (!whole) return { findings, coverage: "partial", incomplete: "limit", ...notes };
+  // A file past the byte limit, or a value past the free-text cap, was read only in part.
+  if (!whole || cut) return { findings, coverage: "partial", incomplete: "limit", ...notes };
   return { findings, coverage: "complete", ...notes };
 }
 
@@ -484,6 +512,6 @@ export const BRAINVISION_READER: FormatReader = {
   },
   async scan(src: RangeSource, path: string, limits) {
     const { bytes, whole } = await readHeader(src, limits.maxBytes);
-    return scanBrainVisionText(decodeHeader(bytes), path, whole);
+    return scanBrainVisionText(decodeHeader(bytes), path, whole, startsBinary(bytes));
   },
 };

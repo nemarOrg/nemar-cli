@@ -25,6 +25,7 @@ import { DATE_KINDS, DIRECT_KINDS, OTHER_RECORDING_EXTENSIONS } from "../shared/
 import { KIND_COPY, NOTE_COPY } from "../shared/identifier-screen-copy";
 import { BRAINVISION_READER } from "../shared/readers/brainvision";
 import {
+  FREE_TEXT_MAX_CHARS,
   MARKER_FILE_MAX_BYTES,
   TEXT_HEADER_MAX_BYTES,
   decodeHeader,
@@ -288,7 +289,9 @@ describe("what is not a BrainVision file, and what is too long", () => {
 
   test("a file of exactly 1 MiB is whole", async () => {
     const head = text("test.vhdr");
-    const pad = `${head}${";".repeat(TEXT_HEADER_MAX_BYTES - encode(head).length)}`;
+    // Short comment lines, so no single value passes the free-text cap.
+    const rest = TEXT_HEADER_MAX_BYTES - encode(head).length;
+    const pad = `${head}${"\n;".repeat(Math.floor(rest / 2))}${rest % 2 === 1 ? "\n" : ""}`;
     expect(encode(pad).length).toBe(TEXT_HEADER_MAX_BYTES);
     expect(await scan(encode(pad), "test.vhdr")).toEqual({ findings: [], coverage: "complete" });
   });
@@ -442,5 +445,100 @@ describe("the note has its words", () => {
     expect(copy.statement).toContain("does not change the verdict");
     expect(copy.remedy).toContain("DataFile or MarkerFile");
     expect(copy.anchor).toBe("note-companion-name-mismatch");
+  });
+});
+
+/** UTF-16 bytes of some text, little- or big-endian, with a byte-order mark. */
+function utf16(textValue: string, endian: "le" | "be"): Uint8Array {
+  const out = new Uint8Array(2 + 2 * textValue.length);
+  out.set(endian === "le" ? [0xff, 0xfe] : [0xfe, 0xff], 0);
+  for (let i = 0; i < textValue.length; i++) {
+    const c = textValue.charCodeAt(i);
+    const [lo, hi] = [c & 0xff, c >> 8];
+    out.set(endian === "le" ? [lo, hi] : [hi, lo], 2 + 2 * i);
+  }
+  return out;
+}
+
+describe("review round 1: no not-applicable evasion, encodings", () => {
+  test("a leading comment line before the first line is still a header", async () => {
+    const r = await scan(encode(`; exported by a tool\n${text("test.vhdr")}`), "test.vhdr");
+    expect(r).toEqual({ findings: [], coverage: "complete" });
+  });
+
+  test("no first line but a [Common Infos] section: it is scanned", async () => {
+    const body = text("test.vmrk").replace(/^[^\n]*\n/, "");
+    const r = await scan(encode(body), "test.vmrk");
+    expect(r.coverage).toBe("complete");
+    expect(kinds(r)).toEqual(["brainvision-segment-date"]);
+  });
+
+  test("a leading NUL hides nothing", async () => {
+    const bytes = new Uint8Array([0, ...fixture("test.vmrk")]);
+    const r = await scan(bytes, "test.vmrk");
+    expect(r.coverage).toBe("complete");
+    expect(kinds(r)).toEqual(["brainvision-segment-date"]);
+  });
+
+  test("a UTF-16 marker file, either byte order, is read like its UTF-8 twin", async () => {
+    for (const endian of ["le", "be"] as const) {
+      const r = await scan(utf16(text("test.vmrk"), endian), "test.vmrk");
+      expect(r.coverage).toBe("complete");
+      expect(kinds(r)).toEqual(["brainvision-segment-date"]);
+    }
+  });
+
+  test("text with neither the first line nor [Common Infos] is screened as free text, partial", async () => {
+    const r = await scan(encode("exported notes\nwrite to q.hollberry@example.org\n"), "x.vhdr");
+    expect(r.coverage).toBe("partial");
+    expect(r.incomplete).toBe("unsupported-version");
+    expect(kinds(r)).toEqual(["brainvision-marker-text"]);
+  });
+
+  test("a declared UTF-8 header that is not UTF-8 decodes as Windows-1252", () => {
+    const bytes = new Uint8Array([...encode("Codepage=UTF-8\nCh1=Fp1,,0.1,"), 0xb5, 0x56]);
+    expect(decodeHeader(bytes)).toContain("µV");
+    expect(decodeHeader(bytes)).not.toContain("\ufffd");
+  });
+});
+
+describe("review round 1: every free-text value is bounded", () => {
+  const timed = async (bytes: Uint8Array, path: string) => {
+    const started = performance.now();
+    const r = await scan(bytes, path);
+    return { r, ms: performance.now() - started };
+  };
+
+  test("a value past 4 KiB is cut, and the read says partial (limit)", async () => {
+    expect(FREE_TEXT_MAX_CHARS).toBe(4096);
+    const long = text("test.vhdr").replace("DataFile=test.eeg", `DataFile=${"a".repeat(5000)}.eeg`);
+    const r = await scan(encode(long), "test.vhdr");
+    expect(r.coverage).toBe("partial");
+    expect(r.incomplete).toBe("limit");
+  });
+
+  test("a 1 MiB single-word [Comment] line finishes within 1 s", async () => {
+    for (const word of ["a", "aB", "x@", "+1 ", "C:\\Users\\"]) {
+      const line = word.repeat(Math.ceil(TEXT_HEADER_MAX_BYTES / word.length));
+      const bytes = encode(text("test.vhdr").replace("[Comment]\n", `[Comment]\n${line}\n`));
+      const { r, ms } = await timed(bytes, "test.vhdr");
+      expect(r.coverage).toBe("partial");
+      expect(ms).toBeLessThan(1000);
+    }
+  });
+
+  test("a 16 MiB marker file with one huge description finishes within 1 s", async () => {
+    const head = text("test.vmrk");
+    for (const word of ["a", "x@", "+1 ", "tel 1 "]) {
+      const huge = word.repeat(
+        Math.floor((MARKER_FILE_MAX_BYTES - head.length - 64) / word.length),
+      );
+      const bytes = encode(head.replace(/Mk2=[^\n]*/, `Mk2=Comment,${huge},100,1,0`));
+      expect(bytes.length).toBeLessThanOrEqual(MARKER_FILE_MAX_BYTES);
+      const { r, ms } = await timed(bytes, "test.vmrk");
+      expect(r.coverage).toBe("partial");
+      expect(r.incomplete).toBe("limit");
+      expect(ms).toBeLessThan(1000);
+    }
   });
 });

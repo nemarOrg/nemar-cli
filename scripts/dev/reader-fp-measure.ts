@@ -13,6 +13,9 @@
  * (the dataset's full file list), so companions that were not downloaded still pair; a dataset
  * whose readers fell short anyway (a partial or failed read) is counted in `incompleteDatasets`.
  *
+ * The per-100 denominator is the files the readers counted: a file a reader found to be another
+ * format (`not-applicable`) is counted as unscreened and is not in it.
+ *
  * **It prints no value.** Only kinds, counts, and the dataset directories that produced a kind,
  * so its output can go in a pull request. The files it reads are the caller's: download public
  * headers into the OS temp directory, run this, and delete them.

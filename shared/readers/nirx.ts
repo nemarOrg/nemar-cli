@@ -33,22 +33,24 @@ import {
   datePrecision,
   hasDateFinerThanYear,
   isNameLike,
-  scanTextForLocalPaths,
   shapeOf,
 } from "../identifier-scan";
 import {
   type IniSection,
   TEXT_HEADER_LIMITS,
+  capText,
   checkReference,
-  contactIn,
   decodeHeader,
   entryValue,
+  freeTextFindings,
   isPersonField,
   pairByName,
   parseIni,
   readHeader,
   splitPath,
+  startsBinary,
   stem,
+  unplacedTextFindings,
 } from "./text-header";
 
 const HDR = ".hdr";
@@ -138,7 +140,8 @@ function screenSubjectBlock(
   section: IniSection | undefined,
   path: string,
   findings: Finding[],
-): void {
+): { cut: boolean } {
+  let cut = false;
   const seen = new Set<string>();
   const once = (finding: Finding) => {
     if (seen.has(finding.kind)) return;
@@ -146,7 +149,10 @@ function screenSubjectBlock(
     findings.push(finding);
   };
   for (const { key, value } of section?.entries ?? []) {
-    const v = value.trim();
+    // Every rule below reads at most the cap of one value.
+    const capped = capText(value.trim());
+    cut ||= capped.cut;
+    const v = capped.text;
     if (v === "") continue;
     if (BIRTH_FIELD.test(key)) {
       if (PLACEHOLDER.test(v)) continue;
@@ -158,43 +164,49 @@ function screenSubjectBlock(
         shape: shapeOf(v),
       });
     } else if (FREE_TEXT_FIELD.test(key)) {
-      const local = scanTextForLocalPaths(v);
-      if (local.length > 0) once({ ...(local[0] as Finding), field: key });
-      if (contactIn(v) !== null) {
-        once({ kind: "nirx-freetext", severity: "review", field: key, shape: shapeOf(v) });
-      }
+      for (const f of freeTextFindings(v, "nirx-freetext", key).findings) once(f);
     } else if (isPersonField(key)) {
       if (PLACEHOLDER.test(v) || !nameIsNameLike(v) || isSubjectLabel(v, path)) continue;
       once({ kind: "nirx-subject-name", severity: "identifier", field: key, shape: shapeOf(v) });
     }
   }
-}
-
-/** The first section a text holds, lowercased, or null: how a NIRx file must start. */
-function firstSection(text: string): string | null {
-  const line = text.split(/\r\n|\r|\n/).find((l) => l.trim() !== "");
-  const m = line === undefined ? null : /^\s*\[([^\]]*)\]\s*$/.exec(line);
-  return m ? (m[1] as string).trim().toLowerCase() : null;
+  return { cut };
 }
 
 /**
  * Screen one NIRx file's text. `path` decides whether it is a header or an `.inf`; `whole` says
  * whether the text is the whole file.
  */
-export function scanNirxText(text: string, path: string, whole: boolean): ReaderResult {
+export function scanNirxText(
+  text: string,
+  path: string,
+  whole: boolean,
+  binaryStart = false,
+): ReaderResult {
   const findings: Finding[] = [];
   const isHeader = path.toLowerCase().endsWith(HDR);
-  // An `.hdr` that is not a NIRx header (an Analyze image header) or an `.inf` that is not NIRx's
-  // (a Windows driver file) is not this reader's: unscreened, never a gap in a NIRx read.
-  if (firstSection(text) !== (isHeader ? "generalinfo" : "subject demographics")) {
-    return { findings, coverage: "not-applicable" };
-  }
   const sections = parseIni(text);
+  const section = sections.get(isHeader ? "generalinfo" : "subject demographics");
+  if (!section) {
+    // No NIRx section anywhere. A binary file (an Analyze image header) is another format:
+    // unscreened. Text (a Windows driver `.inf`, an edited header) is screened as free text and is
+    // a partial read, so a missing section can never hide what the file holds.
+    if (binaryStart) return { findings, coverage: "not-applicable" };
+    return {
+      findings: unplacedTextFindings(text, "nirx-freetext"),
+      coverage: "partial",
+      incomplete: "unsupported-version",
+    };
+  }
   let unmatched = false;
+  let cut = false;
 
   if (isHeader) {
-    const general = sections.get("generalinfo");
-    const date = entryValue(general, "Date");
+    const general = section;
+    const dateValue = entryValue(general, "Date");
+    const dateCapped = dateValue === undefined ? undefined : capText(dateValue);
+    cut ||= dateCapped?.cut ?? false;
+    const date = dateCapped?.text;
     if (date !== undefined && date !== "" && !isYearOnlyDate(date)) {
       findings.push({
         kind: "nirx-header-date",
@@ -207,16 +219,19 @@ export function scanNirxText(text: string, path: string, whole: boolean): Reader
     const fileName = entryValue(general, "FileName");
     if (fileName !== undefined && fileName !== "") {
       const { name } = splitPath(nirxBase(path));
-      if (checkReference(fileName, name, name) !== "match") unmatched = true;
+      const capped = capText(fileName);
+      cut ||= capped.cut;
+      if (checkReference(capped.text, name, name) !== "match") unmatched = true;
     }
     // NIRSport2 keeps the subject in the header's experiment notes; NIRStar keeps notes there.
-    screenSubjectBlock(sections.get("experimentnotes"), path, findings);
+    cut ||= screenSubjectBlock(sections.get("experimentnotes"), path, findings).cut;
   } else {
-    screenSubjectBlock(sections.get("subject demographics"), path, findings);
+    cut ||= screenSubjectBlock(section, path, findings).cut;
   }
 
   const notes = unmatched ? { notes: ["companion-name-mismatch" as const] } : {};
-  if (!whole) return { findings, coverage: "partial", incomplete: "limit", ...notes };
+  // A file past the byte limit, or a value past the free-text cap, was read only in part.
+  if (!whole || cut) return { findings, coverage: "partial", incomplete: "limit", ...notes };
   return { findings, coverage: "complete", ...notes };
 }
 
@@ -249,6 +264,6 @@ export const NIRX_READER: FormatReader = {
   },
   async scan(src: RangeSource, path: string, limits) {
     const { bytes, whole } = await readHeader(src, limits.maxBytes);
-    return scanNirxText(decodeHeader(bytes), path, whole);
+    return scanNirxText(decodeHeader(bytes), path, whole, startsBinary(bytes));
   },
 };

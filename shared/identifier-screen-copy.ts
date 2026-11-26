@@ -207,13 +207,13 @@ export const KIND_COPY: Record<FindingKind, Copy> = {
     "nirx-demographics",
   ),
   "nirx-freetext": kind(
-    "A contact or notes field of a NIRx file holds an email address or a phone number.",
+    "A contact or notes field of a NIRx file, or text in a NIRx file the reader could not place, holds an email address or a phone number.",
     NIRX,
     "Remove the contact details from the .inf file (or the header's notes) and upload again.",
     "nirx-freetext",
   ),
   "brainvision-marker-text": kind(
-    "A marker description in a BrainVision marker file holds an email address or a phone number.",
+    "A marker description in a BrainVision marker file, or text in a BrainVision file the reader could not place, holds an email address or a phone number.",
     BRAINVISION,
     "Remove the contact details from the marker descriptions of the .vmrk file and upload again.",
     "brainvision-marker-text",

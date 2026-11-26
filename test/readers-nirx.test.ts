@@ -19,7 +19,7 @@ import { classifyDataset, readRecordings } from "../shared/identifier-report-bui
 import { DATE_KINDS, DIRECT_KINDS } from "../shared/identifier-scan";
 import { KIND_COPY } from "../shared/identifier-screen-copy";
 import { NIRX_READER } from "../shared/readers/nirx";
-import { TEXT_HEADER_MAX_BYTES } from "../shared/readers/text-header";
+import { TEXT_HEADER_MAX_BYTES, contactIn, decodeHeader } from "../shared/readers/text-header";
 
 const DIR = join(import.meta.dir, "fixtures/text-headers/nirx");
 const fixture = (name: string) => new Uint8Array(readFileSync(join(DIR, name)));
@@ -216,18 +216,26 @@ describe("FileName, companions and coverage", () => {
     expect(kinds(r)).toEqual(["nirx-header-date"]);
   });
 
-  test("a real Analyze .hdr (nibabel) and a non-NIRx .inf are not-applicable", async () => {
+  test("a real Analyze .hdr (nibabel) is not-applicable: binary, with no NIRx section", async () => {
     const analyze = new Uint8Array(readFileSync(join(DIR, "../analyze/analyze.hdr")));
     expect(analyze.length).toBe(348);
     expect(await scan(analyze, "sourcedata/anat/t1.hdr")).toEqual({
       findings: [],
       coverage: "not-applicable",
     });
+  });
+
+  test("text with no NIRx section is screened as free text and is partial, never not-applicable", async () => {
     const driver = '[Version]\nSignature="$Windows NT$"\n';
     expect(await scan(encode(driver), "x.inf")).toEqual({
       findings: [],
-      coverage: "not-applicable",
+      coverage: "partial",
+      incomplete: "unsupported-version",
     });
+    const hidden = "[Info]\nContact=q.hollberry@example.org\n";
+    const r = await scan(encode(hidden), "x.hdr");
+    expect(r.coverage).toBe("partial");
+    expect(kinds(r)).toEqual(["nirx-freetext"]);
   });
 
   test("past 1 MiB the read is partial (limit) and keeps what it found", async () => {
@@ -323,6 +331,90 @@ describe("every new kind has its words", () => {
       expect(copy.read).toContain("NIRx");
       expect(copy.remedy.length).toBeGreaterThan(10);
       expect(copy.anchor).toBe(`kind-${kind}`);
+    }
+  });
+});
+
+/** UTF-16 bytes of some text, little- or big-endian, with a byte-order mark. */
+function utf16(textValue: string, endian: "le" | "be"): Uint8Array {
+  const out = new Uint8Array(2 + 2 * textValue.length);
+  out.set(endian === "le" ? [0xff, 0xfe] : [0xfe, 0xff], 0);
+  for (let i = 0; i < textValue.length; i++) {
+    const c = textValue.charCodeAt(i);
+    const [lo, hi] = [c & 0xff, c >> 8];
+    out.set(endian === "le" ? [lo, hi] : [hi, lo], 2 + 2 * i);
+  }
+  return out;
+}
+
+describe("review round 1: no not-applicable evasion, encodings, bounds", () => {
+  const path = `sourcedata/sub-01/${HDR}`;
+
+  test("a leading comment line, or [GeneralInfo] after another section, is still a header", async () => {
+    for (const body of [`; exported\n${text(HDR)}`, `[Preamble]\nx=1\n${text(HDR)}`]) {
+      const r = await scan(encode(body), path);
+      expect(r.coverage).toBe("complete");
+      expect(kinds(r)).toEqual(["nirx-header-date"]);
+    }
+  });
+
+  test("a leading NUL hides nothing", async () => {
+    const r = await scan(new Uint8Array([0, ...fixture(HDR)]), path);
+    expect(r.coverage).toBe("complete");
+    expect(kinds(r)).toEqual(["nirx-header-date"]);
+    const inf = await scan(new Uint8Array([0, ...fixture("edited-name.inf")]), "x.inf");
+    expect(kinds(inf)).toEqual(["nirx-subject-name"]);
+  });
+
+  test("a UTF-16 file, either byte order, is read like its UTF-8 twin", async () => {
+    for (const endian of ["le", "be"] as const) {
+      const r = await scan(utf16(text(HDR), endian), path);
+      expect(r.coverage).toBe("complete");
+      expect(kinds(r)).toEqual(["nirx-header-date"]);
+      expect(kinds(await scan(utf16(text("edited-name.inf"), endian), "x.inf"))).toEqual([
+        "nirx-subject-name",
+      ]);
+    }
+  });
+
+  test("a 1 MiB single-word contact value finishes within 1 s, partial (limit)", async () => {
+    for (const word of ["a", "x@", "+1 ", "tel 1 ", "C:\\Users\\"]) {
+      const value = word.repeat(Math.ceil(TEXT_HEADER_MAX_BYTES / word.length));
+      const bytes = encode(
+        text(CLEAN_INF).replace('Contact Information=""', `Contact Information="${value}"`),
+      );
+      const started = performance.now();
+      const r = await scan(bytes, "x.inf");
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect(r.coverage).toBe("partial");
+      expect(r.incomplete).toBe("limit");
+    }
+  });
+
+  test("a value past 4 KiB in a small file is cut, and the read says partial (limit)", async () => {
+    const value = "a".repeat(5000);
+    const bytes = encode(
+      text(CLEAN_INF).replace('Contact Information=""', `Contact Information="${value}"`),
+    );
+    expect(bytes.length).toBeLessThan(TEXT_HEADER_MAX_BYTES);
+    const r = await scan(bytes, "x.inf");
+    expect(r).toEqual({ findings: [], coverage: "partial", incomplete: "limit" });
+  });
+});
+
+describe("review round 1: the shared text helpers", () => {
+  test("the email rule reads a window around each @, so a huge value stays fast", () => {
+    const value = `${"a".repeat(TEXT_HEADER_MAX_BYTES)}@`;
+    const started = performance.now();
+    expect(contactIn(value)).toBeNull();
+    expect(contactIn(`${"a".repeat(100)}@example.org`)).toBe("email");
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  test("a UTF-16 byte-order mark decodes text that is not mostly ASCII", () => {
+    const words = "名前データ".repeat(200);
+    for (const endian of ["le", "be"] as const) {
+      expect(decodeHeader(utf16(words, endian))).toBe(words);
     }
   });
 });
