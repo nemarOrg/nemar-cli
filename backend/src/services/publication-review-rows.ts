@@ -29,6 +29,7 @@ import {
   type ScreenState,
   screenGate,
 } from "../../../shared/identifier-screen-report.js";
+import { CONFIRMING_MODELS } from "../../../shared/publication-auto-deny.js";
 import {
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
   type PublicationReviewReport,
@@ -78,6 +79,16 @@ export interface PublicationReviewRow {
   promptVersion: string | null;
   inputDigest: string | null;
   enrichmentSource: string | null;
+  /**
+   * The first run this row confirms (migration 0153; ADR 0139, decision 1), or null for a first
+   * run. A confirming row is never the review in force: {@link readReviewByKey} and
+   * {@link readReviewsByKeys} read first runs only.
+   */
+  confirmOf: number | null;
+  /** What the automatic denial made of a first run, as stored (`AUTO_DENY_STATES`); `none` on a confirming row. */
+  autoDenyState: string;
+  /** When `autoDenyState` was written; null for `none`. */
+  autoDenyAt: string | null;
 }
 
 /** Every column but `nonce`, which never leaves the callback module. */
@@ -85,7 +96,7 @@ export const ROW_COLUMNS =
   "id, request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, verdict, " +
   "detail, report, claimed_at, attempts, override_by, override_at, override_reasons, " +
   "created_at, decided_at, scanner_id, reader_versions, resolver_version, models, " +
-  "prompt_version, input_digest, enrichment_source";
+  "prompt_version, input_digest, enrichment_source, confirm_of, auto_deny_state, auto_deny_at";
 
 const num = (v: unknown): number => Number(v);
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
@@ -119,6 +130,9 @@ export function toRow(raw: Record<string, unknown>): PublicationReviewRow {
     promptVersion: strOrNull(raw.prompt_version),
     inputDigest: strOrNull(raw.input_digest),
     enrichmentSource: strOrNull(raw.enrichment_source),
+    confirmOf: numOrNull(raw.confirm_of),
+    autoDenyState: typeof raw.auto_deny_state === "string" ? raw.auto_deny_state : "none",
+    autoDenyAt: strOrNull(raw.auto_deny_at),
   };
 }
 
@@ -130,7 +144,10 @@ export async function readReview(db: D1Database, id: number): Promise<Publicatio
   return r ? toRow(r) : null;
 }
 
-/** The row of one (request, screened commit, kind of release): the review in force when they are the request's. */
+/**
+ * The first run of one (request, screened commit, kind of release): the review in force when they
+ * are the request's. A confirming row (`confirm_of` set) is never it.
+ */
 export async function readReviewByKey(
   db: D1Database,
   requestId: number,
@@ -140,7 +157,7 @@ export async function readReviewByKey(
   const r = await db
     .prepare(
       `SELECT ${ROW_COLUMNS} FROM publication_reviews
-        WHERE request_id = ? AND head_sha = ? AND anonymous = ?`,
+        WHERE request_id = ? AND head_sha = ? AND anonymous = ? AND confirm_of IS NULL`,
     )
     .bind(requestId, headSha, anonymous ? 1 : 0)
     .first<Record<string, unknown>>();
@@ -186,7 +203,8 @@ export async function readReviewsByKeys(
   const { results } = await db
     .prepare(
       `SELECT ${ROW_COLUMNS} FROM publication_reviews
-        WHERE request_id IN (${marks(ids.length)}) AND head_sha IN (${marks(heads.length)})`,
+        WHERE request_id IN (${marks(ids.length)}) AND head_sha IN (${marks(heads.length)})
+          AND confirm_of IS NULL`,
     )
     .bind(...ids, ...heads)
     .all<Record<string, unknown>>();
@@ -315,7 +333,11 @@ function sqliteTimeMs(text: string): number {
  */
 function storedReport(row: PublicationReviewRow): PublicationReviewReport | null {
   try {
-    const report = parsePublicationReviewReport(JSON.parse(row.report ?? "null"));
+    // A confirming row's report names the confirming model, which only a confirming row may.
+    const report = parsePublicationReviewReport(
+      JSON.parse(row.report ?? "null"),
+      row.confirmOf === null ? {} : { models: CONFIRMING_MODELS },
+    );
     if (report.evidence.head !== row.headSha || report.evidence.anonymous !== row.anonymous) {
       console.warn(
         `[publication-review] review ${row.id}: stored report refused (evidence_mismatch)`,
