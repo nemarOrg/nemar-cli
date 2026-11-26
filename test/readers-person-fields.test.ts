@@ -59,6 +59,10 @@ describe("location fields", () => {
       "OutputFolder",
       "save_path",
       "original_mff",
+      "pwd",
+      "cwd",
+      "datapath",
+      "SDpath",
     ]) {
       expect(isLocationField(f), f).toBe(true);
     }
@@ -69,6 +73,8 @@ describe("location fields", () => {
       "comments",
       "PatientProfile",
       "profile",
+      "redir",
+      "nosedir",
       "setname",
       "path_length_m",
       "fileCount",

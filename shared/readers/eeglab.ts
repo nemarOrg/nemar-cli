@@ -5,7 +5,10 @@
  * ...) is skipped by size, never read. EEGLAB writes the `EEG` structure either as one variable
  * or as one variable per field (`save -struct`); both read the same here.
  *
- * The rules, by EEGLAB field (design review and lead rulings, 2026-11-25):
+ * The rules, by EEGLAB field (design review and lead rulings, 2026-11-25). A field is named
+ * from the `EEG` variable, or from the top level when EEGLAB saved one variable per field;
+ * other variables (`ALLEEG`, `CURRENTSET`, a pipeline's own) get the free-text rules by their
+ * leaf names only, without the EEGLAB field rules below:
  *
  * - `subject`: SNIRF's `SubjectID` rule ({@link readSubjectId}): `eeglab-subject-name`
  *   (identifier) for a name-like word of letters only, `eeglab-subject-freetext` (review) for
@@ -15,18 +18,20 @@
  *   (the free-text rules, `scanMatText`, skip them). They record
  *   where the researcher kept the file and name no participant.
  * - `history` and `setname`: the person-name rule only ({@link personNameIn}), as
- *   `eeglab-history-name` and `eeglab-setname-name` (review); never the path rule.
+ *   `eeglab-history-name` and `eeglab-setname-name` (review); never the path rule. `subject`,
+ *   `history` and `setname` that are not character arrays fire nothing.
  * - The event tables (`event`, `urevent`, `epoch`): `type` gets the person-name rule only, as
  *   `eeglab-event-name` (review), and numeric and code-like types never fire; every other column
  *   is not scanned, as BIDS `events.tsv` is not (lead ruling P1').
- * - Channel labels never fire.
+ * - Channel labels never fire: `chanlocs.labels`, `urchanlocs.labels` and
+ *   `chaninfo.nodatchans.labels` are not scanned.
  * - `datfile` (or `data` as text): the `.fdt` file holding the signal, which must sit beside the
  *   `.set` ({@link ReaderResult.needs}); a miss is a missing companion, not a finding. The
  *   `.fdt` is never read.
  * - `BIDS` (the BIDS plugin's copy of the sidecars): the free-text rules without the
  *   person-field rule, since its keys are BIDS's own words (`LongName`).
- * - Everything else (`setname`, `comments`, `etc`, `group`, `condition`, `session`, ...): the
- *   free-text rules (`scanMatText`).
+ * - Everything else (`comments`, `etc`, `group`, `condition`, `session`, ...): the free-text
+ *   rules (`scanMatText`).
  *
  * In a v7.3 file, cell members and struct-array fields (event types, channel labels) sit
  * behind object references, under `/#refs#`, without their field names: they get the

@@ -16,7 +16,9 @@ import type { MatEntry } from "../shared/mat-meta";
 import {
   MAT_GENERIC_READER,
   foldFindings,
+  fromCodes,
   fromHdf5,
+  isProvenance,
   scanMatEntries,
   unscannedMat,
   walkMatForReader,
@@ -97,10 +99,10 @@ describe("one finding per kind and field per file", () => {
       ...scanMatEntries([char(["c", "notes"], "/home/qmarlow/x")]),
     ]);
     expect(folded).toEqual([
-      { ...shapeOnly, occurrences: 2 } as never,
+      { ...shapeOnly, count: 2 } as never,
       expect.objectContaining({ kind: "mat-freetext" }),
     ]);
-    expect(folded[1]?.occurrences).toBeUndefined();
+    expect(folded[1]?.count).toBe(1);
     expect(JSON.stringify(folded)).not.toContain("Marlow");
   });
 });
@@ -129,6 +131,41 @@ describe("text listed and not read makes the read partial", () => {
     expect(
       unscannedMat([{ fields: ["t"], class: "opaque", dims: [], value: null, skipped: "type" }]),
     ).toBe("unsupported-datatype");
+  });
+});
+
+describe("review round 1", () => {
+  test("a long location field is not a partial read; a long comment is", () => {
+    const long = "x".repeat(FREE_TEXT_MAX_CHARS + 1);
+    expect(unscannedMat([char(["EEG", "filepath"], long)])).toBeNull();
+    expect(
+      unscannedMat([
+        { fields: ["cfg", "datadir"], class: "char", dims: [1, 9e5], value: null, skipped: "size" },
+      ]),
+    ).toBeNull();
+    expect(unscannedMat([char(["EEG", "comments"], long)])).toBe("limit");
+  });
+
+  test("FieldTrip provenance is not read; cfg.previous is walked like any cfg", () => {
+    const home = "/Users/qmarlow/fieldtrip";
+    for (const fields of [
+      ["layout", "cfg", "version", "name"],
+      ["layout", "cfg", "callinfo", "usercfg", "notes"],
+      ["elec", "cfg", "toolbox", "cleanup"],
+      ["data", "cfg", "previous", "cfg", "callinfo", "notes"],
+    ]) {
+      expect(scanMatEntries([char(fields, home)]), fields.join(".")).toEqual([]);
+    }
+    expect(scanMatEntries([char(["data", "cfg", "previous", "notes"], home)])).toEqual([
+      expect.objectContaining({ kind: "mat-freetext" }),
+    ]);
+    expect(isProvenance(["cfg", "version"])).toBe(true);
+    expect(isProvenance(["version", "cfg"])).toBe(false);
+  });
+
+  test("character codes convert in slices, however many there are", () => {
+    const codes = Array.from({ length: 300_000 }, () => 0x61);
+    expect(fromCodes(codes)).toHaveLength(300_000);
   });
 });
 
