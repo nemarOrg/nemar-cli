@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.40 - 2026-11-26
+
 ### Admin command tree (epic #2307, ADR 0135)
 
 **Release note.**
@@ -132,6 +134,20 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
   Deploy order: the backend first. A new CLI against an older backend exits 1, the same way it does for the re-pull section.
   No secret, binding, cron or migration.
 - **New decision records:** ADR 0130 (community input goes through a time-boxed RFC in `nemarOrg/rfcs`), ADR 0131 (biosig-zarr has its own home and packing rules; partly supersedes ADR 0128) and ADR 0133 (format conformance vectors are canonical in biosig-zarr and nemar-cli vendors them by digest; partly supersedes ADR 0124 decision 3).
+
+### Tickets: the legal-process queue (#2304, ADR 0112 amendment of 2026-11-22)
+
+- **Mail to `legal-process@` lands in a restricted queue whose tickets are kept seven years.**
+  Migration 0149 seeds the `legal-process` queue (`INSERT OR IGNORE`, so a queue an owner already made keeps its settings); it is restricted to owners and starts as a pool with no assignee.
+  The purge keeps a ticket until both `MAIL_RETENTION_DAYS` and its queue's own period have passed; `legal-process` is kept 2557 days (`QUEUE_RETENTION_DAYS`).
+  A legal-process message never joins a ticket of another queue: ingest refuses it as `retention_mismatch`.
+  The restriction and the period are declared in code, not in the row, so once a legal-process ticket exists do not roll the Worker back below 0.10.40: an older Worker purges it at the general period.
+
+### Decision records
+
+- **ADR 0138 (accepted): rootless Podman is supported through one path (#2355).**
+  Site and user container configuration and OCI hooks are shut out, the container's `config.json` is checked against the declared binds before it starts, and anything else is refused as `runtime_unusable`.
+  It supersedes only ADR 0122 decision 6's Podman clause; the runtime is built in nemar-process#85, and no nemar-cli code changes.
 
 ### Changed
 
