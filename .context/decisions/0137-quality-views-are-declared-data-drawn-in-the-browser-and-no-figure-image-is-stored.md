@@ -4,6 +4,8 @@
 **Date:** 2026-11-23
 **Owner:** Seyed Yahya Shirazi
 
+This record moves to accepted when the nemar-process and website epics that build the rest of it reach their integration branches; the nemar-cli epic (#2324) alone does not complete it.
+
 Partially supersedes [ADR 0134](0134-pipelines-report-checkpoints-live-and-quality-metrics-are-reviewed-plugins.md) where it names figures or a floor value:
 its decisions 2, 6, 7 and 9 (the `figures` checkpoint, figure formats and caps, the first figure plugins, a plugin that re-reports a floor value, and the homes of figure rules), and its rejected alternative of array outputs;
 the word "figures" in its decision 1 now reads "views".

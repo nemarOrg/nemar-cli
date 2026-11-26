@@ -131,6 +131,9 @@ jobs:
               # so unit-pure -- the job that actually runs
               # test/probe-github-token.test.ts -- silently skipped it.
               - 'scripts/ci/**'
+              # The migration prefix check, read by test/migration-prefixes.unit.test.ts
+              # (unit-pure); without this entry a change to it alone matched no filter.
+              - 'scripts/migration-prefixes.ts'
               # The Neurobagel gatherer, vocabulary generator and golden regenerator
               # (epic #1586) are imported by test/neurobagel-*.test.ts and type-checked
               # with the root tsconfig; a change to them alone must run lint and unit-pure.
