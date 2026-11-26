@@ -56,6 +56,7 @@ import {
   PUBLICATION_REVIEW_MODEL,
 } from "../scripts/ci/publication-review-prompt";
 import type { Tree } from "../scripts/identifier-screen-ci-lib";
+import { formatCoverage } from "../shared/identifier-readers";
 import {
   DOCUMENT_BYTE_CEILING,
   DOCUMENT_CHAR_CAPS,
@@ -815,6 +816,17 @@ describe("the structural summary is counts and closed words", () => {
     expect(s.formats).toEqual({ ".vhdr": 1, ".vmrk": 1, ".hdr": 1, ".inf": 1 });
     expect(s.recordings).toBe(4);
     expect(Object.keys(s.formats).every((k) => REVIEW_FORMATS.has(k))).toBe(true);
+  });
+
+  test("a raw .zip counts once, under the ZIP reader's .zip, never as unscreened (phase A6)", async () => {
+    const zip = "sub-z1/eeg/sub-z1_task-r_eeg.zip";
+    const ds = newDataset("summary-zip", { ...files([zip]), ...WITHOUT_DEFAULT_SUBJECT });
+    const s = structuralSummary(ds.dir, await readTree(ds.dir, ds.head));
+    expect(s.formats).toEqual({ ".zip": 1 });
+    expect(s.recordings).toBe(1);
+    // The screen's coverage rule leaves it out of unscreened: its reader counts it.
+    expect(formatCoverage([zip])).toEqual({ byReader: { zip: 1 }, unscreened: {} });
+    // What is inside is the screen's to say, as `zip:<ext>`; the summary reads paths only.
   });
 
   test("no path, file name or label can reach the summary's output", async () => {
