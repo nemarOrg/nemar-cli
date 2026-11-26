@@ -561,10 +561,18 @@ describe("the file checks of the public route", () => {
 
   test("the record is checked whole: the schema, plugin sources, scope and its own recording", async () => {
     const cases: [string, (r: Loose) => void, string][] = [
-      ["schema", (r) => void (r.extensions.nemar.views[4].caption = ""), "declaration_invalid"],
+      [
+        "schema",
+        (r) => {
+          r.extensions.nemar.views[4].caption = "";
+        },
+        "declaration_invalid",
+      ],
       [
         "plugin source",
-        (r) => void (r.extensions.nemar.views[4].source.plugin.name = "nemar-other"),
+        (r) => {
+          r.extensions.nemar.views[4].source.plugin.name = "nemar-other";
+        },
         "",
       ],
       [
