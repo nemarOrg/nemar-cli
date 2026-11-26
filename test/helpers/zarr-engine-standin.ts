@@ -127,7 +127,10 @@ export interface RunResult {
 const CLI_ENTRY = new URL("../../src/index.ts", import.meta.url).pathname;
 const REPO_ROOT = new URL("../../", import.meta.url).pathname;
 
-/** Run the real `nemar` entry point as a subprocess, with `env` over the process's. */
+/** Run the real `nemar` entry point as a subprocess with an environment built from nothing:
+ *  `PATH`, `HOME` and `TMPDIR` so Bun and the tools `doctor` checks can start, then `env`. The
+ *  test process's own environment (its API URL override, any ambient credential, a developer's
+ *  `FORCE_COLOR`) never reaches the child. */
 export async function runNemar(
   args: string[],
   env: Record<string, string>,
@@ -136,7 +139,12 @@ export async function runNemar(
   const proc = Bun.spawn({
     cmd: [process.execPath, "run", CLI_ENTRY, ...args],
     cwd: REPO_ROOT,
-    env: { ...process.env, ...env },
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "",
+      TMPDIR: process.env.TMPDIR ?? "/tmp",
+      ...env,
+    },
     stdin: stdinIgnore ? "ignore" : "pipe",
     stdout: "pipe",
     stderr: "pipe",
