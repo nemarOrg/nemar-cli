@@ -3,14 +3,16 @@
  * declared once: how a recordings-table row becomes an outcome at each checkpoint, how outcomes become
  * counts, the rules of a live progress object no schema can state, when the live counts disagree with
  * the reconciled ones, what a run shows to an operator (`stalled` included), and the neuroschema
- * `processing` and `signalJourney` entries the backend writes from the reconciled counts.
+ * `processing` and `signalJourney` entries the backend builds, at the dataset level from a run's reconciled
+ * counts and at the record level from one row of its recordings table.
  *
  * `shared/contract/compute-progress-vectors.json` holds input rows and the outcomes and counts this
  * module gives for them; nemar-process (phase 3) replays the same vectors, so the launcher's live
  * counts and the backend's final counts differ only in transport.
  *
  * Pure: nothing here reads a clock, a database or a network. Every entry it builds is made of values
- * the registry and the counts give; no text from a job reaches one.
+ * the registry, the counts and the digests give; the only words from a job that reach one are a row's
+ * failure code and step, and only once they fit neuroschema's patterns.
  */
 
 import {
@@ -33,6 +35,7 @@ import {
   type ProgressCheckpointCounts,
   type ProgressFailure,
 } from "./contract/compute-progress.js";
+import { QUALITY_RELATIVE_LOCATION_SOURCE } from "./contract/quality-route.js";
 
 // --- The recordings table -------------------------------------------------------------------------
 
@@ -111,6 +114,82 @@ export function parseSkippedSteps(cell: string): SkippedStep[] | null {
   return out;
 }
 
+/** Where the columns the counting rules read sit in a recordings table's header. */
+export interface RecordingsHeader {
+  /** The number of cells every row has. */
+  width: number;
+  path: number;
+  status: number;
+  code: number;
+  step: number;
+  /** The optional `skipped_steps` column, or -1. */
+  skippedSteps: number;
+}
+
+/**
+ * The header line of a recordings table (CR already removed), or `missing_column` when a column the
+ * counting rules read is absent. Shared by {@link parseRecordingsTable} and the backend's one-row reader,
+ * so a row is read by one set of rules wherever it is read.
+ */
+export function readRecordingsHeader(
+  line: string,
+): { ok: true; header: RecordingsHeader } | { ok: false; reason: "missing_column" } {
+  const cells = line.split("\t");
+  const index: Record<string, number> = {};
+  for (const column of RECORDINGS_TABLE_COLUMNS) {
+    const i = cells.indexOf(column);
+    if (i < 0) return { ok: false, reason: "missing_column" };
+    index[column] = i;
+  }
+  return {
+    ok: true,
+    header: {
+      width: cells.length,
+      path: index.path,
+      status: index.status,
+      code: index.code,
+      step: index.step,
+      skippedSteps: cells.indexOf(SKIPPED_STEPS_COLUMN),
+    },
+  };
+}
+
+/**
+ * One row of a recordings table under its header (CR already removed), or the reason it is refused: a row
+ * of the wrong width, a status that is not one of the three, a failed or skipped row with no code, or a
+ * malformed plugin pair in `skipped_steps` (read only on a succeeded row).
+ */
+export function readRecordingsRow(
+  line: string,
+  header: RecordingsHeader,
+):
+  | { ok: true; row: RecordingRow }
+  | { ok: false; reason: "row_width" | "bad_status" | "missing_code" | "bad_skipped_steps" } {
+  const cells = line.split("\t");
+  if (cells.length !== header.width) return { ok: false, reason: "row_width" };
+  const status = cells[header.status];
+  if (!(RECORDING_STATUSES as readonly string[]).includes(status)) {
+    return { ok: false, reason: "bad_status" };
+  }
+  const code = naToNull(cells[header.code]);
+  if (status !== "succeeded" && code === null) return { ok: false, reason: "missing_code" };
+  const skipped =
+    header.skippedSteps < 0 || status !== "succeeded"
+      ? []
+      : parseSkippedSteps(cells[header.skippedSteps]);
+  if (skipped === null) return { ok: false, reason: "bad_skipped_steps" };
+  return {
+    ok: true,
+    row: {
+      path: cells[header.path],
+      status: status as RecordingStatus,
+      code: status === "succeeded" ? null : code,
+      step: naToNull(cells[header.step]),
+      ...(skipped.length > 0 ? { skipped_steps: skipped } : {}),
+    },
+  };
+}
+
 /**
  * Read a recordings table (tab-separated, a header row, `n/a` for an empty cell; CRLF tolerated). A
  * missing column, a row of the wrong width, a status that is not one of the three, a failed or skipped
@@ -121,35 +200,14 @@ export function parseRecordingsTable(text: string): TableRead {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   if (lines.length === 0) return { ok: false, reason: "empty_table" };
-  const header = lines[0].split("\t");
-  const index: Record<string, number> = {};
-  for (const column of RECORDINGS_TABLE_COLUMNS) {
-    const i = header.indexOf(column);
-    if (i < 0) return { ok: false, reason: "missing_column" };
-    index[column] = i;
-  }
-  const skippedAt = header.indexOf(SKIPPED_STEPS_COLUMN);
+  const head = readRecordingsHeader(lines[0]);
+  if (!head.ok) return head;
   if (lines.length - 1 > PROGRESS_MAX_RECORDINGS) return { ok: false, reason: "too_many_rows" };
   const rows: RecordingRow[] = [];
   for (const line of lines.slice(1)) {
-    const cells = line.split("\t");
-    if (cells.length !== header.length) return { ok: false, reason: "row_width" };
-    const status = cells[index.status];
-    if (!(RECORDING_STATUSES as readonly string[]).includes(status)) {
-      return { ok: false, reason: "bad_status" };
-    }
-    const code = naToNull(cells[index.code]);
-    if (status !== "succeeded" && code === null) return { ok: false, reason: "missing_code" };
-    const skipped =
-      skippedAt < 0 || status !== "succeeded" ? [] : parseSkippedSteps(cells[skippedAt]);
-    if (skipped === null) return { ok: false, reason: "bad_skipped_steps" };
-    rows.push({
-      path: cells[index.path],
-      status: status as RecordingStatus,
-      code: status === "succeeded" ? null : code,
-      step: naToNull(cells[index.step]),
-      ...(skipped.length > 0 ? { skipped_steps: skipped } : {}),
-    });
+    const read = readRecordingsRow(line, head.header);
+    if (!read.ok) return read;
+    rows.push(read.row);
   }
   return { ok: true, rows };
 }
@@ -546,6 +604,97 @@ export function processingEntryProblem(
   return null;
 }
 
+/**
+ * What became of a run's derivative, for `stored` (ADR 0134 decision 2): copied and kept (`kept`, also an
+ * expired derivative that was stored), lost in the copy (`lost`), or never made (`none`: a skipped stamp, an
+ * expired row that never stored).
+ */
+export type StoredDecision = "kept" | "lost" | "none";
+
+/**
+ * The `stored` counts of a run from the passed count of its last declared checkpoint: a recording reaches
+ * the store only when it passed that checkpoint, so the rest are skipped; a lost copy fails the ones that
+ * would have been stored. Reconciliation resolves the stored row with it, and the public projection of a
+ * promoted (stored) run computes it again, so the two cannot differ.
+ */
+export function storedCounts(
+  decision: StoredDecision,
+  lastPassed: number,
+  total: number,
+): ProgressCheckpointCounts {
+  if (decision === "kept") {
+    return { passed: lastPassed, failed: 0, skipped: total - lastPassed, total };
+  }
+  if (decision === "lost") {
+    return { passed: 0, failed: lastPassed, skipped: total - lastPassed, total };
+  }
+  return { passed: 0, failed: 0, skipped: total, total };
+}
+
+/** A record-level neuroschema `processing` entry for one recipe (`recordRecipeOutcome`). */
+export interface ProcessingRecordEntry {
+  recipe_version: string;
+  checkpoints: Record<string, CheckpointOutcome>;
+}
+
+/**
+ * One recording's record-level `processing` entry from its recordings-table row, over the recipe version's
+ * checkpoints in order and then `stored`, for a run whose derivative is stored (the only run a public page
+ * shows: ADR 0134 decision 9 as amended, ADR 0137 decision 7). Each declared checkpoint is
+ * {@link recordingOutcomes}'s; `stored` is `passed` when the recording passed the last declared checkpoint,
+ * and otherwise `skipped` with the code and step of its first checkpoint that did not pass, the recording's
+ * share of {@link storedCounts}`("kept", ...)`. Summed over a run's rows, these outcomes are the run's
+ * reconciled counts.
+ */
+export function processingRecordEntry(input: {
+  recipeVersion: string;
+  checkpoints: readonly RecipeCheckpoint[];
+  row: RecordingRow;
+}): ProcessingRecordEntry {
+  const outcomes = recordingOutcomes(input.row, input.checkpoints);
+  const checkpoints: Record<string, CheckpointOutcome> = {};
+  input.checkpoints.forEach((c, i) => {
+    checkpoints[c.checkpoint] = outcomes[i];
+  });
+  const first = outcomes.find((o) => o.status !== "passed");
+  checkpoints[STORED_CHECKPOINT] =
+    first === undefined
+      ? { status: "passed", code: null, step: null }
+      : { status: "skipped", code: first.code, step: first.step };
+  return { recipe_version: input.recipeVersion, checkpoints };
+}
+
+/** The words of {@link processingRecordProblem}. */
+export const PROCESSING_RECORD_PROBLEMS = ["keys_differ", "cascade_broken"] as const;
+
+/**
+ * The writer's rules for a record-level `processing` entry that no schema can state (neuroschema
+ * docs/processing-extensions.md): its checkpoints are exactly `declared`, in that order (`stored` last), and
+ * after the recording's first checkpoint that did not pass, every later one is `skipped` with the same code
+ * and step. Null when it holds.
+ */
+export function processingRecordProblem(
+  entry: ProcessingRecordEntry,
+  declared: readonly string[],
+): (typeof PROCESSING_RECORD_PROBLEMS)[number] | null {
+  const keys = Object.keys(entry.checkpoints);
+  if (keys.length !== declared.length || keys.some((k, i) => k !== declared[i])) {
+    return "keys_differ";
+  }
+  let first: CheckpointOutcome | null = null;
+  for (const name of declared) {
+    const o = entry.checkpoints[name];
+    if (first === null) {
+      if (o.status !== "passed") first = o;
+      continue;
+    }
+    if (o.status !== "skipped" || o.code !== first.code || o.step !== first.step) {
+      return "cascade_broken";
+    }
+  }
+  return null;
+}
+
 /** The status of a link to a run's signalJourney record. */
 export type SignalJourneyStatus = "in_progress" | "completed" | "failed";
 
@@ -560,6 +709,11 @@ export interface SignalJourneyLink {
 
 const SHA256_RE = /^[0-9a-f]{64}(?![\s\S])/;
 const SJ_VERSION_RE = /^[0-9]+\.[0-9]+\.[0-9]+(?![\s\S])/;
+/** neuroschema's `relativeLocation`, compiled as Ajv compiles it, and its length in code points. */
+const RELATIVE_LOCATION_RE = new RegExp(QUALITY_RELATIVE_LOCATION_SOURCE, "u");
+const RELATIVE_LOCATION_MAX = 1024;
+const isRelativeLocation = (location: string): boolean =>
+  RELATIVE_LOCATION_RE.test(location) && [...location].length <= RELATIVE_LOCATION_MAX;
 
 /**
  * Build a `signalJourney` link. `in_progress` and `failed` carry no record (location, digest and
@@ -586,7 +740,7 @@ export function signalJourneyLink(input: {
   const sjVersion = input.sjVersion ?? null;
   if (
     location === null ||
-    !PROGRESS_PATH_RE.test(location) ||
+    !isRelativeLocation(location) ||
     sha256 === null ||
     !SHA256_RE.test(sha256) ||
     sjVersion === null ||
