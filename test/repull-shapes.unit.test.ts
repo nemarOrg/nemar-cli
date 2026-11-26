@@ -321,7 +321,7 @@ describe("planFacts refuses a scalar of the plan that is not the shape execution
         n0: "n0" in over ? over.n0 : "2.0.0",
         n1: "n1" in over ? over.n1 : "2.0.1",
       },
-      planner: 2,
+      planner: 3,
       lineage: { recordable: true },
       description: { merged_json: null },
     }) as unknown as PlanBody;

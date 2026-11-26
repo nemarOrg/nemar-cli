@@ -362,10 +362,10 @@ describe("identity fields: owners only", () => {
 
 describe("what is not editable here", () => {
   const POINTERS: Array<[string, unknown, string]> = [
-    ["role", "owner", "nemar admin role"],
-    ["status", "approved", "nemar admin approve"],
-    ["service_access", 1, "nemar admin approve"],
-    ["account_kind", "service", "nemar admin kind"],
+    ["role", "owner", "nemar admin users role"],
+    ["status", "approved", "nemar admin users approve"],
+    ["service_access", 1, "nemar admin users approve"],
+    ["account_kind", "service", "nemar admin users kind"],
     ["orcid_verified", 1, "linking it with ORCID sign-in"],
     ["identity_conflict", 0, "duplicates --clear"],
     ["email_verified", 1, "resets it for you"],

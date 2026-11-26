@@ -914,7 +914,7 @@ describe("recording the merge", () => {
       from_version: "1.0.0",
       to_version: "2.0.0",
       plan_digest: `sha256:${"0".repeat(64)}`,
-      planner: 2,
+      planner: 3,
       base_sha: HEAD,
       lineage_recordable: false,
       counts: { merged_unscreened_head: 0 },

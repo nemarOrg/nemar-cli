@@ -391,7 +391,7 @@ describe("the service on D1", () => {
     from_version: "1.0.0",
     to_version: "2.0.0",
     plan_digest: DIGEST,
-    planner: 2,
+    planner: 3,
     base_sha: SHA,
     lineage_recordable: true,
     counts: { delta_paths: 4 },

@@ -1,0 +1,65 @@
+[34m🔧 Using account: [1m[33msccn[39m[34m[22m[39m
+[34m⚡ Running: wrangler d1 execute nemar-db --remote --json --command SELECT v.dataset_id, d.visibility, d.status, d.withdrawn_at IS NOT NULL AS withdrawn FROM dataset_versions v JOIN datasets d ON d.dataset_id=v.dataset_id WHERE v.dataset_id LIKE 'on%' AND v.source_version_basis IS NULL GROUP BY v.dataset_id -c wrangler-sccn.toml[39m
+
+[
+  {
+    "results": [
+      {
+        "dataset_id": "on004212",
+        "visibility": "private",
+        "status": "active",
+        "withdrawn": 1
+      },
+      {
+        "dataset_id": "on008014",
+        "visibility": "private",
+        "status": "active",
+        "withdrawn": 1
+      },
+      {
+        "dataset_id": "on008017",
+        "visibility": "private",
+        "status": "active",
+        "withdrawn": 1
+      },
+      {
+        "dataset_id": "on008092",
+        "visibility": "private",
+        "status": "active",
+        "withdrawn": 1
+      },
+      {
+        "dataset_id": "on008099",
+        "visibility": "private",
+        "status": "active",
+        "withdrawn": 1
+      },
+      {
+        "dataset_id": "on008115",
+        "visibility": "private",
+        "status": "active",
+        "withdrawn": 1
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "WNAM",
+      "served_by_colo": "DFW",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 2.6537
+      },
+      "duration": 2.6537,
+      "changes": 0,
+      "last_row_id": 47,
+      "changed_db": false,
+      "size_after": 38813696,
+      "rows_read": 1634,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
+[32m[39m
+[32m✅ Command completed successfully[39m

@@ -1,0 +1,117 @@
+name	type	units	low_cutoff	high_cutoff	reference	group	sampling_frequency	description	notch	status	status_description	resection
+A1	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	resected
+A2	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A3	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A4	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A5	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A6	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A7	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A8	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	resected
+A9	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+A10	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A11	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A12	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A13	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A14	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A15	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A16	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A17	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	resected
+A18	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A19	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	seizure onset zone	resected
+A20	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+A21	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A22	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A23	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A24	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A25	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A26	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+A27	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+A28	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+A29	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A30	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A31	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A32	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+A33	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A34	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A35	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A36	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+A37	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A38	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A39	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A40	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A41	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A42	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A43	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A44	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A45	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A46	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A47	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A48	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A49	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A50	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A51	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+A52	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+B1	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B2	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B3	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B4	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B5	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B6	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B7	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B8	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B9	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B10	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B11	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B12	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B13	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B14	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B15	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B16	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B17	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B18	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B19	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B20	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B21	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+B22	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+B23	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B24	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B25	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B26	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B27	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B28	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B29	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B30	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B31	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B32	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B33	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B34	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B35	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B36	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B37	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+B38	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B39	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+B40	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B41	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B42	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B43	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B44	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B45	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B46	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B47	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	bad	artifact	n/a
+B48	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B49	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B50	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B51	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B52	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B53	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B54	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B55	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B56	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B57	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B58	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B59	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B60	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B61	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B62	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B63	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved
+B64	ECOG	µV	0.016	300	n/a	n/a	1000	n/a	n/a	good	n/a	preserved

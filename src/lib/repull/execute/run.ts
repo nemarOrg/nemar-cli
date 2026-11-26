@@ -921,6 +921,8 @@ async function recordAndPrepare(
         unexplained: counts.unexplained ?? 0,
         conflicts: counts.conflicts ?? 0,
         corrections: counts.corrections ?? 0,
+        // The paths the iEEG geometry pipeline owns, which N.0.1 regenerates; left out when none.
+        ...(counts.pipeline_owned ? { pipeline_owned: counts.pipeline_owned } : {}),
         // The automatic create bounds the copy by its stated size (`assertAutomaticCounts` has
         // proved it known); an administrator's record does not need it.
         ...(ctx.automatic && counts.copy_bytes !== undefined

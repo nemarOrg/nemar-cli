@@ -27,6 +27,11 @@
  * it is made the same every time; a run that pushed it and could not record it finds it again by
  * making it once more for the branch's own parent. Its message ends with the re-pull's two trailers
  * and `Repull-Patch: corrections=<n>`.
+ *
+ * It also carries the iEEG geometry pipeline's regenerated files, when the mirror has any (ADR 0111,
+ * the amendment of 2026-11-19; `pipeline-run.ts`): the files to write and the paths to remove are a
+ * function of the new `main`'s snapshot and the pipeline's version, so they are part of the same
+ * deterministic commit. A pipeline-owned path is never a correction, so none of these is replayed.
  */
 
 import { join } from "node:path";
@@ -47,6 +52,7 @@ import { type OriginScratch, fetchInto } from "./execute/origin.js";
 import { type TreeLine, blobAt, datesOf, hashBlob, treeOf } from "./execute/resynthesize.js";
 import { ExecuteRefused } from "./execute/verify-plan.js";
 import { REPULL_IDENTITY, git } from "./execute/workdir.js";
+import type { PipelineFiles } from "./pipeline-run.js";
 import { repullTrailerLines, trailersProblem } from "./trailers.js";
 
 /** The trailer N.0.1's commit carries beside the re-pull's two (one definition, in `shared/`). */
@@ -317,12 +323,23 @@ function patchedDescription(raw: string, keys: PatchSelection["keys"], version: 
 }
 
 /** The commit's message: a subject, counts, and the trailers as its last paragraph. */
-export function patchMessage(row: RepullRow, s: PatchSelection, version: string): string {
+export function patchMessage(
+  row: RepullRow,
+  s: PatchSelection,
+  version: string,
+  pipeline?: PipelineFiles,
+): string {
   const [snapshot, plan] = repullTrailerLines(row);
   return [
     `Replay NEMAR's corrections onto ${row.upstream_ds} ${row.to_tag} as v${version}`,
     "",
     `Corrections the plan listed: ${s.corrections}; conflicts resolved to NEMAR's side: ${s.resolutions}; paths replayed: ${s.paths.length}; description keys replayed: ${s.keys.length}.`,
+    ...(pipeline
+      ? [
+          "",
+          `iEEG geometry pipeline files written: ${pipeline.write.size}; removed: ${pipeline.remove.length}.`,
+        ]
+      : []),
     "",
     snapshot,
     plan,
@@ -402,8 +419,10 @@ export async function patchCommit(args: {
   row: RepullRow;
   selection: PatchSelection;
   parent: string;
+  /** The iEEG geometry pipeline's regenerated files, when the run succeeded and the mirror has any. */
+  pipeline?: PipelineFiles;
 }): Promise<PatchCommit> {
-  const { scratch, row, selection, parent } = args;
+  const { scratch, row, selection, parent, pipeline } = args;
   const dir = scratch.dir;
   const version = patchVersionOf(row.to_version);
   if (!version) throw refuse("plan-schema", "The record's version has no patch version.");
@@ -420,9 +439,13 @@ export async function patchCommit(args: {
   const entries = new Map((await treeOf(dir, parent)).map((e) => [e.path, e]));
   if (parent !== row.merge_sha) {
     const merged = new Map((await treeOf(dir, row.merge_sha as string)).map((e) => [e.path, e]));
-    for (const p of selection.paths) {
-      const a = entries.get(p.path);
-      const b = merged.get(p.path);
+    const touched = [
+      ...selection.paths.map((p) => p.path),
+      ...(pipeline ? [...pipeline.write.keys(), ...pipeline.remove] : []),
+    ];
+    for (const path of touched) {
+      const a = entries.get(path);
+      const b = merged.get(path);
       if (a?.mode !== b?.mode || a?.oid !== b?.oid) {
         throw refuse(
           "patch-main-moved",
@@ -438,8 +461,26 @@ export async function patchCommit(args: {
     if (entry) entries.set(p.path, entry);
     if (key) keys.add(key);
   }
-  // A replayed file where the new tree holds a directory, or under a path it holds as a file.
-  for (const p of selection.paths) {
+  // The pipeline's files: a regenerated one is written as a regular file, a path the new run does not
+  // produce is deleted. A pipeline path is never a replayed one (it is not a correction), so a
+  // clash between the two is a plan that should not have been made.
+  const replayed = new Set(selection.paths.map((p) => p.path));
+  for (const path of [...(pipeline?.write.keys() ?? []), ...(pipeline?.remove ?? [])]) {
+    if (replayed.has(path)) {
+      throw refuse(
+        "patch-path-conflict",
+        "A path the iEEG geometry pipeline regenerates is also a path N.0.1 replays.",
+      );
+    }
+  }
+  for (const [path, text] of pipeline?.write ?? []) {
+    entries.set(path, { mode: "100644", oid: await hashBlob(dir, text), path });
+  }
+  for (const path of pipeline?.remove ?? []) entries.delete(path);
+  // A replayed or regenerated file where the new tree holds a directory, or under a path it holds
+  // as a file.
+  const written = [...replayed, ...(pipeline?.write.keys() ?? [])].map((path) => ({ path }));
+  for (const p of written) {
     if (!entries.has(p.path)) continue;
     const dirPrefix = `${p.path}/`;
     const parents = p.path.split("/").slice(0, -1);
@@ -468,7 +509,7 @@ export async function patchCommit(args: {
   });
   const tree = await writeTree(dir, [...entries.values()], "patch.index");
   const when = await mergeTime(dir, row.merge_sha as string);
-  const message = patchMessage(row, selection, version);
+  const message = patchMessage(row, selection, version, pipeline);
   const problem = await trailersProblem(message, row);
   if (problem)
     throw refuse(

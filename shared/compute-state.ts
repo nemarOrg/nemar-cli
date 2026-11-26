@@ -22,8 +22,10 @@ export const COMPUTE_WORD_RE = /^[a-z0-9_]{1,64}$/;
  */
 export const COMPUTE_STATES = [
   "created",
-  // `uploading` has NO writer yet: no code moves a job into it. Epic D (the partner contract, which wires
-  // `presignIncomingUploads`, `finalizeBundle` and `finalizeSubmittedFiles`) is what makes a job wait here.
+  // `uploading` is written by the person's submit route (phase D3, #2024: `POST /compute/jobs` for a job
+  // with a code bundle, after the hold and before the upload address is issued). A partner's reservation
+  // (phase D4, #2025) is never `uploading`: it is `created` until a Tapis job is reported and verified, and
+  // its files are records uploaded beside a job that is already `submitted`.
   "uploading",
   "submitted",
   "queued",
@@ -243,9 +245,95 @@ export const PLATFORM_FAILURE_CODES = [
   // 2026-11-06): the job ends `failed`, the hold is released with NO charge, and the row is flagged
   // `mismatch` so the observer and the tenant sweep can reconcile any real use against Expanse's figures.
   "tapis_record_lost",
+  // A job a runner claimed and then lost (portable compute, protocol `nemar.runner.v1`): the
+  // thirteenth word, with the details of {@link RUNNER_LOST_DETAILS}. It is not a launcher code and
+  // none of its details is in {@link LAUNCHER_DETAILS}, so the code alone decides and
+  // `isPlatformFailure("runner_lost", detail)` is true for every detail.
+  "runner_lost",
 ] as const;
 
 export type PlatformFailureCode = (typeof PLATFORM_FAILURE_CODES)[number];
+
+/**
+ * Failures the SUBMITTER caused and that are no launcher code: `upload_expired`, a job whose code bundle
+ * was never finalized within the hour (phase D3, #2024). Never a platform failure (the person did not
+ * finish the upload), so `isPlatformFailure` is false for it; the hold is released, nothing is charged.
+ */
+export const SUBMITTER_FAILURE_CODES = ["upload_expired"] as const;
+
+export type SubmitterFailureCode = (typeof SUBMITTER_FAILURE_CODES)[number];
+
+/**
+ * Why a runner job ended `runner_lost`, recorded as its failure detail: its lease ran out with no
+ * outputs (`lease_expired`), it was claimed the most times a job may be and never finished
+ * (`claims_exhausted`), it ran past its deadline (`deadline_exceeded`), or its runner's registration
+ * was revoked (`runner_revoked`). A fifth, `dataset_ineligible`, ends a waiting job that can never be claimed
+ * because its dataset is gone or no longer passes the pipeline eligibility predicate (unpublished, withdrawn,
+ * anonymous or tombstoned), so it stops holding a live-job slot. The numbers behind them are in
+ * `shared/contract/compute-runner.ts`.
+ */
+export const RUNNER_LOST_DETAILS = [
+  "lease_expired",
+  "claims_exhausted",
+  "deadline_exceeded",
+  "runner_revoked",
+  "dataset_ineligible",
+] as const;
+
+export type RunnerLostDetail = (typeof RUNNER_LOST_DETAILS)[number];
+
+// --- Executors, accounting classes and runner backends (portable compute) -----------------------
+
+/** Who runs a job: Tapis on an allocation, or a runner that polls NEMAR. A job is `tapis` by default. */
+export const COMPUTE_EXECUTORS = ["tapis", "runner"] as const;
+
+export type ComputeExecutor = (typeof COMPUTE_EXECUTORS)[number];
+
+/**
+ * How a job is accounted: `su` is the ledger in service units, `none` writes no ledger entry and
+ * measures usage instead. A Tapis job is always `su`: accounting follows the resource, not the executor.
+ */
+export const COMPUTE_ACCOUNTING = ["su", "none"] as const;
+
+export type ComputeAccounting = (typeof COMPUTE_ACCOUNTING)[number];
+
+/** Where a runner job executes: a workstation, or a cluster through its scheduler directly. */
+export const RUNNER_BACKENDS = ["local", "slurm"] as const;
+
+export type RunnerBackend = (typeof RUNNER_BACKENDS)[number];
+
+/**
+ * The refusals of the runner routes, each answered as `{ error: <word> }` with the status of
+ * {@link RUNNER_REFUSAL_STATUS}. A runner reads the word, never a sentence.
+ */
+export const RUNNER_REFUSALS = [
+  "runner_credential_not_accepted",
+  "runner_unknown",
+  "runner_token_expired",
+  "runners_disabled",
+  "lease_lost",
+  "job_not_claimed",
+  "runner_outdated",
+  "protocol_unsupported",
+  "runner_accounting_unbuilt",
+  "invalid_body",
+] as const;
+
+export type RunnerRefusal = (typeof RUNNER_REFUSALS)[number];
+
+/** The one table of HTTP statuses for {@link RUNNER_REFUSALS}. */
+export const RUNNER_REFUSAL_STATUS = {
+  runner_credential_not_accepted: 401,
+  runner_unknown: 401,
+  runner_token_expired: 401,
+  runners_disabled: 503,
+  lease_lost: 409,
+  job_not_claimed: 404,
+  runner_outdated: 426,
+  protocol_unsupported: 426,
+  runner_accounting_unbuilt: 409,
+  invalid_body: 400,
+} as const satisfies Record<RunnerRefusal, number>;
 
 /**
  * Why NEMAR refused to take a job's results, recorded as the detail of `result_upload_failed`.
@@ -346,6 +434,7 @@ export const LAUNCHER_DETAILS = {
     "scratch_unavailable",
     "no_container_runtime",
     "image_missing",
+    "image_unverified",
     "runtime_unusable",
     "internal_error",
     "output_dir_not_empty",
@@ -385,6 +474,7 @@ export const PLATFORM_LAUNCHER_DETAILS = [
   "scratch_unavailable",
   "no_container_runtime",
   "image_missing",
+  "image_unverified",
   "runtime_unusable",
   "internal_error",
   "output_dir_not_empty",
@@ -408,7 +498,7 @@ export const PLATFORM_LAUNCHER_DETAILS = [
   "complete_refused",
 ] as const;
 
-export type ComputeFailureCode = LauncherFailureCode | PlatformFailureCode;
+export type ComputeFailureCode = LauncherFailureCode | PlatformFailureCode | SubmitterFailureCode;
 
 /**
  * A detail the launcher itself wrote in `result.json` that {@link LAUNCHER_DETAILS} does not declare for
@@ -424,12 +514,13 @@ export type WorkerFailureDetail = LauncherDetail | VerifyReason | typeof RECORDS
 /** What `failure_detail` may hold when the Worker writes it: a closed word, or the launcher's own undeclared one. */
 export type ComputeFailureDetail = WorkerFailureDetail | LauncherWord;
 
-/** Every code a failed job may carry, each once: the launcher's seven, then the platform's rest. */
+/** Every code a failed job may carry, each once: the launcher's seven, the platform's rest, then the submitter's. */
 export const COMPUTE_FAILURE_CODES: readonly ComputeFailureCode[] = [
   ...LAUNCHER_FAILURE_CODES,
   ...PLATFORM_FAILURE_CODES.filter(
     (c) => !(LAUNCHER_FAILURE_CODES as readonly string[]).includes(c),
   ),
+  ...SUBMITTER_FAILURE_CODES,
 ];
 
 /**
@@ -527,6 +618,18 @@ export const COMPUTE_REFUSAL_CODES = [
   // transient fault of its database. 503 like `compute_disabled`, but a DIFFERENT word, because that one
   // says the platform is switched off and a caller told so stops retrying.
   "policy_unavailable",
+  // Phase D3 (#2024), the person's submit routes. The first three are the dataset gate the pipeline's
+  // `resolveRun` already applies (the same words, one rule); the rest are the submit, finalize, log and
+  // idempotency routes' own.
+  "version_not_found",
+  "version_untagged",
+  "too_many_files",
+  "entry_not_in_bundle",
+  "bundle_incomplete",
+  "idempotency_conflict",
+  "logs_not_available",
+  "upload_expired",
+  "storage_unavailable",
   // Issue #2121, phase P2: NEMAR's tenant-wide ceiling on live jobs is full for this job's class (the
   // owner's `tenant.maxLiveJobs` less the floors kept for the other classes). Retryable once a job ends;
   // it is not a queue, and it never says which class or whose jobs hold the slots.
@@ -572,6 +675,19 @@ export const COMPUTE_REFUSAL_STATUS = {
   guard_refused: 409,
   results_incomplete: 409,
   policy_unavailable: 503,
+  // 404: a dataset version that does not exist (the pipelines' administrator route has always said so).
+  // 422: the request names something outside what is offered (a version with no tag, an entry that is not
+  // in the bundle, a key already used for another request). 409: the job is in a state that refuses it
+  // (an upload that is not all there, an upload window that closed). 404: no log yet. 503: storage.
+  version_not_found: 404,
+  version_untagged: 422,
+  too_many_files: 422,
+  entry_not_in_bundle: 422,
+  bundle_incomplete: 409,
+  idempotency_conflict: 422,
+  logs_not_available: 404,
+  upload_expired: 409,
+  storage_unavailable: 503,
   platform_busy: 409,
 } as const satisfies Record<ComputeRefusalCode, number>;
 
@@ -586,7 +702,7 @@ export const COMPUTE_ROUTE_SENTENCES = {
   job_not_found: "No such job.",
   bad_state: "The job is not in a state that accepts this.",
   results_expired: "The results of this job have expired.",
-  compute_disabled: "Compute storage is not configured.",
+  compute_disabled: "Compute is not available.",
   invalid_spec: "The request is not valid.",
   too_many_outputs: "The job declared more output files than the owner's limit allows.",
   results_too_large: "The job's results are over the size limit.",
@@ -632,6 +748,9 @@ export const COMPUTE_LEDGER_REASONS = [
   "expired",
   "final_settlement",
   "unreserved_usage",
+  // Phase D4 (#2025): an administrator moved the charge of a job that skipped the reservation from the
+  // partner's pool to a person's (two `adjust` entries, one batch).
+  "charge_moved",
 ] as const;
 
 export type ComputeLedgerReason = (typeof COMPUTE_LEDGER_REASONS)[number];
@@ -659,6 +778,11 @@ export const COMPUTE_CANCEL_REASONS = [
   "unreserved",
   "unattributed",
   "scheduler",
+  // Phase D4 (#2025), a partner's reservation: the partner released it (`DELETE /compute/holds/:id`), or it
+  // went unreported past the owner's reservation wait and NEMAR, finding no Tapis job under its tag,
+  // released it.
+  "partner_release",
+  "hold_expired",
 ] as const;
 
 export type ComputeCancelReason = (typeof COMPUTE_CANCEL_REASONS)[number];

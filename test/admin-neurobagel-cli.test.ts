@@ -142,7 +142,8 @@ describe("nemar admin neurobagel regenerate", () => {
     expect(await storeKeys(h.bucket)).toEqual([]);
   });
 
-  test("--execute writes the store, and the next run reports it unchanged", async () => {
+  // `--apply` is the flag (ADR 0135 decision 4); the first run uses `--execute`, its hidden alias.
+  test("--execute (alias) and --apply write the store, and the next run reports it unchanged", async () => {
     seedSynthetic(h, "nm000950");
     seedSynthetic(h, "on000950");
     const first = await runCli(["admin", "neurobagel", "regenerate", "--execute"]);
@@ -152,7 +153,7 @@ describe("nemar admin neurobagel regenerate", () => {
     expect(first.all).toMatch(/written\s+on000950/);
     expect(await storeKeys(h.bucket)).toContain("index.json");
 
-    const second = await runCli(["admin", "neurobagel", "regenerate", "--execute"]);
+    const second = await runCli(["admin", "neurobagel", "regenerate", "--apply"]);
     expect(second.exitCode).toBe(0);
     expect(second.all).toMatch(/unchanged\s+nm000950/);
     expect(second.all).toContain("index_written=false");
@@ -164,7 +165,7 @@ describe("nemar admin neurobagel regenerate", () => {
       "admin",
       "neurobagel",
       "regenerate",
-      "--execute",
+      "--apply",
       "--dataset",
       "nm000952",
       "nm000950",
@@ -173,14 +174,7 @@ describe("nemar admin neurobagel regenerate", () => {
     expect(await storeKeys(h.bucket)).toContain("nm000950.jsonld");
     expect(await storeKeys(h.bucket)).not.toContain("nm000951.jsonld");
 
-    const limited = await runCli([
-      "admin",
-      "neurobagel",
-      "regenerate",
-      "--execute",
-      "--limit",
-      "1",
-    ]);
+    const limited = await runCli(["admin", "neurobagel", "regenerate", "--apply", "--limit", "1"]);
     expect(limited.all).toContain("limit=1");
     expect(limited.all).toContain("examined=1");
   });
@@ -193,10 +187,10 @@ describe("nemar admin neurobagel regenerate", () => {
     expect(parsed.results[0]?.id).toBe("nm000950");
   });
 
-  test("--execute while the writer is disabled fails with the server's reason and a hint", async () => {
+  test("--apply while the writer is disabled fails with the server's reason and a hint", async () => {
     seedSynthetic(h, "nm000950");
     envOverrides = { NEUROBAGEL_WRITER_ENABLED: undefined };
-    const result = await runCli(["admin", "neurobagel", "regenerate", "--execute"]);
+    const result = await runCli(["admin", "neurobagel", "regenerate", "--apply"]);
     expect(result.exitCode).not.toBe(0);
     expect(result.all).toMatch(/disabled/i);
     expect(result.all).toContain("NEUROBAGEL_WRITER_ENABLED");
@@ -238,7 +232,7 @@ describe("nemar admin neurobagel regenerate", () => {
     // finish with): 30 first-time datasets cannot all be done in one call, whatever --limit says.
     const ids = Array.from({ length: 30 }, (_, i) => `nm${String(970 + i).padStart(6, "0")}`);
     for (const id of ids) seedSynthetic(h, id);
-    const first = await runCli(["admin", "neurobagel", "regenerate", "--execute", "--limit", "50"]);
+    const first = await runCli(["admin", "neurobagel", "regenerate", "--apply", "--limit", "50"]);
     expect(first.exitCode).toBe(0);
     expect(first.all).toContain("spent its operation budget");
     expect(first.all).toContain("run the same command again to continue");
@@ -248,14 +242,7 @@ describe("nemar admin neurobagel regenerate", () => {
     expect(writtenFirst).toBeLessThan(30);
 
     for (let again = 0; again < 5; again++) {
-      const next = await runCli([
-        "admin",
-        "neurobagel",
-        "regenerate",
-        "--execute",
-        "--limit",
-        "50",
-      ]);
+      const next = await runCli(["admin", "neurobagel", "regenerate", "--apply", "--limit", "50"]);
       expect(next.exitCode).toBe(0);
       if (!next.all.includes("spent its operation budget")) break;
     }
@@ -278,7 +265,7 @@ describe("nemar admin neurobagel regenerate", () => {
         }
       }),
     };
-    const result = await runCli(["admin", "neurobagel", "regenerate", "--execute"]);
+    const result = await runCli(["admin", "neurobagel", "regenerate", "--apply"]);
     expect(result.exitCode).not.toBe(0);
     expect(result.all).toContain("anonymity_findings=1");
     expect(result.all).toContain("neurobagel_anonymity_finding");
@@ -302,7 +289,7 @@ describe("nemar admin neurobagel status", () => {
     seedSynthetic(h, "nm000951", {
       tsv: "participant_id\tage\nsub-01\t21\nsub-02\t22\nsub-09\t23\n",
     });
-    await runCli(["admin", "neurobagel", "regenerate", "--execute"]);
+    await runCli(["admin", "neurobagel", "regenerate", "--apply"]);
     await runCli(["admin", "neurobagel", "verify"]);
     const result = await runCli(["admin", "neurobagel", "status"]);
     expect(result.exitCode).toBe(0);

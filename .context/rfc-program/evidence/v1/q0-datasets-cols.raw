@@ -1,0 +1,281 @@
+[34m🔧 Using account: [1m[33msccn[39m[34m[22m[39m
+[34m⚡ Running: wrangler d1 execute nemar-db --remote --json --command SELECT name AS c FROM pragma_table_info('datasets') -c wrangler-sccn.toml[39m
+
+[
+  {
+    "results": [
+      {
+        "c": "id"
+      },
+      {
+        "c": "dataset_id"
+      },
+      {
+        "c": "name"
+      },
+      {
+        "c": "description"
+      },
+      {
+        "c": "owner_user_id"
+      },
+      {
+        "c": "status"
+      },
+      {
+        "c": "github_repo"
+      },
+      {
+        "c": "concept_doi"
+      },
+      {
+        "c": "latest_version_doi"
+      },
+      {
+        "c": "created_at"
+      },
+      {
+        "c": "updated_at"
+      },
+      {
+        "c": "zenodo_concept_id"
+      },
+      {
+        "c": "is_sandbox"
+      },
+      {
+        "c": "visibility"
+      },
+      {
+        "c": "ezid_status"
+      },
+      {
+        "c": "enrichment_json"
+      },
+      {
+        "c": "last_activity_at"
+      },
+      {
+        "c": "source"
+      },
+      {
+        "c": "source_id"
+      },
+      {
+        "c": "subject_count"
+      },
+      {
+        "c": "modalities"
+      },
+      {
+        "c": "age_min"
+      },
+      {
+        "c": "age_max"
+      },
+      {
+        "c": "file_size"
+      },
+      {
+        "c": "total_files"
+      },
+      {
+        "c": "tasks"
+      },
+      {
+        "c": "metadata_columns_error"
+      },
+      {
+        "c": "staleness_warn_stage"
+      },
+      {
+        "c": "staleness_admin_notified_at"
+      },
+      {
+        "c": "authors"
+      },
+      {
+        "c": "license"
+      },
+      {
+        "c": "readme"
+      },
+      {
+        "c": "bids_version"
+      },
+      {
+        "c": "sessions_count"
+      },
+      {
+        "c": "publish_date"
+      },
+      {
+        "c": "embedding_dirty"
+      },
+      {
+        "c": "license_tier"
+      },
+      {
+        "c": "zarr_status"
+      },
+      {
+        "c": "zarr_converted_at"
+      },
+      {
+        "c": "zarr_store_count"
+      },
+      {
+        "c": "zarr_index_etag"
+      },
+      {
+        "c": "zarr_source_commit"
+      },
+      {
+        "c": "archive_status"
+      },
+      {
+        "c": "archive_size"
+      },
+      {
+        "c": "archive_retry_count"
+      },
+      {
+        "c": "records_status"
+      },
+      {
+        "c": "archive_skip_reason"
+      },
+      {
+        "c": "zarr_errors"
+      },
+      {
+        "c": "zarr_failure_count"
+      },
+      {
+        "c": "zarr_deterministic"
+      },
+      {
+        "c": "zarr_data_failures"
+      },
+      {
+        "c": "zarr_failed_at"
+      },
+      {
+        "c": "num_dataset_citations"
+      },
+      {
+        "c": "num_datapaper_citations"
+      },
+      {
+        "c": "n_channels"
+      },
+      {
+        "c": "electrode_system"
+      },
+      {
+        "c": "has_hed"
+      },
+      {
+        "c": "hed_version"
+      },
+      {
+        "c": "is_exemplar"
+      },
+      {
+        "c": "bytes_present"
+      },
+      {
+        "c": "data_complete"
+      },
+      {
+        "c": "withdrawn_at"
+      },
+      {
+        "c": "withdrawn_reason"
+      },
+      {
+        "c": "archive_complete"
+      },
+      {
+        "c": "archive_absent_files"
+      },
+      {
+        "c": "archive_declared_files"
+      },
+      {
+        "c": "attestation"
+      },
+      {
+        "c": "zarr_pool_breaks"
+      },
+      {
+        "c": "total_recording_duration"
+      },
+      {
+        "c": "recording_duration_min"
+      },
+      {
+        "c": "recording_duration_max"
+      },
+      {
+        "c": "recording_count"
+      },
+      {
+        "c": "recordings_unavailable"
+      },
+      {
+        "c": "recordings_measured"
+      },
+      {
+        "c": "channel_count_min"
+      },
+      {
+        "c": "channel_count_max"
+      },
+      {
+        "c": "sampling_frequency"
+      },
+      {
+        "c": "power_line_frequency"
+      },
+      {
+        "c": "eeg_reference"
+      },
+      {
+        "c": "placement_scheme"
+      },
+      {
+        "c": "sweep_stamps"
+      },
+      {
+        "c": "first_published_at"
+      },
+      {
+        "c": "anonymous"
+      },
+      {
+        "c": "data_papers"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "WNAM",
+      "served_by_colo": "DFW",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.3196
+      },
+      "duration": 0.3196,
+      "changes": 0,
+      "last_row_id": 47,
+      "changed_db": false,
+      "size_after": 38813696,
+      "rows_read": 84,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
+[32m[39m
+[32m✅ Command completed successfully[39m

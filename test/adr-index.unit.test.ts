@@ -31,11 +31,12 @@ function indexedFiles(readme: string): string[] {
 
 /**
  * ADR numbers another epic has reserved and not landed yet, so the numbering has a gap this
- * directory is not responsible for. Empty now: ADR 0118 (the compute gateway) has landed beside
- * ADR 0119 (the OpenID Connect provider). Add a number here only while a reserved ADR is on
- * another branch, and delete it in the first change that brings the file.
+ * directory is not responsible for. Add a number here only while a reserved ADR is on another
+ * branch, and delete it in the first change that brings the file.
  */
-const TOLERATED_GAPS: ReadonlySet<number> = new Set([]);
+// 0127: reserved for PR #2210 (pull request review regardless of owner role); delete this entry when that ADR lands
+// 0137: reserved for the pipeline progress epic (branch feature/issue-2324-epic-pipeline-progress); delete this entry when that ADR lands
+const TOLERATED_GAPS: ReadonlySet<number> = new Set([127, 137]);
 
 /** The numbers missing between 1 and the highest one present, ascending. */
 function findGaps(nums: number[]): number[] {
@@ -126,6 +127,22 @@ describe("ADR index", () => {
       if (!/^(proposed|accepted|superseded by ADR-\d{4}(\s+and\s+ADR-\d{4})*)$/.test(status)) {
         bad.push({ file: f, status });
       }
+    }
+    expect(bad).toEqual([]);
+  });
+
+  test("an Accepted line is a real date and appears only on an accepted ADR", () => {
+    const bad: string[] = [];
+    for (const f of onDisk) {
+      const body = readFileSync(join(DECISIONS_DIR, f), "utf8");
+      const accepted = /^\*\*Accepted:\*\*\s*(.+)$/m.exec(body)?.[1]?.trim();
+      if (accepted === undefined) continue;
+      const status = /^\*\*Status:\*\*\s*(.+)$/m.exec(body)?.[1]?.trim() ?? "";
+      const time = /^\d{4}-\d{2}-\d{2}$/.test(accepted)
+        ? Date.parse(`${accepted}T00:00:00Z`)
+        : Number.NaN;
+      const real = !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === accepted;
+      if (status !== "accepted" || !real) bad.push(`${f}: Status ${status}, Accepted ${accepted}`);
     }
     expect(bad).toEqual([]);
   });

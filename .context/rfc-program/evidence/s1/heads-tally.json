@@ -1,0 +1,47 @@
+{
+ "bdf_files": 66340,
+ "by_extension_and_header_type": {
+  "bdf:BDF+C": 55015,
+  "bdf:plain": 11325,
+  "edf:EDF+C": 53585,
+  "edf:EDF+D": 1728,
+  "edf:plain": 20017,
+  "edf:plus-other": 76,
+  "edf:too-small": 1
+ },
+ "by_header_type": {
+  "BDF+C": 55015,
+  "EDF+C": 53585,
+  "EDF+D": 1728,
+  "plain": 31342,
+  "plus-other": 76,
+  "too-small": 1
+ },
+ "datasets_in_catalog": 910,
+ "datasets_listed": 909,
+ "datasets_not_listed": [
+  "on005691"
+ ],
+ "datasets_not_listed_reason": {
+  "on005691": "no latest_version"
+ },
+ "datasets_per_header_type": {
+  "BDF+C": 129,
+  "EDF+C": 146,
+  "EDF+D": 11,
+  "plain": 117,
+  "plus-other": 1,
+  "too-small": 1
+ },
+ "datasets_public": 910,
+ "datasets_with_edf_or_bdf": 359,
+ "edf_bdf_files_listed": 141747,
+ "edf_files": 75407,
+ "headers_failed": 0,
+ "headers_read_ok": 141747,
+ "headers_unread": 0,
+ "manifest_sources": {
+  "github-tree": 10,
+  "manifest.json": 899
+ }
+}

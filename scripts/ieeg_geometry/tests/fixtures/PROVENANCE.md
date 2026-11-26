@@ -1,0 +1,43 @@
+# Fixture provenance
+
+All data are cut from public CC0 datasets (NEMAR mirrors of OpenNeuro datasets).
+`tools/make_fixtures.py` rebuilds `mini_dataset/` from the downloads listed here.
+
+| Fixture | Source | Cut |
+| --- | --- | --- |
+| `sub-1/ieeg/*space-ACPC*`, `*space-ScanRAS*` | `on004473` v1.0.0, `sub-1/ieeg/` (`raw.githubusercontent.com/nemarDatasets/on004473/HEAD/...`), units in meters | none |
+| `derivatives/freesurfer-7.3.2/sub-1/surf/{lh,rh}.pial` | `on004473` v1.0.0, `data.nemar.org/on004473/v1.0.0/derivatives/freesurfer-7.3.2/sub-1/surf/`, with the `volume info` footer (c_ras) | vertices within (nearest-vertex distance + 2 mm) of any contact |
+| `sub-2/ses-ieeg01/ieeg/*` | `on004457` v1.0.0, `sub-2/ses-ieeg01/ieeg/` (native and `space-ACPC` electrodes, coordsystem, `task-ccep_run-01_channels.tsv`) | none |
+| `derivatives/freesurfer/sub-2/pial.R.surf.gii` | `on004457` v1.0.0, `data.nemar.org/on004457/v1.0.0/derivatives/freesurfer/sub-2/pial.R.surf.gii` (Base64Binary, ColumnMajorOrder) | same cut; rewritten column-major |
+
+Because the cut keeps each contact's true nearest vertex, nearest-vertex fits on the fixtures equal the fits on the full surfaces (on004457 sub-2: native 2.68 mm, `space-ACPC` 9.89 mm median).
+The cut surfaces are open meshes, so the inside-the-brain criterion is not evaluated on them.
+
+## Vendored fsaverage6 source
+
+`ieeg_geometry/data/fsaverage/*.npz` were built by `tools/build_fsaverage6.py` from the fsaverage pial surfaces in public dataset `on004370` v1.0.0 (`derivatives/freesurfer/lh.pial`, `rh.pial`; header "created by greve on Thu Apr 11 2013"; sha256 `9cb004f61a2eeb977b1b595ad6de6656afdfc1f37ade0c00a8dde91e990a0f29` and `4f752701f74c1626ee3b6239046b9aa793ca4e87c6ae9a6b74a233c04e651212`).
+This is not FreeSurfer's own distribution; a comparison with FreeSurfer's fsaverage6 files could not be made offline (known limit).
+
+## SPM fixture (`spm_dataset/`, card B2)
+
+`tools/make_spm_fixture.py` builds it from `mini_dataset/sub-2` (electrodes, channels, cut surface; see above) and the full SPM12 field `derivatives/freesurfer/sub-2/y_sub-2_ses-mri01_T1w.nii` of `on004457` v1.0.0 (`data.nemar.org/on004457/v1.0.0/...`, 121 x 145 x 121 voxels, 1.5 mm; sha256 `2570f6896caacf6736bcee0c0a9fe38e70ece8300ac73d22385465cfc5759e2f`).
+The field is cropped to a box around the native contacts (2-voxel margin) with the affine moved, so inversion on the crop equals inversion on the full field (the builder checks it to 1e-4 mm).
+
+## FreeSurfer fixtures (`fs_dataset/`)
+
+Built by `tools/make_fs_fixtures.py` from on004194 v1.0.0 (CC0): `sub-p02` (UMCU, needs c_ras) and `sub-p03` (NYU, as declared), their `acq-clinical` electrodes, coordsystem and channels files (raw GitHub), and from `data.nemar.org/on004194/v1.0.0/derivatives/freesurfer/sub-p0N/`: `surf/{lh,rh}.{pial,sphere.reg}` .
+Pial surfaces are cut to the nearest vertex of each contact (in the declared frame and with c_ras subtracted) plus about 10,000 evenly spaced vertices per hemisphere, so the registration check sees an even sample of the whole brain; the `volume info` footer is kept and each `sphere.reg` is cut to the same vertices so indices stay aligned.
+The cut surfaces are open, so depth-contact inside tests are not evaluated on them (the frame decisions here rest on ECoG contacts); full-surface checks are in `tests/test_freesurfer_network.py`.
+
+## Vendored fsaverage6 `sphere.reg`
+
+`lh.sphere.reg.npz` and `rh.sphere.reg.npz` hold the first 40962 vertices of fsaverage's `sphere.reg` (identical to its `sphere`, and identical for the two hemispheres) from `derivatives/freesurfer/fsaverage/surf/` of on004194 v1.0.0; `tools/build_fsaverage6_sphere.py`.
+
+## Pipeline test dataset (`tests/test_pipeline.py`, card P1)
+
+Composed at test time from `fs_dataset/`, `spm_dataset/`, `mini_dataset/` and `labels/on006107/` (no new committed bytes), plus a synthetic `sub-9` (40 sEEG contacts inside the MNI shell, a full SPM12-grid field and the subject's own surface, built with the helpers of `test_spm.py`). `tests/remote.py` serves it as a local git repository (surfaces, spheres and `y_` fields as git-annex MD5E links) with the annexed bytes in a data tree and a release file, all through `file://` URLs.
+
+## Renamed channels fixtures (`channel_renames/`)
+
+One JSON per dataset: the `name` columns, verbatim and in file order, of the channels and electrodes files of recordings of `on004194`, `on004551`, `on005007`, `on005545`, `on005931`, `on006107`, `on006233` and `on006914` as they stand on the `fix-20261018` pull request of each nemarDatasets repository (commit and SHA-256 of each whole file in the JSON).
+The same files are committed in nemarOrg/website `test/fixtures/ieeg-channel-renames/`, and `tests/test_names.py` holds this module to the same counts as the website's `channel-rename.test.ts`.

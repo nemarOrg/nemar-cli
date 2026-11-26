@@ -1571,7 +1571,10 @@ describe("no path writes a pool's totals except a ledger entry", () => {
   });
 
   test("migration 0114 creates the triggers on compute_pools, and migration 0130 only replaces the identity one with its anonymizing exception", () => {
-    const files = sources().filter((s) => triggersOnPools(s.text) > 0);
+    // Sorted by path: readdir order differs between filesystems, and 0114 sorts before 0130.
+    const files = sources()
+      .filter((s) => triggersOnPools(s.text) > 0)
+      .sort((a, b) => a.path.localeCompare(b.path));
     expect(files.map((f) => f.path)).toEqual([
       expect.stringContaining(TRIGGER_FILE),
       expect.stringContaining("0130_compute_anonymise.sql"),

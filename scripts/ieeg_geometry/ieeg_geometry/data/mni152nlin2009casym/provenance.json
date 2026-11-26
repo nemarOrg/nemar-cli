@@ -1,0 +1,97 @@
+{
+  "download": "the template archive's public object store; SOURCE_BASE in the script",
+  "format": "brain-mesh v1 (src/lib/ieeg-spatial/mesh-format.ts), 16-bit indices",
+  "frame": "MNI152NLin2009cAsym, RAS, millimeters",
+  "licenseSource": {
+    "reproducedVerbatimIn": "LICENSE.txt, followed by one line naming this derived surface",
+    "sha256": "46e280fe1a24c6f37feef2445ed288435e0ad063504a06030b206b12fdd2629d"
+  },
+  "name": "mni152nlin2009casym@1",
+  "outputs": {
+    "lh.mesh.bin": {
+      "triangles": 29400,
+      "vertices": 14955
+    },
+    "rh.mesh.bin": {
+      "triangles": 29400,
+      "vertices": 14942
+    }
+  },
+  "parameters": {
+    "component": "largest connected piece per hemisphere",
+    "cut": "x = 0 plane, surface cut and not capped; left is x < 0",
+    "decimation": {
+      "maxVerticesPerHemisphere": 15000,
+      "method": "quadric edge collapse (fast-simplification)",
+      "startFaces": 30000
+    },
+    "field": "gray matter plus white matter probability, 1 mm",
+    "isosurface": 0.5,
+    "outline": {
+      "minAreaMm2": 100.0,
+      "rasterMm": 0.5,
+      "toleranceMm": 0.4
+    },
+    "smoothing": {
+      "iterations": 10,
+      "lambda": 0.5,
+      "method": "Taubin",
+      "mu": -0.5263157894736842,
+      "passband": 0.1
+    }
+  },
+  "regenerate": "uv run scripts/vendor-brain-template.py",
+  "resolvedEnvironment": {
+    "fast-simplification": "0.2.0",
+    "imageio": "2.38.2",
+    "lazy-loader": "0.6",
+    "networkx": "3.7",
+    "nibabel": "5.5.0",
+    "numpy": "2.5.5",
+    "packaging": "26.3",
+    "pillow": "13.0.0",
+    "scikit-image": "0.26.0",
+    "scipy": "1.18.1",
+    "tifffile": "2026.11.12",
+    "typing-extensions": "4.16.0"
+  },
+  "scope": "A tissue surface of the template's gray plus white matter at the 0.5 level and 1 mm: the cerebrum and the cerebellum (lowest point near z = -72 mm), with whatever brainstem tissue the two maps contain; it is not a cortical pial or white-matter surface, and it is not any subject's anatomy.",
+  "script": {
+    "path": "scripts/vendor-brain-template.py",
+    "sha256": "1f3226e151afefa418ee229fecc93d329e5dd5d3fba9849fd52f66e57d891474"
+  },
+  "sources": [
+    {
+      "bytes": 682,
+      "path": "tpl-MNI152NLin2009cAsym/LICENSE",
+      "role": "license",
+      "sha256": "46e280fe1a24c6f37feef2445ed288435e0ad063504a06030b206b12fdd2629d"
+    },
+    {
+      "bytes": 7566494,
+      "path": "tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-01_label-GM_probseg.nii.gz",
+      "role": "probability map",
+      "sha256": "662b18e83dddc554b19c621d9750af3454b54d4e103df03633eacced3884805a"
+    },
+    {
+      "bytes": 6911720,
+      "path": "tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-01_label-WM_probseg.nii.gz",
+      "role": "probability map",
+      "sha256": "b2f80e29f5a1ef55325215d1716ef611f5b1a3cd97b4a49ef4e9564e9564e945"
+    }
+  ],
+  "template": {
+    "archive": "TemplateFlow (https://templateflow.org)",
+    "name": "tpl-MNI152NLin2009cAsym",
+    "reference": "Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL, Brain Development Cooperative Group. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54(1), 313-327 (2011).",
+    "referenceDoi": "10.1016/j.neuroimage.2010.07.033"
+  },
+  "tools": {
+    "fast-simplification": "0.2.0",
+    "nibabel": "5.5.0",
+    "numpy": "2.5.5",
+    "python": "3.12.13",
+    "scikit-image": "0.26.0",
+    "scipy": "1.18.1"
+  }
+}

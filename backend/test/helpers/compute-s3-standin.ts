@@ -75,6 +75,11 @@ export interface StandinFailure {
   code?: string;
   /** How many matching requests answer the error before it clears. Default 1. */
   times?: number;
+  /**
+   * Runs when the failure fires, before the error is answered: what a CONCURRENT writer did while this
+   * request was in flight (for example, the object it refuses to overwrite was written by the other).
+   */
+  beforeAnswer?: () => void | Promise<void>;
 }
 
 export interface ComputeS3Standin {
@@ -95,7 +100,30 @@ export interface StandinOptions {
   buckets: Record<string, R2Bucket>;
   accessKeyId?: string;
   secretAccessKey?: string;
+  /** The port to listen on (default 0, an ephemeral one). The server always listens on loopback only. */
+  port?: number;
+  /**
+   * Answer 421 `host_not_allowed` to any request whose `Host` is not `127.0.0.1:<port>` or
+   * `localhost:<port>` (a browser rebound to this address by DNS sends its own name). Off by default:
+   * the signature already covers the host of a presigned URL, and the suites address `127.0.0.1`.
+   */
+  hostGuard?: boolean;
 }
+
+/**
+ * Whether a `Host` header names this loopback server: exactly `127.0.0.1:<port>` or `localhost:<port>`
+ * (case-insensitive name, no other name, no IP literal but the loopback one, no other port, no missing
+ * header). A client on another machine reaching the port through `ssh -R` sends the name and port it
+ * dialed; the stack's tunnel uses the same port number on both ends, so that is one of these two.
+ */
+export function loopbackHostAllowed(host: string | null, port: number): boolean {
+  if (host === null) return false;
+  const h = host.toLowerCase();
+  return h === `127.0.0.1:${port}` || h === `localhost:${port}`;
+}
+
+export const HOST_REFUSAL_STATUS = 421;
+export const HOST_REFUSAL_BODY = '{"error":"host_not_allowed"}';
 
 const xml = (body: string, status: number, extra: Record<string, string> = {}) =>
   new Response(body, { status, headers: { "Content-Type": "application/xml", ...extra } });
@@ -198,6 +226,9 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
         service: "s3",
         region: STANDIN_REGION,
         signQuery: true,
+        // `content-length` is signed only when the signer is told to sign every header (phase D3, #2024:
+        // a presigned PUT binds the archive's declared length); the request's own value is what is judged.
+        allHeaders: names.includes("content-length"),
         datetime: q.get("X-Amz-Date") as string,
       });
       const signed = await signer.sign();
@@ -236,6 +267,7 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
       secretAccessKey,
       service: "s3",
       region: STANDIN_REGION,
+      allHeaders: names.includes("content-length"),
       datetime: req.headers.get("x-amz-date") as string,
     });
     const header = (await signer.authHeader()) as string;
@@ -299,6 +331,7 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
 
     const injected = takeFailure(entry.op, entry.bucket, entry.key);
     if (injected) {
+      await injected.beforeAnswer?.();
       entry.code = injected.code ?? "InternalError";
       return errorXml(entry.code, "an injected failure", injected.status);
     }
@@ -413,8 +446,20 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
   }
 
   const server: Server = Bun.serve({
-    port: 0,
+    port: options.port ?? 0,
+    // Loopback only: without it Bun listens on every interface, and the long-running local stack's ssh
+    // tunnel (card DM-08) would expose a bucket to the whole network.
+    hostname: "127.0.0.1",
     async fetch(req) {
+      if (
+        options.hostGuard === true &&
+        !loopbackHostAllowed(req.headers.get("host"), server.port as number)
+      ) {
+        return new Response(HOST_REFUSAL_BODY, {
+          status: HOST_REFUSAL_STATUS,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       const entry: StandinRequest = {
         op: "Unknown",
         method: req.method,

@@ -200,7 +200,7 @@ function seedRow(ds: string, status: RepullStatus, over: Row = {}): number {
     dataset_id: ds,
     upstream_ds: `ds${ds.slice(2)}`,
     origin: "automatic",
-    planner: 2,
+    planner: 3,
     actor_user_id: adminId,
     head_sha: HEAD,
     base_sha: BASE,

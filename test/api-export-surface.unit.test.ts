@@ -40,6 +40,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "completeSandbox",
     "createApiKey",
     "getCurrentUser",
+    "getMyEmailPreferences",
     "getSandboxStatus",
     "listApiKeys",
     "login",
@@ -57,6 +58,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "startOrcidCliLink",
     "suggestUsername",
     "unlinkOrcid",
+    "updateMyEmailPreferences",
     "updateProfile",
     "verifyEmailChange",
   ],
@@ -122,11 +124,9 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "availabilityReport",
     "availabilityReportSweep",
     "availabilityReportSweepReset",
-    "backfillUserNames",
     "backfillUsernames",
     "bulkDeleteDatasets",
     "changeUserRole",
-    "changeVisibility",
     "clearIdentityConflict",
     "clearPrReviewAuthor",
     "createConceptDoi",
@@ -174,7 +174,6 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "markMailTicketSpam",
     "neurobagelRegenerate",
     "neurobagelVerify",
-    "publishDataset",
     "publishVersionDoi",
     "publishZarrCatalog",
     "putMailAvailability",
@@ -206,6 +205,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "signalDefaultsSweepReset",
     "startPrReview",
     "syncCi",
+    "unpublishDataset",
     "updateDoi",
     "updateEmailPreferences",
     "uploadTierOf",
@@ -254,29 +254,57 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "adjustAccountComputePool",
     "adjustPlatformComputePool",
     "advanceComputeJobAsAdmin",
+    "cancelComputeJob",
     "cancelComputeJobAsAdmin",
     "computeRefusalCode",
+    "finalizeComputeJob",
     "getAccountComputePools",
     "getComputeAccessReport",
     "getComputeAccountReport",
+    "getComputeLogs",
+    "getComputeMe",
     "getComputePipelineStatus",
     "getComputePolicy",
     "getComputeRecord",
+    "getComputeResults",
     "getComputeStatus",
+    "getComputeUsage",
+    "getMyComputeJob",
     "grantAccountComputePool",
     "grantPlatformComputePool",
     "listComputeAccessReports",
     "listComputeHolds",
     "listComputeJobs",
     "listComputePools",
+    "listMyComputeJobs",
     "listUnmatchedComputeRows",
     "mintComputeObserverRun",
+    "moveComputeCharge",
     "placeComputeHold",
     "putComputePolicy",
     "readComputeRecord",
     "releaseComputeHold",
+    "renewComputeResults",
+    "requestComputeAccess",
     "requeueComputeAccessReport",
     "runComputePipeline",
+    "submitComputeJob",
+  ],
+  "compute-access-admin": [
+    "computeAccessAdminErrorCode",
+    "decideComputeAccess",
+    "listComputeAccess",
+  ],
+  // Portable compute, card DM-05: the owner's runner registry (`nemar admin compute runners`), and card S6's
+  // usage report (`nemar admin compute runners usage`).
+  "compute-runners": [
+    "RunnerListResponseSchema",
+    "RunnerRevokeResponseSchema",
+    "RunnerViewSchema",
+    "getComputeRunnersUsage",
+    "listComputeRunners",
+    "registerComputeRunner",
+    "revokeComputeRunner",
   ],
 };
 
@@ -305,7 +333,6 @@ const POST_SPLIT_ADDITIONS = [
   "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
   "revokeUserById", // #1274, ADR 0040: id-keyed revoke, the approve twin's eraser
   "verifyUserById", // ADR 0103: owner force verify, POST /admin/users/by-id/:id/verify
-  "backfillUserNames", // #1255, epic #1250: POST /admin/users/backfill-names
   "backfillUsernames", // #1253, epic #1250: POST /admin/users/backfill-usernames
   "checkOrcidName", // #1255, epic #1250: GET /auth/orcid-name pre-signup lookup
   "clearIdentityConflict", // #1254, ADR 0043: POST /admin/users/:id/clear-identity-conflict
@@ -318,7 +345,7 @@ const POST_SPLIT_ADDITIONS = [
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "editAdminUser", // ADR 0096: PATCH /admin/users/by-id/:id, `nemar admin users edit`
   "getAdminUserById", // ADR 0096: GET /admin/users/by-id/:id, `nemar admin users show` and `edit`
-  "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin doctor kinds`
+  "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin users kind-check`
   "getBroadcastStatus", // epic #1893 phase 2: GET /admin/notify/:id, `nemar admin notify --status`
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates
@@ -338,6 +365,8 @@ const POST_SPLIT_ADDITIONS = [
   "updateProfile", // #1266, ADR 0044: PATCH /auth/profile
   "verifyEmailChange", // #1266, ADR 0044: POST /auth/email/change/verify
   "requestUploadAccess", // #1253, epic #1250: POST /users/me/upload-access/request
+  "getMyEmailPreferences", // #2264, epic #2260, ADR 0132: GET /users/me/email-preferences
+  "updateMyEmailPreferences", // #2264, epic #2260, ADR 0132: PUT /users/me/email-preferences
   "recordingStatsSweep", // #1194, CLI wrapper for POST /admin/datasets/recording-stats-sweep
   "recordingStatsSweepReset", // #1194, CLI wrapper for the recording-stats sweep reset
   "signalDefaultsSweep", // #1194, CLI wrapper for POST /admin/datasets/signal-defaults-sweep
@@ -399,6 +428,20 @@ const POST_SPLIT_ADDITIONS = [
   "acceptRepullMergeTrailers", // #1996, ADR 0111 2026-10-29: POST /admin/repulls/:id/merge-trailers/accept
   "getRepullSwitches", // #1913 phase 7h: GET /admin/repulls/switches
   "listRepullDispatches", // #1913 phase 7h: GET /admin/repulls/dispatches
+  "requestComputeAccess", // epic #2021 phase D1: POST /users/me/compute-access/request
+  "getComputeMe", // epic #2021 phase D2: GET /compute/me
+  "getComputeUsage", // epic #2021 phase D2: GET /compute/me/usage
+  "listMyComputeJobs", // epic #2021 phase D2: GET /compute/me/jobs
+  "getMyComputeJob", // epic #2021 phase D2: GET /compute/me/jobs/:id
+  "submitComputeJob", // epic #2021 phase D3b: POST /compute/jobs
+  "finalizeComputeJob", // epic #2021 phase D3b: POST /compute/jobs/:id/finalize
+  "getComputeLogs", // epic #2021 phase D3b: GET /compute/jobs/:id/logs (plain text)
+  "getComputeResults", // epic #2021 phase D3b: GET /compute/jobs/:id/results
+  "renewComputeResults", // epic #2021 phase D3b: POST /compute/jobs/:id/results/renew
+  "cancelComputeJob", // epic #2021 phase D3b: POST /compute/jobs/:id/cancel
+  "listComputeAccess", // epic #2021 phase D1: GET /admin/compute/access
+  "decideComputeAccess", // epic #2021 phase D1: POST /admin/compute/access/{grant|deny|suspend|revoke}/...
+  "computeAccessAdminErrorCode", // epic #2021 phase D1: reads a compute-access refusal's word (no request)
   "getComputePolicy", // epic #2005 phase A2: GET /admin/compute/policy
   "putComputePolicy", // epic #2005 phase A2: PUT /admin/compute/policy
   "getComputeStatus", // epic #2005 phase A4: GET /admin/compute/status
@@ -407,6 +450,13 @@ const POST_SPLIT_ADDITIONS = [
   "runComputePipeline", // epic #2005 phase A6: POST /admin/compute/pipeline/run
   "getComputePipelineStatus", // epic #2005 phase A6: GET /admin/compute/pipeline/status
   "computeRefusalCode", // epic #2005 phase A6: reads a compute refusal's word (no request)
+  "registerComputeRunner", // portable compute, DM-05: POST /admin/compute/runners
+  "listComputeRunners", // portable compute, DM-05: GET /admin/compute/runners
+  "revokeComputeRunner", // portable compute, DM-05: POST /admin/compute/runners/:id/revoke
+  "getComputeRunnersUsage", // portable compute, S6: GET /admin/compute/reports/runners
+  "RunnerViewSchema", // portable compute, DM-05: the open schema of one registration (the listing's row)
+  "RunnerListResponseSchema", // portable compute, DM-05: the open schema of the listing
+  "RunnerRevokeResponseSchema", // portable compute, DM-05: the open schema of a revoke's answer
   "listComputePools", // epic #2005 phase A2: GET /admin/compute/pools
   "getAccountComputePools", // epic #2005 phase A2: GET /admin/compute/pools/by-id/:accountId
   "grantAccountComputePool", // epic #2005 phase A2: POST /admin/compute/pools/by-id/:accountId/grant
@@ -425,6 +475,7 @@ const POST_SPLIT_ADDITIONS = [
   "listComputeAccessReports", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
   "requeueComputeAccessReport", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
   "mintComputeObserverRun", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "moveComputeCharge", // epic #2021 phase D4: POST /admin/compute/jobs/:id/move-charge (owner)
   "createOidcClient", // epic #2014 phase #2016: POST /admin/oidc/clients (shared/contract/oidc-admin.ts)
   "listOidcClients", // epic #2014 phase #2016: GET /admin/oidc/clients
   "getOidcClient", // epic #2014 phase #2016: GET /admin/oidc/clients/:client_id
@@ -458,7 +509,6 @@ const MONOLITH_EXPORTS = [
   "availabilityReportSweepReset",
   "bulkDeleteDatasets",
   "changeUserRole",
-  "changeVisibility",
   "checkGitHubUsername",
   "checkHealth",
   "checkSSHKeyStatus",
@@ -508,7 +558,6 @@ const MONOLITH_EXPORTS = [
   "listPublishRequests",
   "listUsers",
   "login",
-  "publishDataset",
   "publishVersionDoi",
   "registerSSHKey",
   "reindexBulk",
@@ -536,6 +585,7 @@ const MONOLITH_EXPORTS = [
   "stepIndexFor",
   "submitEnrichment",
   "syncCi",
+  "unpublishDataset",
   "updateDoi",
   "updateEmailPreferences",
   "validateCi",

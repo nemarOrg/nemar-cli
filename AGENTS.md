@@ -47,7 +47,7 @@ several oddities here are deliberate, and the ADR says which.
 
 **`nm000103`-`nm000107` are LIVE** (public, DOIs minted).
 Do NOT modify their visibility, S3 data, DOIs or repo settings during development or testing.
-For end-to-end testing use `nm099999` (`nemar admin e2e-test`; reset with `POST /admin/datasets/nm099999/reset`).
+For end-to-end testing use `nm099999` (`nemar admin fleet e2e-test`; reset with `POST /admin/datasets/nm099999/reset`).
 `xx`-prefix datasets are blocked from publishing.
 Detail: [`.rules/datasets-and-fixtures.md`](.rules/datasets-and-fixtures.md).
 
@@ -102,9 +102,13 @@ only the owner adds one, because every re-pull merge mints a version DOI that ca
 A manual major bump on an `on` dataset is refused: plan an upstream re-pull instead.
 Detail: [`.rules/release-and-repull.md`](.rules/release-and-repull.md).
 
+### The vector visibility switch is the owner's
+
+`VECTORIZE_VISIBILITY_FILTER = "1"` is set in production `[vars]` and staging `[env.dev.vars]`, by the owner (ADR 0126); `backend/test/vectorize-switch-flag.test.ts` fails a change that sets it anywhere else or changes its value.
+
 ### The compute switches are the owner's
 
-`COMPUTE_ENABLED` and `COMPUTE_PIPELINES_DISPATCH_ENABLED` are dark switches: they stay out of `backend/wrangler-sccn.toml` (`backend/test/compute-switches-flag.test.ts` fails a change that adds one),
+`COMPUTE_ENABLED`, `COMPUTE_PIPELINES_DISPATCH_ENABLED` and `COMPUTE_RUNNERS_ENABLED` (registered runners; it also needs `COMPUTE_ENABLED`) are dark switches: they stay out of `backend/wrangler-sccn.toml` (`backend/test/compute-switches-flag.test.ts` fails a change that adds one),
 and only the owner adds one, in a reviewed pull request that edits that test.
 Compute crons are production-only (ADR 0118).
 

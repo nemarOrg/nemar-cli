@@ -13,11 +13,13 @@
 
 import type { ZodType } from "zod";
 import { ADMIN_USER_ERROR_CODES } from "../../../shared/contract/admin-user.js";
+import { COMPUTE_ACCESS_ERROR_CODES } from "../../../shared/contract/compute-access.js";
 import {
   DEVICE_AUTH_REFUSAL_CODES,
   deviceGrantErrorSchema,
 } from "../../../shared/contract/device-auth.js";
 import { IDENTITY_CONFLICT_CODES } from "../../../shared/contract/identity.js";
+import { SELF_MAIL_PREFERENCE_ERROR_CODES } from "../../../shared/contract/mail-categories.js";
 import {
   APPROVAL_REFUSAL_ERROR_CODES,
   IDENTIFIER_SCREEN_ERROR_CODES,
@@ -71,6 +73,13 @@ export async function request<T>(
   // (the getCurrentUser class of bug). Endpoints opt in by passing a schema from
   // shared/contract; passthrough schemas keep additive backend fields safe.
   schema?: ZodType<T>,
+  // "text" is for a route whose SUCCESS is not JSON (a job's log, `text/plain`): a 2xx returns
+  // `{ text, headers }` and a refusal is still the JSON `ApiError` below.
+  responseMode: "json" | "text" = "json",
+  // A time after which the request is abandoned (connection and body together), as a network failure
+  // (`ApiError` with status 0). Off by default; a caller that polls sets it, so one hung connection cannot
+  // stall it. A caller's own `options.signal` still aborts the request.
+  timeoutMs?: number,
 ): Promise<T> {
   const url = `${getApiUrl()}${path}`;
   const headers: Record<string, string> = {
@@ -95,9 +104,18 @@ export async function request<T>(
 
   let response: Response;
   try {
+    const signals = [
+      ...(options.signal ? [options.signal] : []),
+      ...(timeoutMs === undefined ? [] : [AbortSignal.timeout(timeoutMs)]),
+    ];
     response = await fetch(url, {
       ...options,
       headers,
+      ...(signals.length === 0
+        ? {}
+        : {
+            signal: signals.length === 1 ? (signals[0] as AbortSignal) : AbortSignal.any(signals),
+          }),
     });
   } catch (fetchError) {
     // Network error - DNS resolution, connection refused, etc.
@@ -164,6 +182,10 @@ export async function request<T>(
       requestBody,
       responseBody: rawBody,
     });
+  }
+
+  if (responseMode === "text" && response.ok) {
+    return { text: rawBody, headers: response.headers } as T;
   }
 
   let data: Record<string, unknown>;
@@ -259,8 +281,13 @@ export async function request<T>(
     // no rule here: `error` already leads, and the word is in `rawBody.code` (`reviewErrorCode`).
     const isApprovalRefusalCode =
       typeof data.error === "string" && APPROVAL_REFUSAL_ERROR_CODES.includes(data.error);
+    // The self-service mail preference refusals (epic #2260 phase 4): a code in `error`, the field in
+    // `field`, the sentence in `message`.
+    const isMailPreferenceCode =
+      typeof data.error === "string" && SELF_MAIL_PREFERENCE_ERROR_CODES.includes(data.error);
     const prefersMessage =
       hasBlockReason ||
+      isMailPreferenceCode ||
       isPublicationRefusalCode ||
       isApprovalRefusalCode ||
       isProfileEditCode ||
@@ -270,7 +297,13 @@ export async function request<T>(
       isScreenCode ||
       (missing !== undefined &&
         typeof data.error === "string" &&
-        UPLOAD_ACCESS_ERROR_CODES.includes(data.error));
+        UPLOAD_ACCESS_ERROR_CODES.includes(data.error)) ||
+      // Compute access's refusals (epic #2021 phase D1): the same shape, a code in `error`, the sentence
+      // in `message` and the fields still to fix in `missing`. Keyed on the code AND on `missing`, as the
+      // upload arm is: `already_active` and `access_closed` are words other bodies may use.
+      (missing !== undefined &&
+        typeof data.error === "string" &&
+        COMPUTE_ACCESS_ERROR_CODES.includes(data.error));
     let primary = prefersMessage
       ? (data.message as string) || (data.error as string)
       : (data.error as string) || (data.message as string);
@@ -305,6 +338,14 @@ export async function request<T>(
     if (typeof data.error === "string") apiError.code = data.error;
     if (typeof data.reason === "string") apiError.reason = data.reason;
     apiError.rawBody = data;
+    const retryAfter = Number(response.headers.get("retry-after"));
+    if (
+      response.headers.get("retry-after") !== null &&
+      Number.isFinite(retryAfter) &&
+      retryAfter >= 0
+    ) {
+      apiError.retryAfterSeconds = retryAfter;
+    }
     throw apiError;
   }
 

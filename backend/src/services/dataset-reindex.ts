@@ -25,7 +25,7 @@ import {
   writeVersionHed,
   writeVersionSize,
 } from "./dataset-metadata-columns.js";
-import { reembedDatasetVector } from "./dataset-search.js";
+import { embedsNonPublic, reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
 import { exemplarOrFragment, isExemplarReindexAllowed } from "./exemplar.js";
 import { getDatasetsToken } from "./github-auth.js";
@@ -324,7 +324,7 @@ export async function refreshDatasetMetadata(
     });
 
     // Best-effort re-embed (internally guarded, never throws).
-    await reembedDatasetVector(db, env.AI, env.VECTORIZE, datasetId);
+    await reembedDatasetVector(db, env.AI, env.VECTORIZE, datasetId, embedsNonPublic(env));
   } catch (colErr) {
     metadataColumnsError = errorMessage(colErr);
     console.error(`[reindex] Failed to write metadata columns for ${datasetId}:`, colErr);
@@ -453,8 +453,8 @@ export function extractEnrichmentSubErrors(body: unknown): string[] {
  * declined to push a DOI record that would have deleted an existing
  * DataCurator, which is the correct outcome, not a broken run. Folding it
  * into the sub-error list made every reindex of a dataset whose owner has no
- * name yet -- most of the catalogue until `nemar admin backfill-names --apply`
- * has been run -- report `status: "failed"` and log "enrichment failed",
+ * name yet -- most of the catalogue before the since-retired `nemar admin backfill-names`
+ * ran -- report `status: "failed"` and log "enrichment failed",
  * burying the real failures in the same batch.
  *
  * Operators still need to see it, so it travels as a WARNING alongside an

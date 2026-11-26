@@ -289,8 +289,8 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # check is TWO-SIDED: the installed biosigIO must be a final release in
 # [BIOSIGIO_FLOOR, BIOSIGIO_CAP). Below the floor is a failed upgrade; at or above
 # the cap is a release nobody has read yet (the cap exists because a biosigIO
-# patch release changed what a store contains or which recordings convert five
-# times in a row, 1.2.9 through 1.2.13), which an install that went wrong can also
+# patch release changed what a store contains or which recordings convert six
+# times in a row, 1.2.9 through 1.2.14), which an install that went wrong can also
 # leave behind; a pre-release or dev build satisfies
 # neither pin. None of them may convert.
 #
@@ -304,8 +304,8 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # `1.2.10rc1` and `1.2.10.dev0` as pre-releases, which a bare tuple of leading
 # digits would read as 1.2.10 and accept. Anything the fallback cannot parse fails
 # closed.
-BIOSIGIO_FLOOR="1.2.13"
-BIOSIGIO_CAP="1.2.14"
+BIOSIGIO_FLOOR="1.2.14"
+BIOSIGIO_CAP="1.2.15"
 BIOSIGIO_FLOOR_PROBE='
 import re
 import sys
@@ -396,16 +396,19 @@ sys.exit(code)
 # a MULTIPLEXED BrainVision file that ends in a partial frame and declares no
 # positive `DataPoints` count: it reads the whole frames, as 1.2.12 did, and
 # records the dropped bytes (`brainvision_dropped_bytes`). Vectorized data with a
-# partial frame is still refused. The engine stamp did not move for any of them,
-# and this pin does not move it (see requirements.txt).
-# The `<1.2.14` half is a CAP, not a floor, raised deliberately per release; raise
+# partial frame is still refused. 1.2.14 refuses an EDF+D or BDF+D file whose data
+# records have gaps (`DiscontinuousRecordingError`, `discontinuous_recording`),
+# where it used to read it with a shifted time axis (biosigio#180); a +D file
+# whose records are contiguous still converts. The engine stamp did not move for
+# any of them, and this pin does not move it (see requirements.txt).
+# The `<1.2.15` half is a CAP, not a floor, raised deliberately per release; raise
 # it everywhere at once (requirements.txt, this default and
 # BIOSIGIO_FLOOR/BIOSIGIO_CAP, SUBJECT_INFO_FLOOR in generate_zarr.py when the
 # floor moves, test_hallu_zarr_config.py).
 # Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
 # without either the matching recordings raise ImportError at convert time even
 # though discovery finds them.
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.13,<1.2.14}"
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.14,<1.2.15}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
 # The STABLE base published in each index as `contract_base` and in each store's
 # `nemar.contract_url` (#1059/#1064). Distinct from S3_BUCKET/AWS_REGION, which

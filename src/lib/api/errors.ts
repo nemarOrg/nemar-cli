@@ -54,6 +54,8 @@ export class ApiError extends Error {
   public code?: string;
   public reason?: string;
   public rawBody?: unknown;
+  /** The `Retry-After` of the response, in seconds, when it sent a number (a 429, a 503). */
+  public retryAfterSeconds?: number;
 
   constructor(
     public statusCode: number,

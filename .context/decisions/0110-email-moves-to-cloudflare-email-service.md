@@ -1,7 +1,8 @@
 # ADR 0110: Email moves to the Cloudflare Email Service
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-23
+**Accepted:** 2026-10-26
 **Owner:** Seyed Yahya Shirazi
 
 ## Context

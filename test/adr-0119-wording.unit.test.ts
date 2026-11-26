@@ -179,7 +179,16 @@ describe("ADR 0119 records what the revocation phase settled (#2019)", () => {
     expect(twelve).toMatch(/`oidc_clients.id` row, never the public `oc_` string/);
     expect(twelve).toMatch(/what it selects is GRANTS/);
     expect(twelve).toContain("`{scopePrefix}`");
-    expect(twelve).toMatch(/no caller yet, because its state does not exist/);
+    // The compute suspension has its caller since epic #2021 phase D1 (it used to say "no caller yet,
+    // because its state does not exist"): a suspension AND a revocation of compute access, named in the
+    // table and in the list of callers.
+    expect(twelve).toMatch(/The compute suspension's caller is `endComputeStatements`/);
+    expect(twelve).toMatch(/a suspension and for a revocation of compute access/);
+    expect(twelve).not.toMatch(/no caller yet/);
+    expect(twelve).toMatch(/Compute suspension or revocation \(`endComputeStatements`/);
+    expect(twelve).toMatch(
+      /an administrator's suspension or revocation of compute access \(`endComputeStatements`\)/,
+    );
     expect(twelve).toContain("`oidcClientEndStatements`");
     expect(twelve).toMatch(/does not revoke the account/);
     expect(readmeLine).toContain("oidcEndStatements");

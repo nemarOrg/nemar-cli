@@ -51,6 +51,7 @@ Trust these for how things work today.
 | [epic_browser_compute_state.md](epic_browser_compute_state.md) | The live map of the in-browser compute epic across osa, eegprep, nemar-cli and website: what is decided, what blocks what, what is still open. | public |
 | [epic_email_cloudflare.md](epic_email_cloudflare.md) | The live map of the email epic (#1893): moving all NEMAR mail to the Cloudflare Email Service, what is decided (ADR 0110), the phases and what is still open. | public |
 | [eegprep_lean_contract.md](eegprep_lean_contract.md) | What `eegprep-lean` will guarantee and where it deliberately differs from eegprep. The deliverable ADR 0069 names; drafted before the package exists. | public |
+| [brainlife-indexing.md](brainlife-indexing.md) | Plan and handoff for making NEMAR an indexed source on Brainlife (#2195): decisions, verified findings, eligibility rule, next actions. Waiting on the Brainlife maintainers. | public |
 | [ideas.md](ideas.md) | Exploratory design notes. Frequently rewritten; promote settled items to an ADR. | public |
 | [research.md](research.md) | Prior art from the `nemar-tools` scripts. Describes the **pre-NEMAR** Zenodo flow; DOIs are EZID now (ADR 0007). | public |
 
@@ -89,6 +90,7 @@ Measurements and investigations. Accurate as of their date; re-verify before rel
 | [research-make-vs-take-audit.md](research-make-vs-take-audit.md) | 2026-09-03 audit of bespoke code an established library or platform feature already covers, with replace / wrap / keep verdicts (-> ADR 0037). | public |
 | [research-agent-findability.md](research-agent-findability.md) | 2026-09-03: how AI agents and crawlers actually find datasets (robots tokens, sitemaps, JSON-LD, registries, DataCite); evidence that llms.txt and markdown mirrors are not read; Zarr guidance for agents (-> OSCAR epic). | public |
 | [research-publication-review-calibration.md](research-publication-review-calibration.md) | How often the publication review's model is judged wrong on published datasets and how many seeded defects it catches, so the model for the soak can be chosen (-> ADR 0102, call 6). Method and empty results tables; **awaiting the operator's run**. | public |
+| [research-bids-quality-guidelines.md](research-bids-quality-guidelines.md) | 2026-11-19: what BIDS 1.11.2 requires per hosted modality, which RECOMMENDED or OPTIONAL items NEMAR should strongly recommend at submission, measured omission rates on a sample of public datasets, and where each could be enforced; the item tables are generated from [research-bids-quality-guidelines.json](research-bids-quality-guidelines.json), the single source (stable ids, targets, check types, metric definitions). No ADR yet. | public |
 
 ## Historical — completed work
 

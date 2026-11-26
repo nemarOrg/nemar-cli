@@ -854,6 +854,18 @@ export const JobSpecSchema = z
 
 export type JobSpec = z.infer<typeof JobSpecSchema>;
 
+/**
+ * The specification in one canonical spelling, so that its digest (the job row's `spec_digest`, which is
+ * also the request hash of an idempotency key) does not depend on the order a caller wrote `env` in:
+ * `env` is the one record in a specification (every other object has the schema's fixed key order, which
+ * zod writes), so its names are put in sorted order. Everything else is unchanged, so the digest of a job
+ * with no environment, or one name, is what it always was. Pure.
+ */
+export function canonicalJobSpec(spec: JobSpec): JobSpec {
+  const entries = Object.entries(spec.env).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return { ...spec, env: Object.fromEntries(entries) as JobSpec["env"] };
+}
+
 // --- The owner policy --------------------------------------------------------------------------
 
 const CLIENT_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -870,6 +882,25 @@ const ceilingsShape = Object.fromEntries(
 export const ComputeClientCapsSchema = z
   .object({ maxOpenReservations: safeInt(0, 100_000), maxReservedMilliPerDay: safeInt(0) })
   .strict();
+
+/**
+ * Whether a scheduler option string NAMES an option that could allocate GPUs or generic resources. Only the
+ * option NAME counts (the part before `=` or whitespace, after the leading dashes), never its value, so
+ * `--account=progress` and `--chdir=/home/gpuser` are not GPU options. Refused, fail-closed: a name that
+ * contains `gpu`, `gres` or `tres` in any case (`--gpus-per-node`, `--mem-per-gpu`, `--gres-flags`,
+ * `--tres-per-task`), the short option `-G` with or without an attached value, and an abbreviation of
+ * `--gpus`, `--gres` or `--tres` the scheduler would accept (`--g`, `--gp`, `--gpu`, `--gre`, `--tre`).
+ * The hold bounds GPUs; the owner's list never admits one. Options that move a job off the checked queue or
+ * size (`--partition`, `-N`, `--ntasks`, `--mem`, `--time`, `--exclusive`) are NOT refused here and must
+ * not be listed: see ADR 0118 item 41.
+ */
+export function schedulerOptionNamesGpus(arg: string): boolean {
+  const rawName = arg.split(/[=\s]/)[0] ?? "";
+  if (rawName.startsWith("-G")) return true;
+  const name = rawName.replace(/^-+/, "").toLowerCase();
+  if (/gpu|gres|tres/.test(name)) return true;
+  return name.length >= 1 && ["gpus", "gres", "tres"].some((long) => long.startsWith(name));
+}
 
 /**
  * NEMAR's tenant-wide ceiling on live jobs and the floors it keeps for each class of occupant (issue
@@ -896,6 +927,17 @@ export const ComputeTenantPolicySchema = z
   });
 
 export type ComputeTenantPolicy = z.infer<typeof ComputeTenantPolicySchema>;
+
+/**
+ * What the owner lets runners hold at once (portable compute, ADR 0121 decision 6): the most live
+ * `accounting = 'none'` runner jobs of each pool. Not exported as a schema, only through
+ * {@link ComputePolicy}: an absent key reads {@link RUNNERS_POLICY_DEFAULT}, never "unlimited".
+ */
+const ComputeRunnersPolicySchema = z
+  .object({ maxLiveJobs: z.object({ cpu: safeInt(0, 1000), gpu: safeInt(0, 1000) }).strict() })
+  .strict();
+
+export type ComputeRunnersPolicy = z.infer<typeof ComputeRunnersPolicySchema>;
 
 /**
  * Everything the owner sets without a deploy, validated strictly on every write
@@ -930,6 +972,12 @@ export const ComputePolicySchema = z
      * still parses; a missing key is never "unlimited": see {@link tenantPolicyOf}.
      */
     tenant: ComputeTenantPolicySchema.optional(),
+    /**
+     * The runners' live cap per pool (ADR 0121). OPTIONAL like `tenant`, so a stored policy without it
+     * still parses; see {@link runnersPolicyOf}. A Worker from before ADR 0121 reads a stored policy that
+     * has this key as unreadable (the schema is strict), which is the rollback hazard the ADR names.
+     */
+    runners: ComputeRunnersPolicySchema.optional(),
     /** Minutes a reservation may wait for its Tapis job before NEMAR searches and releases. */
     reservationWaitMinutes: safeInt(1, 1440),
     retention: z
@@ -959,6 +1007,47 @@ export const ComputePolicySchema = z
         maxFileBytes: safeInt(1),
       })
       .strict(),
+    /**
+     * The partner contract's two owner confirmations (phase D4, #2025). OPTIONAL, so a stored version that
+     * predates it still parses, and CLOSED by default: absent means off.
+     *  - `tapisVisibilityConfirmed`: the owner has confirmed that NEMAR's service identity can search the
+     *    tenant's jobs by tag AND read a job another owner submitted. Until it is true no reservation is made
+     *    (`POST /compute/holds` is 503 `partner_not_enabled`) and the hold reaper never releases a
+     *    reservation on an EMPTY search (an empty answer is only evidence of nothing when the identity can
+     *    see the jobs).
+     *  - `execSystemId`: the execution system a partner's job must run on; a record on another system is a
+     *    `resources_mismatch`. Required while the confirmation is true.
+     *  - `allowedSchedulerArgs`: exact scheduler option strings (for example an account or a profile the app
+     *    or the system adds, which Tapis merges into the record) that are accepted IN ADDITION to at most one
+     *    `--gpus=N` within the hold. Default none; any other option is a `resources_mismatch`. The owner
+     *    reads ONE real job record of the tenant and copies the options it shows BEFORE turning
+     *    `tapisVisibilityConfirmed` on. A `--gpus` option can never be listed (the hold bounds GPUs).
+     */
+    partner: z
+      .object({
+        tapisVisibilityConfirmed: z.boolean(),
+        execSystemId: z
+          .string()
+          .regex(/^[A-Za-z0-9._-]{1,80}$/)
+          .optional(),
+        allowedSchedulerArgs: z
+          .array(
+            z
+              .string()
+              .regex(/^[-A-Za-z0-9=_.:,@/]{1,100}$/)
+              .refine((a) => !schedulerOptionNamesGpus(a), {
+                message: "GPUs are bounded by the hold, never allowed by name",
+              }),
+          )
+          .max(20)
+          .optional(),
+      })
+      .strict()
+      .refine((p) => !p.tapisVisibilityConfirmed || p.execSystemId !== undefined, {
+        message: "a confirmed partner names the execution system",
+        path: ["execSystemId"],
+      })
+      .optional(),
   })
   .strict();
 
@@ -982,6 +1071,15 @@ export const TENANT_POLICY_DEFAULT: ComputeTenantPolicy = deepFreeze({
 /** The policy's tenant ceiling, or the default when a stored policy predates the key: never unlimited. */
 export const tenantPolicyOf = (policy: ComputePolicy): ComputeTenantPolicy =>
   policy.tenant ?? TENANT_POLICY_DEFAULT;
+
+/** The runners' live cap in force when a stored policy has no `runners` key: 64 on the CPU pool, 8 on the GPU pool. */
+export const RUNNERS_POLICY_DEFAULT: ComputeRunnersPolicy = deepFreeze({
+  maxLiveJobs: { cpu: 64, gpu: 8 },
+});
+
+/** The policy's runners cap, or the default when a stored policy predates the key: never unlimited. */
+export const runnersPolicyOf = (policy: ComputePolicy): ComputeRunnersPolicy =>
+  policy.runners ?? RUNNERS_POLICY_DEFAULT;
 
 /**
  * The policy in force when no version has been set. Closed by default: no grant, no registry, no

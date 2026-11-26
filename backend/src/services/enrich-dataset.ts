@@ -16,6 +16,7 @@
  */
 
 import { formatFileSize } from "../../../shared/bytes.js";
+import { accountCopy } from "../../../shared/contract/account-copy.js";
 import { type NemarMetadataV2, datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { ANONYMOUS_DEPOSIT_REASON, blindEnrichmentMetadata, isAnonymous } from "./anonymity.js";
@@ -32,7 +33,7 @@ import {
   writeDatasetCatalogFields,
   writeDatasetMetadataColumns,
 } from "./dataset-metadata-columns.js";
-import { reembedDatasetVector } from "./dataset-search.js";
+import { embedsNonPublic, reembedDatasetVector } from "./dataset-search.js";
 import {
   type DoiResolution,
   type DoiResolutionSummary,
@@ -1144,7 +1145,7 @@ export async function enrichDataset(
     // Leaving file_size/total_files/bytes_present/data_complete unset here lets
     // COALESCE preserve whatever refreshDatasetMetadata (dataset-reindex.ts,
     // which runs right after every version-DOI mint and DOES verify the
-    // manifest) or the `admin data-integrity-sweep` backfill last wrote,
+    // manifest) or the `admin fleet sweep data-integrity` backfill last wrote,
     // instead of this run clobbering the honest value back to the S3 sum on
     // every re-enrichment. s3Stats itself stays in use above for the
     // human-readable `seeded.sizes` LLM-prompt field, unrelated to these columns.
@@ -1195,7 +1196,7 @@ export async function enrichDataset(
       });
 
       // Best-effort re-embed (internally guarded, never throws).
-      await reembedDatasetVector(env.DB, env.AI, env.VECTORIZE, datasetId);
+      await reembedDatasetVector(env.DB, env.AI, env.VECTORIZE, datasetId, embedsNonPublic(env));
     } catch (err) {
       metadataColumnsError = errorMessage(err);
       console.error(`[llm-enrich] Failed to write metadata columns for ${datasetId}:`, err);
@@ -1236,16 +1237,16 @@ export async function enrichDataset(
       doiSyncOutcome = { status: "skipped", reason: ANONYMOUS_DEPOSIT_REASON, message };
     } else if (dataset.concept_doi && refreshWouldStripAttribution(dataset, doiUploader)) {
       // DO NOT SYNC (#1255). This path runs automatically from the
-      // README/dataset_description webhook and from `nemar admin reindex
+      // README/dataset_description webhook and from `nemar admin dataset reindex
       // --bulk`, and it rebuilds the DataCite document from live DB state.
       // For a published dataset whose owner has no researcher name on file
-      // -- most of the catalogue until `nemar admin backfill-names --apply`
-      // has been run -- the rebuilt document has NO DataCurator, and pushing
+      // -- once most of the catalogue, before the since-retired `nemar admin backfill-names`
+      // ran -- the rebuilt document has NO DataCurator, and pushing
       // it would delete the curator from a permanent record while logging
       // success. Skipping leaves the existing record intact; the metadata
       // this run would have refreshed is re-synced by the next enrichment
       // after the name lands.
-      const message = `DOI metadata sync skipped for ${datasetId}: the owner has no researcher name on file, so the rebuilt record would drop the existing DataCurator. Run \`nemar admin backfill-names --apply\`, then re-run enrichment.`;
+      const message = `DOI metadata sync skipped for ${datasetId}: the owner has no researcher name on file, so the rebuilt record would drop the existing DataCurator. ${accountCopy("cli.admin.owner_name_missing.fix")} Then re-run enrichment.`;
       console.error(`[llm-enrich] ATTRIBUTION SKIP ${message}`);
       doiSyncOutcome = { status: "skipped", reason: OWNER_NAME_MISSING_REASON, message };
     } else if (dataset.concept_doi) {

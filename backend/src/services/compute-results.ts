@@ -20,6 +20,7 @@ import { resultsOutputKey } from "../../../shared/contract/compute-launch.js";
 import { escapeHtml } from "../lib/escape.js";
 import type { Bindings } from "../types/bindings.js";
 import type { ComputeJobRow } from "./compute-jobs.js";
+import { getPolicy } from "./compute-policy.js";
 import { COMPUTE_PRESIGN_MAX_SECONDS, computeS3, presignGet } from "./compute-s3.js";
 import { readDeclared } from "./compute-verify.js";
 import { resolveEmailConfig, sendEmail } from "./email.js";
@@ -121,6 +122,8 @@ export const RESULT_LINKS_MAX = 1000;
 export interface ResultLink {
   path: string;
   size: number;
+  /** The SHA-256 the launcher declared, which the person checks after the download. */
+  sha256: string;
   url: string;
 }
 
@@ -143,6 +146,28 @@ const linkRefusal = (code: "bad_state" | "results_expired" | "compute_disabled")
 });
 
 /**
+ * Whether the owner's results retention (`retention.resultsDays`, 30 by default) has passed since the job
+ * ended. A job with no end time has not passed it. An unreadable policy does not expire anything: the
+ * bucket's own check still stands.
+ */
+export async function resultsRetentionPassed(
+  env: Bindings,
+  job: ComputeJobRow,
+  nowMs: number = Date.now(),
+): Promise<boolean> {
+  if (job.ended_at === null) return false;
+  let days: number;
+  try {
+    days = (await getPolicy(env.DB)).policy.retention.resultsDays;
+  } catch {
+    return false;
+  }
+  const raw = job.ended_at.replace(" ", "T");
+  const endedMs = Date.parse(/(?:[zZ]|[+-]\d\d:?\d\d)$/.test(raw) ? raw : `${raw}Z`);
+  return Number.isFinite(endedMs) && nowMs > endedMs + days * 86_400_000;
+}
+
+/**
  * 7-day presigned GETs for a finished job's declared outputs, in path order, at most `RESULT_LINKS_MAX`
  * (`truncated` says there are more, `total` how many there are in all, and `next_after` is the cursor of
  * the next page: the last path of this one). `after` starts the page at the first output whose path sorts
@@ -159,6 +184,10 @@ export async function mintResultLinks(
   after: string | null = null,
 ): Promise<LinksResult> {
   if (job.state !== "finished" || job.results_verified_at === null) return linkRefusal("bad_state");
+  // The retention in force, counted from the job's end: past it the results are expired whether or not
+  // the bucket's own rule has removed the objects yet (a lifecycle rule runs lazily). The bucket's
+  // objects being gone is the second check, below.
+  if (await resultsRetentionPassed(env, job)) return linkRefusal("results_expired");
   const bucket = env.COMPUTE_RESULTS;
   const s3 = computeS3(env);
   if (!bucket || !s3) return linkRefusal("compute_disabled");
@@ -179,7 +208,7 @@ export async function mintResultLinks(
     const signed = await presignGet(s3, "results", resultsOutputKey(job.id, o.path), {
       expiresIn: RESULT_LINK_SECONDS,
     });
-    links.push({ path: o.path, size: o.size, url: signed.url });
+    links.push({ path: o.path, size: o.size, sha256: o.sha256, url: signed.url });
     expires = expires === "" || signed.expires_at < expires ? signed.expires_at : expires;
   }
   if (expires === "") {

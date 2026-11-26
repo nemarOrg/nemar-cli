@@ -37,12 +37,25 @@ export interface AssignmentContext {
 }
 
 /**
+ * The queue that holds official requests for compute records (subpoenas, court orders, warrants).
+ * It is restricted like `security` and `conduct`, and the purge keeps its tickets longer than any
+ * other queue's (`QUEUE_RETENTION_DAYS` in ticket-retention.ts). Being in RESTRICTED_TAGS also
+ * means mail to legal-process@ keeps this queue tag when the row is missing instead of falling to
+ * `*`, so the longer retention cannot be lost to a deleted row.
+ */
+export const LEGAL_PROCESS_QUEUE_TAG = "legal-process";
+
+/**
  * Queues that are restricted whatever their row says, or whether they have one. The row is
  * data an operator can delete or edit; confidentiality must not depend on it, so a ticket for
  * one of these tags is restricted even if the queue row is missing (a missing row assigns
  * nobody, the pool, but never unrestricts).
  */
-export const RESTRICTED_TAGS: ReadonlySet<string> = new Set(["security", "conduct"]);
+export const RESTRICTED_TAGS: ReadonlySet<string> = new Set([
+  "security",
+  "conduct",
+  LEGAL_PROCESS_QUEUE_TAG,
+]);
 
 /** Whether tickets of `tag` are restricted, given the queue row if there is one. */
 export function isRestrictedQueue(tag: string, row?: { restricted: number } | null): boolean {
@@ -260,8 +273,9 @@ export interface MailReleaseStatement {
  * fourth path that removes an admin needs these statements too.
  *
  * The compute counterpart, `computeReleaseStatements` (`services/compute-release.ts`, epic #2005
- * phase A8), has TWO callers, not three: `finalizeRevocation` and `tombstoneUserCascade`. A role
- * demotion is deliberately not one of them: compute is not an admin's standing, so a demoted person
+ * phase A8), has TWO account-ending callers, not three: `finalizeRevocation` and `tombstoneUserCascade`
+ * (a third, `endComputeStatements`, ends a person's compute alone, epic #2021 phase D1, and is not an
+ * account's end). A role demotion is deliberately not one of them: compute is not an admin's standing, so a demoted person
  * keeps their jobs and their pools, while the tickets, the away window and the queue references above
  * exist only for admins. A new path that ends a WHOLE ACCOUNT needs both sets; one that only removes
  * an admin needs this set alone.

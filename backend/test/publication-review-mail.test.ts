@@ -180,7 +180,7 @@ describe("the mail waits for a review that is in flight", () => {
       expect(mail).toHaveLength(1);
       const text = textOf(mail[0].html);
       expect(text).toContain("Publication review: pass");
-      expect(text).toContain(`nemar admin publish approve ${datasetId}`);
+      expect(text).toContain(`nemar admin dataset publish approve ${datasetId}`);
       expect(text).toContain(NOT_ASSESSED_LINE);
       // The identifier screen's own section is still there, before the review's.
       expect(text.indexOf("Identifier screen")).toBeLessThan(text.indexOf("Publication review"));
@@ -204,7 +204,7 @@ describe("the mail waits for a review that is in flight", () => {
       headline: "Publication review: action required",
       reasons: ["review_could_not_run"],
       words: ["the review job failed before it finished"],
-      next: "nemar admin publish start",
+      next: "nemar admin dataset publish start",
     },
     {
       name: "declined",
@@ -212,7 +212,7 @@ describe("the mail waits for a review that is in flight", () => {
       headline: "Publication review: action required",
       reasons: ["review_limit_reached"],
       words: ["this depositor's daily limit"],
-      next: "nemar admin publish start",
+      next: "nemar admin dataset publish start",
     },
     {
       name: "unreported",
@@ -220,7 +220,7 @@ describe("the mail waits for a review that is in flight", () => {
       headline: "Publication review: action required",
       reasons: ["review_did_not_report"],
       words: [],
-      next: "nemar admin publish start",
+      next: "nemar admin dataset publish start",
     },
     {
       // The mail goes once the lease frees it, at the 30-minute deadline, and says what is true
@@ -231,7 +231,7 @@ describe("the mail waits for a review that is in flight", () => {
       headline: "Publication review: action required",
       reasons: ["review_did_not_report"],
       words: [],
-      next: "nemar admin publish start",
+      next: "nemar admin dataset publish start",
     },
     {
       name: "dispatched past the views' overdue bound",
@@ -239,7 +239,7 @@ describe("the mail waits for a review that is in flight", () => {
       headline: "Publication review: action required",
       reasons: ["review_did_not_report"],
       words: [],
-      next: "nemar admin publish start",
+      next: "nemar admin dataset publish start",
     },
     {
       name: "reported with a failed question",
@@ -392,6 +392,9 @@ describe("with the review off, the mail is what it was before the review existed
   // commit before the section was added. Not a snapshot of wording: it pins that the template
   // changed by not one byte (whitespace included) when there is no review to add. A deliberate
   // edit to the mail updates these hashes in the same commit and says so.
+  // Re-pinned when the admin tree renamed `admin repo` to `admin dataset` (ADR 0135): the mail
+  // with `admin dataset publish` put back to `admin repo publish` hashes to the previous pins
+  // exactly, so the command text is the only change.
   const MAIL_BEFORE_THE_REVIEW: Array<{
     name: string;
     opts: Parameters<typeof sendPublicationRequestEmail>[8];
@@ -408,7 +411,7 @@ describe("with the review off, the mail is what it was before the review existed
           next: "next & step",
         },
       },
-      sha256: "5d95f3c4105c5351eea61a6e1bca201fa9cca342ea79f65d75dd9679d47b80b3",
+      sha256: "5fef05662750af814a164a228286c5ed62dd86c893bd0cfbec6ae0ee9cdb202f",
     },
     {
       name: "an anonymous release with a stopping screen",
@@ -416,12 +419,12 @@ describe("with the review off, the mail is what it was before the review existed
         anonymous: true,
         screen: { headline: "Identifier screen: FOUND IDENTIFIERS", tone: "stop", lines: [] },
       },
-      sha256: "1e491a8558d772d564d4a10d75f4ec55faff36170560048e28c0d4f0426a2a55",
+      sha256: "0d95f1f5d69c4bfb568ad2159b791287a79f1c65cbcbe1cf92c24ad01c43a086",
     },
     {
       name: "no sections at all",
       opts: {},
-      sha256: "909739632837b8af2525ab29495747d8481ab0754304dd538aaf37350e2e9b8c",
+      sha256: "6d4ebd0664dc9ac6f1bdfc032247b5453d6e79ed6eae82a6143e4678ec2bdd89",
     },
   ];
 
@@ -846,7 +849,7 @@ describe("the depositor's resend carries the review's section", () => {
       const mail = sends(calls);
       expect(mail).toHaveLength(1);
       expect(textOf(mail[0].html)).toContain("Publication review: pass");
-      expect(textOf(mail[0].html)).toContain(`nemar admin publish approve ${datasetId}`);
+      expect(textOf(mail[0].html)).toContain(`nemar admin dataset publish approve ${datasetId}`);
       // Nothing waits for a review any more, so the watchdog must not send it again.
       expect(mailState(requestId).emailed).not.toBeNull();
       expect(await notifyAdminsOfScreen(env(), requestId)).toBe("not-claimed");
@@ -994,7 +997,7 @@ describe("what the mail may carry", () => {
       const text = textOf(sends(calls)[0].html);
       expect(text).toContain("Publication review: could not be read");
       expect(text).toContain("This is not a pass.");
-      expect(text).toContain(`nemar admin publish show ${datasetId}`);
+      expect(text).toContain(`nemar admin dataset publish show ${datasetId}`);
       expect(text).toContain(NOT_ASSESSED_LINE);
       expect(text).not.toContain("Publication review: pass");
     });

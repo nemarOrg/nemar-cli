@@ -1,0 +1,1 @@
+This dataset, used in the analysis reported by Kochi et al., (2025), contains intracranial EEG recordings from 121 individuals who performed an auditory‑naming task. Electrode coordinates are provided in MNI‑305 space.

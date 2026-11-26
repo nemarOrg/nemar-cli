@@ -123,7 +123,7 @@ describe("the marker literal is duplicated, so pin the copies together", () => {
     const classified = classifyImportFailure({ stage: "finalize", lastError: gateMessage });
     expect(classified.cause).toBe("data_unavailable");
     expect(classified.label).toBe("data-unavailable");
-    expect(classified.summary).toContain("content-recovery");
+    expect(classified.summary).toContain("nemar admin rework annex content-recovery");
   });
 
   test("the identifier scrub's refusal classifies as identifier_scrub (ADR 0089)", () => {
@@ -178,7 +178,7 @@ describe("the tag pin's refusals (epic #1046, ADR 0111 decision 10)", () => {
     expect(c.label).toBe("upstream-moved");
     expect(IMPORT_FAILURE_CAUSE_LABELS).toContain("upstream-moved");
     expect(c.summary).toContain("re-pull");
-    expect(c.summary).toContain("`nemar admin import-openneuro <ds> --tag <recorded tag>`");
+    expect(c.summary).toContain("`nemar admin import openneuro <ds> --tag <recorded tag>`");
   });
 
   test("the #1320 preflight's refusal is annex_uuid_conflict, like git-annex's own wording", () => {

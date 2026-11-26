@@ -1,0 +1,7 @@
+Step 0 (card), observed 2026-11-20 around 16:43 to 16:47 PST, before any read:
+  ps -p 99119                      -> header line only (the process of remi:18769 has ended)
+  pgrep -fl scan.py                -> nothing
+  cache.json modification time     -> 2026-11-20 15:58 (more than 15 minutes before the copy)
+  copy: /Users/yahya/.cache/nemar-s1-scan/cache.json, 56371069 bytes
+  sha256 c21c5ce0a46fe17572bc02cfd5621c8d122d5737b880028d58904068d3d9fd11 (identical to the original's)
+Later (2026-11-21) the original scan directory no longer exists; the copy and this digest remain.

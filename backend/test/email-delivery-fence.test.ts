@@ -254,7 +254,7 @@ describe("sendBroadcast delivery fence", () => {
         "NEMAR <noreply@nemar.org>",
         {
           sentById,
-          group: "admins",
+          group: "user:broadcastadmin",
           subject: "Test broadcast",
           bodyMarkdown: "Hello",
           recipients: [
@@ -294,7 +294,7 @@ describe("sendBroadcast delivery fence", () => {
         "NEMAR <noreply@nemar.org>",
         {
           sentById,
-          group: "all",
+          group: "user:broadcastadmin",
           subject: "Test broadcast",
           bodyMarkdown: "Hello",
           recipients: ["real-user-1@gmail.com", "real-user-2@yahoo.com"],
@@ -322,7 +322,7 @@ describe("sendBroadcast delivery fence", () => {
         "NEMAR <noreply@nemar.org>",
         {
           sentById,
-          group: "all",
+          group: "user:broadcastadmin",
           subject: "Test broadcast",
           bodyMarkdown: "Hello",
           recipients: ["real-user-1@gmail.com", "real-user-2@yahoo.com"],

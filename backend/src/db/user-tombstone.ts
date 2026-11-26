@@ -1,4 +1,5 @@
 import { computeReleaseStatements } from "../services/compute-release";
+import { runnerEndStatements } from "../services/compute-runners";
 import { DOCS_GRANTS_PURGE_SQL } from "../services/docs-auth";
 import { oidcEndStatements } from "../services/oidc-cascade";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../services/private-auth";
@@ -97,6 +98,13 @@ export const USER_TOMBSTONE_MASK_SQL = `UPDATE users
        service_access_granted_at = NULL,
        service_access_granted_by = NULL,
        upload_access_requested_at = NULL,
+       -- Compute access is a grant of its own (epic #2021 phase D1, ADR 0118): a deleted account holds
+       -- none, so the state is 'revoked' whatever it was (the pools were frozen and the live jobs given
+       -- their intent to cancel by the same batch), and the purpose, a person's prose, is erased. The terms
+       -- version and the times stay: they are the record that a person once accepted the terms, and are
+       -- not personal prose.
+       compute_access = 'revoked',
+       compute_purpose = NULL,
        status = 'revoked',
        revoked_at = COALESCE(revoked_at, datetime('now')),
        deleted_at = datetime('now'),
@@ -149,6 +157,11 @@ export interface TombstoneCascadeResult {
  * Tapis cancels are NOT made here (a network call never runs inside a batch); the retried sweep
  * (`sweepComputeCancellations`) makes them. Each of those statements goes through `step` like the
  * rest, so under `onlyIfEmail` it applies only when the mask did.
+ *
+ * The runners the account registered end in this batch too (`runnerEndStatements`, portable compute D5):
+ * their access tokens are deleted, an unstarted claim is released, a started job becomes `unreported` with
+ * no lease, and each registration is revoked. One of THREE callers of that set (see
+ * `services/compute-runners.ts`); like the compute statements they go through `step`.
  *
  * What it does NOT do, because both are network calls with their own failure
  * modes and only the owner-only route wants them: remove GitHub collaborators
@@ -207,6 +220,10 @@ export async function tombstoneUserCascade(
     // Tapis cancels follow from the retried sweep; nothing here calls Tapis. Every statement ends in
     // a WHERE clause (see compute-release.ts), because `step` appends the mask guard to each.
     ...computeReleaseStatements(id).map((s) => step(s.sql, ...s.binds)),
+    // The runners the account registered (portable compute, D5): tokens deleted, an unstarted claim
+    // released, a started job `unreported` with no lease, the registration revoked. Through `step`, so a
+    // guarded call applies them only when the mask did (every statement ends in a WHERE clause).
+    ...runnerEndStatements(id, "account_deleted").map((s) => step(s.sql, ...s.binds)),
     // Expire any outstanding passwordless login codes for the original email so
     // a code issued just before deletion can't be submitted (it would otherwise
     // be consumed and then cleanly denied; this avoids even that round-trip).

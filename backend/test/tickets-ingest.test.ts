@@ -677,6 +677,65 @@ describe("restriction is decided before threading and never fails open", () => {
   });
 });
 
+describe("a queue with its own retention never threads into another queue's ticket", () => {
+  test("a legal-process@ reply to a security ticket's Message-ID opens a legal-process ticket", async () => {
+    const first = await ingest(
+      { messageId: "<sec@sender.example>" },
+      "security@staging.nemar.test",
+    );
+    expect(ticket(first.ticketId)).toMatchObject({ queue_tag: "security", restricted: 1 });
+    const reply = await ingest(
+      { inReplyTo: "<sec@sender.example>", references: "<sec@sender.example>" },
+      "legal-process@staging.nemar.test",
+    );
+    expect(reply.outcome).toBe("created");
+    expect(ticket(reply.ticketId)).toMatchObject({ queue_tag: "legal-process", restricted: 1 });
+    expect(createdDetail(reply.ticketId)).toMatchObject({
+      matched_ticket_id: first.ticketId,
+      reason: "retention_mismatch",
+    });
+    const ref = ticket(first.ticketId).ref as string;
+    const viaRef = await ingest({}, `legal-process+${ticketPlusTag(ref)}@staging.nemar.test`);
+    expect(viaRef.outcome).toBe("created");
+    expect(ticket(viaRef.ticketId).queue_tag).toBe("legal-process");
+    expect(createdDetail(viaRef.ticketId)).toMatchObject({
+      matched_ticket_id: first.ticketId,
+      reason: "retention_mismatch",
+    });
+    expect(
+      count("SELECT COUNT(*) AS n FROM mail_messages WHERE ticket_id = ?", first.ticketId),
+    ).toBe(1);
+  });
+
+  test("a reply to a legal-process ticket from another queue threads into it", async () => {
+    const first = await ingest(
+      { messageId: "<lp@sender.example>" },
+      "legal-process@staging.nemar.test",
+    );
+    expect(ticket(first.ticketId)).toMatchObject({ queue_tag: "legal-process", restricted: 1 });
+    const viaSecurity = await ingest(
+      { inReplyTo: "<lp@sender.example>" },
+      "security@staging.nemar.test",
+    );
+    expect(viaSecurity).toMatchObject({ outcome: "threaded", ticketId: first.ticketId });
+    const ref = ticket(first.ticketId).ref as string;
+    const viaSupport = await ingest({}, `support+${ticketPlusTag(ref)}@staging.nemar.test`);
+    expect(viaSupport).toMatchObject({ outcome: "threaded", ticketId: first.ticketId });
+    const sameQueue = await ingest(
+      { inReplyTo: "<lp@sender.example>" },
+      "legal-process@staging.nemar.test",
+    );
+    expect(sameQueue).toMatchObject({ outcome: "threaded", ticketId: first.ticketId });
+    expect(ticket(first.ticketId).queue_tag).toBe("legal-process");
+  });
+
+  test("security and conduct still thread into each other", async () => {
+    const first = await ingest({ messageId: "<sc@sender.example>" }, "security@staging.nemar.test");
+    const reply = await ingest({ inReplyTo: "<sc@sender.example>" }, "conduct@staging.nemar.test");
+    expect(reply).toMatchObject({ outcome: "threaded", ticketId: first.ticketId });
+  });
+});
+
 describe("threading needs the sender to be on the ticket", () => {
   test("a stranger with an SPF pass and no DMARC cannot thread by ref or by Message-ID", async () => {
     const first = await ingest({ messageId: "<own@sender.example>" });

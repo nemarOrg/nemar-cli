@@ -586,3 +586,97 @@ describe("the keys N.0.1 replays are NEMAR's", () => {
     );
   });
 });
+
+describe("N.0.1 and the iEEG geometry pipeline's files", () => {
+  const OUT = "sub-01/ieeg/sub-01_space-fsaverage_electrodes.tsv";
+  const SIDECAR = "sub-01/ieeg/sub-01_space-fsaverage_coordsystem.json";
+  const OWNERSHIP = ".nemar/ieeg-geometry.json";
+  const STALE = "sub-09/ieeg/sub-09_space-fsaverage_coordsystem.json";
+  const files = (): { write: Map<string, string>; remove: string[]; kept: number } => ({
+    write: new Map([
+      [OUT, "derived-from\tabc\n"],
+      [SIDECAR, '{"iEEGCoordinateSystem": "fsaverage"}\n'],
+      [OWNERSHIP, '{"paths": {}, "schema": 1}\n'],
+    ]),
+    remove: [STALE],
+    kept: 0,
+  });
+  let parent: string;
+
+  beforeAll(async () => {
+    parent = await commit(
+      {
+        "participants.tsv": ["100644", "x\n"],
+        [STALE]: ["100644", "{}\n"],
+        "dataset_description.json": ["100644", DESC_N0],
+      },
+      base,
+      "Release v2.0.0 (#1)",
+      "1790000500 +0000",
+    );
+  });
+
+  const make = (pipeline: ReturnType<typeof files> | undefined, selection = sel(), on = parent) =>
+    patchCommit({ scratch, row: row({ merge_sha: parent }), selection, parent: on, pipeline });
+
+  test("writes the regenerated files as regular git files and deletes what the run no longer makes", async () => {
+    const made = await make(files());
+    const listed = (await git(dir, ["ls-tree", "-r", made.sha])).split("\n");
+    expect(listed.filter((l) => l.startsWith("100644")).map((l) => l.split("\t")[1])).toEqual(
+      expect.arrayContaining([OUT, SIDECAR, OWNERSHIP]),
+    );
+    expect(listed.join("\n")).not.toContain(STALE);
+    expect(await git(dir, ["show", `${made.sha}:${OUT}`])).toBe("derived-from\tabc");
+    // Everything else is N.0.0's, and the description says N.0.1.
+    expect(await git(dir, ["rev-parse", `${made.sha}:participants.tsv`])).toBe(
+      await git(dir, ["rev-parse", `${parent}:participants.tsv`]),
+    );
+    expect(
+      JSON.parse(await git(dir, ["show", `${made.sha}:dataset_description.json`])).Version,
+    ).toBe("2.0.1");
+    expect(await git(dir, ["log", "-1", "--format=%b", made.sha])).toContain(
+      "iEEG geometry pipeline files written: 3; removed: 1.",
+    );
+  });
+
+  test("the same files make the same commit, other files another one", async () => {
+    const a = await make(files());
+    expect((await make(files())).sha).toBe(a.sha);
+    const changed = files();
+    changed.write.set(OUT, "derived-from\tdef\n");
+    expect((await make(changed)).sha).not.toBe(a.sha);
+  });
+
+  test("with no corrections and no pipeline file the tree is N.0.0's with N.0.1 in its description", async () => {
+    const made = await make(undefined);
+    expect(await git(dir, ["ls-tree", "-r", "--name-only", made.sha])).toBe(
+      await git(dir, ["ls-tree", "-r", "--name-only", parent]),
+    );
+  });
+
+  test("a pipeline path that is also a replayed path refuses: patch-path-conflict", async () => {
+    expect(await refusalOf(make(files(), sel({ paths: [{ path: OUT, ours: "absent" }] })))).toBe(
+      "patch-path-conflict",
+    );
+  });
+
+  test("a pipeline file where the tree holds a directory refuses: patch-path-conflict", async () => {
+    const clashing = files();
+    clashing.write.set("participants.tsv/sub-01_space-fsaverage_electrodes.tsv", "x\n");
+    expect(await refusalOf(make(clashing))).toBe("patch-path-conflict");
+  });
+
+  test("a pipeline path enrichment changed after the merge refuses: patch-main-moved", async () => {
+    const moved = await commit(
+      {
+        "participants.tsv": ["100644", "x\n"],
+        [STALE]: ["100644", "changed after the merge\n"],
+        "dataset_description.json": ["100644", DESC_N0],
+      },
+      parent,
+      "enrichment",
+      "1790000900 +0000",
+    );
+    expect(await refusalOf(make(files(), sel(), moved))).toBe("patch-main-moved");
+  });
+});

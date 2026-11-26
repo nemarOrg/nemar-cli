@@ -320,7 +320,7 @@ CREATE TABLE dataset_ownership (
 
 #### Admin Revokes User
 ```
-1. Admin: nemar admin revoke username
+1. Admin: nemar admin users revoke username
 2. CLI: POST /api/admin/revoke
    - Backend validates admin token
    - For each dataset owned by user:
