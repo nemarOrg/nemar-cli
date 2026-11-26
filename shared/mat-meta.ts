@@ -502,8 +502,6 @@ class MatWalker {
       } else {
         pos += length + pad8(tag.bytes);
       }
-      // A skipped element that ends past the end of the file: the file was cut short.
-      if (pos > this.src.size) throw new MatProblem("corrupt");
     }
   }
 
@@ -632,6 +630,7 @@ class MatWalker {
     const end = r.pos + bytes;
     this.elements++;
     if (this.elements > this.limits.maxElements) throw new MatProblem("limit");
+    if (depth > this.limits.maxDepth) throw new MatProblem("limit");
     // An empty element: an empty cell member or struct field.
     if (bytes === 0) return "";
     const flags = await this.element(r, end);
@@ -670,14 +669,12 @@ class MatWalker {
         this.entries.push({ fields: path, class: cls, dims, value: this.text(data, raw, dims) });
       }
     } else if (cls === "cell") {
-      if (depth + 1 > this.limits.maxDepth) throw new MatProblem("limit");
       for (let i = 0; i < count; i++) {
         const tag = await this.elementTag(r, end);
         if (tag.type !== MI.MATRIX || tag.small !== null) throw new MatProblem("corrupt");
         await this.matrix(r, tag.bytes, path, depth + 1);
       }
     } else if (cls === "struct") {
-      if (depth + 1 > this.limits.maxDepth) throw new MatProblem("limit");
       const lengthEl = await this.element(r, end);
       const [width] = this.numbers(lengthEl.tag, lengthEl.data);
       const namesEl = await this.element(r, end);

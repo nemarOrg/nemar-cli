@@ -179,6 +179,93 @@ describe("bounds", () => {
   });
 });
 
+/** A little-endian Level 5 file built here, for constructs no fixture holds. */
+function level5(...elements: Uint8Array[]): Uint8Array {
+  const head = new Uint8Array(MAT_HEADER_BYTES).fill(0x20);
+  head.set(new TextEncoder().encode("MATLAB 5.0 MAT-file, built by the A5 tests"));
+  head[124] = 0x00;
+  head[125] = 0x01;
+  head[126] = "I".charCodeAt(0);
+  head[127] = "M".charCodeAt(0);
+  const out = new Uint8Array(head.length + elements.reduce((n, e) => n + e.length, 0));
+  out.set(head);
+  let at = head.length;
+  for (const e of elements) {
+    out.set(e, at);
+    at += e.length;
+  }
+  return out;
+}
+
+/** A sub-element: tag and data, padded to 8 bytes. */
+function sub(type: number, data: Uint8Array): Uint8Array {
+  const padded = new Uint8Array(8 + Math.ceil(data.length / 8) * 8);
+  const view = new DataView(padded.buffer);
+  view.setUint32(0, type, true);
+  view.setUint32(4, data.length, true);
+  padded.set(data, 8);
+  return padded;
+}
+
+const u32 = (...n: number[]) => new Uint8Array(new Uint32Array(n).buffer);
+const i32 = (...n: number[]) => new Uint8Array(new Int32Array(n).buffer);
+const ascii = (s: string) => new TextEncoder().encode(s);
+
+function matrix(...parts: Uint8Array[]): Uint8Array {
+  return sub(14, level5Concat(parts));
+}
+function level5Concat(parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+describe("classes no fixture holds", () => {
+  test("an opaque array (a MATLAB object) is skipped after its flags; the walk goes on", async () => {
+    // Opaque layout: flags, then the variable name, the type system and the class name: no dims.
+    const opaque = matrix(
+      sub(6, u32(17, 0)),
+      sub(1, ascii("tbl")),
+      sub(1, ascii("MCOS")),
+      sub(1, ascii("table")),
+      matrix(sub(6, u32(9, 0)), sub(5, i32(1, 3)), sub(1, ascii("")), sub(2, new Uint8Array(3))),
+    );
+    const note = new Uint8Array(new Uint16Array([..."ok"].map((c) => c.charCodeAt(0))).buffer);
+    const text = matrix(sub(6, u32(4, 0)), sub(5, i32(1, 2)), sub(1, ascii("note")), sub(4, note));
+    const walk = await walkMat(bufferSource(level5(opaque, text)));
+    expect(walk.incomplete).toBe("unsupported-datatype");
+    expect(walk.entries).toEqual([
+      { fields: [], class: "opaque", dims: [], value: null, skipped: "type" },
+      { fields: ["note"], class: "char", dims: [1, 2], value: ["ok"] },
+    ]);
+  });
+
+  test("a sparse array is skipped as unsupported, and a nested cell past the depth cap is a limit", async () => {
+    const sparse = matrix(sub(6, u32(5, 0)), sub(5, i32(2, 2)), sub(1, ascii("sp")));
+    expect((await walkMat(bufferSource(level5(sparse)))).incomplete).toBe("unsupported-datatype");
+    // A cell inside a cell inside a cell: depth 2 below the variable.
+    const leaf = matrix(
+      sub(6, u32(6, 0)),
+      sub(5, i32(1, 1)),
+      sub(1, ascii("")),
+      sub(9, new Uint8Array(8)),
+    );
+    const inner = matrix(sub(6, u32(1, 0)), sub(5, i32(1, 1)), sub(1, ascii("")), leaf);
+    const outer = matrix(sub(6, u32(1, 0)), sub(5, i32(1, 1)), sub(1, ascii("c")), inner);
+    const bytes = level5(outer);
+    expect((await walkMat(bufferSource(bytes), { limits: { maxDepth: 1 } })).incomplete).toBe(
+      "limit",
+    );
+    expect(
+      (await walkMat(bufferSource(bytes), { limits: { maxDepth: 2 } })).incomplete,
+    ).toBeUndefined();
+  });
+});
+
 describe("damaged input", () => {
   test("a file cut short is corrupt, keeping the arrays before the cut", async () => {
     const bytes = load("eeglab-data.set");

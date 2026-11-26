@@ -264,6 +264,8 @@ describe("the EEGLAB field rules", () => {
     expect(types("Quillfeather Marlow")).toEqual(["eeglab-event-name/review"]);
     expect(types("urevent", "x").length).toBe(0);
     expect(types("square", "rt", "boundary", "S  1", "Stimulus/S 12", "12", "Target")).toEqual([]);
+    // One capitalized word beside a lowercase one is not a name.
+    expect(types("Target onset", "left Hand")).toEqual([]);
     // Once per file, however many events hold it.
     expect(types("Quillfeather Marlow", "Quillfeather Marlow")).toEqual([
       "eeglab-event-name/review",
@@ -351,6 +353,9 @@ describe("the .fdt companion", () => {
     expect(namedCompanionsMissing("sub-01/eeg/a.set", ["../b.fdt"], paths)).toBe(1);
     expect(namedCompanionsMissing("sub-01/eeg/a.set", ["eeg/a.fdt"], paths)).toBe(1);
     expect(namedCompanionsMissing("sub-01/eeg/a.set", ["eeg\\a.fdt"], paths)).toBe(1);
+    // Even when the path it names is in the dataset.
+    const nested = new Set(["sub-01/eeg/a.set", "sub-01/eeg/sub/a.fdt"]);
+    expect(namedCompanionsMissing("sub-01/eeg/a.set", ["sub/a.fdt"], nested)).toBe(1);
     expect(namedCompanionsMissing("sub-01/eeg/a.set", [".."], paths)).toBe(1);
     expect(namedCompanionsMissing("sub-01/eeg/a.set", undefined, paths)).toBe(0);
   });
