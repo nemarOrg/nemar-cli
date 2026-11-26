@@ -1169,7 +1169,6 @@ export async function scanDatasetFromManifest(
     uncapped ? [...items] : sampleEvenly(items, max, groupOf);
   const findings: Finding[] = [...scanPaths([...paths, ...(extras.extraPaths ?? [])])];
   const coverage = formatCoverage(paths, readers);
-  const unscreenedCount = Object.values(coverage.unscreened).reduce((a, b) => a + b, 0);
   const failures: Record<string, number> = {};
   const fail = (what: string, error: unknown) => {
     // A stopped run is not a failed read: let it end the scan, record nothing.
@@ -1203,6 +1202,11 @@ export async function scanDatasetFromManifest(
   });
   for (const f of recordings.findings) findings.push(f);
   for (const [key, n] of Object.entries(recordings.failures)) failures[key] = n;
+  // A file a reader found not to be its format (an Analyze `.hdr`) is unscreened, by extension.
+  for (const [extension, n] of Object.entries(recordings.notApplicable)) {
+    coverage.unscreened[extension] = (coverage.unscreened[extension] ?? 0) + n;
+  }
+  const unscreenedCount = Object.values(coverage.unscreened).reduce((a, b) => a + b, 0);
   const edfTally = recordings.tallies.edf;
   const edfAbsent = recordings.failures[SUPERSEDED_ABSENT] ?? 0;
   const edfCount = edfTally.files;

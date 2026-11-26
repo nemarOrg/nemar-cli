@@ -674,6 +674,9 @@ export function projectReport(report: ScreenReport): ScreenReport {
   // Version 2's coverage is part of the verdict: a clean version-2 scan does not read back without it.
   if (s.read_by_format !== undefined) scan.read_by_format = s.read_by_format;
   if (s.companion_missing !== undefined) scan.companion_missing = s.companion_missing;
+  if (s.companion_name_mismatch !== undefined) {
+    scan.companion_name_mismatch = s.companion_name_mismatch;
+  }
   if (s.readers !== undefined) scan.readers = s.readers;
   return parseScreenReport({
     version: report.version,
