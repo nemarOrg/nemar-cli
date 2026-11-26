@@ -269,6 +269,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getComputePolicy",
     "getComputeRecord",
     "getComputeResults",
+    "getComputeRunQuality",
     "getComputeStatus",
     "getComputeUsage",
     "getMyComputeJob",
@@ -453,6 +454,7 @@ const POST_SPLIT_ADDITIONS = [
   "getComputePipelineStatus", // epic #2005 phase A6: GET /admin/compute/pipeline/status
   "getComputePipelineGrid", // epic #2324 phase 4a: GET /admin/compute/pipeline/grid
   "getComputePipelineRun", // epic #2324 phase 4a: GET /admin/compute/pipeline/runs/:stamp
+  "getComputeRunQuality", // epic #2324 phase B3: GET /admin/compute/pipeline/runs/:stamp/quality
   "computeRefusalCode", // epic #2005 phase A6: reads a compute refusal's word (no request)
   "registerComputeRunner", // portable compute, DM-05: POST /admin/compute/runners
   "listComputeRunners", // portable compute, DM-05: GET /admin/compute/runners

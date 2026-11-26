@@ -183,6 +183,10 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
   A staged run is handed `--serving-index /data/serving-index/index.json --source-commit <tag commit>`; the launcher fetches the copy with its job token from `POST /compute/jobs/<id>/serving-index` (a ten-minute presigned GET of the copy the recorded specification names), checks it, and binds it read-only (`dataset_fetch_failed`, `serving_index_mismatch` otherwise).
   The derivative key reads the recorded digest (`sha256:<hex>`), so `serving_index_unattested` now applies only to a run whose arguments do not match what was recorded.
   nemar-ica is still a placeholder that no path dispatches.
+- **A run's quality, for administrators (ADR 0137 decision 7, epic #2324 phase B3).**
+  `GET /admin/compute/pipeline/runs/:stamp/quality` says where the run's derivative stands in one word (`run_in_progress` for a dispatched stamp, `run_not_succeeded`, `not_keyed` with the store's skip word, `awaiting_derivative`, `failed`, `expired`, `copying`, `canary`, `current`, `superseded` or `not_current`), with its retention, `stored_at` and `expires_at`, and `dataset_public` (the quality route's gate now: a `current` row is what public pages read only while it is true); a canary past its date is `expired` before the sync marks it, and no state is a 500.
+  When the derivative's files stand, it lists the recordings that succeeded, 100 a page in path order (`after` continues; a cursor that is not a recording path is `invalid_query`), from the recordings table stored under the derivative's key: read once, at most 32 MiB, and kept in the edge cache under that key, so a later page reads no store. Every answer is `no-store`.
+  `nemar admin compute pipeline quality <stamp-id> [--after <path>]` prints it.
 
 ### Changed
 

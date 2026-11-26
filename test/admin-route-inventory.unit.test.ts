@@ -93,6 +93,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /compute/pipeline/grid": 1,
   "GET /compute/pipeline/coverage": 1,
   "GET /compute/pipeline/runs/:stamp": 1,
+  // Epic #2324 phase B3: a run's quality (its derivative's word and its succeeded recordings).
+  "GET /compute/pipeline/runs/:stamp/quality": 1,
   // Portable compute, card DM-05: the owner's runner registry. `requireOwner` then the handler, each.
   "POST /compute/runners": 2,
   "GET /compute/runners": 2,
@@ -405,7 +407,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(273);
+    expect(adminRoutes.routes.length).toBe(274);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

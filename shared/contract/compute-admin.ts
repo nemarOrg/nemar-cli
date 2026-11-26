@@ -1015,6 +1015,124 @@ export type ComputePipelineRunDetailResponse = z.infer<
   typeof ComputePipelineRunDetailResponseSchema
 >;
 
+// --- A run's quality (ADR 0137 decision 7, epic #2324 phase B3) -----------------------------------------------
+//
+// `GET /admin/compute/pipeline/runs/:stamp/quality`: where the run's derivative stands, in one word, and a
+// page of the recordings that succeeded, from the recordings table stored under the derivative's key. The
+// lists and the bound are literals for the website's drift tests, like the grid's.
+
+/**
+ * Where a run's derivative stands, one word, decided in this order:
+ *  - `run_in_progress`: the stamp is `dispatched`: its job has not ended, so there is nothing to key yet;
+ *  - `run_not_succeeded`: the stamp failed or was refused, so no derivative is made of it;
+ *  - `not_keyed`: it succeeded and the derivative store decided to make none (`skip` names why;
+ *    `duplicate_key` means an earlier run with the same inputs holds the derivative under that key);
+ *  - `awaiting_derivative`: it succeeded and the store has not decided yet;
+ *  - `failed`: the copy could not be trusted (`derivative.failure` names why);
+ *  - `expired`: the row expired, or its date has passed (a canary 30 days after it was stored), so its
+ *    files are deleted or about to be;
+ *  - `copying`: its files are being copied;
+ *  - `canary`: stored, and seen by administrators only;
+ *  - `current`: stored, and the row public pages read while the dataset is public (`dataset_public`
+ *    says whether it is now);
+ *  - `superseded`: a stored `catalog` row a later one replaced;
+ *  - `not_current`: stored and of a public class, but another such row of its dataset and recipe is newer,
+ *    so it is not the row public pages read while the dataset is public.
+ */
+export const COMPUTE_RUN_QUALITY_STATES = [
+  "run_in_progress",
+  "run_not_succeeded",
+  "not_keyed",
+  "awaiting_derivative",
+  "failed",
+  "expired",
+  "copying",
+  "canary",
+  "current",
+  "superseded",
+  "not_current",
+] as const;
+
+export type ComputeRunQualityState = (typeof COMPUTE_RUN_QUALITY_STATES)[number];
+
+/**
+ * What the recordings list holds, one word:
+ *  - `listed`: the succeeded recordings, a page at a time;
+ *  - `not_stored`: the derivative's files do not stand whole (no derivative, copying, failed or expired);
+ *  - `store_unavailable`: the derivatives store is not bound, or could not be reached (logged);
+ *  - `table_missing`: the stored derivative has no recordings table;
+ *  - `table_too_large`: the table is over the read bound and was not read;
+ *  - `table_unreadable`: the table does not parse as a recordings table (logged).
+ */
+export const COMPUTE_RUN_QUALITY_RECORDINGS_STATES = [
+  "listed",
+  "not_stored",
+  "store_unavailable",
+  "table_missing",
+  "table_too_large",
+  "table_unreadable",
+] as const;
+
+export type ComputeRunQualityRecordingsState =
+  (typeof COMPUTE_RUN_QUALITY_RECORDINGS_STATES)[number];
+
+/** Succeeded recordings per page. */
+export const COMPUTE_RUN_QUALITY_PAGE_SIZE = 100;
+
+/** `GET /admin/compute/pipeline/runs/:stamp/quality`: the run's derivative and a page of its recordings. */
+export const ComputeRunQualityResponseSchema = z
+  .object({
+    stamp_id: z.number().int(),
+    dataset_id: z.string(),
+    version: z.string(),
+    recipe: z.string(),
+    recipe_version: z.string(),
+    input: z.string(),
+    stamp_state: z.string(),
+    /**
+     * Whether the dataset passes the quality route's gate now (active, public, not concealed, first
+     * published, not withdrawn, not tombstoned): a `current` row is what its public page shows only then.
+     */
+    dataset_public: z.boolean(),
+    /** One of {@link COMPUTE_RUN_QUALITY_STATES}; a string so a word the Worker grows never breaks a CLI. */
+    quality: z.string(),
+    /** The skip log's word when the store decided to make no derivative, or null. */
+    skip: nullableString,
+    derivative: z
+      .object({
+        key: z.string(),
+        state: z.string(),
+        retention: z.string(),
+        failure: nullableString,
+        created_at: z.string(),
+        stored_at: nullableString,
+        expires_at: nullableString,
+        superseded_at: nullableString,
+        serving_index: nullableString,
+      })
+      .passthrough()
+      .nullable(),
+    recordings: z
+      .object({
+        /** One of {@link COMPUTE_RUN_QUALITY_RECORDINGS_STATES}. */
+        state: z.string(),
+        /** Succeeded recordings the table lists, or null when it was not read. */
+        succeeded: z.number().int().nullable(),
+        /**
+         * Succeeded rows left out: a path that is not a recording path the quality route takes, or a path
+         * the table lists more than once (each repeat after the first).
+         */
+        unlisted: z.number().int(),
+        items: z.array(z.object({ path: z.string() }).passthrough()),
+        /** The last path of this page when there are more; pass it as `after`. */
+        next_after: nullableString,
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+export type ComputeRunQualityResponse = z.infer<typeof ComputeRunQualityResponseSchema>;
+
 // --- Reporting, holds, the observer and ACCESS reports (epic #2005 phase A7, #2012) ---------------------------
 
 /** The most rows a listing answers with at once. */

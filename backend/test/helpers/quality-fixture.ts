@@ -48,7 +48,7 @@ export async function seedIcaStamp(
   input: {
     datasetId: string;
     jobId: string;
-    state?: "succeeded" | "failed";
+    state?: "succeeded" | "failed" | "dispatched";
     version?: string;
     attempt?: number;
     recipe?: string;

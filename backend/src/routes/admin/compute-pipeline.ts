@@ -7,8 +7,10 @@
  *   GET  /admin/compute/pipeline/grid     datasets by checkpoints for one recipe (ADR 0134 decision 5)
  *   GET  /admin/compute/pipeline/coverage each recipe's coverage and its daily failure trend
  *   GET  /admin/compute/pipeline/runs/:stamp  one run's checkpoints and the failures each lists
+ *   GET  /admin/compute/pipeline/runs/:stamp/quality  where the run's derivative stands, and a page of its
+ *                                         succeeded recordings (epic #2324 phase B3, services/quality-admin.ts)
  *
- * The grid, coverage and run routes READ ONLY (epic #2324 phase 4a): they never sync, never reconcile and
+ * The grid, coverage, run and run-quality routes READ ONLY (epic #2324 phase 4a): they never sync, never reconcile and
  * never write, so a page the website renders costs a few statements. `grid?sync=1` brings the open stamps
  * up to date first, as the status route always does; the CLI asks for it, the website never does. A run's
  * status is still right without a sync (it reads the job's own end); its reconciled counts wait, and the
@@ -95,6 +97,7 @@ import {
 } from "../../services/compute-pipeline.js";
 import { fieldPath } from "../../services/compute-policy.js";
 import { computeEnabled } from "../../services/compute-switches.js";
+import { isRecordingPath, runQuality } from "../../services/quality-admin.js";
 import type { Bindings, Variables } from "../../types/bindings.js";
 import { refuse as refuseAdmin } from "./compute.js";
 import type { AdminRouter } from "./shared.js";
@@ -377,6 +380,38 @@ function fail(c: Ctx, err: unknown) {
   );
 }
 
+/** A stamp id from the path: a whole number of up to 16 digits that is a safe integer, or null. */
+function stampParam(raw: string): number | null {
+  if (!COMPUTE_PIPELINE_STAMP_ID_RE.test(raw)) return null;
+  const stampId = Number(raw);
+  return Number.isSafeInteger(stampId) ? stampId : null;
+}
+
+const stampIssue = () =>
+  new z.ZodError([
+    { code: z.ZodIssueCode.custom, path: ["stamp"], message: "a stamp id is a whole number" },
+  ]);
+
+/** A run's quality page: `after` is a recording path the quality route takes, and nothing else is asked. */
+const runQualityQuery = z
+  .object({
+    after: z
+      .string()
+      .refine(isRecordingPath, { message: "a cursor is a recording path a page answered with" })
+      .optional(),
+  })
+  .strict();
+
+/** `waitUntil` where the request has an execution context (none in some test harnesses). */
+function deferOf(c: Ctx): ((work: Promise<unknown>) => void) | undefined {
+  try {
+    const ctx = c.executionCtx;
+    return (work) => ctx.waitUntil(work);
+  } catch {
+    return undefined;
+  }
+}
+
 export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
   admin.post("/compute/pipeline/run", async (c) => {
     const parsed = runBody.safeParse(await readJson(c));
@@ -539,30 +574,50 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
   });
 
   admin.get("/compute/pipeline/runs/:stamp", async (c) => {
-    const raw = c.req.param("stamp");
-    if (!COMPUTE_PIPELINE_STAMP_ID_RE.test(raw)) {
-      return invalid(
-        c,
-        "invalid_query",
-        new z.ZodError([
-          { code: z.ZodIssueCode.custom, path: ["stamp"], message: "a stamp id is a whole number" },
-        ]),
-      );
-    }
-    const stampId = Number(raw);
-    if (!Number.isSafeInteger(stampId)) {
-      return invalid(
-        c,
-        "invalid_query",
-        new z.ZodError([
-          { code: z.ZodIssueCode.custom, path: ["stamp"], message: "a stamp id is a whole number" },
-        ]),
-      );
-    }
+    const stampId = stampParam(c.req.param("stamp"));
+    if (stampId === null) return invalid(c, "invalid_query", stampIssue());
     try {
       const detail = await pipelineRunDetail(c.env.DB, stampId);
       if (detail === null) return refuseAdmin(c, "stamp_not_found");
       return c.json(detail);
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  // A run's quality (epic #2324 phase B3): where its derivative stands and a page of its succeeded
+  // recordings. Read only, and every answer, a refusal included, is `no-store` (ADR 0137 decision 7).
+  admin.get("/compute/pipeline/runs/:stamp/quality", async (c) => {
+    c.header("Cache-Control", "no-store");
+    const stampId = stampParam(c.req.param("stamp"));
+    if (stampId === null) return invalid(c, "invalid_query", stampIssue());
+    // A key named twice is refused, not read as its first value: a cursor is one path.
+    const named = Object.entries(c.req.queries()).find(([, values]) => values.length > 1);
+    if (named !== undefined) {
+      return invalid(
+        c,
+        "invalid_query",
+        new z.ZodError([
+          {
+            code: z.ZodIssueCode.custom,
+            // A key the route does not take is never echoed.
+            path: named[0] === "after" ? ["after"] : [],
+            message: "named twice",
+          },
+        ]),
+      );
+    }
+    const query = runQualityQuery.safeParse(c.req.query());
+    if (!query.success) return invalid(c, "invalid_query", query.error);
+    try {
+      const answer = await runQuality(c.env, {
+        stampId,
+        after: query.data.after ?? null,
+        origin: new URL(c.req.url).origin,
+        defer: deferOf(c),
+      });
+      if (answer === null) return refuseAdmin(c, "stamp_not_found");
+      return c.json(answer);
     } catch (err) {
       return fail(c, err);
     }
