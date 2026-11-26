@@ -33,7 +33,7 @@ import {
   renderOverviewOutputSchema,
 } from "../../../../shared/contract/mcp.js";
 import type { RecordingGroupSummary } from "../../../../shared/contract/mcp.js";
-import { decodeBloscZstdInt16 } from "../../services/blosc-decode.js";
+import { decodeBloscZstdInt16 } from "../../../../shared/zarr/codecs/blosc.js";
 import {
   type PublicDatasetRow,
   datasetNotFoundResult,
@@ -247,7 +247,8 @@ export async function renderOverviewTool(
           }
           const buf = new Uint8Array(await response.arrayBuffer());
           bytesRead += buf.byteLength;
-          return decodeBloscZstdInt16(buf);
+          // A view chunk holds 2 rows (min, max) per channel, each chunkColumns wide.
+          return decodeBloscZstdInt16(buf, 2 * nChannels * chunkPlan.chunkColumns * 2);
         }),
       );
     } catch (err) {

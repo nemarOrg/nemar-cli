@@ -432,7 +432,7 @@ describe("nemar auth status: Kind:", () => {
 
 describe("nemar admin users kind-check", () => {
   /** Stand-in for `GET /admin/users/:username`, the one endpoint `nemar
-   *  admin doctor kinds` calls once per entry of OPERATIONAL_ACCOUNT_KINDS
+   *  admin users kind-check` calls once per entry of OPERATIONAL_ACCOUNT_KINDS
    *  (#1284 review). `users` maps username -> the kind the stand-in should
    *  report for it; a username with no entry answers 404, exactly like the
    *  real route does for an unknown username. */
