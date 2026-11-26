@@ -23,49 +23,42 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import {
+  ANCHOR_FORM,
   END_MARKER,
+  type Namespace,
+  SECTIONS,
   START_MARKER,
   allAnchors,
+  escapeHtml,
   md,
   renderScreenCopyDocs,
   spliceGenerated,
+  unrendered,
+  walkCopy,
 } from "../scripts/docs/screen-copy-docs";
-import {
-  type Copy,
-  INCOMPLETE_COPY,
-  KIND_COPY,
-  LOCAL_ANCHOR,
-  LOCAL_COPY,
-  NOTE_COPY,
-  READ_FAILURE_COPY,
-  STATUS_COPY,
-} from "../shared/identifier-screen-copy";
+import * as copy from "../shared/identifier-screen-copy";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const GENERATOR = join(REPO_ROOT, "scripts", "docs", "screen-copy-docs.ts");
 const PAGE_PATH = join("src", "content", "docs", "platform", "identifier-screening.md");
 
-/** Every anchor, read straight from the tables (not from the generator, so a table the generator
- *  forgot still has its anchors checked). */
+/** Every anchor the copy module declares, from the same walk the generator renders from, with the
+ *  export that holds it. */
 function tableAnchors(): Map<string, string> {
   const anchors = new Map<string, string>();
-  const add = (table: string, copy: Copy) => anchors.set(copy.anchor, table);
-  for (const copy of Object.values(KIND_COPY)) add("KIND_COPY", copy);
-  for (const copy of Object.values(STATUS_COPY)) add("STATUS_COPY", copy);
-  for (const copy of Object.values(INCOMPLETE_COPY)) add("INCOMPLETE_COPY", copy);
-  for (const copy of Object.values(READ_FAILURE_COPY)) add("READ_FAILURE_COPY", copy);
-  for (const copy of Object.values(NOTE_COPY)) add("NOTE_COPY", copy);
-  for (const copy of [
-    LOCAL_COPY.server,
-    LOCAL_COPY.workingTree,
-    LOCAL_COPY.committed,
-    LOCAL_COPY.noHistory,
-    LOCAL_COPY.supersededAbsent(1),
-  ]) {
-    add("LOCAL_COPY", copy);
+  for (const found of walkCopy().found) {
+    for (const [, entry] of found.entries) anchors.set(entry.anchor, found.name);
   }
   return anchors;
 }
+
+/** An entry as the tables write it. */
+const entry = (anchor: string, statement = "A statement.") => ({
+  statement,
+  read: "what was read",
+  remedy: "Do this.",
+  anchor,
+});
 
 /** The ids of the headings of a Markdown page: an explicit `id` on a raw HTML heading, or the slug
  *  the site derives from a `#` heading's text. Fenced code is not read. */
@@ -125,71 +118,133 @@ describe("the heading id extractor", () => {
   });
 });
 
+describe("the walk of the copy module", () => {
+  const walk = walkCopy();
+
+  test("finds every section the generator renders, and nothing it cannot", () => {
+    expect(walk.found.map((f) => f.name).sort()).toEqual(Object.keys(SECTIONS).sort());
+    // Each is the shape its section expects: a table of entries, or a group probed one level down.
+    for (const f of walk.found)
+      expect({ name: f.name, shape: f.shape }).toEqual({
+        name: f.name,
+        shape: SECTIONS[f.name]?.shape,
+      });
+    expect(unrendered(walk)).toEqual([]);
+    expect(allAnchors().length).toBeGreaterThan(100);
+  });
+
+  test("agrees with the tables it was written for", () => {
+    const entries = (name: string) =>
+      walk.found.find((f) => f.name === name)?.entries.map(([k]) => k);
+    expect(entries("KIND_COPY")?.sort()).toEqual(Object.keys(copy.KIND_COPY).sort());
+    expect(entries("STATUS_COPY")?.sort()).toEqual(Object.keys(copy.STATUS_COPY).sort());
+    expect(entries("INCOMPLETE_COPY")?.sort()).toEqual(Object.keys(copy.INCOMPLETE_COPY).sort());
+    expect(entries("READ_FAILURE_COPY")?.sort()).toEqual(
+      Object.keys(copy.READ_FAILURE_COPY).sort(),
+    );
+    expect(entries("NOTE_COPY")?.sort()).toEqual(Object.keys(copy.NOTE_COPY).sort());
+    // A group, one level down, with its function member probed.
+    expect(entries("LOCAL_COPY")?.sort()).toEqual(
+      ["committed", "noHistory", "server", "supersededAbsent", "workingTree"].sort(),
+    );
+  });
+
+  test("every anchor is lowercase letters, digits and hyphens", () => {
+    for (const anchor of tableAnchors().keys()) {
+      expect({ anchor, ok: ANCHOR_FORM.test(anchor) }).toEqual({ anchor, ok: true });
+    }
+  });
+
+  test("an exported table with no section fails the render, and is never appended", () => {
+    const ns: Namespace = { ...copy, NEW_COPY: { fresh: entry("kind-fresh") } };
+    expect(unrendered(walkCopy(ns))).toEqual(["NEW_COPY"]);
+    expect(() => renderScreenCopyDocs(ns)).toThrow(/NEW_COPY/);
+  });
+
+  test("an exported group or single entry with no section fails the render too", () => {
+    const group: Namespace = { ...copy, OTHER_GROUP: { one: entry("kind-one"), count: () => 1 } };
+    expect(() => renderScreenCopyDocs(group)).toThrow(/OTHER_GROUP/);
+    const single: Namespace = { ...copy, LONE_COPY: entry("kind-lone") };
+    expect(() => renderScreenCopyDocs(single)).toThrow(/LONE_COPY/);
+  });
+
+  test("a section whose table the module stopped exporting fails the render", () => {
+    const { NOTE_COPY: _gone, ...rest } = copy;
+    expect(() => renderScreenCopyDocs(rest)).toThrow(/NOTE_COPY/);
+  });
+
+  test("a new entry in a known table is rendered with no change to the script", () => {
+    const ns: Namespace = {
+      ...copy,
+      KIND_COPY: {
+        ...copy.KIND_COPY,
+        "brand-new-kind": entry("kind-brand-new-kind", "Fresh words."),
+      },
+    };
+    const out = renderScreenCopyDocs(ns);
+    expect(headingIds(out)).toContain("kind-brand-new-kind");
+    expect(out).toContain("Fresh words.");
+  });
+
+  test("an anchor outside [a-z0-9-] fails the render", () => {
+    const ns: Namespace = {
+      ...copy,
+      KIND_COPY: { ...copy.KIND_COPY, bad: entry('kind-x"><script>') },
+    };
+    expect(() => renderScreenCopyDocs(ns)).toThrow(/anchor/);
+  });
+});
+
 describe("the generated reference", () => {
   const generated = renderScreenCopyDocs();
-  const anchors = tableAnchors();
+  const walk = walkCopy();
 
-  test("every anchor of every table is a heading id, once", () => {
+  test("every walked entry is rendered: its anchor is a heading id, once, with its words", () => {
     const ids = headingIds(generated);
-    for (const anchor of anchors.keys()) {
-      expect({ anchor, count: ids.filter((id) => id === anchor).length }).toEqual({
-        anchor,
-        count: 1,
-      });
-    }
-    expect(new Set(ids).size).toBe(ids.length);
-  });
-
-  test("the generator lists exactly the anchors the tables declare", () => {
-    expect(allAnchors()).toEqual([...anchors.keys()].sort());
-  });
-
-  test("anchors keep their forms", () => {
-    const prefix: Record<string, RegExp> = {
-      KIND_COPY: /^kind-/,
-      STATUS_COPY: /^status-/,
-      INCOMPLETE_COPY: /^incomplete-/,
-      READ_FAILURE_COPY: /^failure-/,
-      NOTE_COPY: /^note-/,
-      LOCAL_COPY: new RegExp(`^${LOCAL_ANCHOR}$`),
-    };
-    for (const [anchor, table] of anchors)
-      expect({ anchor, ok: prefix[table].test(anchor) }).toEqual({ anchor, ok: true });
-  });
-
-  test("every entry's statement, what was read and remedy are on the page", () => {
     const missing: string[] = [];
-    const tables: [string, Record<string, Copy>][] = [
-      ["kind", KIND_COPY],
-      ["status", STATUS_COPY],
-      ["incomplete", INCOMPLETE_COPY],
-      ["failure", READ_FAILURE_COPY],
-      ["note", NOTE_COPY],
-    ];
-    for (const [, table] of tables) {
-      for (const copy of Object.values(table)) {
-        const start = generated.indexOf(`id="${copy.anchor}"`);
-        const next = generated.indexOf("<h", start + 1);
-        const section = generated.slice(start, next === -1 ? undefined : next);
-        for (const part of [copy.statement, copy.read, copy.remedy]) {
-          if (!section.includes(md(part))) missing.push(`${copy.anchor}: ${part}`);
+    for (const found of walk.found) {
+      for (const [, e] of found.entries) {
+        const count = ids.filter((id) => id === e.anchor).length;
+        // A group shares one anchor, held by its section heading.
+        if (count !== 1) missing.push(`${found.name}: ${e.anchor} x${count}`);
+        for (const part of [e.statement, e.read, e.remedy]) {
+          if (!generated.includes(md(part))) missing.push(`${found.name}: ${e.anchor}: ${part}`);
         }
-        if (!section.includes("Reproduce: `nemar dataset screen --committed`")) {
-          missing.push(`${copy.anchor}: reproduce line`);
-        }
-      }
-    }
-    for (const copy of [
-      LOCAL_COPY.server,
-      LOCAL_COPY.workingTree,
-      LOCAL_COPY.committed,
-      LOCAL_COPY.noHistory,
-    ]) {
-      for (const part of [copy.statement, copy.read, copy.remedy]) {
-        if (!generated.includes(md(part))) missing.push(`${LOCAL_ANCHOR}: ${part}`);
       }
     }
     expect(missing).toEqual([]);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  test("sections come in the card's order", () => {
+    const at = (title: string) => generated.indexOf(`## ${title}`);
+    const order = Object.values(SECTIONS)
+      .filter((meta) => meta.shape === "table")
+      .map((meta) => at(meta.title));
+    expect(order.every((position) => position > 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(generated.indexOf('<h2 id="local-run">')).toBeGreaterThan(Math.max(...order));
+  });
+
+  test("every table entry says how to reproduce it", () => {
+    const bad: string[] = [];
+    for (const found of walk.found.filter((f) => f.shape === "table")) {
+      for (const [, e] of found.entries) {
+        const start = generated.indexOf(`id="${e.anchor}"`);
+        const next = generated.slice(start + 1).search(/<h[23]\b/);
+        const section = generated.slice(start, next === -1 ? undefined : start + 1 + next);
+        if (!section.includes("Reproduce: `nemar dataset screen --committed`")) bad.push(e.anchor);
+      }
+    }
+    expect(bad).toEqual([]);
+  });
+
+  test("it names the formats with and without a reader, from the registry", () => {
+    expect(generated).toContain("## Formats the screen reads");
+    expect(generated).toContain("| MATLAB | `.mat` |");
+    expect(generated).toContain("## Formats with no reader");
+    expect(generated).toMatch(/`\.nwb`/);
+    expect(generated).toContain("See also: [Verdict words](#verdict-words)");
   });
 
   test("the output is deterministic and has no timestamp", () => {
@@ -200,22 +255,86 @@ describe("the generated reference", () => {
   test("entries are sorted within each section", () => {
     const sections = generated.split(/^## /m).slice(1);
     for (const section of sections) {
-      const ids = headingIds(section.replace(/^[^\n]*\n/, "")).filter((id) => id.includes("-"));
-      const own = ids.filter((id) => /^(status|kind|incomplete|failure|note)-/.test(id));
+      const own = headingIds(section.replace(/^[^\n]*\n/, "")).filter((id) =>
+        /^(status|kind|incomplete|failure|note)-/.test(id),
+      );
       expect(own).toEqual([...own].sort());
     }
   });
 
-  test("copy characters Markdown reads as syntax are kept as code", () => {
-    expect(md("Run with --committed to read it.")).toBe("Run with `--committed` to read it.");
-    expect(md("Remove .idea, __pycache__ and .DS_Store.")).toBe(
-      "Remove .idea, `__pycache__` and .`DS_Store`.",
+  test("a heading label and an anchor are HTML-escaped", () => {
+    expect(escapeHtml('<img src=x onerror="1">&')).toBe(
+      "&lt;img src=x onerror=&quot;1&quot;&gt;&amp;",
     );
+    const ns: Namespace = {
+      ...copy,
+      NOTE_COPY: { "<img src=x onerror=1>": entry("note-hostile") },
+    };
+    const out = renderScreenCopyDocs(ns);
+    expect(out).toContain('<h3 id="note-hostile"><code>&lt;img src=x onerror=1&gt;</code></h3>');
+    expect(out).not.toContain("<img");
+  });
+});
+
+describe("md() on hostile strings", () => {
+  /** The text outside code spans, which is where Markdown and HTML act. */
+  const outside = (text: string) =>
+    text
+      .split(/(`[^`]*`)/)
+      .filter((_, i) => i % 2 === 0)
+      .join("");
+  const hostile = [
+    "<script>alert(1)</script>",
+    '<img src=x onerror="alert(1)">',
+    "a | b | c",
+    "*bold* and **more**",
+    "a `code` and a lone ` tick",
+    "[link](javascript:alert(1)) and ![img](x)",
+    "[a1](https://example.com)",
+    "tom & jerry &lt; &#60;",
+    "line one\n# heading\n- item",
+    "# heading at the start",
+    "- list at the start",
+    "1. numbered at the start",
+    "back\\slash \\*not bold\\*",
+    "<!-- comment --> text",
+  ];
+
+  test("nothing outside a code span can be Markdown or HTML syntax", () => {
+    for (const text of hostile) {
+      const out = outside(md(text));
+      expect({ text, bad: out.match(/(?<!\\)[<>*|`[\]]/)?.[0] ?? null }).toEqual({
+        text,
+        bad: null,
+      });
+      expect({ text, bad: out.match(/&(?!amp;|lt;|gt;)/)?.[0] ?? null }).toEqual({
+        text,
+        bad: null,
+      });
+      expect(md(text)).not.toContain("\n");
+      expect(md(text)).not.toMatch(/^(\s*)(#|-|\+|\d+[.)])/);
+    }
+  });
+
+  test("escapes the characters it names", () => {
+    expect(md("a & b < c > d * e | f ` g")).toBe("a &amp; b &lt; c &gt; d \\* e \\| f \\` g");
+  });
+
+  test("copy words that are syntax are kept as code", () => {
+    expect(md("Run with --committed to read it.")).toBe("Run with `--committed` to read it.");
     expect(md("or run 'nemar dataset publish status <id>', to see")).toBe(
       "or run `nemar dataset publish status <id>`, to see",
     );
     expect(md("the [Comment] section")).toBe("the `[Comment]` section");
     expect(md("plain words, a-b and sub-01")).toBe("plain words, a-b and sub-01");
+  });
+
+  test("a dotfile or a name with underscores is one code span", () => {
+    expect(
+      md("Remove them (.idea, .vscode, __pycache__, .DS_Store and the like) and upload."),
+    ).toBe("Remove them (.idea, .vscode, `__pycache__`, `.DS_Store` and the like) and upload.");
+    expect(md("the acq_time column.")).toBe("the `acq_time` column.");
+    expect(md("ends with .DS_Store.")).toBe("ends with `.DS_Store`.");
   });
 });
 
