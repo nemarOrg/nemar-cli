@@ -24,8 +24,10 @@ import {
 import { LINEAGE_OUTCOMES } from "../shared/license-lineage";
 import {
   LINEAGE_UNCONFIRMED_OUTCOMES,
+  PREVIOUS_DENIAL_SENDABLE,
   PUBLICATION_REPORT_VERSION,
   type PublicationReviewEvidence,
+  REASON_CODES,
   REVIEW_INPUTS,
   type RawDocument,
   type ReviewDocument,
@@ -38,6 +40,7 @@ import {
   previousDenialReasonsOf,
   reasonStatement,
   reportReasons,
+  reproducibilityOf,
   verdictOf,
 } from "../shared/publication-review";
 import { emptyInputs, fullInputs } from "./helpers/review-inputs";
@@ -294,6 +297,7 @@ describe("the input digest", () => {
       models: [{ model: "claude-haiku-5-5", effort: "high" }],
       input_digest: d,
       resolver_version: body.lineage.resolver_version,
+      enrichment_source: null,
     });
   });
 });
@@ -532,13 +536,13 @@ describe("a stored version-1 report reads as it always did", () => {
 
 describe("the previous denial: closed codes only (ADR 0139, decision 5)", () => {
   test("a denial's column gives its reason codes only when it holds nothing but codes", () => {
-    expect(previousDenialReasonsOf('["question_failed","text_withheld"]')).toEqual([
+    expect(previousDenialReasonsOf('["question_failed","version_malformed"]')).toEqual([
       "question_failed",
-      "text_withheld",
+      "version_malformed",
     ]);
-    expect(previousDenialReasonsOf("text_withheld, question_failed question_failed")).toEqual([
+    expect(previousDenialReasonsOf("version_malformed, question_failed question_failed")).toEqual([
       "question_failed",
-      "text_withheld",
+      "version_malformed",
     ]);
     // An administrator's own words, or codes mixed with words, give nothing: no free text.
     for (const free of [
@@ -567,6 +571,28 @@ describe("the previous denial: closed codes only (ADR 0139, decision 5)", () => 
     expect(userOf(fullInputs({ previous_denial: null }))).not.toContain('kind="previous_denial"');
   });
 
+  test("a denial that named a screen code sends none of it (ADR 0102 §2 stays)", () => {
+    expect(previousDenialReasonsOf('["identifier_screen_blocks","question_failed"]')).toEqual([
+      "question_failed",
+    ]);
+    expect(previousDenialReasonsOf("identifier_screen_blocks")).toEqual([]);
+    expect(previousDenialReasonsOf("identifier_screen_needs_acknowledgment text_withheld")).toEqual(
+      [],
+    );
+    const sendable: readonly string[] = PREVIOUS_DENIAL_SENDABLE;
+    for (const code of REASON_CODES) {
+      if (code.startsWith("identifier_screen_") || code === "text_withheld") {
+        expect(sendable).not.toContain(code);
+      }
+    }
+    expect(() =>
+      parseReviewInputs({
+        ...emptyInputs(),
+        previous_denial: { automated: true, reasons: ["identifier_screen_blocks"] },
+      }),
+    ).toThrow(ReviewInputsError);
+  });
+
   test("the job refuses a body whose previous denial holds anything but codes", () => {
     for (const bad of [
       { automated: true, reasons: ["Please expand the README"] },
@@ -578,5 +604,30 @@ describe("the previous denial: closed codes only (ADR 0139, decision 5)", () => 
         ReviewInputsError,
       );
     }
+  });
+});
+
+describe("the record as it is read back", () => {
+  const row = (models: string) => ({
+    headSha: HEAD,
+    scannerId: null,
+    readerVersions: null,
+    resolverVersion: null,
+    models,
+    promptVersion: "publication-review-prompt/2",
+    inputDigest: "a".repeat(64),
+    enrichmentSource: "2026-11-20 10:00:00",
+  });
+
+  test("a recorded effort is kept, whatever the review's effort is now; an unknown one is not shown", () => {
+    const max = reproducibilityOf(
+      row(JSON.stringify([{ model: "claude-sonnet-5-5", effort: "max" }])),
+    );
+    expect(max?.models).toEqual([{ model: "claude-sonnet-5-5", effort: "max" }]);
+    expect(max?.enrichment_source).toBe("2026-11-20 10:00:00");
+    const odd = reproducibilityOf(
+      row(JSON.stringify([{ model: "claude-haiku-5-5", effort: "huge" }])),
+    );
+    expect(odd?.models).toBeNull();
   });
 });

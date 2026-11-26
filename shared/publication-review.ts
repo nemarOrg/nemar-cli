@@ -66,6 +66,14 @@ export const PUBLICATION_PROMPT_VERSION = "publication-review-prompt/2";
 /** The effort every call of the review is made at. One word, recorded with the model. */
 export const PUBLICATION_REVIEW_EFFORT = "high";
 
+/**
+ * Every effort a record may name: the review's, and the others a call can be made at (the
+ * confirming run of ADR 0139 decision 1 is made at `max`). A closed list, so a record keeps the
+ * effort it was made at whatever the review's effort is now.
+ */
+export const RECORDED_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type RecordedEffort = (typeof RECORDED_EFFORTS)[number];
+
 /** The models a production report may name. A closed set, so a model change is a reviewed code change. */
 export const PUBLICATION_REVIEW_MODELS = ["claude-haiku-5-5"] as const;
 export type PublicationReviewModel = (typeof PUBLICATION_REVIEW_MODELS)[number];
@@ -741,7 +749,7 @@ export function parseReviewInputs(raw: unknown): ReviewInputsBody {
     const reasons = d.reasons as unknown[];
     if (
       reasons.length > REASON_CODES.length ||
-      !reasons.every((c) => isOneOf(REASON_CODES, c)) ||
+      !reasons.every((c) => isOneOf(PREVIOUS_DENIAL_SENDABLE, c)) ||
       new Set(reasons).size !== reasons.length
     ) {
       badInputs();
@@ -765,10 +773,36 @@ export function parseReviewInputs(raw: unknown): ReviewInputsBody {
 }
 
 /**
- * The closed reason codes a denial named, from its `denied_reason` column: a JSON array of codes,
- * or codes separated by commas or spaces. Codes only: a column holding anything that is not a
- * reason code (an administrator's own words) gives none, so no free text can reach the model. Each
- * code once, in {@link REASON_CODES} order.
+ * The reason codes a previous denial may show the model (ADR 0139, decision 5, under ADR 0102 §2).
+ * An allowlist, so a new code is sendable only on purpose: the reasons about the dataset's own
+ * documents, answers, metadata and release. Never a screen code (every `identifier_screen_*`,
+ * which would tell the model what the identifier screen found or could not read), never
+ * `text_withheld` (its cause is the shared identifier rules), never `request_blocked` (its block
+ * reason can be the screen's), and never a code about the review's own running.
+ */
+export const PREVIOUS_DENIAL_SENDABLE = [
+  "submission_minimum_failed",
+  "version_kept_after_anonymous_release",
+  "question_failed",
+  "steering_attempt",
+  "bids_failed_at_review",
+  "version_already_released",
+  "version_malformed",
+  "stored_verdict_fail",
+  "question_unknown",
+  "license_lineage_unconfirmed",
+  "resubmission_note_unaddressed",
+  "bids_unconcluded_at_review",
+  "version_missing",
+  "doi_state_unexpected",
+] as const satisfies readonly ReasonCode[];
+
+/**
+ * The reason codes a denial named that the model may be shown, from its `denied_reason` column: a
+ * JSON array of codes, or codes separated by commas or spaces. Codes only: a column holding
+ * anything that is not a reason code (an administrator's own words) gives none, so no free text can
+ * reach the model; and of the codes, only {@link PREVIOUS_DENIAL_SENDABLE}, so no screen code does
+ * (ADR 0102 §2). Each code once, in {@link REASON_CODES} order.
  */
 export function previousDenialReasonsOf(deniedReason: string | null): ReasonCode[] {
   if (deniedReason === null) return [];
@@ -781,7 +815,8 @@ export function previousDenialReasonsOf(deniedReason: string | null): ReasonCode
   }
   if (tokens.length === 0 || !tokens.every((t) => isOneOf(REASON_CODES, t))) return [];
   const named = new Set(tokens as ReasonCode[]);
-  return REASON_CODES.filter((c) => named.has(c));
+  const sendable: readonly ReasonCode[] = PREVIOUS_DENIAL_SENDABLE;
+  return REASON_CODES.filter((c) => named.has(c) && sendable.includes(c));
 }
 
 /** Whether a lineage's attribution is declared where the DOI's IsDerivedFrom is made from. */
@@ -806,7 +841,7 @@ export interface PublicationFinding {
 /** One model call of a review: the model and the effort it was asked at (ADR 0139, decision 9). */
 export interface ReviewModelCall {
   model: ReviewerModel;
-  effort: typeof PUBLICATION_REVIEW_EFFORT;
+  effort: RecordedEffort;
 }
 
 /**
@@ -821,7 +856,15 @@ export interface ReviewReproducibility {
   models: ReviewModelCall[];
   input_digest: string;
   resolver_version: string | null;
+  /**
+   * Which enrichment the review read: the copy of `.nemar/metadata.json` that D1 held at review
+   * time, named by when D1 stored it (or the commit it was read at); null when there was none.
+   */
+  enrichment_source: string | null;
 }
+
+/** An enrichment's source: a stored instant (`datetime('now')` text) or a commit. */
+export const ENRICHMENT_SOURCE_RE = /^(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}|[0-9a-f]{40})$/;
 
 export interface PublicationReportShape {
   v: PublicationReportVersion;
@@ -1177,7 +1220,13 @@ function badRecord(): never {
 function parseRecord(raw: unknown, model: ReviewerModel): ReviewReproducibility {
   if (
     !isRecord(raw) ||
-    !hasExactKeys(raw, ["prompt_version", "models", "input_digest", "resolver_version"])
+    !hasExactKeys(raw, [
+      "prompt_version",
+      "models",
+      "input_digest",
+      "resolver_version",
+      "enrichment_source",
+    ])
   ) {
     badRecord();
   }
@@ -1195,13 +1244,19 @@ function parseRecord(raw: unknown, model: ReviewerModel): ReviewReproducibility 
   if (!Array.isArray(r.models) || r.models.length < 1 || r.models.length > MAX_RECORDED_CALLS) {
     badRecord();
   }
+  if (
+    r.enrichment_source !== null &&
+    (typeof r.enrichment_source !== "string" || !ENRICHMENT_SOURCE_RE.test(r.enrichment_source))
+  ) {
+    badRecord();
+  }
   const models = (r.models as unknown[]).map((m): ReviewModelCall => {
     if (!isRecord(m) || !hasExactKeys(m, ["model", "effort"])) badRecord();
     const call = m as Record<string, unknown>;
-    if (!isOneOf(CALIBRATION_MODELS, call.model) || call.effort !== PUBLICATION_REVIEW_EFFORT) {
+    if (!isOneOf(CALIBRATION_MODELS, call.model) || !isOneOf(RECORDED_EFFORTS, call.effort)) {
       badRecord();
     }
-    return { model: call.model as ReviewerModel, effort: PUBLICATION_REVIEW_EFFORT };
+    return { model: call.model as ReviewerModel, effort: call.effort as RecordedEffort };
   });
   if (models[0]?.model !== model) badRecord();
   return {
@@ -1209,6 +1264,7 @@ function parseRecord(raw: unknown, model: ReviewerModel): ReviewReproducibility 
     models,
     input_digest: r.input_digest as string,
     resolver_version: r.resolver_version as string | null,
+    enrichment_source: r.enrichment_source as string | null,
   };
 }
 
@@ -1535,6 +1591,8 @@ export const WORKER_ONLY_RUN_ERRORS = [
 /** Attempts that never reached a model: not counted against a cap, restarted by a new screen result. */
 export const NEVER_REACHED_MODEL = [
   "stale_head",
+  // The job could not read its inputs; it calls the model only after they are read.
+  "inputs_unavailable",
   "dispatch_failed",
   "dispatch_unconfigured",
   "review_disabled",
@@ -2723,6 +2781,8 @@ export interface PublicationReviewReproducibility {
   models: { model: string; effort: string }[] | null;
   prompt_version: string | null;
   input_digest: string | null;
+  /** The enrichment the review read, as D1 held it at review time (see {@link ReviewReproducibility}). */
+  enrichment_source: string | null;
 }
 
 const RECORD_SCANNER_RE = /^identifier-scan@[0-9a-f]{7,40}$/;
@@ -2750,6 +2810,7 @@ export function reproducibilityOf(row: {
   models: string | null;
   promptVersion: string | null;
   inputDigest: string | null;
+  enrichmentSource: string | null;
 }): PublicationReviewReproducibility | null {
   const models = parseJsonOrNull(row.models);
   const shownModels =
@@ -2758,9 +2819,7 @@ export function reproducibilityOf(row: {
     models.length <= MAX_RECORDED_CALLS &&
     models.every(
       (m) =>
-        isRecord(m) &&
-        isOneOf(CALIBRATION_MODELS, m.model) &&
-        m.effort === PUBLICATION_REVIEW_EFFORT,
+        isRecord(m) && isOneOf(CALIBRATION_MODELS, m.model) && isOneOf(RECORDED_EFFORTS, m.effort),
     )
       ? (models as { model: string; effort: string }[]).map((m) => ({
           model: m.model,
@@ -2792,6 +2851,10 @@ export function reproducibilityOf(row: {
         : null,
     input_digest:
       row.inputDigest !== null && DIGEST_RE.test(row.inputDigest) ? row.inputDigest : null,
+    enrichment_source:
+      row.enrichmentSource !== null && ENRICHMENT_SOURCE_RE.test(row.enrichmentSource)
+        ? row.enrichmentSource
+        : null,
   };
   const empty =
     record.scanner_id === null &&
@@ -2799,7 +2862,8 @@ export function reproducibilityOf(row: {
     record.resolver_version === null &&
     record.models === null &&
     record.prompt_version === null &&
-    record.input_digest === null;
+    record.input_digest === null &&
+    record.enrichment_source === null;
   return empty ? null : record;
 }
 
@@ -2831,6 +2895,7 @@ export function reproducibilityLines(record: PublicationReviewReproducibility): 
     `Models: ${models}`,
     `Prompt version: ${record.prompt_version ?? unrecorded}`,
     `Input digest (SHA-256): ${record.input_digest ?? unrecorded}`,
+    `Enrichment read: ${record.enrichment_source === null ? "none, or not recorded" : `the copy stored at ${record.enrichment_source}`}`,
     REPRODUCIBILITY_LINE,
   ];
 }

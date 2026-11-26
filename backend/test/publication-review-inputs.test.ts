@@ -199,6 +199,21 @@ describe("POST /webhooks/publication-review-inputs", () => {
     expect((await inputs(reviewId)).status).toBe(502);
   });
 
+  test("a stored enrichment that does not parse ends the answer: never read as no enrichment", async () => {
+    const { reviewId } = review();
+    h.db.run("UPDATE datasets SET enrichment_json = ? WHERE dataset_id = ?", [
+      '{"title": "cut off',
+      PROD_DATASET,
+    ]);
+    const { value: res, log } = await logged(() => inputs(reviewId));
+    expect(res.status).toBe(502);
+    expect(log).toContain("stored enrichment does not parse");
+    expect(log).not.toContain("cut off");
+    // And the job reports what the review then is: no inputs, nothing reviewed.
+    await h.result(reviewId, { outcome: "error", error: "inputs_unavailable" });
+    expect(h.review(reviewId)).toMatchObject({ state: "errored", detail: "inputs_unavailable" });
+  });
+
   test("the coverage section is counts and format words only, and the dispatch payload did not grow", async () => {
     const { requestId, reviewId } = review();
     // A screen report with findings in it: none of their kinds or counts reaches the inputs.
@@ -273,13 +288,13 @@ describe("the previous denial, as codes", () => {
 
   test("an automated denial gives its codes and says it was automated", async () => {
     const reviewId = linked({
-      deniedReason: '["question_failed","text_withheld"]',
+      deniedReason: '["question_failed","version_malformed"]',
       automated: true,
     });
     const res = await inputs(reviewId);
     expect(parseReviewInputs(res.body).previous_denial).toEqual({
       automated: true,
-      reasons: ["question_failed", "text_withheld"],
+      reasons: ["question_failed", "version_malformed"],
     });
   });
 
@@ -289,6 +304,19 @@ describe("the previous denial, as codes", () => {
     const res = await inputs(reviewId);
     expect(parseReviewInputs(res.body).previous_denial).toEqual({ automated: false, reasons: [] });
     expect(JSON.stringify(res.body)).not.toContain("README does not");
+  });
+
+  test("a denial that named a screen code serves none of it", async () => {
+    const reviewId = linked({
+      deniedReason: '["identifier_screen_blocks","version_malformed"]',
+      automated: true,
+    });
+    const res = await inputs(reviewId);
+    expect(parseReviewInputs(res.body).previous_denial).toEqual({
+      automated: true,
+      reasons: ["version_malformed"],
+    });
+    expect(JSON.stringify(res.body)).not.toContain("identifier_screen");
   });
 
   test("a withdrawal is not a denial, and a first request has none", async () => {
@@ -352,6 +380,7 @@ describe("the reproducibility record is stored with the report", () => {
         models: [{ model: "claude-haiku-5-5", effort: "high" }],
         input_digest: digest,
         resolver_version: RESOLVER_VERSION,
+        enrichment_source: "2026-11-20 10:00:00",
       },
     });
     const res = await h.result(reviewId, { outcome: "reported", report: body });
@@ -364,6 +393,7 @@ describe("the reproducibility record is stored with the report", () => {
       models: JSON.stringify([{ model: "claude-haiku-5-5", effort: "high" }]),
       prompt_version: PUBLICATION_PROMPT_VERSION,
       input_digest: digest,
+      enrichment_source: "2026-11-20 10:00:00",
     });
   });
 

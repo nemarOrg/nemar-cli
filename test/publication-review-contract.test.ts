@@ -501,6 +501,8 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
     ]);
     expect([...NEVER_REACHED_MODEL]).toEqual([
       "stale_head",
+      // Posted before any model call: the inputs are read first (ADR 0139, decision 6).
+      "inputs_unavailable",
       "dispatch_failed",
       "dispatch_unconfigured",
       "review_disabled",
