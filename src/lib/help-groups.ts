@@ -34,5 +34,5 @@
 export const COMMON_COMMANDS: Readonly<Record<string, readonly string[]>> = {
   // The deposit-then-consume arc, in the order a depositor meets it, with the
   // two commands a consumer types (search, download) kept adjacent.
-  dataset: ["search", "download", "upload", "validate", "status", "list"],
+  dataset: ["search", "download", "upload", "validate", "screen", "status", "list"],
 };

@@ -31,6 +31,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T16:50-08:00 | Shared person-field rule: describing-field exclusion (age, sex, gender, type, info, history, group, notes, remarks, date, contact) and token matching | lead |  |
 | 2026-11-25T17:20-08:00 | B5: errored confirming run = confirm_failed (never deny); confirming run excluded from depositor tally, kept in platform cap | lead |  |
 | 2026-11-25T17:37-08:00 | Owner raised today's agent limit to 60 (Q2) | owner |  |
+| 2026-11-25T18:13-08:00 | A9: index.ts local-only skip accepted; packaged scanner id = identifier-scan@nemar-cli-v<version>; LOCAL_COPY into shared copy; screen in common commands | lead |  |
+| 2026-11-25T18:27-08:00 | Owner: license-lineage failures get a known workflow: depositor sends author evidence to support@nemar.org; admin records it linked to the ticket; clears that reason only (card B6, issue #2391) | owner |  |
 
 ## Log
 
@@ -51,3 +53,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T15:46-08:00 | Incident: A2 ran A4's mutate.py (shared scratchpad name collision) on A4's worktree; A4 asked to verify; preamble now requires per-step scratch dirs |
 | 2026-11-25T15:47-08:00 | Incident closed: A4 verified worktree intact (rules and later edits present, 35 tests pass) |
 | 2026-11-25T16:47-08:00 | Seam: text-header.ts had its own isPersonField (drifted) and biome errors outside lint scope; A4 consolidates |
+| 2026-11-25T18:36-08:00 | CP-D3 seam review: ready-with-fixes (CHANGELOG missing; command wording drift); tests pass except known parallel/compute and stale-website failures |
