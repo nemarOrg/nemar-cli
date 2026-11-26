@@ -17,10 +17,10 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Repo | nemarOrg/nemar-cli |
 | Integration branch | feature/issue-2182-epic-pq-decide, feature/issue-2182-epic-pq-evidence |
 | Manager id | mba-claude-opus |
-| State | running |
+| State | paused |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-25T20:20-08:00 |
-| Next tick | 2026-11-25T21:20-08:00 |
+| Last tick | 2026-11-25T20:31-08:00 |
+| Next tick | - |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-25T11:07-08:00 |
 
@@ -74,7 +74,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  | claude-worker | done | A1, A3 | 2385 | r1 panel: 2 important (unscanned strings, numeric id fields) + 5 fixed; seam fix (one person-field rule); r2 delta: all resolved, describing-field exclusion + token match + placeholder sent, lead verifies | 2026-11-25T15:23 | 1.5d | merged |
 | A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  | claude-worker | done | A1 | 2392 | r1 panel: 2 important (hidden entries, NaN hang) + 5 fixed; r2 delta: 1 important (directory end alignment) sent, 2 documented as out of scope; lead verifies | 2026-11-25T17:38 | 1d | merged |
 | A9 | [nemar dataset screen](cards/A9.md) |  | worker |  | claude-worker | done | A1 | 2389 | r1 panel: 4 important (update-check network, superseded honesty, git failure, copy) + 4 fixed; r2 delta clean, 1 sugg fixed, 1 rejected (fails closed) | 2026-11-25T17:38 | 1d | merged |
-| A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  | claude-worker | review | A1, A4 | 2395 |  | 2026-11-25T18:11 | 2d | r1: 1 critical (struct loop hang) + 5 important + 5 sent; r2 delta needs tomorrow's budget; no merge before it |
+| A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  | claude-worker | review | A1, A4 | 2395 |  | 2026-11-25T18:11 | 2d | r1 fixed at e401e6a3 (critical hang fixed; fieldless struct() accepted as valid); delta review waits for budget |
 | D3 | [Batch ack on public upstream](cards/D3.md) |  | worker-hard |  | claude-worker | done | D1, D2 | 2380 | r1 panel: 2 important (audit fail-open, item isolation) + 4 + lead (D1 batch txn, no JSON bundle) fixed; r2 delta clean, 2 sugg fixed | 2026-11-25T14:32 | 2d | merged |
 | B3 | [Resubmission note](cards/B3.md) |  | worker |  | claude-worker | done | B2 | 2379 | r1 panel: 1 important + 7 fixed; r2 delta clean; 1 sugg rejected | 2026-11-25T14:10 | 1d | merged |
 | B4 | [Review inputs and record](cards/B4.md) |  | worker-hard |  | claude-worker | done | D1, B2 | 2382 | r1 panel: 1 important (screen codes) + 5 fixed, lead cap-gap fix; r2 delta clean, 3 sugg fixed | 2026-11-25T14:54 | 2d | merged |
@@ -93,6 +93,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 |---|---|---|---|---|---|---|---|
 | Q1 | - | Raise PLATFORM_DAILY_CAP (50 model calls/day) for the queue? At 50/day ~300 requests take ~1 week; ADR 0139 adds a Sonnet call per fail | Keep 50 for the shadow batch, decide after (Recommended) / Raise to 150 now / Make it an env var you set | none | 2026-11-27T17:00 | closed | Raise to 150 now (owner, 2026-11-25T11:22-08:00) |
 | Q2 | - | Agent budget 40/40 used today. Raise today's limit so the B5 (auto-deny) review panel and A5, A6, A9 can start now, or wait for the daily reset? | Raise to 60 today (Recommended) / Wait for the reset | none | 2026-11-26T09:00 | closed | Raise to 60 today |
+| Q3 | - | Budget 60/60 used. Raise by 5 today for A5's delta review and A10 docs, or wait for the reset? | Raise to 65 today / Wait for the reset (Recommended) | none | 2026-11-26T09:00 | open |  |
 
 ## Proposals
 
