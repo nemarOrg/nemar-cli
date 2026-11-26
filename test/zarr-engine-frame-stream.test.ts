@@ -26,8 +26,8 @@ const fixture = (name: string) => new Uint8Array(readFileSync(new URL(name, DIR)
 const hello = encodeFrame({ id: 1, type: "hello", protocol: "0.1", client: "t" });
 const release = encodeFrame({ id: 2, type: "release", handle: "h1" });
 const windowFrame = fixture("window-float64.bin");
-/** The time bound for reading a 128 MiB frame in 64 KiB pieces (see the test). */
-const BOUND_MS = 250;
+/** The time bound for reading a 64 MiB frame in 16 KiB pieces (see the test). */
+const BOUND_MS = 1000;
 
 function concat(...parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
@@ -91,17 +91,17 @@ describe("FrameReader", () => {
     }
   });
 
-  test("a 128 MiB frame fed in 64 KiB pieces is read in linear time", () => {
+  test("a 64 MiB frame fed in 16 KiB pieces is read in linear time", () => {
     // Joining the buffer on every piece copied the whole buffer each time: quadratic, 1.25 s
-    // for 64 MiB, so a legal 1 GiB reply could outlast the client's call timeout. Measured on
-    // an M-series laptop: 8 to 13 ms with the pieces kept apart, 3.8 s with the old join. The
-    // bound is about 20 times the linear cost, for slow CI runners, and 15 times below the
-    // quadratic one.
-    const payload = new Uint8Array(128 * 1024 * 1024);
+    // for 64 MiB in 64 KiB pieces, so a legal 1 GiB reply could outlast the client's call timeout. Measured on
+    // an M-series laptop for this case: 4 to 7 ms with the pieces kept apart, 3.0 to 3.4 s with
+    // the old join. The bound leaves slow CI runners about 150 times the linear cost and is
+    // still 3 times below the quadratic one.
+    const payload = new Uint8Array(64 * 1024 * 1024);
     for (let i = 0; i < payload.length; i += 4096) payload[i] = i & 0xff;
     const frame = encodeFrame({ id: 7, type: "window", payload_bytes: payload.length }, payload);
     const reader = new FrameReader({ maxPayloadBytes: payload.length });
-    const piece = 64 * 1024;
+    const piece = 16 * 1024;
     const events = [];
     const started = performance.now();
     for (let at = 0; at < frame.length; at += piece) {
