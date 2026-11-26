@@ -8,11 +8,15 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  QUALITY_ADMIN_ROUTE_WORDS,
   QUALITY_FILE_MAX_BYTES,
   QUALITY_FORMAT_MEDIA_TYPES,
   QUALITY_PUBLIC_MAX_AGE,
   QUALITY_RECORDING_PATH_MAX,
   QUALITY_ROUTE_WORDS,
+  qualityAdminFilePath,
+  qualityAdminRecordPath,
+  qualityAdminRest,
   qualityCacheTag,
   qualityFileHeaders,
   qualityFilePath,
@@ -116,5 +120,94 @@ describe("file headers (RFC 6266, nosniff)", () => {
     expect(qualityFileHeaders('d/it\'s (µ) "x".tsv', "tsv")["Content-Disposition"]).toBe(
       "inline; filename*=UTF-8''it%27s%20%28%C2%B5%29%20%22x%22.tsv",
     );
+  });
+});
+
+describe("the admin mount's grammar (epic #2324 phase B3b), which the website's proxy enforces too", () => {
+  const REC = "sub-01/eeg/sub-01_task-rest_eeg.edf";
+  const SHA = "a".repeat(64);
+
+  test("the two shapes, decoded", () => {
+    expect(qualityAdminRest(`record/${REC}`)).toEqual({ kind: "record", recording: REC });
+    expect(qualityAdminRest(`file/${SHA}/${REC}`)).toEqual({
+      kind: "file",
+      sha256: SHA,
+      recording: REC,
+    });
+    expect(qualityAdminRest("record/sub-01/eeg/sub-01_task-a%20b_eeg.edf")).toEqual({
+      kind: "record",
+      recording: "sub-01/eeg/sub-01_task-a b_eeg.edf",
+    });
+  });
+
+  test("every path the builders make is inside the grammar and names its recording again", () => {
+    for (const recording of [REC, "sub-01_task-x_eeg.set", "a/b/c (1)/sub-µ_task-x_eeg.edf"]) {
+      const record = qualityAdminRecordPath(7, recording);
+      const file = qualityAdminFilePath(7, SHA, recording);
+      const prefix = "/admin/compute/pipeline/runs/7/quality/";
+      expect(record.startsWith(prefix)).toBe(true);
+      expect(file.startsWith(prefix)).toBe(true);
+      expect(qualityAdminRest(record.slice(prefix.length))).toEqual({ kind: "record", recording });
+      expect(qualityAdminRest(file.slice(prefix.length))).toEqual({
+        kind: "file",
+        sha256: SHA,
+        recording,
+      });
+    }
+  });
+
+  test("anything else is outside it: traversal, encoded separators, forged digests, other kinds", () => {
+    for (const rest of [
+      "",
+      "record",
+      "record/",
+      `record/${REC}/`,
+      `record//${REC}`,
+      `record/../${REC}`,
+      `record/./${REC}`,
+      "record/sub-01/..",
+      `record/%2E%2E/${REC}`,
+      `record/.%2e/${REC}`,
+      `record/%2e/${REC}`,
+      "record/sub-01%2Feeg%2Fsub-01_task-rest_eeg.edf",
+      "record/sub-01%2feeg/sub-01_task-rest_eeg.edf",
+      "record/sub-01%5Ceeg/sub-01_task-rest_eeg.edf",
+      "record/sub-01\\eeg/sub-01_task-rest_eeg.edf",
+      "record/sub-01/eeg/sub-01_task-rest_eeg.edf%00",
+      "record/sub-01/eeg/sub-01_task-rest%0A_eeg.edf",
+      "record/sub-01/eeg/sub-01_task-rest%7F_eeg.edf",
+      "record/sub-01/eeg/sub-01_task-rest%ZZ_eeg.edf",
+      "record/sub-01/eeg/sub-01_task-rest%E0%A4_eeg.edf",
+      "record/sub-01/eeg/sub-01?x_eeg.edf",
+      "record/sub-01/eeg/sub-01#x_eeg.edf",
+      "record/sub 01/eeg/sub-01_task-rest_eeg.edf",
+      `file/${SHA.toUpperCase()}/${REC}`,
+      `file/${SHA.slice(1)}/${REC}`,
+      `file/${SHA}0/${REC}`,
+      `file/${SHA}`,
+      `file/${SHA}/`,
+      `file/${REC}`,
+      `views/${REC}`,
+      `RECORD/${REC}`,
+      `record/${"a/".repeat(600)}x_eeg.edf`,
+    ]) {
+      expect([rest, qualityAdminRest(rest)]).toEqual([rest, null]);
+    }
+  });
+
+  test("the admin words extend the public route's, each with its status", () => {
+    for (const [word, status] of Object.entries(QUALITY_ROUTE_WORDS)) {
+      expect(QUALITY_ADMIN_ROUTE_WORDS[word as keyof typeof QUALITY_ADMIN_ROUTE_WORDS]).toBe(
+        status,
+      );
+    }
+    expect(QUALITY_ADMIN_ROUTE_WORDS).toMatchObject({
+      stamp_not_found: 404,
+      derivative_not_keyed: 404,
+      derivative_copying: 409,
+      derivative_failed: 409,
+      method_not_allowed: 405,
+      quality_unavailable: 503,
+    });
   });
 });
