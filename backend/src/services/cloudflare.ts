@@ -24,6 +24,9 @@ import type { Bindings } from "../types/bindings.js";
  *  Free/Pro/Business plans; chunk larger lists to stay within it. */
 const PURGE_URLS_PER_REQUEST = 30;
 
+/** How long one purge request may take before it is abandoned and reported as failed. */
+export const PURGE_TIMEOUT_MS = 5000;
+
 export interface PurgeResult {
   /** True when every batch was accepted (or there was nothing to purge). */
   ok: boolean;
@@ -99,6 +102,8 @@ async function postPurge(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ [kind]: batch }),
+        // A purge never holds its caller: an API that does not answer is abandoned and reported.
+        signal: AbortSignal.timeout(PURGE_TIMEOUT_MS),
       });
       if (!res.ok) {
         allOk = false;

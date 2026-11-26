@@ -49,6 +49,7 @@ import {
   seedStandInAppToken,
   startRulesetStandIn,
 } from "./helpers/github-rulesets";
+import { logged } from "./helpers/logs";
 import { seedScreenedRequest, seedUser } from "./helpers/publication-review";
 
 const ADMIN_KEY = "autoreq-admin-key-0123456789abcdef0123456789abcdef";
@@ -472,6 +473,32 @@ describe("the visibility service (public and private)", () => {
       expect(rowOf(ID)).toMatchObject({ visibility: "private" });
       expect(purges).toHaveLength(1);
     });
+
+    test("a purge API that never answers does not stall the flip: it is abandoned and logged (review of #2383)", async () => {
+      const silent = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: () => new Promise<Response>(() => {}),
+      });
+      (globalThis as { NEMAR_CLOUDFLARE_API_URL?: string }).NEMAR_CLOUDFLARE_API_URL =
+        `http://127.0.0.1:${silent.port}`;
+      try {
+        seedPublished();
+        const started = Date.now();
+        let status = 0;
+        const lines = await logged(async () => {
+          status = (await flip("private")).status;
+        });
+        expect(status).toBe(200);
+        expect(rowOf(ID)).toMatchObject({ visibility: "private" });
+        expect(Date.now() - started).toBeLessThan(10_000);
+        expect(lines).toContain(`[quality] cache_purge_failed dataset=${ID} cause=private`);
+      } finally {
+        (globalThis as { NEMAR_CLOUDFLARE_API_URL?: string }).NEMAR_CLOUDFLARE_API_URL =
+          `http://127.0.0.1:${purge.port}`;
+        silent.stop(true);
+      }
+    }, 20_000);
 
     test("making a dataset public purges nothing", async () => {
       seedPrivate();
