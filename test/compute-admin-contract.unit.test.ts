@@ -359,6 +359,7 @@ const VALID: Record<string, unknown> = {
     recipe_version: "1.0.0",
     input: "bids",
     stamp_state: "succeeded",
+    dataset_public: true,
     quality: "canary",
     skip: null,
     derivative: {

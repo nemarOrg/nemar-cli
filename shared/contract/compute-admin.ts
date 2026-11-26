@@ -1023,19 +1023,24 @@ export type ComputePipelineRunDetailResponse = z.infer<
 
 /**
  * Where a run's derivative stands, one word, decided in this order:
- *  - `run_not_succeeded`: the stamp did not succeed, so no derivative is made of it;
- *  - `not_keyed`: it succeeded and the derivative store decided to make none (`skip` names why);
+ *  - `run_in_progress`: the stamp is `dispatched`: its job has not ended, so there is nothing to key yet;
+ *  - `run_not_succeeded`: the stamp failed or was refused, so no derivative is made of it;
+ *  - `not_keyed`: it succeeded and the derivative store decided to make none (`skip` names why;
+ *    `duplicate_key` means an earlier run with the same inputs holds the derivative under that key);
  *  - `awaiting_derivative`: it succeeded and the store has not decided yet;
  *  - `failed`: the copy could not be trusted (`derivative.failure` names why);
  *  - `expired`: the row expired, or its date has passed (a canary 30 days after it was stored), so its
  *    files are deleted or about to be;
  *  - `copying`: its files are being copied;
  *  - `canary`: stored, and seen by administrators only;
- *  - `current`: stored, and the derivative public pages read for its dataset and recipe;
+ *  - `current`: stored, and the row public pages read while the dataset is public (`dataset_public`
+ *    says whether it is now);
  *  - `superseded`: a stored `catalog` row a later one replaced;
- *  - `not_current`: stored and public, but another public row of its dataset and recipe is newer.
+ *  - `not_current`: stored and of a public class, but another such row of its dataset and recipe is newer,
+ *    so it is not the row public pages read while the dataset is public.
  */
 export const COMPUTE_RUN_QUALITY_STATES = [
+  "run_in_progress",
   "run_not_succeeded",
   "not_keyed",
   "awaiting_derivative",
@@ -1084,6 +1089,11 @@ export const ComputeRunQualityResponseSchema = z
     recipe_version: z.string(),
     input: z.string(),
     stamp_state: z.string(),
+    /**
+     * Whether the dataset passes the quality route's gate now (active, public, not concealed, first
+     * published, not withdrawn, not tombstoned): a `current` row is what its public page shows only then.
+     */
+    dataset_public: z.boolean(),
     /** One of {@link COMPUTE_RUN_QUALITY_STATES}; a string so a word the Worker grows never breaks a CLI. */
     quality: z.string(),
     /** The skip log's word when the store decided to make no derivative, or null. */
@@ -1108,7 +1118,10 @@ export const ComputeRunQualityResponseSchema = z
         state: z.string(),
         /** Succeeded recordings the table lists, or null when it was not read. */
         succeeded: z.number().int().nullable(),
-        /** Succeeded rows whose path is not a recording path the quality route takes (left out). */
+        /**
+         * Succeeded rows left out: a path that is not a recording path the quality route takes, or a path
+         * the table lists more than once (each repeat after the first).
+         */
         unlisted: z.number().int(),
         items: z.array(z.object({ path: z.string() }).passthrough()),
         /** The last path of this page when there are more; pass it as `after`. */

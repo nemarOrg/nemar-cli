@@ -5,8 +5,9 @@
  * Two answers in one:
  *  - WHERE THE RUN'S DERIVATIVE STANDS, one word of `COMPUTE_RUN_QUALITY_STATES`, from ONE D1 statement
  *    (`RUN_QUALITY_SQL`): the stamp, its derivative row (one stamp makes at most one), the skip log's word
- *    when the store decided to make none, and whether the row is its dataset and recipe's current public
- *    derivative (B1's `CURRENT_PUBLIC_DERIVATIVE_SQL`, the rule the public route serves by). Every state a
+ *    when the store decided to make none, whether the dataset passes the quality route's gate now
+ *    (`dataset_public`, `QUALITY_DATASET_GATE_SQL`), and whether the row is its dataset and recipe's current
+ *    public derivative (B1's `CURRENT_PUBLIC_DERIVATIVE_SQL`, the rule the public route serves by). Every state a
  *    row can be in has a word: a copying, failed, expired, canary or superseded row is answered, never a
  *    500. A row whose date has passed is `expired` before the sync marks it so (the missing-canary case:
  *    its files are deleted or about to be).
@@ -21,7 +22,8 @@
  *    D1 statement and one cache match, and no store read.
  *
  * A succeeded path that is not a recording path the quality route takes (its `relativeLocation` pattern and
- * a recording's name) is left out and counted as `unlisted`, so every listed path is one the drill-down can
+ * a recording's name), and every repeat of a path the table lists more than once, is left out and counted
+ * as `unlisted`, so every listed path is one the drill-down can
  * ask the route for. The cursor (`after`) is a path of that shape, checked by the route before anything is
  * read; one the list does not hold still pages from where it would sort.
  *
@@ -50,7 +52,11 @@ import {
   derivativesBound,
 } from "./compute-derivatives.js";
 import type { ManifestCache } from "./manifest-source.js";
-import { CURRENT_PUBLIC_DERIVATIVE_SQL, QUALITY_PATTERNS } from "./quality-documents.js";
+import {
+  CURRENT_PUBLIC_DERIVATIVE_SQL,
+  QUALITY_DATASET_GATE_SQL,
+  QUALITY_PATTERNS,
+} from "./quality-documents.js";
 
 /** The stamp, its derivative, its skip word and the two judgments the word needs: `?1` the stamp id. */
 export const RUN_QUALITY_SQL = `SELECT s.id, s.dataset_id, s.version, s.recipe, s.recipe_version, s.input,
@@ -59,8 +65,10 @@ export const RUN_QUALITY_SQL = `SELECT s.id, s.dataset_id, s.version, s.recipe, 
        cd.superseded_at, cd.serving_index,
        CASE WHEN cd.key IS NOT NULL AND ${CURRENT_PUBLIC_DERIVATIVE_SQL("cd")} THEN 1 ELSE 0 END AS current,
        CASE WHEN cd.key IS NOT NULL AND (cd.state = 'expired'
-              OR (cd.expires_at IS NOT NULL AND cd.expires_at <= datetime('now'))) THEN 1 ELSE 0 END AS past
+              OR (cd.expires_at IS NOT NULL AND cd.expires_at <= datetime('now'))) THEN 1 ELSE 0 END AS past,
+       CASE WHEN d.dataset_id IS NOT NULL AND ${QUALITY_DATASET_GATE_SQL} THEN 1 ELSE 0 END AS dataset_public
   FROM compute_pipeline_stamps s
+  LEFT JOIN datasets d ON d.dataset_id = s.dataset_id
   LEFT JOIN compute_derivatives cd ON cd.stamp_id = s.id
   LEFT JOIN compute_derivative_skips k ON k.stamp_id = s.id
  WHERE s.id = ?1`;
@@ -85,11 +93,13 @@ interface RunQualityRow {
   serving_index: string | null;
   current: number;
   past: number;
+  dataset_public: number;
 }
 
 /** The word for where a run's derivative stands, in the order `COMPUTE_RUN_QUALITY_STATES` gives. */
 export function runQualityState(row: RunQualityRow): ComputeRunQualityState {
   if (row.key === null) {
+    if (row.stamp_state === "dispatched") return "run_in_progress";
     if (row.stamp_state !== "succeeded") return "run_not_succeeded";
     return row.skip !== null ? "not_keyed" : "awaiting_derivative";
   }
@@ -184,8 +194,16 @@ async function succeededList(
   try {
     const object = await bucket.get(`${DERIVATIVE_OBJECT_PREFIX}${key}/${storedTablePath(recipe)}`);
     if (object === null) return { kind: "table_missing" };
-    // A larger object's body is never read: it is left unconsumed, and the runtime releases it.
-    if (object.size > TABLE_READ_MAX_BYTES) return { kind: "table_too_large" };
+    // A larger object's body is never read: it is cancelled, so the stream is released at once.
+    if (object.size > TABLE_READ_MAX_BYTES) {
+      // Best effort: a stream that cannot be cancelled is released by the runtime, and the answer stands.
+      try {
+        await object.body.cancel();
+      } catch {
+        /* the runtime releases it */
+      }
+      return { kind: "table_too_large" };
+    }
     bytes = new Uint8Array(await object.arrayBuffer());
   } catch (err) {
     console.error(
@@ -307,6 +325,7 @@ export async function runQuality(
     recipe_version: row.recipe_version,
     input: row.input,
     stamp_state: row.stamp_state,
+    dataset_public: row.dataset_public === 1,
     quality,
     skip: row.skip,
     derivative:

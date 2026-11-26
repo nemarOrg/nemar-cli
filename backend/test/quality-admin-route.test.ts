@@ -60,9 +60,11 @@ const handle = makeComputeApp();
 /** An object's body, counting each time it is read. */
 function countedBody(object: R2ObjectBody): R2ObjectBody {
   return new Proxy(object, {
-    get(target, prop, receiver) {
-      const value = Reflect.get(target, prop, receiver);
-      if (prop === "arrayBuffer" || prop === "text" || prop === "json" || prop === "body") {
+    get(target, prop) {
+      // Read on the object itself, so its getters (`body`) see their own instance.
+      const value = Reflect.get(target, prop, target);
+      // Reading the bytes counts; `body.cancel()` on a refused object does not read them.
+      if (prop === "arrayBuffer" || prop === "text" || prop === "json") {
         reads.body += 1;
       }
       return typeof value === "function" ? value.bind(target) : value;
@@ -160,7 +162,7 @@ const quality = (stamp: number | string, query = "", who: ComputeWho | null = "a
 
 let runs = 0;
 /** A stamp of a nemar-ica run in the state given; its id. */
-async function stamp(state: "succeeded" | "failed" = "succeeded"): Promise<number> {
+async function stamp(state: "succeeded" | "failed" | "dispatched" = "succeeded"): Promise<number> {
   return seedIcaStamp(realD1(db), {
     datasetId: DATASET,
     jobId: newJobId(),
@@ -295,6 +297,49 @@ describe("where a run's derivative stands, one word each", () => {
       next_after: null,
     });
     expect(reads).toEqual({ get: 0, head: 0, body: 0 });
+  });
+
+  test("a dispatched stamp is run_in_progress, before run_not_succeeded, with no derivative and no read", async () => {
+    const id = await stamp("dispatched");
+    const r = await quality(id);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({
+      stamp_state: "dispatched",
+      quality: "run_in_progress",
+      derivative: null,
+    });
+    expect(r.body.recordings.state).toBe("not_stored");
+    expect(reads).toEqual({ get: 0, head: 0, body: 0 });
+  });
+
+  test("dataset_public is the quality route's gate now: each term of it turns it false, the derivative's word stays", async () => {
+    const d = await derivative({ retention: "catalog" });
+    const pub = await quality(d.stampId);
+    expect([pub.body.quality, pub.body.dataset_public]).toEqual(["current", true]);
+    for (const [term, set, reset] of [
+      ["private", "visibility = 'private'", "visibility = 'public'"],
+      // An anonymous deposit is never first published (a trigger keeps it so), so it is set with both.
+      [
+        "concealed",
+        "anonymous = 1, first_published_at = NULL",
+        "anonymous = 0, first_published_at = '2026-01-01 00:00:00'",
+      ],
+      ["withdrawn", "withdrawn_at = '2026-11-01 00:00:00'", "withdrawn_at = NULL"],
+      [
+        "never published",
+        "first_published_at = NULL",
+        "first_published_at = '2026-01-01 00:00:00'",
+      ],
+      ["not active", "status = 'deleted'", "status = 'active'"],
+    ] as const) {
+      db.run(`UPDATE datasets SET ${set} WHERE dataset_id = ?`, [DATASET]);
+      const r = await quality(d.stampId);
+      expect([term, r.body.dataset_public, r.body.quality]).toEqual([term, false, "current"]);
+      db.run(`UPDATE datasets SET ${reset} WHERE dataset_id = ?`, [DATASET]);
+    }
+    // A stamp whose dataset row is gone is not public.
+    db.run("DELETE FROM datasets WHERE dataset_id = ?", [DATASET]);
+    expect((await quality(d.stampId)).body.dataset_public).toBe(false);
   });
 
   test("a succeeded stamp the store decided not to key is not_keyed with the skip word; one undecided is awaiting_derivative", async () => {
