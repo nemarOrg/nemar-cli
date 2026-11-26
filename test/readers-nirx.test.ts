@@ -418,3 +418,40 @@ describe("review round 1: the shared text helpers", () => {
     }
   });
 });
+
+describe("review round 2: not-applicable needs binary bytes, no section name and no key", () => {
+  const glue = (prefix: Uint8Array, body: string) => new Uint8Array([...prefix, ...encode(body)]);
+  const ctrl = new Uint8Array(100).fill(1);
+  const nul = new Uint8Array(600);
+
+  test("100 control bytes before [SUBJECT DEMOGRAPHICS] with a name: the name is found", async () => {
+    const r = await scan(
+      glue(ctrl, "[SUBJECT DEMOGRAPHICS]\nName=Quintavius Hollberry\n"),
+      "x.inf",
+    );
+    expect(r.coverage).toBe("complete");
+    expect(kinds(r)).toEqual(["nirx-subject-name"]);
+  });
+
+  test("an .hdr with [ExperimentNotes] and no [GeneralInfo], binary start: findings, partial", async () => {
+    for (const prefix of [ctrl, nul]) {
+      const r = await scan(glue(prefix, "[ExperimentNotes]\nName=Quintavius Hollberry\n"), "x.hdr");
+      expect(r.coverage).toBe("partial");
+      expect(r.incomplete).toBe("unsupported-version");
+      expect(kinds(r)).toEqual(["nirx-subject-name"]);
+    }
+  });
+
+  test("a binary start with only a Name= or Contact key and no section is still scanned", async () => {
+    const named = await scan(glue(nul, "Name=Quintavius Hollberry\n"), "x.inf");
+    expect(named.coverage).toBe("partial");
+    expect(kinds(named)).toEqual(["nirx-subject-name"]);
+    const contact = await scan(glue(nul, "Contact Information=q.hollberry@example.org\n"), "x.hdr");
+    expect(kinds(contact)).toEqual(["nirx-freetext"]);
+  });
+
+  test("a binary start naming any NIRx section in another case is scanned", async () => {
+    const r = await scan(glue(nul, "imagingparameters\n"), "x.hdr");
+    expect(r).toEqual({ findings: [], coverage: "partial", incomplete: "unsupported-version" });
+  });
+});

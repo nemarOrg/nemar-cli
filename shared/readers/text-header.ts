@@ -74,8 +74,9 @@ function utf16Of(bytes: Uint8Array): "utf-16le" | "utf-16be" | null {
  * Decode a header's text. UTF-16 (a byte-order mark, `FF FE` or `FE FF`, or a NUL in every other
  * byte) decodes as UTF-16. Anything else decodes as UTF-8 when the bytes are valid UTF-8, and as
  * Windows-1252 when they are not, whatever a `Codepage` line declares: a header that says UTF-8
- * and is not would otherwise come back as replacement characters. A byte-order mark and every NUL
- * are dropped, so a stray NUL cannot hide a section header.
+ * and is not would otherwise come back as replacement characters. A byte-order mark and every C0
+ * control character but tab, line feed and carriage return (NUL included) are dropped before
+ * anything parses the text, so no control byte can hide a section header or a key.
  */
 export function decodeHeader(bytes: Uint8Array): string {
   const utf16 = utf16Of(bytes);
@@ -98,7 +99,7 @@ export function decodeHeader(bytes: Uint8Array): string {
     }
   }
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  return text.includes("\u0000") ? text.replaceAll("\u0000", "") : text;
+  return text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
 }
 
 /**
@@ -118,6 +119,27 @@ export function startsBinary(bytes: Uint8Array): boolean {
     else if (b < 0x20 && b !== 0x09 && b !== 0x0a && b !== 0x0c && b !== 0x0d) control++;
   }
   return nul > 0.05 * n || control > 0.1 * n;
+}
+
+/** Keys whose presence anywhere means the file holds text a reader must screen. */
+const SCREENED_KEY = /(?:^|[\r\n])[ \t]*(?:name|contact[^=\r\n]*|notes|comment|mk1)[ \t]*=/i;
+
+/**
+ * Whether a file's content shows it is another format than the reader's, so `not-applicable`: all
+ * three must hold. (a) The raw bytes start binary (`binaryStart`, from {@link startsBinary}).
+ * (b) No section name of the reader's format occurs anywhere in the decoded text, in any letter
+ * case, bracketed or not. (c) No `Name=`, `Contact...=`, `Notes=`, `Comment=` or `Mk1=` key occurs
+ * anywhere. Anything else is scanned.
+ */
+export function isAnotherFormat(
+  binaryStart: boolean,
+  text: string,
+  sectionNames: readonly string[],
+): boolean {
+  if (!binaryStart) return false;
+  const lower = text.toLowerCase();
+  if (sectionNames.some((name) => lower.includes(name.toLowerCase()))) return false;
+  return !SCREENED_KEY.test(text);
 }
 
 /** One `key=value` line of a section, with the value unquoted and trimmed. */

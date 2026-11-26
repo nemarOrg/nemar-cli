@@ -542,3 +542,54 @@ describe("review round 1: every free-text value is bounded", () => {
     }
   });
 });
+
+describe("review round 2: not-applicable needs binary bytes, no section name and no key", () => {
+  const glue = (prefix: Uint8Array, body: string) => new Uint8Array([...prefix, ...encode(body)]);
+  const ctrl = new Uint8Array(100).fill(1);
+  const nul = new Uint8Array(600);
+
+  test("100 control bytes before a marker file hide nothing", async () => {
+    const r = await scan(glue(ctrl, text("test.vmrk")), "test.vmrk");
+    expect(r.coverage).toBe("complete");
+    expect(kinds(r)).toEqual(["brainvision-segment-date"]);
+  });
+
+  test("a binary start with [Marker Infos] and contact details, no [Common Infos]: findings, partial", async () => {
+    const body = "[Marker Infos]\nMk1=Comment,mail q.hollberry@example.org,1,1,0\n";
+    for (const prefix of [ctrl, nul]) {
+      const r = await scan(glue(prefix, body), "x.vmrk");
+      expect(r.coverage).toBe("partial");
+      expect(r.incomplete).toBe("unsupported-version");
+      expect(kinds(r)).toEqual(["brainvision-marker-text"]);
+    }
+  });
+
+  test("a binary start with a [Comment] name, no [Common Infos]: findings, partial", async () => {
+    const r = await scan(glue(nul, "[Comment]\nSubject: Quintavius Hollberry\n"), "x.vhdr");
+    expect(r.coverage).toBe("partial");
+    expect(kinds(r)).toEqual(["brainvision-comment-name"]);
+  });
+
+  test("a binary start with a dated New Segment, no [Common Infos]: the date is found", async () => {
+    const body = "[Marker Infos]\nMk1=New Segment,,1,1,0,20131113161403794232\n";
+    const r = await scan(glue(nul, body), "x.vmrk");
+    expect(r.coverage).toBe("partial");
+    expect(kinds(r)).toEqual(["brainvision-segment-date"]);
+  });
+
+  test("a binary start with only an Mk1= key and no section is still scanned", async () => {
+    const r = await scan(glue(nul, "Mk1=Comment,mail q.hollberry@example.org,1,1,0\n"), "x.vmrk");
+    expect(r.coverage).toBe("partial");
+    expect(kinds(r)).toEqual(["brainvision-marker-text"]);
+  });
+
+  test("a binary start that names a section in another case is scanned", async () => {
+    const r = await scan(glue(nul, "binary channel user infos\n"), "x.vhdr");
+    expect(r).toEqual({ findings: [], coverage: "partial", incomplete: "unsupported-version" });
+  });
+
+  test("decoding drops every C0 control but tab, line feed and carriage return", () => {
+    const bytes = new Uint8Array([1, 2, 7, 0x0b, 0x0c, 0x1b, 0x1f, 0, ...encode("a\tb\r\nc")]);
+    expect(decodeHeader(bytes)).toBe("a\tb\r\nc");
+  });
+});

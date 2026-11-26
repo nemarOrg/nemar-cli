@@ -43,6 +43,7 @@ import {
   decodeHeader,
   entryValue,
   freeTextFindings,
+  isAnotherFormat,
   pairByName,
   parseIni,
   readHeader,
@@ -404,6 +405,55 @@ const EEG = ".eeg";
 const VMRK_MAGIC = /^brain ?vision (core )?data (exchange|format) marker file/i;
 const VHDR_MAGIC = /^brain ?vision (core )?data (exchange|format) header file/i;
 
+/** The BrainVision section names: any of them anywhere means the file is screened. */
+export const BRAINVISION_SECTIONS = [
+  "Common Infos",
+  "Channel Infos",
+  "Comment",
+  "Marker Infos",
+  "Binary Infos",
+  "Coordinates",
+  "ASCII Infos",
+  "Channel User Infos",
+] as const;
+
+/**
+ * Every content rule over a file the reader could not place: the `[Comment]` name rule, the
+ * `New Segment` rule, and the free-text rules over every line (marker descriptions included). One
+ * finding per kind.
+ */
+function unplacedFindings(text: string, sections: Map<string, IniSection>): Finding[] {
+  const found: Finding[] = [];
+  const token = commentNameTokens(sections).tokens[0];
+  if (token !== undefined) {
+    found.push({
+      kind: "brainvision-comment-name",
+      severity: "review",
+      field: "Comment",
+      shape: shapeOf(token),
+    });
+  }
+  // Marker descriptions are lines too: the free-text pass below covers them.
+  const stamp = segmentDate(sections.get("marker infos"));
+  if (stamp !== null) {
+    found.push({
+      kind: "brainvision-segment-date",
+      severity: "review",
+      field: "New Segment",
+      shape: shapeOf(stamp),
+    });
+  }
+  found.push(...unplacedTextFindings(text, "brainvision-marker-text"));
+  const seen = new Set<string>();
+  const out: Finding[] = [];
+  for (const f of found) {
+    if (seen.has(f.kind)) continue;
+    seen.add(f.kind);
+    out.push(f);
+  }
+  return out;
+}
+
 /**
  * Screen one file's text. `path` decides whether it is a header or a marker file; `whole` says
  * whether the text is the whole file.
@@ -420,11 +470,15 @@ export function scanBrainVisionText(
   const sections = parseIni(text);
   const common = sections.get("common infos");
   if (!(isHeader ? VHDR_MAGIC : VMRK_MAGIC).test(firstLine) && !common) {
-    // Neither the first line nor a `[Common Infos]` section. A binary file (an AppleDouble `._`
-    // file) is another format: unscreened. Text is screened as free text and is a partial read.
-    if (binaryStart) return { findings, coverage: "not-applicable" };
+    // Neither the first line nor a `[Common Infos]` section. Only content that shows another
+    // format (`isAnotherFormat`: binary, no BrainVision section name, no screened key anywhere)
+    // is not this reader's; anything else gets every rule this reader has, whatever the file's
+    // extension, and is a partial read.
+    if (isAnotherFormat(binaryStart, text, BRAINVISION_SECTIONS)) {
+      return { findings, coverage: "not-applicable" };
+    }
     return {
-      findings: unplacedTextFindings(text, "brainvision-marker-text"),
+      findings: unplacedFindings(text, sections),
       coverage: "partial",
       incomplete: "unsupported-version",
     };

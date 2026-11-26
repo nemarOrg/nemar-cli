@@ -43,6 +43,7 @@ import {
   decodeHeader,
   entryValue,
   freeTextFindings,
+  isAnotherFormat,
   isPersonField,
   pairByName,
   parseIni,
@@ -52,6 +53,20 @@ import {
   stem,
   unplacedTextFindings,
 } from "./text-header";
+
+/** The NIRx section names (NIRStar, NIRSport2 and `.inf`): any of them anywhere means screen it. */
+export const NIRX_SECTIONS = [
+  "GeneralInfo",
+  "Subject Demographics",
+  "ExperimentNotes",
+  "ImagingParameters",
+  "Paradigm",
+  "DataStructure",
+  "GainSettings",
+  "Markers",
+  "DarkNoise",
+  "ChannelsDistance",
+] as const;
 
 const HDR = ".hdr";
 const INF = ".inf";
@@ -188,15 +203,23 @@ export function scanNirxText(
   const sections = parseIni(text);
   const section = sections.get(isHeader ? "generalinfo" : "subject demographics");
   if (!section) {
-    // No NIRx section anywhere. A binary file (an Analyze image header) is another format:
-    // unscreened. Text (a Windows driver `.inf`, an edited header) is screened as free text and is
-    // a partial read, so a missing section can never hide what the file holds.
-    if (binaryStart) return { findings, coverage: "not-applicable" };
-    return {
-      findings: unplacedTextFindings(text, "nirx-freetext"),
-      coverage: "partial",
-      incomplete: "unsupported-version",
-    };
+    // The file's own section is missing. Only content that shows another format
+    // (`isAnotherFormat`: binary, no NIRx section name, no screened key anywhere; an Analyze image
+    // header) is not this reader's. Anything else (a Windows driver `.inf`, an `.hdr` with only
+    // `[ExperimentNotes]`) gets the person, birth-date and contact rules on every section and the
+    // free-text rules on every line, and is a partial read.
+    if (isAnotherFormat(binaryStart, text, NIRX_SECTIONS)) {
+      return { findings, coverage: "not-applicable" };
+    }
+    for (const block of sections.values()) screenSubjectBlock(block, path, findings);
+    const seen = new Set(findings.map((f) => f.kind));
+    for (const f of unplacedTextFindings(text, "nirx-freetext")) {
+      if (!seen.has(f.kind)) {
+        seen.add(f.kind);
+        findings.push(f);
+      }
+    }
+    return { findings, coverage: "partial", incomplete: "unsupported-version" };
   }
   let unmatched = false;
   let cut = false;
