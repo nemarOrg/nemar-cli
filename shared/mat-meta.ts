@@ -615,8 +615,12 @@ class MatWalker {
     if (count === 0 || rows === 0) return [];
     // UTF-8 with multi-byte characters has no fixed unit; a single row decodes whole.
     if (tag.type === MI.UTF8 && rows === 1) return [utf8.decode(data)];
+    // The rows and columns come from the file: they must be a count the data holds, checked
+    // before any loop, so no declared dimension drives one (review round 2).
+    if (!Number.isSafeInteger(count)) throw new MatProblem("corrupt");
     const units = this.numbers(tag, data);
-    const columns = Math.floor(units.length / rows);
+    const columns = count / rows;
+    if (columns === 0 || units.length < count) throw new MatProblem("corrupt");
     const out: string[] = [];
     for (let r = 0; r < rows; r++) {
       let s = "";

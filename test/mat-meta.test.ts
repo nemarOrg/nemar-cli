@@ -400,6 +400,26 @@ describe("declared counts and sizes do not drive the walk (review round 1)", () 
     expect((await walkMat(bufferSource(level5(ragged)))).incomplete).toBe("corrupt");
   });
 
+  test("a char array whose dimensions the data cannot fill is corrupt, at once (round 2)", async () => {
+    // 3e8 rows declared, two UTF-16 characters stored: no rows are produced.
+    const text = (dims: number[], units: number[]) =>
+      matrix(
+        sub(6, u32(4, 0)),
+        sub(5, i32(...dims)),
+        sub(1, ascii("a")),
+        sub(17, new Uint8Array(new Uint16Array(units).buffer)),
+      );
+    const started = performance.now();
+    const w = await walkMat(bufferSource(level5(text([300_000_000, 1], [0x61, 0x62]))));
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(w.incomplete).toBe("corrupt");
+    expect(w.entries).toEqual([]);
+    // The twin: two rows of one character each, as stored.
+    const ok = await walkMat(bufferSource(level5(text([2, 1], [0x61, 0x62]))));
+    expect(ok.incomplete).toBeUndefined();
+    expect(ok.entries).toEqual([{ fields: ["a"], class: "char", dims: [2, 1], value: ["a", "b"] }]);
+  });
+
   test("every top-level element counts against the element cap", async () => {
     const small = sub(1, ascii("x"));
     const many = level5(...Array.from({ length: 20 }, () => small));
