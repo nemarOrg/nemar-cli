@@ -18,9 +18,11 @@
  *  - the gate runs before the edge cache, the cache key carries the dataset's epoch, and no refusal is cached.
  */
 
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { Hono } from "hono";
 import { Miniflare } from "miniflare";
 import {
@@ -660,6 +662,30 @@ describe("the edge cache", () => {
     expect(await word(res)).toBe("view_data_corrupt");
   });
 
+  test("a cache hit carries Cache-Tag again, which the real Cache API strips when it stores (MUTATION: return the hit as stored)", async () => {
+    /** The Workers Cache API's behavior: `Cache-Tag` is consumed on put and is not in what match returns. */
+    class TagStrippingCache extends InMemoryCache {
+      override async put(request: RequestInfo | URL, response: Response): Promise<void> {
+        const stored = new Response(response.body, response);
+        stored.headers.delete("Cache-Tag");
+        return super.put(request, stored);
+      }
+    }
+    (globalThis as { caches?: unknown }).caches = { default: new TagStrippingCache() };
+    const key = await derivative();
+    expect((await get(fileUrl(key, SPECTRUM[0]))).headers.get("Cache-Tag")).toBe(
+      `nemar-dq-${DATASET}`,
+    );
+    // The store's copy goes bad, so a 200 now can only be the cached answer.
+    const bad = new Uint8Array(PRODUCT.get(SPECTRUM[1]) as Uint8Array);
+    bad[10] = bad[10] === 0x31 ? 0x32 : 0x31;
+    await bucket.put(`d/${key}/${SPECTRUM[1]}`, bad);
+    const hit = await get(fileUrl(key, SPECTRUM[0]));
+    expect(hit.status).toBe(200);
+    expect(hit.headers.get("Cache-Tag")).toBe(`nemar-dq-${DATASET}`);
+    expect(hit.headers.get("ETag")).toBe(`"${SPECTRUM[0]}"`);
+  });
+
   test("no refusal is cached: a corrupt answer is followed by the good one once the store is right", async () => {
     const key = await derivative();
     const good = PRODUCT.get(SPECTRUM[1]) as Uint8Array;
@@ -717,5 +743,42 @@ describe("migration 0152: the dataset's quality cache epoch", () => {
     expect(
       db.query("SELECT epoch FROM dataset_quality_epochs WHERE dataset_id = 'legacy-id-1'").get(),
     ).toEqual({ epoch: 1 });
+  });
+});
+
+describe("migration 0153: earlier rows' quality plugins (review of #2383)", () => {
+  test("a nemar-floor row gets [] and stays servable; another recipe's earlier row stays null", () => {
+    const dir = join(import.meta.dir, "../src/db/migrations");
+    const files = readdirSync(dir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+    const at = files.indexOf("0153_compute_derivatives_serving_index.sql");
+    expect(at).toBeGreaterThan(0);
+    const old = new Database(":memory:");
+    for (const f of files.slice(0, at)) old.exec(readFileSync(join(dir, f), "utf8"));
+    const row = (key: string, recipe: string, stamp: number) =>
+      old.run(
+        `INSERT INTO compute_derivatives (key, dataset_id, version, recipe, recipe_version, engine, input,
+           profile, input_digest, image_digest, job_id, stamp_id, object_count, bytes)
+         VALUES (?, 'nm000901', 'v1.0.0', ?, '0.9.0', 'eegprep@0.5.0', 'bids', 'archive', ?, ?, ?, ?, 1, 1)`,
+        [
+          key,
+          recipe,
+          `git:${"5".repeat(40)}`,
+          `sha256:${"e".repeat(64)}`,
+          `job_${"0".repeat(23)}${stamp}`,
+          stamp,
+        ],
+      );
+    row("a".repeat(64), "nemar-floor", 1);
+    row("b".repeat(64), "nemar-ica", 2);
+    old.exec(readFileSync(join(dir, files[at] as string), "utf8"));
+    expect(
+      old.query("SELECT recipe, quality_plugins FROM compute_derivatives ORDER BY key").all(),
+    ).toEqual([
+      { recipe: "nemar-floor", quality_plugins: "[]" },
+      { recipe: "nemar-ica", quality_plugins: null },
+    ]);
+    old.close();
   });
 });

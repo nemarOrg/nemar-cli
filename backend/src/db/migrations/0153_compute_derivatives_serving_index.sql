@@ -34,3 +34,11 @@ ALTER TABLE compute_derivatives ADD COLUMN quality_plugins TEXT
   CONSTRAINT compute_derivatives_quality_plugins CHECK (
     quality_plugins IS NULL
     OR (json_valid(quality_plugins) AND json_type(quality_plugins) = 'array'));
+
+-- BACKFILL. A `nemar-floor` row runs no quality plugin at any version (its `quality` checkpoint is the
+-- recipe's own `qc` step), so its list is `[]` whatever version made it, and its rows stay servable.
+-- Every other recipe's earlier rows stay NULL: their plugins depend on the version, and a version the
+-- registry no longer holds cannot be read back here, so a guess could admit a plugin's view the run never
+-- ran. No nemar-ica row exists (nemar-ica is a placeholder no path dispatches), so none is left out today.
+UPDATE compute_derivatives SET quality_plugins = '[]'
+  WHERE recipe = 'nemar-floor' AND quality_plugins IS NULL;
