@@ -29,6 +29,9 @@ export const PROFILE_OF_INPUT = Object.freeze({ bids: "archive", zarr: "serving"
 /**
  * The words neuroschema's `docs/views.md` gives for a view a run did not write for a recording. The
  * schema admits any `failureCode` word beside them, which a renderer shows as it is.
+ *
+ * Documentation a contract test holds, not a validation allowlist: the backend admits any
+ * `failureCode` word in `views_skipped`, and nothing outside the test reads this list.
  */
 export const VIEWS_SKIPPED_NEUROSCHEMA_WORDS = [
   "labels_unusable",
@@ -44,6 +47,9 @@ export const VIEWS_SKIPPED_NEUROSCHEMA_WORDS = [
  * turned, the three ways a run of the archive finds no row of the serving index, and an index it was handed
  * but cannot use (`serving_index_unusable`, ADR 0141). A plugin's view can
  * be skipped with `frame_rotated` or `cap_exceeded` while its plugin ran.
+ *
+ * Like `VIEWS_SKIPPED_NEUROSCHEMA_WORDS`, documentation a contract test holds, not a validation
+ * allowlist: a word missing here is still admitted.
  */
 export const VIEWS_SKIPPED_NEMAR_PROCESS_WORDS = [
   "no_good_window",
