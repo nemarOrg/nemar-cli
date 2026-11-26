@@ -20,6 +20,7 @@ import {
 } from "../../shared/publication-review";
 import { signPublicationReviewCallbackToken } from "../src/services/github/callback-tokens";
 import { coverageOf, readNarrowScreenReport } from "../src/services/publication-review-inputs";
+import { realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
 import {
@@ -28,7 +29,12 @@ import {
   seedPublicationReview,
   seedScreenedRequest,
 } from "./helpers/publication-review";
-import { CALLBACK_SECRET, PROD_DATASET, createHarness } from "./helpers/publication-review-harness";
+import {
+  CALLBACK_SECRET,
+  PROD_DATASET,
+  createHarness,
+  hookedD1,
+} from "./helpers/publication-review-harness";
 
 const h = createHarness();
 
@@ -417,6 +423,32 @@ describe("the reproducibility record is stored with the report", () => {
       state: "errored",
       detail: "workflow_failed",
     });
+  });
+
+  test("a stamp that throws serves nothing: 409, and the log names only the error's class", async () => {
+    const { reviewId } = review();
+    const token = await h.tokenFor(reviewId);
+    const db = hookedD1(realD1(h.db), {
+      statement: (sql) => {
+        if (sql.includes("SET inputs_served_at")) throw new Error("D1 SQL text SECRET-SQL");
+      },
+    });
+    const { value: res, log } = await logged(async () => {
+      const r = await h.app.request(
+        "/webhooks/publication-review-inputs",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Webhook-Token": token },
+          body: JSON.stringify({ review_id: reviewId, dataset_id: PROD_DATASET }),
+        },
+        h.env({ DB: db }),
+      );
+      return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+    });
+    expect(res).toEqual({ status: 409, body: { ok: false, reason: "not_claimed" } });
+    expect(log).toContain("stamp failed (Error)");
+    expect(log).not.toContain("SECRET-SQL");
+    expect(h.review(reviewId).inputs_served_at).toBeNull();
   });
 
   test("a run error stores no record", async () => {

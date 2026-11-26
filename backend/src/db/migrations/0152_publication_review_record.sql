@@ -19,13 +19,17 @@
 -- `head_sha` already records the commit. The seven columns are set only on a reported row, and a
 -- reported row written by a job from before this record (a version-1 report) leaves them NULL.
 --
--- `detail` gains `inputs_unavailable`: the job could not read the review's widened inputs from the
--- Worker and reviewed nothing. `inputs_served_at` is when the Worker answered the job's inputs call
--- with the inputs (it is set once, and only on a claimed row still waiting): a job that posts
--- `inputs_unavailable` after it was served them may have called the model, so that word is then
--- stored as `workflow_failed`, which counts against the caps, as a claimed `stale_head` is. SQLite cannot change a CHECK in place, so the table is rebuilt with
--- every row, column and index it had; nothing references it (migration 0098 declares no foreign key
--- either way), and no trigger or view reads it.
+-- `detail` gains `inputs_unavailable`: the job could not read the review's widened inputs from
+-- the Worker and reviewed nothing.
+--
+-- `inputs_served_at` is when the Worker answered the job's inputs call with the inputs. It is set
+-- once, and only on a claimed row still waiting. A job that posts `inputs_unavailable` after it
+-- was served them may have called the model, so that word is then stored as `workflow_failed`,
+-- which counts against the caps, as a claimed `stale_head` is.
+--
+-- SQLite cannot change a CHECK in place, so the table is rebuilt with every row, column and index
+-- it had; nothing references it (migration 0098 declares no foreign key either way), and no
+-- trigger or view reads it.
 
 CREATE TABLE publication_reviews_new (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
