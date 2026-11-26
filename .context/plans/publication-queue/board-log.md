@@ -28,6 +28,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T15:49-08:00 | A4: SubjectID identifier only for an all-letter name-like token; letters+digits = review; shared function reused by A5 for EEGLAB subject | lead |  |
 | 2026-11-25T16:06-08:00 | B4: inputs_unavailable after the Worker served inputs is rewritten to workflow_failed (counted), via inputs_served_at | lead |  |
 | 2026-11-25T16:25-08:00 | A4 deviations accepted (bare 'name' not a person field; rule B in person fields; byte bound on requested bytes; label role removed; extensions kept in OTHER list); SNIRF limits 48 MiB/1,000 fetches/180 s | lead |  |
+| 2026-11-25T16:50-08:00 | Shared person-field rule: describing-field exclusion (age, sex, gender, type, info, history, group, notes, remarks, date, contact) and token matching | lead |  |
 
 ## Log
 
@@ -47,3 +48,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T14:42-08:00 | A1 merged (#2374 -> 5c3d65d5): A2, A6, A9 ready |
 | 2026-11-25T15:46-08:00 | Incident: A2 ran A4's mutate.py (shared scratchpad name collision) on A4's worktree; A4 asked to verify; preamble now requires per-step scratch dirs |
 | 2026-11-25T15:47-08:00 | Incident closed: A4 verified worktree intact (rules and later edits present, 35 tests pass) |
+| 2026-11-25T16:47-08:00 | Seam: text-header.ts had its own isPersonField (drifted) and biome errors outside lint scope; A4 consolidates |

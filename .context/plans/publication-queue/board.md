@@ -48,7 +48,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 39 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 40 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -70,8 +70,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | A3 | [Pure-TS HDF5 metadata reader](cards/A3.md) |  | worker-hard |  | claude-worker | done |  | 2378 | r1 panel: 2 important (never-throw, unshuffle hang) + 4 fixed; r2 delta clean, 1 sugg fixed, 2 accepted | 2026-11-25T14:10 | 2d | merged d767b62b |
 | D0 | [Review in prod, shadow 20](cards/D0.md) |  | lead |  |  | owner |  | 2370 | r1 code+tests+comments: 0 important, 2 suggestions fixed |  | 4h | draft #2370; owner checklist, then owner merges and releases |
 | B2 | ADR 0139 auto-deny (draft on decide branch) |  | lead |  |  | done |  |  |  |  |  | accepted 2026-11-25 |
-| A2 | [BrainVision and NIRx](cards/A2.md) |  | worker-hard |  | claude-worker | review | A1 | 2381 | r1 panel: 2 important (regex DoS, not-applicable evasion) + 3 fixed; r2 delta: 2 important evasions fixed, verified by lead with r2 probes (no r3) | 2026-11-25T14:46 | 1d | CI on 7840826a, then merge |
-| A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  | claude-worker | review | A1, A3 | 2385 |  | 2026-11-25T15:23 | 1.5d | r1: 2 important (unscanned big strings, numeric id fields) + 5 sent; r2 needs 1 agent |
+| A2 | [BrainVision and NIRx](cards/A2.md) |  | worker-hard |  | claude-worker | done | A1 | 2381 | r1 panel: 2 important (regex DoS, not-applicable evasion) + 3 fixed; r2 delta: 2 important evasions fixed, verified by lead with r2 probes (no r3) | 2026-11-25T14:46 | 1d | merged |
+| A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  | claude-worker | done | A1, A3 | 2385 | r1 panel: 2 important (unscanned strings, numeric id fields) + 5 fixed; seam fix (one person-field rule); r2 delta: all resolved, describing-field exclusion + token match + placeholder sent, lead verifies | 2026-11-25T15:23 | 1.5d | merged |
 | A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  |  | todo | A1 |  |  |  | 1d | next day's budget (39/40 used) |
 | A9 | [nemar dataset screen](cards/A9.md) |  | worker |  |  | todo | A1 |  |  |  | 1d | next day's budget |
 | A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  |  | todo | A1, A4 |  |  |  | 2d | after A4 |
@@ -140,3 +140,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-2385a | reviewer | claude-worker | Sonnet 5.5 | A4 | 2026-11-25T16:27 | done |
 | rev-2385b | reviewer | claude-worker | Sonnet 5.5 | A4 | 2026-11-25T16:27 | done |
 | B5 | implementer | claude-worker | Opus 5.5 | B5 | 2026-11-25T16:29 | running |
+| rev-2385-r2 | reviewer | claude-worker | Sonnet 5.5 | A4 | 2026-11-25T16:49 | done |
