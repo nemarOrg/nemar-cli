@@ -479,6 +479,14 @@ describe("one person-field rule for every reader (shared/readers/person-fields.t
     ]);
   });
 
+  test("a field that describes the person is not a person field; SubjectName still is", async () => {
+    expect(kinds(await scan(withLine('Subject_Type="Marlow"'), "x.inf"))).toEqual([]);
+    expect(kinds(await scan(withLine('SubjectInfo="Marlow"'), "x.inf"))).toEqual([]);
+    expect(kinds(await scan(withLine('SubjectName="Marlow"'), "x.inf"))).toEqual([
+      "nirx-subject-name",
+    ]);
+  });
+
   test("a bare Name is the subject's in NIRx demographics and an object's in HDF5", () => {
     expect(isPersonField("Name", { bareName: "person" })).toBe(true);
     expect(isPersonField("Name")).toBe(false);

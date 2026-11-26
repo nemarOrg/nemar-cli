@@ -4,15 +4,14 @@
  * name means the same in every format.
  */
 
-import { canonical } from "../identifier-scan";
-
 /**
- * Which field names are a person's: a canonical name (lowercase, no space, `_` or `-`) that
- * contains a `person` word not qualified by a `thing` word before it, and is not one of the `own`
- * names. A field called just `name` names its own object (a stimulus, an aux channel, a group), as
- * SNIRF's `stim{k}/name` and many HDF5 layouts use it, so it is not a person's. `ExperimenterName`,
- * `PatientProfile` and `SubjectTask` are a person's; `ManufacturerName`, `AppName` and `name` are
- * not.
+ * Which field names are a person's, read word by word ({@link fieldTokens}): a `person` word not
+ * qualified by a `thing` word before it, in a name with no `describing` word (a field that
+ * describes the person, such as `Subject_Type` or `SubjectInfo`, has its own rules), that is not
+ * one of the `own` names. A field called just `name` names its own object (a stimulus, an aux
+ * channel, a group), as SNIRF's `stim{k}/name` and many HDF5 layouts use it. `ExperimenterName`,
+ * `PatientProfile` and `SubjectTask` are a person's; `ManufacturerName`, `AppName`, `SubjectInfo`
+ * and `name` are not. Words match whole, never inside another word (`cap` is not in `landscape`).
  */
 export const PERSON_FIELDS = {
   person: ["name", "subject", "patient", "operator", "experimenter", "participant"],
@@ -24,6 +23,7 @@ export const PERSON_FIELDS = {
     "software",
     "file",
     "stim",
+    "stimulus",
     "aux",
     "channel",
     "cap",
@@ -38,8 +38,34 @@ export const PERSON_FIELDS = {
     "montage",
     "paradigm",
   ],
+  describing: [
+    "age",
+    "sex",
+    "gender",
+    "type",
+    "info",
+    "history",
+    "group",
+    "notes",
+    "remarks",
+    "date",
+    "contact",
+  ],
   own: ["name"],
 } as const;
+
+/**
+ * The words of a field name, lowercase: split at camelCase boundaries (`SubjectID` is `subject`,
+ * `id`), and at anything that is not a letter (underscores, spaces, hyphens, digits).
+ */
+export function fieldTokens(name: string): string[] {
+  return name
+    .replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2")
+    .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, "$1 $2")
+    .split(/[^\p{L}]+/u)
+    .filter((t) => t !== "")
+    .map((t) => t.toLowerCase());
+}
 
 /**
  * Is this field name (any spelling) a person's? `bareName` says what a field called just `name`
@@ -50,15 +76,17 @@ export function isPersonField(
   name: string,
   options: { bareName?: "object" | "person" } = {},
 ): boolean {
-  const c = canonical(name);
-  if ((PERSON_FIELDS.own as readonly string[]).includes(c)) return options.bareName === "person";
+  const tokens = fieldTokens(name);
+  const has = (list: readonly string[], t: string) => list.includes(t);
+  if (tokens.length === 1 && has(PERSON_FIELDS.own, tokens[0] as string)) {
+    return options.bareName === "person";
+  }
+  if (tokens.some((t) => has(PERSON_FIELDS.describing, t))) return false;
   // A thing word suppresses a person word only when it comes before it, as its qualifier:
   // `ManufacturerName` is a manufacturer's; `PatientProfile` and `SubjectTask` are a person's.
-  for (const w of PERSON_FIELDS.person) {
-    for (let at = c.indexOf(w); at >= 0; at = c.indexOf(w, at + 1)) {
-      const before = c.slice(0, at);
-      if (!PERSON_FIELDS.thing.some((t) => before.includes(t))) return true;
-    }
-  }
-  return false;
+  return tokens.some(
+    (t, i) =>
+      has(PERSON_FIELDS.person, t) &&
+      !tokens.slice(0, i).some((before) => has(PERSON_FIELDS.thing, before)),
+  );
 }

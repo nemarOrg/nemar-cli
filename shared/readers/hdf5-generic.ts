@@ -37,12 +37,13 @@ import { walkForReader } from "./hdf5-incomplete";
 import { isPersonField } from "./person-fields";
 import { capText, contactIn } from "./text-header";
 
-export { PERSON_FIELDS, isPersonField } from "./person-fields";
+export { PERSON_FIELDS, fieldTokens, isPersonField } from "./person-fields";
 
 /** Values that mean "nothing was entered" in an identifier field or a SubjectID. */
 export const EMPTY_VALUES: ReadonlySet<string> = new Set([
   "",
   "0",
+  "-1",
   "unknown",
   "n/a",
   "na",

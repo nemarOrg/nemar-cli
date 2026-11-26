@@ -15,6 +15,7 @@ import { KIND_COPY } from "../shared/identifier-screen-copy";
 import {
   HDF5_GENERIC_READER,
   PERSON_FIELDS,
+  fieldTokens,
   isPersonField,
   scanEntryText,
   scanNumericIdentifier,
@@ -123,6 +124,26 @@ describe("person fields", () => {
     expect(isPersonField("ExperimenterName")).toBe(true);
   });
 
+  test("words match whole, never inside another word", () => {
+    expect(fieldTokens("SubjectID")).toEqual(["subject", "id"]);
+    expect(fieldTokens("PATIENTName_2b")).toEqual(["patient", "name", "b"]);
+    expect(fieldTokens("experimenter-name")).toEqual(["experimenter", "name"]);
+    // A thing word inside a longer word qualifies nothing.
+    expect(isPersonField("LandscapeName")).toBe(true);
+    expect(isPersonField("CommunityName")).toBe(true);
+    expect(isPersonField("HappyName")).toBe(true);
+    expect(isPersonField("CapName")).toBe(false);
+    expect(isPersonField("UnitName")).toBe(false);
+    expect(isPersonField("AppName")).toBe(false);
+    // A person word inside a longer word is not a person word.
+    expect(isPersonField("Surnamed")).toBe(false);
+    expect(isPersonField("Subjective")).toBe(false);
+    // A describing word anywhere unmakes a person field.
+    for (const d of PERSON_FIELDS.describing) expect(isPersonField(`Subject_${d}`)).toBe(false);
+    expect(isPersonField("SubjectAgeGroup")).toBe(false);
+    expect(isPersonField("Subject_Ageless")).toBe(true);
+  });
+
   test("each thing word unmakes one", () => {
     for (const w of PERSON_FIELDS.thing) expect(isPersonField(`${w}Name`)).toBe(false);
     // A field called just `name` names its own object, in any spelling.
@@ -165,7 +186,7 @@ describe("identifier fields", () => {
     expect(kindsOf(attr("DOB", "1971-04"))).toEqual(["hdf5-identifier-field/review"]);
     expect(kindsOf(attr("BirthDate", "1971"))).toEqual(["hdf5-identifier-field/review"]);
     expect(kindsOf(attr("BirthDate", "1971-01-01"))).toEqual(["hdf5-identifier-field/review"]);
-    for (const empty of ["", "0", "unknown", "N/A", "none"]) {
+    for (const empty of ["", "0", "-1", "unknown", "N/A", "none"]) {
       expect(kindsOf(attr("DateOfBirth", empty))).toEqual([]);
     }
     // Text in a birth field that is not a coarse date cannot be shown to be coarse.
@@ -174,6 +195,10 @@ describe("identifier fields", () => {
 
   test("record numbers are identifiers; contacts are review", () => {
     expect(kindsOf(attr("MRN", "12345678"))).toEqual(["hdf5-identifier-field/identifier"]);
+    // The strings "0" and "-1" are placeholders in an ID field, like the numbers.
+    expect(kindsOf(attr("PatientID", "0"))).toEqual([]);
+    expect(kindsOf(attr("PatientID", "-1"))).toEqual([]);
+    expect(kindsOf(attr("PatientID", "-2"))).toEqual(["hdf5-identifier-field/identifier"]);
     expect(kindsOf(attr("PatientName", "Quillfeather"))).toEqual([
       "hdf5-identifier-field/identifier",
     ]);
