@@ -53,3 +53,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T15:46-08:00 | Incident: A2 ran A4's mutate.py (shared scratchpad name collision) on A4's worktree; A4 asked to verify; preamble now requires per-step scratch dirs |
 | 2026-11-25T15:47-08:00 | Incident closed: A4 verified worktree intact (rules and later edits present, 35 tests pass) |
 | 2026-11-25T16:47-08:00 | Seam: text-header.ts had its own isPersonField (drifted) and biome errors outside lint scope; A4 consolidates |
+| 2026-11-25T18:36-08:00 | CP-D3 seam review: ready-with-fixes (CHANGELOG missing; command wording drift); tests pass except known parallel/compute and stale-website failures |
