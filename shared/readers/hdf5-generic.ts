@@ -37,11 +37,10 @@ import { walkForReader } from "./hdf5-incomplete";
 
 /**
  * Which field names are a person's: a canonical name (lowercase, no space, `_` or `-`) that
- * contains a `person` word and no `thing` word, and is not one of the `own` names. A field called
- * just `name` names its own object (a stimulus, an aux channel, a group), as SNIRF's
- * `stim{k}/name` and countless HDF5 layouts use it, so it is not a person's (measured: on public
- * SNIRF files read as generic HDF5, a bare `name` made 8 identifier findings per file).
- * `ExperimenterName` and `subject` are a person's; `ManufacturerName`, `AppName` and `name` are
+ * contains a `person` word not qualified by a `thing` word before it, and is not one of the `own`
+ * names. A field called just `name` names its own object (a stimulus, an aux channel, a group), as
+ * SNIRF's `stim{k}/name` and many HDF5 layouts use it, so it is not a person's. `ExperimenterName`,
+ * `PatientProfile` and `SubjectTask` are a person's; `ManufacturerName`, `AppName` and `name` are
  * not.
  */
 export const PERSON_FIELDS = {
@@ -69,11 +68,16 @@ export const PERSON_FIELDS = {
 /** Is this field name (any spelling) a person's? */
 export function isPersonField(name: string): boolean {
   const c = canonical(name);
-  return (
-    !(PERSON_FIELDS.own as readonly string[]).includes(c) &&
-    PERSON_FIELDS.person.some((w) => c.includes(w)) &&
-    !PERSON_FIELDS.thing.some((w) => c.includes(w))
-  );
+  if ((PERSON_FIELDS.own as readonly string[]).includes(c)) return false;
+  // A thing word suppresses a person word only when it comes before it, as its qualifier:
+  // `ManufacturerName` is a manufacturer's; `PatientProfile` and `SubjectTask` are a person's.
+  for (const w of PERSON_FIELDS.person) {
+    for (let at = c.indexOf(w); at >= 0; at = c.indexOf(w, at + 1)) {
+      const before = c.slice(0, at);
+      if (!PERSON_FIELDS.thing.some((t) => before.includes(t))) return true;
+    }
+  }
+  return false;
 }
 
 /** Values that mean "nothing was entered" in an identifier field or a SubjectID. */
@@ -117,6 +121,8 @@ export function readPersonText(text: string): "name" | "freetext" | "none" {
  * `snirf.stim-name`, ...); the entry's own name decides only which rules apply.
  */
 export function scanEntryText(entry: Hdf5Entry, field: string): Finding[] {
+  const numbers = numbersOf(entry);
+  if (numbers.length > 0) return scanNumericIdentifier(entry, numbers);
   const values = stringsOf(entry);
   if (values.length === 0) return [];
   const out: Finding[] = [];
@@ -153,6 +159,37 @@ export function scanEntryText(entry: Hdf5Entry, field: string): Finding[] {
   return out;
 }
 
+/** The numbers an entry holds, or none. */
+function numbersOf(entry: Hdf5Entry): number[] {
+  if (!Array.isArray(entry.value)) return [];
+  const values = entry.value as unknown[];
+  return values.length > 0 && values.every((v) => typeof v === "number")
+    ? (values as number[])
+    : [];
+}
+
+/**
+ * An identifier-key field that holds numbers (lead ruling, review round 1): a number is content.
+ * A record number or ID is `identifier`; a birth-date field is `identifier` when a number is a
+ * `YYYYMMDD` date at day precision and `review` for any other number (a year, a year and month, or
+ * a number that is not a date). Numbers under any other name are not text and fire nothing.
+ */
+export function scanNumericIdentifier(entry: Hdf5Entry, numbers: readonly number[]): Finding[] {
+  const key = canonical(entry.name);
+  const keySeverity = identifierKeySeverity(key);
+  if (keySeverity === null) return [];
+  let severity: Severity = keySeverity;
+  let shown = numbers[0] as number;
+  if (BIRTH_KEYS.has(key)) {
+    const dated = numbers.find(
+      (n) => Number.isInteger(n) && /^\d{8}$/.test(String(n)) && datePrecision(String(n)) === "day",
+    );
+    severity = dated === undefined ? "review" : "identifier";
+    if (dated !== undefined) shown = dated;
+  }
+  return [{ kind: "hdf5-identifier-field", severity, field: key, shape: shapeOf(String(shown)) }];
+}
+
 /** The fixed field word of a generic entry. */
 const genericField = (entry: Hdf5Entry) =>
   entry.kind === "attribute" ? "hdf5.attribute" : "hdf5.dataset";
@@ -163,15 +200,9 @@ export function scanHdf5Entries(entries: readonly Hdf5Entry[]): Finding[] {
 }
 
 /**
- * The limits of the HDF5-based readers, from the false-positive gate's measurement over 296 public
- * SNIRF files read by HTTP range requests (the PR gives the distribution). A typical file's
- * metadata takes 0.3 to 4 MiB in 5 to 60 fetches, because the page cache reads 64 KiB pages and a
- * large file's object headers lie among its data. High-density files (thousands of
- * `measurementList` groups) need much more: 13 MiB in 203 fetches for 31,800 entries, and 38 MiB
- * in 573 fetches for 66,500 entries. The caps admit those with room (48 MiB, 1,000 fetches, the
- * walker's 100,000 entries in `walkLimits`); past them the file is `partial` (`limit`), never
- * clean. The time cap is three minutes: the gate's slowest complete file took 51 s over a home
- * connection, and the screen reads from storage in the same region.
+ * The limits of the HDF5-based readers. They admit the largest public SNIRF files measured for
+ * card A4 (the numbers are in `test/fixtures/hdf5/README.md`); past them the file is `partial`
+ * (`limit`), never clean.
  */
 export const HDF5_READER_LIMITS: ReaderLimits = {
   maxBytes: 48 * 1024 * 1024,

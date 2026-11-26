@@ -36,8 +36,9 @@ export const SHORT_CODE_MAX = 12;
 const SHORT_CODE = new RegExp(`^[\\p{L}\\p{N}][\\p{L}\\p{N}_-]{0,${SHORT_CODE_MAX - 1}}$`, "u");
 
 const NIRS = String.raw`/nirs\d*`;
-const SUBJECT_ID = new RegExp(`^${NIRS}/metaDataTags/SubjectID$`);
-const MEASUREMENT_DATE = new RegExp(`^${NIRS}/metaDataTags/MeasurementDate$`);
+// Writers differ in letter case (`SubjectId`, `measurementdate`); the tag is the same.
+const SUBJECT_ID = new RegExp(`^${NIRS}/metaDataTags/SubjectID$`, "i");
+const MEASUREMENT_DATE = new RegExp(`^${NIRS}/metaDataTags/MeasurementDate$`, "i");
 const STIM_OR_AUX_NAME = new RegExp(`^${NIRS}/(stim|aux)\\d+/name$`);
 
 /** The BIDS subject label in a path (`sub-<label>`, the last one), or null. */
