@@ -53,7 +53,7 @@ import {
   runScreen,
   walkHistory,
 } from "../scripts/identifier-screen-ci-lib";
-import { DEFAULT_READER_LIMITS, type FormatReader, READERS } from "../shared/identifier-readers";
+import { EDF_READER } from "../shared/identifier-readers";
 import {
   type DatasetRecord,
   type ScreenReport,
@@ -1070,21 +1070,11 @@ describe("the screen: a history walk that failed", () => {
           annexedRecordings: 0,
         };
         const oids = new Set(tree.entries.map((t) => t.oid));
-        // A reader registered for `.snirf` (only in this test): the old blob is a recording.
-        const snirf: FormatReader = {
-          id: "snirf",
-          extensions: [".snirf"],
-          limits: { ...DEFAULT_READER_LIMITS },
-          version: "test-1",
-          scan: async () => ({ findings: [], coverage: "complete" }),
-        };
-        const found = await findSuperseded(repo.dir, walk, resolved, oids, reader, [
-          ...READERS,
-          snirf,
-        ]);
+        // The registry reads `.snirf` (card A4): the old blob is a recording.
+        const found = await findSuperseded(repo.dir, walk, resolved, oids, reader);
         expect(found.entries.map((e) => [e.path, e.reader])).toEqual([[OLD, "snirf"]]);
-        // The twin: with the registry as it is, no reader parses it, so it is not a recording.
-        const none = await findSuperseded(repo.dir, walk, resolved, oids, reader);
+        // The twin: with a registry that has no reader for it, it is not a recording.
+        const none = await findSuperseded(repo.dir, walk, resolved, oids, reader, [EDF_READER]);
         expect(none.entries).toEqual([]);
       } finally {
         await reader.close();

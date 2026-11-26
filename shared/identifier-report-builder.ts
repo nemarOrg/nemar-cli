@@ -23,7 +23,9 @@ import {
   type ReaderId,
   cachedSource,
   companionsOf,
+  limitsFor,
   readerFor,
+  readerMatch,
 } from "./identifier-readers";
 import {
   DATE_KINDS,
@@ -154,6 +156,13 @@ export interface RecordingsOutcome {
   failures: Record<string, number>;
   reasons: Set<IncompleteReason>;
   companionMissing: number;
+  /** Files whose header names a companion other than its own base name (a note; never gating). */
+  companionNameMismatch: number;
+  /**
+   * Files a reader found not to be its format (`not-applicable`), by the extension it matched:
+   * the caller counts them as unscreened. They are in no tally.
+   */
+  notApplicable: Record<string, number>;
   /** EDF/BDF only: the statistics the fleet scan has always kept. */
   edf: {
     flaggedFiles: number;
@@ -207,6 +216,8 @@ async function pool<T>(items: readonly T[], size: number, fn: (item: T) => Promi
  *   {@link LimitExceeded} or ran out of its time (`limit`, `time`), which keeps no finding; or
  *   the dataset's time was spent before it started (`time`).
  * - `failed`: any other throw, including the source's read failures. Never a clean read.
+ * - `not-applicable`: the reader found the file is not its format. It leaves the tallies and is
+ *   counted in `notApplicable` by extension, for the caller to count as unscreened.
  *
  * Superseded recordings are read as headers only: their companions are checked against the
  * current tree alone, by design (history keeps headers, and a companion's absence there is not a
@@ -241,6 +252,8 @@ export async function readRecordings<E extends RecordingEntry>(
     failures: {},
     reasons: new Set(),
     companionMissing: 0,
+    companionNameMismatch: 0,
+    notApplicable: {},
     edf: {
       flaggedFiles: 0,
       flaggedKinds: {},
@@ -284,12 +297,10 @@ export async function readRecordings<E extends RecordingEntry>(
     let result: Awaited<ReturnType<FormatReader["scan"]>>;
     // EDF/BDF statistics, from the header the reader already read (a cache hit, no new read).
     let patient: string | null = null;
+    const limits = limitsFor(reader, entry.path);
     try {
-      source = cachedSource(options.open(entry), reader.limits);
-      result = await withTimer(
-        reader.scan(source, entry.path, reader.limits),
-        reader.limits.timeMs,
-      );
+      source = cachedSource(options.open(entry), limits);
+      result = await withTimer(reader.scan(source, entry.path, limits), limits.timeMs);
       if (reader.id === "edf" && result.coverage === "complete" && !source.limited) {
         const head = await source.read(0, EDF_HEADER_BYTES);
         if (head.length >= EDF_HEADER_BYTES) patient = edfIdentificationText(head).patient;
@@ -314,7 +325,15 @@ export async function readRecordings<E extends RecordingEntry>(
       return;
     }
     // Everything below only commits; nothing below can throw.
+    if (result.coverage === "not-applicable") {
+      // Not this reader's format: unscreened under its extension, in no tally, no companions.
+      t.files--;
+      const extension = readerMatch(entry.path, [reader])?.extension ?? reader.extensions[0] ?? "";
+      out.notApplicable[extension] = (out.notApplicable[extension] ?? 0) + 1;
+      return;
+    }
     for (const f of result.findings) out.findings.push(f);
+    if (result.notes?.includes("companion-name-mismatch")) out.companionNameMismatch++;
     if (reader.id === "edf") {
       const e = out.edf;
       if (patient !== null && !result.findings.some((f) => f.kind === "edf-unreadable")) {
@@ -375,13 +394,18 @@ export function recordingCounts(outcome: Pick<RecordingsOutcome, "tallies">): {
   return { recordings, read };
 }
 
-/** `read_by_format`, `companion_missing` and `readers`, as the report carries them. */
+/**
+ * `read_by_format`, `companion_missing`, `companion_name_mismatch` (only when there is one, so a
+ * report without the note reads as it always did) and `readers`, as the report carries them.
+ */
 export function coverageFields(
-  outcome: Pick<RecordingsOutcome, "tallies" | "present" | "companionMissing">,
+  outcome: Pick<RecordingsOutcome, "tallies" | "present" | "companionMissing"> &
+    Partial<Pick<RecordingsOutcome, "companionNameMismatch">>,
   readers: readonly FormatReader[] = READERS,
 ): {
   read_by_format: Partial<Record<ReaderId, ReaderTally>>;
   companion_missing: number;
+  companion_name_mismatch?: number;
   readers: Partial<Record<ReaderId, string>>;
 } {
   const read_by_format: Partial<Record<ReaderId, ReaderTally>> = {};
@@ -390,5 +414,11 @@ export function coverageFields(
   }
   const versions: Partial<Record<ReaderId, string>> = {};
   for (const reader of readers) versions[reader.id] = reader.version;
-  return { read_by_format, companion_missing: outcome.companionMissing, readers: versions };
+  const mismatch = outcome.companionNameMismatch ?? 0;
+  return {
+    read_by_format,
+    companion_missing: outcome.companionMissing,
+    ...(mismatch > 0 ? { companion_name_mismatch: mismatch } : {}),
+    readers: versions,
+  };
 }

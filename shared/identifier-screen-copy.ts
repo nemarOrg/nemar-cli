@@ -13,7 +13,7 @@
  * accepted publication request.
  */
 
-import type { ReaderId } from "./identifier-readers";
+import type { ReaderId, ReaderNote } from "./identifier-readers";
 import type { FindingKind } from "./identifier-scan";
 import type {
   IncompleteReason,
@@ -43,6 +43,15 @@ export const docsLink = (copy: Copy): string => `${SCREEN_DOCS_URL}#${copy.ancho
 const HEADER = "the identification fields of the EDF/BDF header (its first 256 bytes)";
 const EDF_REMEDY =
   "Blank the field or replace it with a code (for EDF/BDF, the patient and recording fields of the header) and upload again.";
+
+const SNIRF_TAGS = "the metaDataTags group of every nirs group in a SNIRF file";
+const HDF5_TEXT =
+  "every string attribute and string dataset of the file that the HDF5 reader returns (signal data is never read)";
+const HDF5_REMEDY =
+  "Blank the value or replace it with a code in the file (h5py or MATLAB can edit it in place) and upload again.";
+const BRAINVISION =
+  "the text of BrainVision header (.vhdr) and marker (.vmrk) files, up to 1 MiB each";
+const NIRX = "the text of NIRx header (.hdr) and information (.inf) files, up to 1 MiB each";
 
 const kind = (statement: string, read: string, remedy: string, name: FindingKind): Copy => ({
   statement,
@@ -173,11 +182,104 @@ export const KIND_COPY: Record<FindingKind, Copy> = {
     "tooling-debris",
   ),
   "local-user-path": kind(
-    "A code or text file holds a path into someone's home directory.",
-    "small code and text files under code/ and sourcedata/",
-    "Replace the path with a relative one and upload again.",
+    "A code, text or recording header file holds a path into someone's home directory, or a header names its companion by an absolute path.",
+    "small code and text files under code/ and sourcedata/, the companion file names in BrainVision headers, BrainVision marker descriptions, and NIRx contact and notes fields",
+    "Replace the path with a relative one (for a BrainVision header, the companion's file name alone) and upload again.",
     "local-user-path",
   ),
+  "snirf-subject-name": kind(
+    "The SubjectID tag of a SNIRF file holds a name.",
+    SNIRF_TAGS,
+    "Replace the SubjectID with the BIDS subject label or another code and upload again.",
+    "snirf-subject-name",
+  ),
+  "snirf-subject-freetext": kind(
+    "The SubjectID tag of a SNIRF file holds text that is neither the BIDS subject label nor a short code.",
+    SNIRF_TAGS,
+    "Check that it names nobody; replace it with the BIDS subject label if in doubt.",
+    "snirf-subject-freetext",
+  ),
+  "snirf-measurement-date": kind(
+    "The MeasurementDate tag of a SNIRF file is an acquisition date finer than year and month.",
+    SNIRF_TAGS,
+    "Remove or coarsen the date if it could identify someone.",
+    "snirf-measurement-date",
+  ),
+  "hdf5-freetext": kind(
+    "A text value in an HDF5 or SNIRF file holds a path into someone's home directory, or text that may name someone.",
+    HDF5_TEXT,
+    HDF5_REMEDY,
+    "hdf5-freetext",
+  ),
+  "hdf5-freetext-name": kind(
+    "A text value in an HDF5 or SNIRF file, in a field meant for a person (a name, a subject, a patient, an operator or an experimenter), holds a name.",
+    HDF5_TEXT,
+    HDF5_REMEDY,
+    "hdf5-freetext-name",
+  ),
+  "hdf5-identifier-field": kind(
+    "An HDF5 or SNIRF file has a field named for an identifier (a name, a birth date, a record number or a contact) that holds a value.",
+    HDF5_TEXT,
+    "Scrub the field (blank it, or for a birth date keep the year only) in every file that has it, and resubmit.",
+    "hdf5-identifier-field",
+  ),
+  "brainvision-comment-name": kind(
+    "The [Comment] section of a BrainVision header holds a word that may be a name.",
+    BRAINVISION,
+    "Check the [Comment] section of the .vhdr file; remove any name and upload again.",
+    "brainvision-comment-name",
+  ),
+  "brainvision-segment-date": kind(
+    "A New Segment marker of a BrainVision marker file holds an acquisition date finer than year and month.",
+    BRAINVISION,
+    "Remove or coarsen the date if it could identify someone.",
+    "brainvision-segment-date",
+  ),
+  "nirx-subject-name": kind(
+    "A person field of a NIRx file (the subject's Name, or an operator or experimenter) holds a name rather than a code.",
+    NIRX,
+    "Blank the field or replace it with the subject's code (for the subject, the BIDS subject label), and upload again.",
+    "nirx-subject-name",
+  ),
+  "nirx-demographics": kind(
+    "The demographics of a NIRx file hold a birth date: to the day it is an identifier; as a year or a year and month it is for review.",
+    NIRX,
+    "Blank the birth date in the .inf file (or the NIRSport2 header's experiment notes) and upload again; a year is enough if one is needed.",
+    "nirx-demographics",
+  ),
+  "nirx-freetext": kind(
+    "A contact or notes field of a NIRx file, or text in a NIRx file the reader could not place, holds an email address or a phone number.",
+    NIRX,
+    "Remove the contact details from the .inf file (or the header's notes) and upload again.",
+    "nirx-freetext",
+  ),
+  "brainvision-marker-text": kind(
+    "A marker description in a BrainVision marker file, or text in a BrainVision file the reader could not place, holds an email address or a phone number.",
+    BRAINVISION,
+    "Remove the contact details from the marker descriptions of the .vmrk file and upload again.",
+    "brainvision-marker-text",
+  ),
+  "nirx-header-date": kind(
+    "The header of a NIRx recording holds an acquisition date finer than year and month.",
+    NIRX,
+    "Remove or coarsen the date if it could identify someone.",
+    "nirx-header-date",
+  ),
+};
+
+/**
+ * Notes a reader makes that are neither findings nor gaps: counted and printed with a remedy, and
+ * never gating. A `Record` over {@link ReaderNote}, so a note without words fails the typecheck.
+ */
+export const NOTE_COPY: Record<ReaderNote, Copy> = {
+  "companion-name-mismatch": {
+    statement:
+      "A recording's header names its data or marker file by a name other than the header's own BIDS base name. The header was read in full; this does not change the verdict.",
+    read: "the DataFile and MarkerFile entries of BrainVision headers and marker files, and the FileName of NIRStar headers",
+    remedy:
+      "Correct the DataFile or MarkerFile entry (or NIRx FileName) to the BIDS file name of its companion, and upload again.",
+    anchor: "note-companion-name-mismatch",
+  },
 };
 
 /** How loudly a state is said. */
@@ -442,9 +544,9 @@ export const INCOMPLETE_COPY: Record<IncompleteReason, Copy> = {
     "time",
   ),
   "companion-missing": reason(
-    "A recording's header names a companion file that is not in the dataset.",
+    "A recording's header needs a companion file that is not beside it under the header's own base name.",
     "the dataset's paths",
-    "Add the missing companion file, or remove the header that names it.",
+    "Add the missing companion file next to its header, named with the header's base name, and upload again.",
     "companion-missing",
   ),
   encrypted: reason(
@@ -675,6 +777,7 @@ export const LINES = {
   flagged: (count: number) => `EDF/BDF files with an identifier finding: ${count}.`,
   notScreened: (phrase: string) => `Not screened (format x files): ${phrase}.`,
   companionMissing: (count: number) => `Companion files missing: ${count}.`,
+  note: (count: number, copy: Copy) => `Note (x${count}): ${copy.statement}`,
   incomplete: (reasons: string) => `Incomplete: ${reasons}.`,
   reason: (name: string, copy: Copy) => `Incomplete (${name}): ${copy.statement}`,
   readFailure: (key: string, count: number, copy: Copy) =>

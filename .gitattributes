@@ -8,3 +8,4 @@ test/neurobagel/golden/** -text linguist-generated
 test/neurobagel/oracle/** linguist-generated
 shared/neurobagel/vocab/** linguist-generated
 scripts/neurobagel/*.py.lock linguist-generated
+test/fixtures/text-headers/** -text

@@ -54,7 +54,20 @@ export type FindingKind =
   | "acq-time-dated"
   | "image-or-document-file"
   | "tooling-debris"
-  | "local-user-path";
+  | "local-user-path"
+  | "snirf-subject-name"
+  | "snirf-subject-freetext"
+  | "snirf-measurement-date"
+  | "hdf5-freetext"
+  | "hdf5-freetext-name"
+  | "hdf5-identifier-field"
+  | "brainvision-comment-name"
+  | "brainvision-segment-date"
+  | "nirx-subject-name"
+  | "nirx-demographics"
+  | "nirx-header-date"
+  | "nirx-freetext"
+  | "brainvision-marker-text";
 
 /**
  * Finding kinds that name a person or a clinical record: what must not stay public. A finding
@@ -71,6 +84,11 @@ export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-recording-freetext",
   "json-identifier-key",
   "participants-identifier-column",
+  "snirf-subject-name",
+  "hdf5-freetext-name",
+  "hdf5-identifier-field",
+  "nirx-subject-name",
+  "nirx-demographics",
 ]);
 
 /**
@@ -82,6 +100,9 @@ export const DATE_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-startdate",
   "edf-recording-startdate",
   "acq-time-dated",
+  "snirf-measurement-date",
+  "brainvision-segment-date",
+  "nirx-header-date",
 ]);
 
 /** The shape of some text: produced only by {@link shapeOf}, so a raw value cannot be assigned to it. */
@@ -386,8 +407,13 @@ function isNameLikePart(part: string, strict: boolean): boolean {
   return runs.some((run) => run.length >= 4 && !exempt(run));
 }
 
-/** A whitespace token that could be a name, after splitting on delimiters such as `^ , / = :`. */
-function isNameLike(token: string, strict = false): boolean {
+/**
+ * A whitespace token that could be a name, after splitting on delimiters such as `^ , / = :`.
+ * `strict` is the rule for a slot that should hold a code: only placeholders and study-group words
+ * are exempt, not the neutral vocabulary.
+ * Exported for the text-header readers (`shared/readers/`), so every format asks the same question.
+ */
+export function isNameLike(token: string, strict = false): boolean {
   if (token === "" || isCodeLike(token)) return false;
   return token.split(PART_SPLIT).some((part) => isNameLikePart(part, strict));
 }
@@ -551,6 +577,29 @@ function findDates(text: string): DateMatch[] {
           d.index + d.text.length <= o.index + o.text.length,
       ),
   );
+}
+
+/**
+ * True when the text holds a calendar date finer than the year (any date that is not 1 January
+ * under every reading), by the same layouts {@link scanEdfHeader} reads. For the text-header
+ * readers (`shared/readers/`).
+ */
+export function hasDateFinerThanYear(text: string): boolean {
+  return findDates(text).some((d) => !isYearOnly(d.candidates));
+}
+
+/**
+ * The finest date in some text: `day` for a calendar date that is not 1 January, `month` for a
+ * year and month, `year` for a year-only date (1 January, or a bare four-digit year), or null
+ * when the scanner reads no date in it. For the text-header readers' birth-date rule.
+ */
+export function datePrecision(text: string): "day" | "month" | "year" | null {
+  const dates = findDates(text);
+  const fine = dates.filter((d) => !isYearOnly(d.candidates));
+  if (fine.some((d) => d.candidates.some((c) => c.day > 0))) return "day";
+  if (fine.length > 0) return "month";
+  if (dates.length > 0 || /(?<!\d)(19|20)\d{2}(?!\d)/.test(text)) return "year";
+  return null;
 }
 
 /** The text with every date found in it replaced by a space, so month names are not read as names. */
@@ -1012,6 +1061,25 @@ const IDENTIFIER_KEYS = new Set([
 /** Keys that may be an author's public contact or a participant's: a person decides. */
 const REVIEW_KEYS = new Set(["address", "contact", "phone", "telephone", "email", "national"]);
 
+/** Canonical key names that hold a birth date. */
+export const BIRTH_KEYS: ReadonlySet<string> = new Set([
+  "patientbirthdate",
+  "birthdate",
+  "dateofbirth",
+  "dob",
+]);
+
+/**
+ * The severity a key or field name carries by itself, from its canonical spelling: `identifier`
+ * for a name, a birth date or a record number, `review` for a contact, null for anything else.
+ * The JSON key rule and the HDF5 field rule share it.
+ */
+export function identifierKeySeverity(canonicalName: string): Severity | null {
+  if (IDENTIFIER_KEYS.has(canonicalName)) return "identifier";
+  if (REVIEW_KEYS.has(canonicalName)) return "review";
+  return null;
+}
+
 /** True when a JSON value holds anything at all, at any depth. */
 export function hasContent(value: unknown): boolean {
   if (value === null || value === undefined) return false;
@@ -1037,11 +1105,7 @@ export function scanJsonKeys(doc: unknown): Finding[] {
   if (doc === null || typeof doc !== "object") return out;
   for (const [key, value] of Object.entries(doc as Record<string, unknown>)) {
     const name = canonical(key);
-    const severity: Severity | null = IDENTIFIER_KEYS.has(name)
-      ? "identifier"
-      : REVIEW_KEYS.has(name)
-        ? "review"
-        : null;
+    const severity = identifierKeySeverity(name);
     if (severity && hasContent(value)) {
       const sample = Array.isArray(value) ? "[]" : typeof value === "object" ? "{}" : String(value);
       out.push({ kind: "json-identifier-key", severity, field: name, shape: shapeOf(sample) });
@@ -1140,10 +1204,11 @@ export function scanTextForLocalPaths(text: string): Finding[] {
 export const DIRECTORY_FORMATS: readonly string[] = [".ds", ".mff", ".mefd", ".zarr"];
 /**
  * Formats counted as recording or signal data wherever they sit, named or not by BIDS, when no
- * registered reader reads them. An extension leaves this list when a reader is registered for it.
+ * registered reader reads them. An extension stays here after a reader is registered for it: the
+ * report's closed list of format names (`KNOWN_FORMATS`) is built from this list, and stored
+ * reports, and formats inside a ZIP, still name it.
  */
 export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
-  ".vhdr",
   ".set",
   ".fdt",
   ".fif",
