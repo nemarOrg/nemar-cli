@@ -32,6 +32,7 @@ import {
   qualityAdminRecordPath,
   qualityRecordPath,
 } from "../../shared/contract/quality-route";
+import { runViewRefusal } from "../src/routes/admin/quality-views";
 import { dataRoutes } from "../src/routes/data";
 import { viewFiles } from "../src/services/quality-views";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -370,6 +371,24 @@ describe("only a stored, in-date derivative of the run is read", () => {
       await call(`/admin/compute/pipeline/runs/99999999999999999/quality/record/${RECORDING}`),
       "stamp_not_found",
     );
+  });
+
+  test("a state the table does not know yet is never read (the table's CHECK holds four today)", () => {
+    const row = {
+      stamp_id: 1,
+      key: "a".repeat(64),
+      dataset_id: DATASET,
+      recipe: "nemar-ica",
+      version: "v1.0.0",
+      recipe_version: "1",
+      input: "bids" as const,
+      retention: "canary",
+      stored_at: "2026-11-20 10:00:00",
+      quality_plugins: "[]",
+      past: 0,
+    };
+    expect(runViewRefusal({ ...row, state: "stored" })).toBeNull();
+    expect(runViewRefusal({ ...row, state: "archived" })).toBe("derivative_not_keyed");
   });
 
   test("a derivative row of another dataset than its stamp's is never the run's", async () => {
