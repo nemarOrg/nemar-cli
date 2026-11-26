@@ -117,7 +117,9 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "compareRecordedStat",
     "createRevertBranch",
     "describeChangedSinceTracked",
+    "describeIntegrationFailure",
     "describeStaleFlagFailure",
+    "integrateRemoteIntoAdjustedBranch",
     "isNonFastForwardPush",
     "pushAnnexBranchToGitHub",
     "pushBranch",
@@ -223,6 +225,10 @@ const INTERNAL_WIRING = [
   "replaceDefaultAnnexDescription",
   // Annex-only guarded push used after S3 copy has advanced git-annex.
   "pushAnnexBranchToGitHub",
+  // Local patch for nemar-cli#2140: the adjusted-branch integration used by pushToGitHub's
+  // retry and by the upload before validation (upload/integrate-remote.ts), and its message.
+  "integrateRemoteIntoAdjustedBranch",
+  "describeIntegrationFailure",
   // policy.ts postdates the split (#1158). Its surface is consumed by sibling
   // git-annex modules and by import-openneuro, never by the CLI directly, so
   // none of it belongs to the pre-split monolith surface below.
