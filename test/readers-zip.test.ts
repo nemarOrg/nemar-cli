@@ -87,6 +87,8 @@ interface Spec {
   flags?: number;
   /** The uncompressed size the headers declare, when it is not the data's. */
   declared?: number;
+  /** Extra fields of the central directory entry (a ZIP64 field, say). */
+  extra?: Uint8Array;
 }
 
 const enc = new TextEncoder();
@@ -94,7 +96,14 @@ const enc = new TextEncoder();
 /** An archive per APPNOTE 6.3.10: local headers and data, the central directory, the end record. */
 function buildZip(
   specs: readonly Spec[],
-  options: { disk?: number } = {},
+  options: {
+    disk?: number;
+    /** The end record's entry counts (on this disk, in all), when they are not the real count. */
+    count?: number;
+    onDisk?: number;
+    /** The end record's directory size, when it is not the real size. */
+    size?: number;
+  } = {},
 ): { bytes: Uint8Array; directoryOffset: number; directorySize: number } {
   const parts: Uint8Array[] = [];
   const central: Uint8Array[] = [];
@@ -119,7 +128,8 @@ function buildZip(
     l.setUint32(22, declared, true);
     l.setUint16(26, name.length, true);
     local.set(name, 30);
-    const entry = new Uint8Array(46 + name.length);
+    const extra = spec.extra ?? new Uint8Array(0);
+    const entry = new Uint8Array(46 + name.length + extra.length);
     const c = new DataView(entry.buffer);
     c.setUint32(0, 0x02014b50, true);
     c.setUint16(4, 0x031e, true);
@@ -131,8 +141,10 @@ function buildZip(
     c.setUint32(20, body.length, true);
     c.setUint32(24, declared, true);
     c.setUint16(28, name.length, true);
+    c.setUint16(30, extra.length, true);
     c.setUint32(42, offset, true);
     entry.set(name, 46);
+    entry.set(extra, 46 + name.length);
     parts.push(local, body);
     central.push(entry);
     offset += local.length + body.length;
@@ -144,9 +156,9 @@ function buildZip(
   e.setUint32(0, 0x06054b50, true);
   e.setUint16(4, options.disk ?? 0, true);
   e.setUint16(6, options.disk ?? 0, true);
-  e.setUint16(8, specs.length, true);
-  e.setUint16(10, specs.length, true);
-  e.setUint32(12, directorySize, true);
+  e.setUint16(8, options.onDisk ?? options.count ?? specs.length, true);
+  e.setUint16(10, options.count ?? specs.length, true);
+  e.setUint32(12, options.size ?? directorySize, true);
   e.setUint32(16, directoryOffset, true);
   const all = [...parts, ...central, end];
   const bytes = new Uint8Array(all.reduce((n, p) => n + p.length, 0));
@@ -369,6 +381,71 @@ describe("which inner entries are read", () => {
     expect(JSON.stringify(result)).not.toContain("Marlow");
   });
 
+  /** A ZIP64 extended-information field holding these 64-bit values. */
+  const zip64Field = (...values: bigint[]) => {
+    const field = new Uint8Array(4 + 8 * values.length);
+    const v = new DataView(field.buffer);
+    v.setUint16(0, 0x0001, true);
+    v.setUint16(2, 8 * values.length, true);
+    values.forEach((x, i) => v.setBigUint64(4 + 8 * i, x, true));
+    return field;
+  };
+
+  test("a size of 0xFFFFFFFF whose ZIP64 value is 2^64-1 is corrupt and never reaches the inflater", async () => {
+    // The EDF reader is watched: the entry must stop at the gate, before any inner read.
+    const seen: string[] = [];
+    const watched: FormatReader = {
+      ...EDF_READER,
+      scan: (src, path, limits) => {
+        seen.push(path);
+        return EDF_READER.scan(src, path, limits);
+      },
+    };
+    const reader = createZipReader(kitWith([watched, ...INNER.filter((r) => r.id !== "edf")]));
+    const { result } = await scan(
+      buildZip([
+        {
+          name: "a.edf",
+          data: FLAGGED,
+          method: 8,
+          declared: 0xffffffff,
+          extra: zip64Field(0xffffffffffffffffn),
+        },
+      ]).bytes,
+      { reader },
+    );
+    expect(seen).toEqual([]);
+    expect(result.coverage).toBe("partial");
+    expect(result.incomplete).toBe("corrupt");
+    expect(result.unscreened).toBeUndefined();
+  }, 2000);
+
+  test("a 0xFFFFFFFF size with no ZIP64 field, or one too short, is corrupt, not a cap skip", async () => {
+    const short = new Uint8Array([0x01, 0x00, 0x04, 0x00, 0, 0, 0, 0]);
+    for (const extra of [undefined, short]) {
+      const { result } = await scan(
+        buildZip([{ name: "a.edf", data: FLAGGED, method: 8, declared: 0xffffffff, extra }]).bytes,
+      );
+      expect(result.coverage, String(extra?.length)).toBe("partial");
+      expect(result.incomplete, String(extra?.length)).toBe("corrupt");
+      expect(result.unscreened, String(extra?.length)).toBeUndefined();
+    }
+    // Twin: a ZIP64 field with the real size is read.
+    const resolved = await scan(
+      buildZip([
+        {
+          name: "a.edf",
+          data: FLAGGED,
+          method: 8,
+          declared: 0xffffffff,
+          extra: zip64Field(BigInt(FLAGGED.length)),
+        },
+      ]).bytes,
+    );
+    expect(resolved.result.coverage).toBe("complete");
+    expect(has(resolved.result.findings, "edf-patient-name")).toBe(true);
+  });
+
   test("macOS resource forks are screened by name and never read as recordings", async () => {
     const { result } = await scan(
       buildZip([{ name: "__MACOSX/sub-01/._sub-01_eeg.edf", data: new Uint8Array(300) }]).bytes,
@@ -478,6 +555,35 @@ describe("the central directory", () => {
     expect(over.result.incomplete).toBe("limit");
     const small = make(Math.floor(MIB4 / 260));
     expect((await scan(small.bytes)).result.coverage).toBe("complete");
+  });
+
+  // Review round 1 of #2392: an end record that declares fewer entries than the directory holds
+  // hides the rest. The hidden entry is a deflated EDF with identifier findings.
+  test("entries the end record hides make the archive corrupt, never complete", async () => {
+    const hidden: Spec[] = [
+      { name: "README.txt", data: enc.encode("x") },
+      { name: "sourcedata/a.edf", data: FLAGGED, method: 8 },
+    ];
+    const real = buildZip(hidden);
+    expect((await scan(real.bytes)).result.coverage).toBe("complete");
+    // Counts of 0, and of 1 of 2, with the real directory size: bytes left in the directory.
+    for (const count of [0, 1]) {
+      const { result } = await scan(buildZip(hidden, { count }).bytes);
+      expect(result.coverage, String(count)).toBe("partial");
+      expect(result.incomplete, String(count)).toBe("corrupt");
+    }
+    // A count of 1 and a size that covers only the first entry: a directory entry follows it.
+    const first = 46 + "README.txt".length;
+    const shrunk = await scan(buildZip(hidden, { count: 1, size: first }).bytes);
+    expect(shrunk.result.coverage).toBe("partial");
+    expect(shrunk.result.incomplete).toBe("corrupt");
+  });
+
+  test("an end record whose entries-on-this-disk differs from the total is a split archive", async () => {
+    const specs = [{ name: "a.edf", data: FLAGGED }];
+    const { result } = await scan(buildZip(specs, { onDisk: 0 }).bytes);
+    expect(result.coverage).toBe("partial");
+    expect(result.incomplete).toBe("unsupported-version");
   });
 
   test("a split archive is partial (unsupported-version)", async () => {

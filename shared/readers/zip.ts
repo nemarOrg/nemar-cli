@@ -23,8 +23,11 @@
  *   Nesting is followed one level only: a ZIP inside a ZIP is screened by name and counted
  *   `zip:.zip`. An encrypted recording entry is counted so too, and makes the archive `partial`
  *   (`encrypted`).
- * - **Complete** only when the directory was read in full and every inner entry that was read
- *   was read completely.
+ * - **Complete** only when the directory was read in full (no directory bytes past the declared
+ *   entries, no directory entry past the declared size) and every inner entry that was read was
+ *   read completely. CRC-32 is not checked: the bytes are scanned as they inflate, and a size that
+ *   disagrees with the directory gives `corrupt`. An entry whose sizes or offset do not resolve (a
+ *   `0xFFFFFFFF` field with no ZIP64 field, or one too short, or past 2^53) is `corrupt`.
  *
  * What is an inner recording entry is decided by the registry's own coverage rule, as if the
  * archive's content were raw material under `sourcedata/`: an archive is raw material by nature,
@@ -118,6 +121,8 @@ export interface ZipEntry {
   uncompressedSize: number;
   localOffset: number;
   directory: boolean;
+  /** A size or offset did not resolve (an all-ones field with no ZIP64 value for it, or a value past 2^53). */
+  damaged: boolean;
 }
 
 /** The central directory as read, and why it was read only in part. */
@@ -285,7 +290,8 @@ export async function readZipDirectory(src: RangeSource, pageBytes: number): Pro
     let compressedSize = u32(dir, p + 20);
     let uncompressedSize = u32(dir, p + 24);
     let localOffset = u32(dir, p + 42);
-    // ZIP64 extended information: only the fields whose 32-bit value is all ones, in order.
+    // ZIP64 extended information: only the fields whose 32-bit value is all ones, in order. A
+    // field left all ones (no ZIP64 field, or one too short for it) is unresolved.
     let x = p + CENTRAL_BYTES + nameLength;
     const extraEnd = x + extraLength;
     while (x + 4 <= extraEnd) {
@@ -307,6 +313,9 @@ export async function readZipDirectory(src: RangeSource, pageBytes: number): Pro
       x += 4 + length;
     }
     const name = entryName(dir.subarray(p + CENTRAL_BYTES, p + CENTRAL_BYTES + nameLength));
+    const damaged = [compressedSize, uncompressedSize, localOffset].some(
+      (v) => v === 0xffffffff || !Number.isSafeInteger(v),
+    );
     entries.push({
       name,
       method: u16(dir, p + 10),
@@ -315,8 +324,18 @@ export async function readZipDirectory(src: RangeSource, pageBytes: number): Pro
       uncompressedSize,
       localOffset,
       directory: name.endsWith("/"),
+      damaged,
     });
     p = next;
+  }
+  if (incomplete === undefined) {
+    // Directory bytes past the declared entries, or a directory entry right after the declared
+    // directory, are entries the end record hides: never a complete read.
+    if (p < dir.length) incomplete = "corrupt";
+    else if (directoryOffset + directorySize + 4 <= directoryEnd) {
+      const after = await src.read(directoryOffset + directorySize, 4);
+      if (after.length === 4 && u32(after, 0) === SIG_CENTRAL) incomplete = "corrupt";
+    }
   }
   return incomplete === undefined ? { entries, declared } : { entries, declared, incomplete };
 }
@@ -441,7 +460,7 @@ function inflatingSource(
 
   const append = (chunk: Uint8Array) => {
     if (produced + chunk.length > buffer.length) {
-      let capacity = buffer.length * 2;
+      let capacity = Math.max(1, buffer.length * 2);
       while (capacity < produced + chunk.length) capacity *= 2;
       const grown = new Uint8Array(Math.min(capacity, declared));
       grown.set(buffer.subarray(0, produced));
@@ -607,10 +626,17 @@ export async function scanZip(
       continue;
     }
     if (
-      (entry.method !== METHOD_STORED && entry.method !== METHOD_DEFLATE) ||
-      entry.uncompressedSize > ZIP_ENTRY_MAX_BYTES ||
+      entry.damaged ||
+      !Number.isSafeInteger(entry.uncompressedSize) ||
       !Number.isSafeInteger(entry.compressedSize) ||
       !Number.isSafeInteger(entry.localOffset)
+    ) {
+      reason("corrupt");
+      continue;
+    }
+    if (
+      (entry.method !== METHOD_STORED && entry.method !== METHOD_DEFLATE) ||
+      entry.uncompressedSize > ZIP_ENTRY_MAX_BYTES
     ) {
       count(extension);
       continue;
