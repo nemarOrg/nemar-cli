@@ -14,9 +14,13 @@
  * because the recipe uses a row of the index only when the index's commit is its `--source-commit`, and the
  * commit it is given is the tag's.
  *
- * NOTHING HERE REFUSES A RUN. When there is no index, or it cannot be read, or it does not match, the job is
- * dispatched without one, and its specification records the word (`SERVING_INDEX_ABSENT_REASONS`): the run then
- * declares no view of the serving copy, as it did before this phase, and its derivative is keyed `none`.
+ * A FAULT DEFERS, ANYTHING ELSE DISPATCHES WITHOUT (ADR 0141, amended). When GitHub or the index cannot be read,
+ * or the copy cannot be kept (`SERVING_INDEX_FAULT_REASONS`), the dispatcher defers the run for up to 24 hours
+ * from its first deferral (`compute-pipeline.ts`, `servingIndexForRun`). When the index is absent, built from
+ * another commit, too large or not one the recipe can use, the job is dispatched at once without one, and its
+ * specification records the word: the run declares no view of the serving copy, and its derivative is keyed
+ * `none`. The index's shape is checked here as the recipe checks it (`servingIndexShapeOk`), so a run is never
+ * handed an index it would refuse.
  *
  * THE BOUNDS are `checkZarrSource`'s: one GitHub tag lookup (two requests at most, the second only after a 404
  * or 422 without the leading `v`), one index read abandoned after `ZARR_SOURCE_INDEX_TIMEOUT_MS` and read to at
@@ -29,6 +33,7 @@ import {
   COMPUTE_SERVING_INDEX_MAX_BYTES,
   type ServingIndexAbsentReason,
 } from "../../../shared/contract/compute.js";
+import { readIJson } from "../../../shared/contract/view-digest.js";
 import type { Bindings } from "../types/bindings.js";
 import { putServingIndexCopy, sha256Hex } from "./compute-records.js";
 import { isNonProductionEnv } from "./environment.js";
@@ -137,38 +142,125 @@ async function readIndexBytes(env: Bindings, datasetId: string): Promise<IndexRe
     }
     const bytes = await readBytesBounded(res, COMPUTE_SERVING_INDEX_MAX_BYTES);
     if (bytes === null) return { ok: false, reason: "index_too_large" };
-    if (bytes.byteLength === 0) return { ok: false, reason: "index_unreadable" };
     return { ok: true, bytes };
   } catch {
     return { ok: false, reason: "index_unreadable" };
   }
 }
 
-/** The `source_commit` of the index's bytes, or why it has none a run can use. */
+/** nemar-process `zarr_input`: `MAX_NAME_LENGTH`, `MAX_DECLARED_CHANNELS`, `MAX_DECLARED_SAMPLES`. */
+const MAX_NAME_LENGTH = 1024;
+const MAX_DECLARED_CHANNELS = 100_000;
+const MAX_DECLARED_SAMPLES = 10 ** 11;
+const MAX_STORE_COUNT = 10 ** 9;
+const UNSAFE_PATH_CHARACTERS = new Set(["?", "#", "%", "\\"]);
+
+const isWhole = (value: unknown, low: number, high: number): boolean =>
+  typeof value === "number" && Number.isInteger(value) && value >= low && value <= high;
+
+/** nemar-process `zarr_input._name`: text of 1 to 1,024 code points with no control character. */
+function isName(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const points = [...value];
+  if (points.length === 0 || points.length > MAX_NAME_LENGTH) return false;
+  return points.every((p) => {
+    const cp = p.codePointAt(0) as number;
+    return cp >= 32 && cp !== 127;
+  });
+}
+
+/** nemar-process `zarr_input._relative`: a name of plain segments, none empty, none starting with a dot. */
+const isRelative = (value: unknown): boolean =>
+  isName(value) &&
+  !value.split("/").some((segment) => segment === "" || segment.startsWith(".")) &&
+  ![...value].some((c) => UNSAFE_PATH_CHARACTERS.has(c));
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * Whether an index document has the shape the recipe requires before it reads one (nemar-process
+ * `zarr_input.validate_document`, rule for rule): `stores` a list and `store_count` a whole number; each store
+ * an object with a relative `path` and `zarr` and a list of `groups`; each group an object with a `name`, a
+ * text `modality`, a positive finite `rate` and whole `n_channels` and `n_samples` within their bounds. An index
+ * the recipe would refuse is never staged (`index_unusable`), so a run is never handed one.
+ */
+export function servingIndexShapeOk(document: unknown): boolean {
+  if (!isRecord(document)) return false;
+  const stores = document.stores;
+  if (!Array.isArray(stores)) return false;
+  if (!isWhole(document.store_count, 0, MAX_STORE_COUNT)) return false;
+  for (const entry of stores) {
+    if (!isRecord(entry)) return false;
+    if (!isRelative(entry.path) || !isRelative(entry.zarr)) return false;
+    const groups = entry.groups;
+    if (!Array.isArray(groups)) return false;
+    for (const group of groups) {
+      if (!isRecord(group)) return false;
+      if (!isName(group.name) || typeof group.modality !== "string") return false;
+      const rate = group.rate;
+      if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0) return false;
+      if (!isWhole(group.n_channels, 0, MAX_DECLARED_CHANNELS)) return false;
+      if (!isWhole(group.n_samples, 0, MAX_DECLARED_SAMPLES)) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The `source_commit` of the index's bytes, or why a run cannot use it: bytes that are not strict JSON (a byte
+ * order mark, not UTF-8, a repeated member name, I-JSON's other refusals: `readIJson`) or not the shape the
+ * recipe requires are `index_unusable`; a document with no full commit is `index_commit_unusable`.
+ */
 function indexSourceCommit(
   bytes: Uint8Array,
 ):
   | { ok: true; commit: string }
-  | { ok: false; reason: "index_unreadable" | "index_commit_unusable" } {
-  let value: unknown;
+  | { ok: false; reason: "index_unusable" | "index_commit_unusable" } {
+  let text: string;
   try {
-    value = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
+    // The byte order mark is kept in the text, so `readIJson` refuses it as the recipe's reader does.
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch {
-    return { ok: false, reason: "index_unreadable" };
+    return { ok: false, reason: "index_unusable" };
   }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return { ok: false, reason: "index_unreadable" };
+  const read = readIJson(text);
+  if (!read.ok || !servingIndexShapeOk(read.value)) {
+    return { ok: false, reason: "index_unusable" };
   }
-  const commit = (value as Record<string, unknown>).source_commit;
+  const commit = (read.value as Record<string, unknown>).source_commit;
   return isSourceCommit(commit)
     ? { ok: true, commit }
     : { ok: false, reason: "index_commit_unusable" };
 }
 
 /**
+ * The words of a staging that may clear on a later attempt (ADR 0141 amendment): GitHub or the index could not
+ * be read, or the copy could not be kept. A run is not dispatched on one of them for
+ * {@link SERVING_INDEX_DEFER_MINUTES} from its first deferral; every other word dispatches it at once without an
+ * index (the index is absent, of another commit, or one the recipe cannot use).
+ */
+export const SERVING_INDEX_FAULT_REASONS: readonly ServingIndexAbsentReason[] = Object.freeze([
+  "github_unreadable",
+  "index_unreadable",
+  "token_mint_failed",
+  "no_github_credentials",
+  "index_not_stored",
+]);
+
+/** How long a run is deferred on a fault before it is dispatched without the index: 24 hours. */
+export const SERVING_INDEX_DEFER_MINUTES = 24 * 60;
+
+export const isServingIndexFault = (reason: ServingIndexAbsentReason): boolean =>
+  SERVING_INDEX_FAULT_REASONS.includes(reason);
+
+const errorName = (err: unknown): string =>
+  err instanceof Error ? err.name.replace(/[^A-Za-z0-9]/g, "") || "Error" : "unknown";
+
+/**
  * Stage the serving index of `datasetId` for a run of the version tagged `tag` (the data-plane tag, `v1.0.2`),
- * or say why none is staged. Never throws: every failure is a word, and a word dispatches the run without an
- * index. The copy is kept BEFORE this answers `staged`, so a specification never names bytes that are not kept.
+ * or say why none is staged. Never throws: every failure is a word; a fault (`isServingIndexFault`) defers the
+ * run, any other word dispatches it without an index. The copy is kept BEFORE this answers `staged`, so a specification never names bytes that are not kept.
  */
 export async function stageServingIndex(
   env: Bindings,
@@ -192,16 +284,19 @@ export async function stageServingIndex(
     let kept: boolean;
     try {
       kept = await putServingIndexCopy(env, sha256, index.bytes);
-    } catch {
-      kept = false;
+    } catch (err) {
+      console.error(`[serving-index] copy_put_failed error=${errorName(err)}`);
+      return absent("index_not_stored");
     }
-    if (!kept) return absent("index_not_stored");
+    if (!kept) {
+      // Other bytes under a content address: never overwritten, and an administrator looks.
+      console.error(`[serving-index] copy_conflict sha256=${sha256}`);
+      return absent("index_not_stored");
+    }
     return { staged: true, sha256, size: index.bytes.byteLength, sourceCommit: source.commit };
   } catch (err) {
     // A throw here is a defect, not a service: the error's name (never its message) is for the operator.
-    console.error(
-      `[serving-index] stage_threw error=${err instanceof Error ? err.name.replace(/[^A-Za-z0-9]/g, "") : "unknown"}`,
-    );
+    console.error(`[serving-index] stage_threw error=${errorName(err)}`);
     return absent("index_unreadable");
   }
 }

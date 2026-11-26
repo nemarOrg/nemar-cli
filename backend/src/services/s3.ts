@@ -1280,9 +1280,11 @@ export async function getZarrIndex(
 
 /**
  * The response of a signed GET of `<id>/zarr/index.json`, unread, for a caller that needs the exact
- * bytes (the serving index a pipeline job is handed, ADR 0141): null on 404 or 403 (absent, as for
- * {@link getZarrIndex}), the response on 200, and a throw for any other status. The caller bounds the
- * read and the wait; this never reads the body.
+ * bytes (the serving index a pipeline job is handed, ADR 0141): null on 404 only (the index is absent),
+ * the response on 200, and a throw for any other status. Unlike {@link getZarrIndex}, whose sweep must
+ * converge and so reads a 403 as absent, a 403 here is a FAULT (missing without `s3:ListBucket`, or a
+ * credential problem cannot be told apart), so the dispatcher defers rather than run without an index
+ * that may be there. The caller bounds the read and the wait; this never reads the body.
  */
 export async function getZarrIndexResponse(
   options: PresignedUrlOptions,
@@ -1296,7 +1298,7 @@ export async function getZarrIndexResponse(
   const aws = createS3Client(options);
   const signed = await aws.sign(url, { method: "GET" });
   const response = await fetch(signed, signal === undefined ? undefined : { signal });
-  if (response.status === 404 || response.status === 403) {
+  if (response.status === 404) {
     await response.body?.cancel().catch(() => {});
     return null;
   }

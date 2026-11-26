@@ -72,6 +72,7 @@ describe("what a job's specification records of the serving index", () => {
       "index_unreadable",
       "index_too_large",
       "index_commit_unusable",
+      "index_unusable",
       "source_commit_differs",
       "tag_absent",
       "github_unreadable",

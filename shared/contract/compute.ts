@@ -689,14 +689,16 @@ export const COMPUTE_SERVING_INDEX_MAX_BYTES = 64 * 1024 * 1024;
  * Why the Worker staged no serving index for a job of a recipe that keys one (ADR 0141), recorded in the
  * job's specification: a fixed word, never a path or a message. `source_commit_differs` is an index built
  * from another commit than the version's tag (a later conversion, or a commit that differs by metadata only,
- * which the Zarr input's `metadata_only` allows and this never does); the others say the index or the tag
- * could not be read, or the copy could not be kept.
+ * which the Zarr input's `metadata_only` allows and this never does); `index_unusable` is an index the recipe
+ * would refuse (not strict JSON, or not the shape it reads); the others say the index or the tag could not
+ * be read, or the copy could not be kept.
  */
 export const SERVING_INDEX_ABSENT_REASONS = [
   "no_index",
   "index_unreadable",
   "index_too_large",
   "index_commit_unusable",
+  "index_unusable",
   "source_commit_differs",
   "tag_absent",
   "github_unreadable",
