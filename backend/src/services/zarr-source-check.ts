@@ -169,7 +169,7 @@ const unverifiable = (reason: ZarrSourceReason): Refused => ({
 // --- Bounded reads --------------------------------------------------------------------------------------
 
 /** Rejects after `ms`; the work it races is not cancelled (a promise cannot be), only no longer waited for. */
-function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+export function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const clock = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error("timeout")), ms);
@@ -329,11 +329,12 @@ async function indexCommit(
 // --- T: the commit of the version's tag -----------------------------------------------------------------
 
 /** What a GitHub request needs: the installation token (null: none), the user agent, and a 401's consequence. */
-type GithubAccess =
+export type GithubAccess =
   | { ok: true; token: string | null; userAgent: string; onUnauthorized: () => void }
   | { ok: false; reason: "no_github_credentials" | "token_mint_failed" };
 
-async function githubAccess(env: Bindings): Promise<GithubAccess> {
+/** The GitHub access of a check: the App's installation token, none outside production, or the refusal. */
+export async function githubAccess(env: Bindings): Promise<GithubAccess> {
   const userAgent = isNonProductionEnv(env) ? ZARR_SOURCE_LOCAL_USER_AGENT : "NEMAR-API";
   const installation = resolveInstallationId(env, ORG_NAME);
   if (getGitHubAppConfig(env) !== null && installation !== undefined) {
@@ -370,7 +371,8 @@ const githubHeaders = (access: GithubAccess & { ok: true }): Record<string, stri
 /** Is the string a path segment safe to put in a GitHub URL: the tag and ids this tree writes are. */
 const ref = (value: string): string => encodeURIComponent(value);
 
-async function tagCommit(
+/** The commit of a version's tag, looked up as a tag (`refs/tags/`), with and without its leading `v`. */
+export async function tagCommit(
   repo: string,
   tag: string,
   access: GithubAccess & { ok: true },

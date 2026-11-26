@@ -56,9 +56,11 @@ import {
   readRecipeRecord,
   recipeArguments,
   recipeCommand,
+  recipeKeysServingIndex,
   recipeRequiredOutputs,
   recipeRunsInput,
   recipeRunsOn,
+  recipeServingIndexArguments,
   recipeZarrArguments,
   recipeZarrBase,
   stampInputFields,
@@ -68,7 +70,10 @@ import {
   COMPUTE_PIPELINE_RUN_PER_INVOCATION,
   type ComputePipelineLimitedBy,
 } from "../../../shared/contract/compute-admin.js";
-import { resultsOutputKey } from "../../../shared/contract/compute-launch.js";
+import {
+  SERVING_INDEX_CONTAINER_PATH,
+  resultsOutputKey,
+} from "../../../shared/contract/compute-launch.js";
 import {
   type ComputePolicy,
   type ComputePool,
@@ -118,6 +123,7 @@ import { readRuntimeImage } from "./compute-runtime-image.js";
 import { computeEnabled, computeRunnersEnabled } from "./compute-switches.js";
 import { tenantFacts, tenantRoom } from "./compute-tenant.js";
 import { isNonProductionEnv } from "./environment.js";
+import { type StagedServingIndex, stageServingIndex } from "./serving-index-staging.js";
 import { checkZarrSource } from "./zarr-source-check.js";
 
 // --- Words ------------------------------------------------------------------------------------------
@@ -439,12 +445,22 @@ export function recipeJobSpec(
     zarrSource?: ZarrCommitAttestation | null;
     /** The Worker's bindings the Zarr origin is read from; only a `zarr` input reads them. */
     env: Pick<Bindings, "ENVIRONMENT" | "ZARR_HOSTNAME">;
+    /**
+     * What `stageServingIndex` staged (ADR 0141). Required for a recipe that keys the serving index on this
+     * input (`recipeKeysServingIndex`), never read for any other.
+     */
+    servingIndex?: StagedServingIndex;
   },
 ) {
   if (!recipe.inputs.includes(input.input)) {
     throw new RangeError("the recipe does not read that input");
   }
   const zarr = input.input === "zarr";
+  const keysIndex = recipeKeysServingIndex(recipe, input.input);
+  if (keysIndex && input.servingIndex === undefined) {
+    throw new RangeError("a recipe that keys the serving index needs what was staged");
+  }
+  const staged = keysIndex ? (input.servingIndex as StagedServingIndex) : null;
   return JobSpecSchema.parse({
     name: `${recipe.name} ${input.datasetId} ${input.tag}`.slice(0, 80),
     runtime: "image",
@@ -459,10 +475,26 @@ export function recipeJobSpec(
           imageDigest: input.image.digest,
           zarrBase: pipelineZarrBase(input.env),
         })
-      : recipeArguments({
-          datasetId: input.datasetId,
-          tag: input.tag,
-          imageDigest: input.image.digest,
+      : [
+          ...recipeArguments({
+            datasetId: input.datasetId,
+            tag: input.tag,
+            imageDigest: input.image.digest,
+          }),
+          // The staged index's file and the commit it was built from, the tag's (ADR 0141).
+          ...(staged?.staged === true
+            ? recipeServingIndexArguments({
+                path: SERVING_INDEX_CONTAINER_PATH,
+                sourceCommit: staged.sourceCommit,
+              })
+            : []),
+        ],
+    ...(staged === null
+      ? {}
+      : {
+          serving_index: staged.staged
+            ? { sha256: staged.sha256, size: staged.size }
+            : { reason: staged.reason },
         }),
     datasets: zarr ? [] : [{ id: input.datasetId, version: input.tag }],
     partition: recipe.partition,
@@ -722,6 +754,18 @@ export async function dispatchPipelineJob(
   if (!resolved.ok) return fail(resolved.code, datasetId, resolved.extra);
   const { tag } = resolved;
 
+  // A run of the archive by a recipe that keys the serving index is handed the index built from the tag's
+  // commit, or none with the word for why (ADR 0141). Before the claim, like the specification: it reads and
+  // keeps a content-addressed copy, and never refuses the run.
+  const servingIndex = recipeKeysServingIndex(recipe, recipeInput)
+    ? await stageServingIndex(env, datasetId, tag)
+    : undefined;
+  if (servingIndex !== undefined && !servingIndex.staged) {
+    console.error(
+      `[compute-pipeline] serving_index_absent dataset=${datasetId} reason=${servingIndex.reason}`,
+    );
+  }
+
   const image = readRuntimeImage(env);
   if (image.state !== "ok") return fail("runtime_unavailable", datasetId, { version: tag });
   const accountId = await pipelinesAccountId(db);
@@ -738,6 +782,7 @@ export async function dispatchPipelineJob(
       image,
       zarrSource: resolved.zarrSource,
       env,
+      ...(servingIndex === undefined ? {} : { servingIndex }),
     });
   } catch (err) {
     console.error(
