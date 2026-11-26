@@ -103,6 +103,7 @@ describe("0098 publication_reviews: columns", () => {
     models: { type: "TEXT", notnull: 0, dflt: null },
     prompt_version: { type: "TEXT", notnull: 0, dflt: null },
     input_digest: { type: "TEXT", notnull: 0, dflt: null },
+    enrichment_source: { type: "TEXT", notnull: 0, dflt: null },
   };
 
   test("exactly the declared columns, types, NOT NULLs and defaults", () => {
@@ -573,6 +574,7 @@ describe("the row module", () => {
         "models",
         "promptVersion",
         "inputDigest",
+        "enrichmentSource",
       ].sort(),
     );
     expect(row).toMatchObject({

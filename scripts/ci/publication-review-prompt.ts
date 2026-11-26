@@ -277,7 +277,7 @@ export function assemblePublicationReport(
   modelOutput: unknown,
   facts: ReviewFacts,
   model: ReviewerModel = PUBLICATION_REVIEW_MODEL,
-  run: { inputDigest: string; resolverVersion: string | null } = {
+  run: { inputDigest: string; resolverVersion: string | null; enrichmentSource?: string | null } = {
     inputDigest: "0".repeat(64),
     resolverVersion: null,
   },
@@ -340,6 +340,7 @@ export function assemblePublicationReport(
           models: [{ model, effort: PUBLICATION_REVIEW_EFFORT }],
           input_digest: run.inputDigest,
           resolver_version: run.resolverVersion,
+          enrichment_source: run.enrichmentSource ?? null,
         },
       },
       options,

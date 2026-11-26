@@ -28,11 +28,20 @@
  * environment's NAME, so a payload cannot steer the report to a host of its choosing. The report
  * echoes the head and the release kind, and the Worker refuses one that does not match its row.
  *
- * **The model sees only cleared text.** Every document goes through `publication-review-presend.ts`
- * and the prompt builder accepts nothing else (ADR 0102, section 2).
+ * **The metadata comes from the Worker.** After the workflow's claim and before anything is
+ * examined, the script asks the Worker for the review's widened inputs
+ * (`POST /webhooks/publication-review-inputs`, with the same callback token; ADR 0139, decision 6):
+ * the enrichment as D1 holds it at review time, the license lineage, the resubmission note, the
+ * previous denial's closed reason codes and the screen's coverage counts. A failed call, or any
+ * answer but a 200 that parses, is the run error `inputs_unavailable`: the review never runs on
+ * part of its inputs. The body is never logged: it is the dataset's metadata.
+ *
+ * **The model sees only cleared text.** Every document, and every section of the inputs, goes
+ * through `publication-review-presend.ts` (`presend`, `presendInputs`), and the prompt builder
+ * accepts nothing else (ADR 0102, section 2).
  *
  * **The public log carries no value.** `nemarDatasets/.github` is public, so this prints a review
- * id, a request id and a fixed word, never a dataset's text, a finding, a count of findings, the
+ * id, a request id and a fixed word, never a dataset's text, an input the Worker served, a finding, a count of findings, the
  * model's output or a token. Every error is reported as a closed word, and only the words a job
  * may post: the Worker's own (`dispatch_failed`, `dispatch_unconfigured`, `review_disabled`) are
  * not in this script's vocabulary.
@@ -279,6 +288,7 @@ export async function runPublicationReview(args: ReviewArgs): Promise<Publicatio
       report: assemblePublicationReport(modelOutput, facts, PUBLICATION_REVIEW_MODEL, {
         inputDigest,
         resolverVersion: body.lineage.resolver_version,
+        enrichmentSource: body.enrichment?.source ?? null,
       }),
     };
   } catch (e) {

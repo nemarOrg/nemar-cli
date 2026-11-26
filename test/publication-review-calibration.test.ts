@@ -1507,6 +1507,7 @@ describe("the calibration model: Sonnet is accepted here and refused everywhere 
         models: [{ model: SONNET, effort: "high" }],
         input_digest: "0".repeat(64),
         resolver_version: null,
+        enrichment_source: null,
       },
     };
     expect(parsePublicationReviewReport(raw, { models: CALIBRATION_MODELS }).model).toBe(SONNET);

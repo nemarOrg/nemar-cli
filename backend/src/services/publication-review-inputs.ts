@@ -6,7 +6,10 @@
  * review and to nobody else:
  *
  *  - the enrichment, the fields `ENRICHMENT_FIELDS_SHOWN` of `datasets.enrichment_json` (the copy
- *    of `.nemar/metadata.json` that D1 keeps), with the instant D1 last stored it;
+ *    of `.nemar/metadata.json` that D1 keeps), as it is at review time, with the instant D1 last
+ *    stored it, which the review's record keeps (`enrichment_source`). It is the copy current when
+ *    the review runs, not one read at the reviewed commit; one that is stored and does not parse
+ *    ends the answer (`unavailable`), never reads as no enrichment;
  *  - the license lineage of the reviewed commit, resolved here by the one shared resolver over the
  *    description and README at that commit, the enrichment and the attestation's upstream source,
  *    with the Worker's per-DOI cache;
@@ -27,6 +30,7 @@ import {
   type CoverageSource,
   type CoverageTally,
   ENRICHMENT_FIELDS_SHOWN,
+  ENRICHMENT_SOURCE_RE,
   type EnrichmentField,
   MAX_COVERAGE_KEYS,
   MAX_INPUT_SOURCES,
@@ -353,6 +357,16 @@ export async function publicationReviewInputs(
     return { kind: "unavailable" };
   }
 
+  // The enrichment as D1 holds it now, at review time: the copy the review reads and its record
+  // names. One that is there and does not parse is not "no enrichment": nothing is reviewed.
+  const doc = parseObject(dataset.enrichment_json);
+  if (dataset.enrichment_json !== null && doc === null) {
+    console.warn(
+      `[publication-review-inputs] review ${reviewId} (${datasetId}): stored enrichment does not parse`,
+    );
+    return { kind: "unavailable" };
+  }
+
   const repo = dataset.github_repo ? extractRepoName(dataset.github_repo) : null;
   if (!repo) return { kind: "unavailable" };
 
@@ -386,7 +400,6 @@ export async function publicationReviewInputs(
     { cache: workerLineageCache() },
   );
 
-  const doc = parseObject(dataset.enrichment_json);
   const anonymous = request.anonymous === 1;
   const body: ReviewInputsBody = {
     v: REVIEW_INPUTS_VERSION,
@@ -396,7 +409,8 @@ export async function publicationReviewInputs(
         : {
             fields: enrichmentFieldsOf(doc, anonymous),
             source:
-              typeof dataset.enrichment_updated_at === "string"
+              typeof dataset.enrichment_updated_at === "string" &&
+              ENRICHMENT_SOURCE_RE.test(dataset.enrichment_updated_at)
                 ? dataset.enrichment_updated_at
                 : null,
           },

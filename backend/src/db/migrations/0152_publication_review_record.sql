@@ -13,8 +13,10 @@
 --   * `prompt_version`: the review prompt's version (`publication-review-prompt/<n>`).
 --   * `input_digest`: the SHA-256, in hex, of the exact input the job sent, with the run's fence
 --     nonce replaced by a fixed one, so two reviews over the same inputs have the same digest.
+--   * `enrichment_source`: which enrichment the review read: the copy of `.nemar/metadata.json`
+--     that D1 held at review time, named by the instant D1 stored it (or a commit); NULL for none.
 --
--- `head_sha` already records the commit. The six columns are set only on a reported row, and a
+-- `head_sha` already records the commit. The seven columns are set only on a reported row, and a
 -- reported row written by a job from before this record (a version-1 report) leaves them NULL.
 --
 -- `detail` gains `inputs_unavailable`: the job could not read the review's widened inputs from the
@@ -54,6 +56,7 @@ CREATE TABLE publication_reviews_new (
   models TEXT,
   prompt_version TEXT,
   input_digest TEXT CHECK (input_digest IS NULL OR length(input_digest) = 64),
+  enrichment_source TEXT,
   UNIQUE (request_id, head_sha, anonymous),
   -- A verdict, and a stored report, exist exactly when the review reported.
   CHECK ((state = 'reported') = (verdict IS NOT NULL)),
@@ -73,7 +76,7 @@ CREATE TABLE publication_reviews_new (
   -- The record is a reported review's alone.
   CHECK (state = 'reported' OR (scanner_id IS NULL AND reader_versions IS NULL
     AND resolver_version IS NULL AND models IS NULL AND prompt_version IS NULL
-    AND input_digest IS NULL)),
+    AND input_digest IS NULL AND enrichment_source IS NULL)),
   -- The job's part of the record is written whole or not at all.
   CHECK ((models IS NULL) = (prompt_version IS NULL)),
   CHECK ((models IS NULL) = (input_digest IS NULL))

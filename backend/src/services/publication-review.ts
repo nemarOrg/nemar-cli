@@ -950,9 +950,9 @@ export const STORE_RESULT_SQL_MARKER = "SET state = ?, verdict = ?";
  * seen) and a claimed row records `workflow_failed` instead, which counts.
  *
  * The reproducibility record (ADR 0139, decision 9) is written in the same statement, so a stored
- * report and its record cannot part: the six columns of migration 0152, NULL for a run error.
+ * report and its record cannot part: the seven columns of migration 0152, NULL for a run error.
  *
- * Binds, in order: the state, the verdict, the detail (twice), the report, the record's six
+ * Binds, in order: the state, the verdict, the detail (twice), the report, the record's seven
  * columns ({@link RECORD_COLUMNS}), then `waitingRow`'s.
  */
 function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): string {
@@ -974,6 +974,7 @@ const RECORD_COLUMNS = [
   "models",
   "prompt_version",
   "input_digest",
+  "enrichment_source",
 ] as const;
 
 /**
@@ -1001,6 +1002,7 @@ async function recordBinds(
     r === null ? null : JSON.stringify(r.models),
     r?.prompt_version ?? null,
     r?.input_digest ?? null,
+    r?.enrichment_source ?? null,
   ];
 }
 

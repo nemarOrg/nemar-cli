@@ -77,6 +77,7 @@ export interface PublicationReviewRow {
   models: string | null;
   promptVersion: string | null;
   inputDigest: string | null;
+  enrichmentSource: string | null;
 }
 
 /** Every column but `nonce`, which never leaves the callback module. */
@@ -84,7 +85,7 @@ export const ROW_COLUMNS =
   "id, request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, verdict, " +
   "detail, report, claimed_at, attempts, override_by, override_at, override_reasons, " +
   "created_at, decided_at, scanner_id, reader_versions, resolver_version, models, " +
-  "prompt_version, input_digest";
+  "prompt_version, input_digest, enrichment_source";
 
 const num = (v: unknown): number => Number(v);
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
@@ -117,6 +118,7 @@ export function toRow(raw: Record<string, unknown>): PublicationReviewRow {
     models: strOrNull(raw.models),
     promptVersion: strOrNull(raw.prompt_version),
     inputDigest: strOrNull(raw.input_digest),
+    enrichmentSource: strOrNull(raw.enrichment_source),
   };
 }
 
