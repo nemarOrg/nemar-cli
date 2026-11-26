@@ -66,7 +66,7 @@ export async function loadShardFooter(opts: {
     const parsed = shardIndexProjectionSchema.safeParse(raw);
     if (!parsed.success) {
       console.warn(
-        "[mcp] projection cache hit failed schema validation, treated as a miss",
+        "[zarr] projection cache hit failed schema validation, treated as a miss",
         cacheKey,
       );
     } else if (parsed.data.length === nInner) {
@@ -83,7 +83,7 @@ export async function loadShardFooter(opts: {
       };
     } else {
       console.warn(
-        `[read_window] ${key.datasetId} ${zarr}/${groupName} shard ${shardIndex}: cached footer has ` +
+        `[zarr] ${key.datasetId} ${zarr}/${groupName} shard ${shardIndex}: cached footer has ` +
           `${parsed.data.length} entries, expected ${nInner}; re-reading`,
       );
     }

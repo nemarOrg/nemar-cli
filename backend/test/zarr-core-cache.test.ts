@@ -28,7 +28,7 @@ const SHA = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
 const ZARR = "sub-synth/eeg/sub-synth_task-shardtest_eeg.zarr";
 const GROUP = "eeg_250hz";
 const ARRAY_PREFIX = `nm099500/zarr/${ZARR}/${GROUP}/0`;
-const SCHEMA_WARNING = "[mcp] projection cache hit failed schema validation, treated as a miss";
+const SCHEMA_WARNING = "[zarr] projection cache hit failed schema validation, treated as a miss";
 
 function fixtureBytes(name: string): Uint8Array {
   return new Uint8Array(readFileSync(new URL(name, FIXTURES)));
@@ -170,6 +170,7 @@ describe("shard footer cache (shared/zarr/shard-footer.ts)", () => {
       logged.some(
         (l) =>
           l.level === "warn" &&
+          String(l.args[0]).startsWith("[zarr] ") &&
           String(l.args[0]).includes("cached footer has 2 entries, expected 4; re-reading"),
       ),
     ).toBe(true);

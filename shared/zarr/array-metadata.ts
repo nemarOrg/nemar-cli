@@ -136,7 +136,7 @@ export async function loadLevel0ArrayMetadata(opts: {
       const cached = level0ArrayProjectionSchema.safeParse(raw);
       if (!cached.success) {
         console.warn(
-          "[mcp] projection cache hit failed schema validation, treated as a miss",
+          "[zarr] projection cache hit failed schema validation, treated as a miss",
           cacheKey,
         );
       } else {
