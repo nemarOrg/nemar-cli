@@ -168,7 +168,7 @@ export function walkDatasetTree(root: string): LocalTree {
  * cannot be opened, is `unreadable-entry`. Local failures are final, so none is retryable. A file
  * in `planned` (by absolute path) is read with its first bytes replaced by the planned header.
  */
-function createLocalReader(
+export function createLocalReader(
   readable: ReadonlyMap<string, string>,
   planned: ReadonlyMap<string, Uint8Array> = new Map(),
 ) {

@@ -165,6 +165,7 @@ describe("recordings are read through the registry", () => {
       brainvision: "1",
       nirx: "1",
       snirf: "test-1",
+      zip: "1",
     });
     // The twin: without the reader the same file is a format nobody reads.
     const without = await scan(files, WITHOUT_HDF5);
@@ -380,7 +381,14 @@ describe("the registry and the page cache", () => {
 
   test("the EDF/BDF reader keeps its 256 bytes", () => {
     expect(EDF_READER.limits.maxBytes).toBe(256);
-    expect(READERS.map((r) => r.id)).toEqual(["edf", "brainvision", "nirx", "snirf", "hdf5"]);
+    expect(READERS.map((r) => r.id)).toEqual([
+      "edf",
+      "brainvision",
+      "nirx",
+      "snirf",
+      "hdf5",
+      "zip",
+    ]);
   });
 });
 

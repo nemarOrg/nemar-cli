@@ -64,6 +64,7 @@ export type FindingKind =
   | "brainvision-comment-name"
   | "brainvision-segment-date"
   | "nirx-subject-name"
+  | "nirx-subject-freetext"
   | "nirx-demographics"
   | "nirx-header-date"
   | "nirx-freetext"
@@ -115,6 +116,12 @@ export interface Finding {
   field: string;
   /** Letters, digits and length only; never the value. */
   shape: Shape;
+  /**
+   * Reader-internal: how many paths this one finding stands for, when a reader folds a path
+   * rule's hits into one (the ZIP reader, one per kind per archive). A count only, never a name.
+   * It is not reported: every count of findings counts this finding once.
+   */
+  entries?: number;
 }
 
 /** Size of the fixed EDF/BDF header, which holds the identification fields this module reads. */
@@ -1242,7 +1249,8 @@ export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
   ".dat",
   ".npy",
   ".parquet",
-  // Archives hold raw files of any format that nobody opened.
+  // Archives hold raw files of any format that nobody opened. `.zip` has a reader (its entries
+  // are counted as `zip:<ext>`); it stays here for the report's closed list of format names.
   ".zip",
   ".tar",
   ".tar.gz",

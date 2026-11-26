@@ -241,6 +241,12 @@ export const KIND_COPY: Record<FindingKind, Copy> = {
     "Blank the field or replace it with the subject's code (for the subject, the BIDS subject label), and upload again.",
     "nirx-subject-name",
   ),
+  "nirx-subject-freetext": kind(
+    "The subject's Name in a NIRx .inf holds text that is neither the BIDS subject label nor a short code, and may name someone.",
+    NIRX,
+    "Check that it names nobody; replace it with the BIDS subject label if in doubt.",
+    "nirx-subject-freetext",
+  ),
   "nirx-demographics": kind(
     "The demographics of a NIRx file hold a birth date: to the day it is an identifier; as a year or a year and month it is for review.",
     NIRX,
@@ -586,9 +592,9 @@ export const INCOMPLETE_COPY: Record<IncompleteReason, Copy> = {
     "external-link",
   ),
   "content-absent": reason(
-    "A recording's content is not in storage, so it could not be read.",
-    "the file's storage object",
-    "Upload the file's content again.",
+    "A recording's content was not there to read (missing from storage, or not on this machine when the screen runs here), so the recording was not read.",
+    "where the content is kept: its storage object, or this machine's copy for a local run",
+    "On this machine, fetch the file's content (nemar dataset get) and run the screen again; for a deposit, upload the file's content again.",
     "content-absent",
   ),
 };
@@ -810,4 +816,84 @@ export const PREFLIGHT_REFUSAL = {
     "Remove them from the files (for EDF/BDF, the patient and recording fields of the header) and run the upload again.",
   noOverride: (flag: string, termsUrl: string) =>
     `There is no override, and ${flag} does not apply. If this is a false positive, please report it, so the scanner is fixed for every dataset. Terms: ${termsUrl}`,
+} as const;
+
+// ---------------------------------------------------------------------------------------
+// The local run (`nemar dataset screen`)
+// ---------------------------------------------------------------------------------------
+
+/** The docs section that explains what a local run does and does not read. */
+export const LOCAL_ANCHOR = "local-run";
+
+const local = (statement: string, read: string, remedy: string): Copy => ({
+  statement,
+  read,
+  remedy,
+  anchor: LOCAL_ANCHOR,
+});
+
+/** Which kind of scanner id a local run carries (see `localScannerId`). */
+export type LocalScannerKind = "checkout" | "release";
+
+/**
+ * Every sentence only the local run says, declared once (ADR 0045). The statements name counts and
+ * fixed words, never a path or a value.
+ */
+export const LOCAL_COPY = {
+  /** The first line: which tree was read, the commit it names, and who read it. */
+  banner: (source: "working-tree" | "committed", commit: string | null, cliVersion: string) =>
+    `Local identifier screen of ${source === "committed" ? "the committed tree (HEAD)" : "the working tree, as the files are now"}; commit ${commit ? commit.slice(0, 12) : "none (no git history here)"}. Nothing was sent and nothing was changed (nemar-cli ${cliVersion}).`,
+  /**
+   * Why no screen could be made, as a fixed word with its sentence. Never a path or a value.
+   * `git-failed` names the class of the failure (a fixed word), because a screen made with a git
+   * that failed would claim less than the server reads.
+   */
+  errors: {
+    "not-a-directory": "The path is not a directory.",
+    "not-a-repository": "--committed needs the top level of a git repository, and this is not one.",
+    "no-commit": "--committed needs a commit, and this repository has none yet.",
+    "git-failed": (cause: string) =>
+      `git could not be read here (${cause}), so no screen was made: a screen without git's history would say less than the server's. If this is a repository, check that git runs in it ('git status') and that you own the directory.`,
+    "report-refused":
+      "The scan did not fit the report contract, so no verdict was made. Please report this: https://github.com/nemarOrg/nemar-cli/issues",
+  },
+  /** The sentence for a failure with no word of its own. */
+  fallbackError:
+    "The screen could not be made. Please report this: https://github.com/nemarOrg/nemar-cli/issues",
+  /** What kind of id the scanner line carries. */
+  scannerKind: (kind: LocalScannerKind, id: string) =>
+    kind === "checkout"
+      ? `Scanner id ${id} is the git revision of the nemar-cli checkout this ran from, the same kind of id the server's screen carries.`
+      : `Scanner id ${id} is the release tag of this nemar-cli build, which names an exact commit; the server's screen carries a git revision instead.`,
+  /** What the server's copy holds that this run cannot see. */
+  server: local(
+    "Not read here: the server's copy of the dataset (its stored files, its version manifest and the branches pushed there), so the screen run on the server can differ from this one.",
+    "this machine's files and git history only",
+    "Request publication, or run 'nemar dataset publish status <id>', to see the server's own screen.",
+  ),
+  /** The working-tree mode, in a repository. */
+  workingTree: local(
+    "This run read the working tree; the server reads the committed tree, so a change that is not committed is read here and not there.",
+    "the files in this directory as they are now",
+    "Run with --committed to read what the server reads.",
+  ),
+  /** The committed mode. */
+  committed: local(
+    "This run read the committed tree (HEAD); a change that is not committed was not read.",
+    "the tree of the HEAD commit",
+    "Commit the change, or run without --committed to read the files as they are now.",
+  ),
+  /** No repository, or not its top level: no history. */
+  noHistory: local(
+    "Earlier commits were not read: this directory is not the top level of a readable git repository, so there is no history here, and the server screens every earlier path and recording.",
+    "nothing of earlier commits",
+    "Run the command at the top level of the dataset's repository to read its history too.",
+  ),
+  /** Recordings of earlier commits whose content is not on this machine. */
+  supersededAbsent: (count: number) =>
+    local(
+      `${count} recording${count === 1 ? "" : "s"} from earlier commits ${count === 1 ? "has" : "have"} no content on this machine, so ${count === 1 ? "it was" : "they were"} not read and the screen is incomplete (content-absent); the server reads ${count === 1 ? "it" : "them"} from storage.`,
+      "the paths of earlier commits only",
+      "Fetch the old content (git annex get --all) and run the screen again, or leave it to the server's screen.",
+    ),
 } as const;

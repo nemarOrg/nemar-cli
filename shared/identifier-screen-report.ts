@@ -75,6 +75,7 @@ const KIND_TABLE: Record<FindingKind, true> = {
   "brainvision-comment-name": true,
   "brainvision-segment-date": true,
   "nirx-subject-name": true,
+  "nirx-subject-freetext": true,
   "nirx-demographics": true,
   "nirx-header-date": true,
   "nirx-freetext": true,
@@ -180,7 +181,7 @@ const ERROR_SET: ReadonlySet<string> = new Set(SCREEN_ERRORS);
 export interface ScreenReport {
   version: ReportVersion;
   /**
-   * `identifier-scan@<revision>` of the scanner that ran; null only on an error report, where
+   * `identifier-scan@<revision>` (or, for a local run of a packaged CLI, `identifier-scan@nemar-cli-v<version>`) of the scanner that ran; null only on an error report, where
    * the workflow failed before (or without) knowing which scanner it had.
    */
   scanner: string | null;
@@ -321,7 +322,12 @@ export function isReadFailureKey(key: string): boolean {
   return READ_WHAT.has(what) && (READ_CLASS.has(cls) || HTTP_CLASS.test(cls));
 }
 
-const SCANNER = /^identifier-scan@[0-9a-f]{7,40}$/;
+/**
+ * A git revision, or (a local run of a packaged CLI, which has no checkout) the release tag of the
+ * build, which names an exact commit. The publication workflow always sends a revision.
+ */
+const SCANNER =
+  /^identifier-scan@([0-9a-f]{7,40}|nemar-cli-v\d{1,4}\.\d{1,4}\.\d{1,6}(-[0-9a-z.]{1,24})?)$/;
 const HEAD = /^[0-9a-f]{40}$/;
 const DATASET_ID = /^(nm|on|xx)\d{6}$/;
 /**
