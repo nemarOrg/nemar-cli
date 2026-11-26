@@ -307,7 +307,7 @@ export const LICENSE_PERMISSION_REFUSAL_TEXT: Record<LicensePermissionRefusal, s
   no_lineage_reason:
     "The review in force does not report an unconfirmed license lineage, so there is nothing for a permission to clear.",
   basis_unrecorded:
-    "The review in force did not record the lineage it was given; start a new review, then record the permission.",
+    "The review in force did not record the lineage it was given; start a new review with nemar admin dataset publish start <dataset>, then record the permission.",
   basis_mismatch:
     "The review's lineage outcome and its recorded sources disagree; start a new review, then record the permission.",
   dataset_files_unreadable:
@@ -316,6 +316,21 @@ export const LICENSE_PERMISSION_REFUSAL_TEXT: Record<LicensePermissionRefusal, s
     "No support ticket with that id is visible to you; the evidence must arrive as a support ticket first.",
   already_covered: "A recorded license permission already covers this request.",
 };
+
+/** The depositor's mail once a permission is recorded: its subject and its one sentence. */
+export function licenseRecordedSubject(datasetId: string): string {
+  return `License evidence recorded: ${datasetId}`;
+}
+
+export function licenseRecordedNotice(datasetId: string): string {
+  return `Your evidence for ${datasetId} was recorded by an administrator; the review continues.`;
+}
+
+export const LICENSE_RECORDED_HEADLINE = "License evidence recorded";
+
+/** What became of the administrators' "Ready to approve" mail after a permission was recorded. */
+export const READY_MAIL_OUTCOMES = ["sent", "not_ready", "undelivered"] as const;
+export type ReadyMailOutcome = (typeof READY_MAIL_OUTCOMES)[number];
 
 export const LICENSE_PERMISSION_RECORDED =
   "License permission recorded. The license lineage reason is cleared for this request and for later requests with the same sources; every other reason still stands, and approval is still yours.";

@@ -16,7 +16,10 @@
  *  - Without `apply` it is a dry run: it answers what would be recorded (the request, the outcome,
  *    the target license and the sources) and writes nothing.
  *  - With `apply`, the permission and its audit row (`license_permission_recorded`) are written in
- *    one batch. The permission names exactly the sources behind the review's outcome.
+ *    one batch. The permission names exactly the sources behind the review's outcome. Then the
+ *    verdict is derived again: a `pass` with a clear screen mails the administrators the existing
+ *    "Ready to approve" mail, and the depositor is always told the evidence was recorded
+ *    (`afterPermissionRecorded`, both through the mail fences; the answer's `mail` says what went).
  *
  * The evidence (1 to 1,000 characters, the administrator's own summary of what was received) is
  * stored and never echoed: not in the answer, not in the audit row, not in a log, and never sent to
@@ -46,6 +49,7 @@ import {
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL } from "../../services/approval-dispatch";
 import { isValidDatasetId } from "../../services/datasetId";
+import { afterPermissionRecorded } from "../../services/license-notice";
 import { coveringPermission } from "../../services/license-permission";
 import { loadVisibleTicket } from "../../services/mail-admin";
 import {
@@ -85,7 +89,14 @@ export function registerLicensePermissionRoutes(admin: AdminRouter): void {
     const admin = c.get("user");
     const db = c.env.DB;
     const refuse = (code: LicensePermissionRefusal, extra: Record<string, unknown> = {}) =>
-      c.json({ error: LICENSE_PERMISSION_REFUSAL_TEXT[code], code, ...extra }, STATUS[code]);
+      c.json(
+        {
+          error: LICENSE_PERMISSION_REFUSAL_TEXT[code].replaceAll("<dataset>", datasetId),
+          code,
+          ...extra,
+        },
+        STATUS[code],
+      );
 
     const active = await db
       .prepare(`SELECT id ${ACTIVE_REQUEST_TAIL_SQL}`)
@@ -175,11 +186,15 @@ export function registerLicensePermissionRoutes(admin: AdminRouter): void {
     ]);
     const permissionId = Number(results[0]?.meta?.last_row_id);
     const recorded = await coveringPermission(db, datasetId, active.id, basis);
+    // Close the loop: the verdict is derived again, the administrators get "Ready to approve" when
+    // it is now a pass with a clear screen, and the depositor is told; both through the mail fences.
+    const mail = await afterPermissionRecorded(c.env, active.id);
     return c.json({
       applied: true,
       message: LICENSE_PERMISSION_RECORDED,
       permission_id: permissionId,
       line: recorded === null ? null : licensePermissionRecordedLine(recorded),
+      mail,
       ...preview,
     });
   });
