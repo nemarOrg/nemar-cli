@@ -93,7 +93,7 @@ const GOLDEN: Record<string, { startable: string; notStartable?: string }> = {
   text_withheld: { startable: `Read the withheld documents yourself. ${TERM_OVERRIDE}` },
   question_unknown: { startable: `Answer it yourself from the dataset. ${TERM_OVERRIDE}` },
   license_lineage_unconfirmed: {
-    startable: `Read the license lineage: nemar admin dataset publish license-lineage nm000123. The depositor records the source's permission, or corrects License in dataset_description.json. ${TERM_OVERRIDE}`,
+    startable: `Read the license lineage: nemar admin dataset publish license-lineage nm000123. The depositor sends the original authors' evidence to support@nemar.org and an administrator records it against the request, which clears this reason; or the depositor corrects License in dataset_description.json. ${TERM_OVERRIDE}`,
   },
   resubmission_note_unaddressed: {
     startable: `Read the note and the previous denial yourself. ${TERM_OVERRIDE}`,
@@ -236,7 +236,7 @@ const NEUTRAL: Record<string, { startable: string; notStartable?: string }> = {
   text_withheld: { startable: `Read the withheld documents yourself. ${NEUTRAL_OVERRIDE}` },
   question_unknown: { startable: `Answer it yourself from the dataset. ${NEUTRAL_OVERRIDE}` },
   license_lineage_unconfirmed: {
-    startable: `Read the license lineage. The depositor records the source's permission, or corrects License in dataset_description.json. ${NEUTRAL_OVERRIDE}`,
+    startable: `Read the license lineage. The depositor sends the original authors' evidence to support@nemar.org and an administrator records it against the request, which clears this reason; or the depositor corrects License in dataset_description.json. ${NEUTRAL_OVERRIDE}`,
   },
   resubmission_note_unaddressed: {
     startable: `Read the note and the previous denial yourself. ${NEUTRAL_OVERRIDE}`,

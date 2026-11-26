@@ -35,7 +35,13 @@
 
 import type { FindingKind } from "./identifier-scan.js";
 import { FINDING_KINDS, KNOWN_FORMATS, type ScreenGate } from "./identifier-screen-report.js";
-import { LINEAGE_OUTCOMES, type LineageOutcome, MAX_CREATORS } from "./license-lineage.js";
+import {
+  ACTION_REQUIRED_OUTCOMES,
+  LICENSE_EVIDENCE_ADDRESS,
+  LINEAGE_OUTCOMES,
+  type LineageOutcome,
+  MAX_CREATORS,
+} from "./license-lineage.js";
 import { SEMVER, isOneOf } from "./pr-review.js";
 import { PUBLICATION_DATASET_ID_RE } from "./publication-limits.js";
 import { MINIMUM_FAILURES, MIN_NAME_LENGTH, type MinimumFailure } from "./submission-minimums.js";
@@ -481,16 +487,11 @@ export const INPUT_STATES = [
 
 /**
  * The lineage outcomes that need action before a release (ADR 0139, decision 7, as amended on
- * 2026-11-25): each is the reason `license_lineage_unconfirmed`, which an override clears and which
- * never denies automatically.
+ * 2026-11-25): each is the reason `license_lineage_unconfirmed`, which never denies automatically
+ * and which a recorded license permission (`LiveFacts.license_permission`) or an override clears.
+ * Declared once, beside the outcomes, in `shared/license-lineage.ts`.
  */
-export const LINEAGE_UNCONFIRMED_OUTCOMES: readonly LineageOutcome[] = [
-  "needs_permission",
-  "share_alike_mismatch",
-  "redistribution_prohibited",
-  "source_is_publication",
-  "unresolved",
-];
+export const LINEAGE_UNCONFIRMED_OUTCOMES: readonly LineageOutcome[] = ACTION_REQUIRED_OUTCOMES;
 
 declare const factsBrand: unique symbol;
 
@@ -1887,7 +1888,7 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     clearedBy: "override",
     sentence:
       "The license of an upstream source of this dataset could not be confirmed as allowing this release.",
-    cure: `Read the license lineage: ${COMMAND_LINEAGE}. The depositor records the source's permission, or corrects License in dataset_description.json. ${OVERRIDE}`,
+    cure: `Read the license lineage: ${COMMAND_LINEAGE}. The depositor sends the original authors' evidence to ${LICENSE_EVIDENCE_ADDRESS} and an administrator records it against the request, which clears this reason; or the depositor corrects License in dataset_description.json. ${OVERRIDE}`,
     command: COMMAND_LINEAGE,
   },
   // ADR 0139, decision 5: the note's answer can only ask for a person, never fail or pass a request.
@@ -2124,6 +2125,13 @@ export interface LiveFacts {
     /** The concept DOI's EZID status (`datasets.ezid_status`). */
     concept_ezid_status: string | null;
   };
+  /**
+   * A recorded license permission that covers the lineage of the review in force
+   * (`permissionCovers`, `shared/license-permission.ts`; ADR 0139 decision 7, amendment of
+   * 2026-11-25), or null when none does. It clears `license_lineage_unconfirmed` and no other
+   * reason. Who and when only; the evidence text is never part of the facts.
+   */
+  license_permission: { recorded_at: string; recorded_by: string | null; ticket_id: number } | null;
 }
 
 /** The review in force as the reasons need it. `none`: no row of the screened head and flag. */
@@ -2227,7 +2235,9 @@ export function reasonsOf(input: { live: LiveFacts; row: ReviewRowView }): Reaso
         break;
       }
       const own = reportReasons(row.report);
-      out.push(...own);
+      // A recorded license permission clears the lineage reason, and only that one; the checks
+      // below still read the report's own reasons, so a stored verdict is explained as before.
+      out.push(...(live.license_permission === null ? own : withoutPermittedLineage(own)));
       if (row.stored === "fail" && !own.some((r) => REASONS[r.code].class === "fail")) {
         add("stored_verdict_fail");
       }
@@ -2238,6 +2248,32 @@ export function reasonsOf(input: { live: LiveFacts; row: ReviewRowView }): Reaso
     }
   }
   return normalize(out);
+}
+
+/** The one reason a recorded license permission clears (ADR 0139, decision 7, amendment of 2026-11-25). */
+export const PERMISSION_CLEARED_REASON: ReasonCode = "license_lineage_unconfirmed";
+
+/** A report's reasons without the one a recorded license permission clears. */
+export function withoutPermittedLineage(reasons: readonly Reason[]): Reason[] {
+  return reasons.filter((r) => r.code !== PERMISSION_CLEARED_REASON);
+}
+
+/**
+ * The stored verdict as a recorded license permission leaves it. The stored column was derived
+ * from the report's reasons alone (`verdictOf(reportReasons(report))`); when it still equals that,
+ * the column says nothing the reasons do not, so a covering permission derives it again without
+ * the lineage reason. A column that disagrees with its report (an older rule, a hand edit) is kept
+ * as stored, so a permission never raises what it cannot explain.
+ */
+export function storedVerdictWithPermission(
+  stored: PublicationOutcome,
+  report: PublicationReviewReport | null,
+  permitted: boolean,
+): PublicationOutcome {
+  if (!permitted || report === null) return stored;
+  const own = reportReasons(report);
+  if (verdictOf(own) !== stored) return stored;
+  return verdictOf(withoutPermittedLineage(own));
 }
 
 /** No reason is a pass; any reason of the fail class is a fail; anything else needs a person. */

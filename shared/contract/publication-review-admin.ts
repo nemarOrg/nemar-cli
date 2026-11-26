@@ -303,6 +303,18 @@ export interface PublicationReviewDetail {
    */
   screen_gate: ScreenGate | "exempt";
   reasons: ReasonView[];
+  /**
+   * The recorded license permission that covers the review in force's lineage and clears
+   * `license_lineage_unconfirmed` (ADR 0139, decision 7, amendment of 2026-11-25), or null: who,
+   * when, the support ticket and the line every surface prints. Never the evidence text. Optional
+   * because an older Worker sends none.
+   */
+  license_permission?: {
+    recorded_at: string;
+    recorded_by: string | null;
+    ticket_id: number;
+    line: string;
+  } | null;
   /** Headline, tone, lines (the standing line last) and the next command. */
   description: PublicationReviewDescription;
   review: PublicationReviewRecord | null;

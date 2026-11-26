@@ -1560,6 +1560,7 @@ function* liveFacts(): Generator<LiveFacts> {
                         screen: { gate, head, acknowledged_by: null, head_current },
                         versions: { version_row_exists, prior_anonymous_request, first_published },
                         doi: { concept_doi_present, concept_ezid_status },
+                        license_permission: null,
                       };
                     }
 }
@@ -1686,6 +1687,7 @@ describe("reasonsOf, over every row, screen, request, version and DOI fact", () 
         first_published: false,
       },
       doi: { concept_doi_present: false, concept_ezid_status: null },
+      license_permission: null,
     };
     const report = PARSED_REPORTS[0].report;
     expect(reasonsOf({ live: clean, row: { kind: "reported", report, stored: "pass" } })).toEqual(
@@ -2634,6 +2636,7 @@ describe("the block reason a surface shows", () => {
         first_published: false,
       },
       doi: { concept_doi_present: false, concept_ezid_status: null },
+      license_permission: null,
     };
     for (const block_reason of ["min_requirements_failed", "Not A Word!", null, "x".repeat(70)]) {
       const live = { ...clean, request: { ...clean.request, block_reason } };
