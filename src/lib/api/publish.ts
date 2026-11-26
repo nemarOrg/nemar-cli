@@ -372,6 +372,26 @@ export async function denyPublication(
 }
 
 /**
+ * Restore a dataset's denied publication request to waiting for its decision (admin; ADR 0139,
+ * decision 4). `requestId` names the request the administrator read; the API refuses it when it is
+ * not the dataset's newest request.
+ */
+export async function restorePublication(
+  datasetId: string,
+  requestId?: number,
+): Promise<{ message: string; dataset_id: string; request_id: number }> {
+  return request<{ message: string; dataset_id: string; request_id: number }>(
+    `/admin/publish/${datasetId}/restore`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestId !== undefined ? { request_id: requestId } : {}),
+    },
+    true,
+  );
+}
+
+/**
  * Re-run the identifier screen of a dataset's active publication request
  * (admin; epic #1610, phase 4). The admins are mailed when it reports.
  */
