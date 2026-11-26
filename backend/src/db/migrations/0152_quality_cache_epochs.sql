@@ -14,15 +14,13 @@
 -- NO DELETION. A deleted dataset's row stays: it holds a dataset id and a number, and dropping it would
 -- start a dataset re-made under the same id at 0 again, where an old cache entry could still sit.
 --
--- Every CHECK is named, a numeric column is checked with `typeof(...) = 'integer'`, and every GLOB is at
--- most 50 characters (D1 refuses longer), as 0117 requires.
+-- NO CHECK. The only writer is the trigger below, which runs inside every UPDATE of a gate column of
+-- `datasets`; a CHECK this table could fail (an id of an unexpected shape, say) would abort that UPDATE,
+-- and an unpublish, a withdrawal or a concealment must never be refused for the sake of a cache.
 
 CREATE TABLE dataset_quality_epochs (
-  dataset_id TEXT PRIMARY KEY NOT NULL CONSTRAINT dataset_quality_epochs_dataset CHECK (
-    length(dataset_id) = 8 AND substr(dataset_id, 1, 2) NOT GLOB '*[^a-z]*'
-    AND substr(dataset_id, 3) NOT GLOB '*[^0-9]*'),
-  epoch INTEGER NOT NULL CONSTRAINT dataset_quality_epochs_epoch CHECK (
-    typeof(epoch) = 'integer' AND epoch >= 1)
+  dataset_id TEXT PRIMARY KEY NOT NULL,
+  epoch INTEGER NOT NULL
 );
 
 -- Shaped like 0145: an UPDATE OF the gate's columns, guarded by a real change, so an UPDATE that rewrites
