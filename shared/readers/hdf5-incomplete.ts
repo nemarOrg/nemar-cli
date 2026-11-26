@@ -11,6 +11,7 @@ import {
   type Hdf5Entry,
   type Hdf5Incomplete,
   type Hdf5Walk,
+  type Hdf5WalkOptions,
   type RangeSource,
   walkHdf5,
 } from "../hdf5-meta";
@@ -129,11 +130,13 @@ export function unscannedReason(entries: readonly Hdf5Entry[]): ReaderIncomplete
  * - A walk that read everything is still `partial` when a string, or a value under an
  *   identifier-key name, was listed without its value ({@link unscannedReason}): text no rule
  *   read is never clean.
+ * - `options.matlabChars` reads MATLAB v7.3 character arrays as text (`walkHdf5`).
  */
 export async function walkForReader(
   src: LimitedSource,
   limits: ReaderLimits,
   now: () => number = Date.now,
+  options: Pick<Hdf5WalkOptions, "matlabChars"> = {},
 ): Promise<ReaderWalk> {
   const deadline = now() + limits.timeMs * WALK_TIME_SHARE;
   let thrown: unknown;
@@ -151,7 +154,7 @@ export async function walkForReader(
       }
     },
   };
-  const walk = await walkHdf5(guarded, { limits: walkLimits(limits) });
+  const walk = await walkHdf5(guarded, { ...options, limits: walkLimits(limits) });
   // A walk the source stopped says why it stopped: that reason outranks an earlier one the
   // walker recorded, because it is why the rest of the file was not read.
   if (thrown !== undefined) {

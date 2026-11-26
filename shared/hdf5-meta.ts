@@ -119,13 +119,24 @@ export interface Hdf5Walk {
   tally: ReadTally;
 }
 
+export interface Hdf5WalkOptions {
+  limits?: Partial<Hdf5Limits>;
+  /**
+   * MATLAB v7.3 (card A5): a `uint16` dataset whose own `MATLAB_class` attribute is `char` is a
+   * MATLAB character array, returned as text under the string rules (at most
+   * {@link STRING_BYTES_MAX} stored bytes), one string per MATLAB row, instead of as numbers
+   * under the numeric rule. Off by default, so SNIRF and generic HDF5 walks are unchanged.
+   */
+  matlabChars?: boolean;
+}
+
 export async function walkHdf5(
   source: RangeSource,
-  options: { limits?: Partial<Hdf5Limits> } = {},
+  options: Hdf5WalkOptions = {},
 ): Promise<Hdf5Walk> {
   const limits: Hdf5Limits = { ...HDF5_LIMITS, ...options.limits };
   const src = new BoundedSource(source, limits);
-  const walker = new Walker(src, limits);
+  const walker = new Walker(src, limits, options.matlabChars === true);
   await walker.run();
   return {
     entries: walker.entries,
@@ -167,10 +178,12 @@ class Walker {
   private readonly limits: Hdf5Limits;
   private file: Hdf5File | undefined;
   private readonly visited = new Set<number>();
+  private readonly matlabChars: boolean;
 
-  constructor(src: BoundedSource, limits: Hdf5Limits) {
+  constructor(src: BoundedSource, limits: Hdf5Limits, matlabChars: boolean) {
     this.src = src;
     this.limits = limits;
+    this.matlabChars = matlabChars;
   }
 
   private record(reason: Hdf5Incomplete): void {
@@ -259,9 +272,11 @@ class Walker {
       const external = messages.some((m) => m.type === MSG.EXTERNAL_FILES);
       // value() asks for bytes only when there is a dataspace with elements, never for `null`.
       const dims = shape ?? [];
-      const result = await this.value(dtype, shape, (n) =>
-        this.datasetBytes(layout, filters, external, dtype, dims, n),
-      );
+      const bytes = (n: number) => this.datasetBytes(layout, filters, external, dtype, dims, n);
+      const result =
+        this.matlabChars && isMatlabChar(dtype, messages, this.f.w)
+          ? await matlabCharValue(shape, bytes, dtype.cls === "int" && dtype.be)
+          : await this.value(dtype, shape, bytes);
       entry.value = result.value;
       if (result.skipped) entry.skipped = result.skipped;
     } catch (e) {
@@ -611,6 +626,54 @@ class Walker {
       }
     }
   }
+}
+
+/**
+ * A MATLAB v7.3 character array: a `uint16` dataset whose own header carries a compact
+ * `MATLAB_class` attribute reading `char`. An attribute stored densely is not looked for: such a
+ * dataset is read under the numeric rule, and the caller sees its `MATLAB_class` entry.
+ */
+function isMatlabChar(dtype: Dtype, messages: Message[], w: Hdf5File["w"]): boolean {
+  if (dtype.cls !== "int" || dtype.size !== 2 || dtype.signed) return false;
+  for (const m of messages) {
+    if (m.type !== MSG.ATTRIBUTE) continue;
+    try {
+      const a = parseAttribute(new Cursor(m.data, w));
+      if (a.name !== "MATLAB_class" || a.dtype.cls !== "string") continue;
+      return cName(a.data.subarray(0, a.dtype.size)) === "char";
+    } catch {
+      // An attribute that does not parse is recorded when the attributes are listed.
+    }
+  }
+  return false;
+}
+
+/**
+ * A MATLAB character array's text: UTF-16 code units, stored column-major, so the HDF5 shape
+ * `[columns, rows]` holds MATLAB row `r` at every `rows`-th unit from `r`. One string per row
+ * (one for a row vector); `skipped: "size"` past {@link STRING_BYTES_MAX} stored bytes.
+ */
+async function matlabCharValue(
+  shape: Shape,
+  bytes: (n: number) => Promise<Uint8Array>,
+  be: boolean,
+): Promise<{ value: Hdf5Entry["value"]; skipped?: Hdf5Skipped }> {
+  if (shape === null) return { value: null };
+  const count = product(shape);
+  if (count * 2 > STRING_BYTES_MAX) return { value: null, skipped: "size" };
+  const raw = await bytes(count * 2);
+  const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  const rows = shape.length === 0 ? 1 : (shape[shape.length - 1] as number);
+  if (rows === 0) return { value: [] };
+  const columns = count / rows;
+  const out: string[] = [];
+  for (let r = 0; r < rows; r++) {
+    let s = "";
+    for (let c = 0; c < columns; c++)
+      s += String.fromCharCode(view.getUint16((c * rows + r) * 2, !be));
+    out.push(s);
+  }
+  return { value: out };
 }
 
 type NumericDtype = Extract<Dtype, { cls: "int" | "float" }>;
