@@ -45,6 +45,7 @@
     "test/identifier-coverage-contract.test.ts",
     "test/readers-brainvision.test.ts",
     "test/readers-nirx.test.ts",
+    "test/readers-zip.test.ts",
     "scripts/dev/reader-fp-measure.ts",
     "backend/test/repull-screens-partially-screened-migration.test.ts",
     "test/publication-review-contract.test.ts",
