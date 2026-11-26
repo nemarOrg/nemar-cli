@@ -265,9 +265,9 @@ export type ReaderNote = (typeof READER_NOTES)[number];
 export interface ReaderResult {
   findings: Finding[];
   /**
-   * `not-applicable`: the file has the reader's extension but is not the reader's format (an
-   * Analyze `.hdr` beside NIRx's). It is counted as unscreened under its extension, never as
-   * read, partial or failed, and its companions are not looked for.
+   * `not-applicable`: the file's content shows it is another format than the reader's (an Analyze
+   * `.hdr` beside NIRx's). It is counted as unscreened under its extension, never as read, partial
+   * or failed, and its companions are not looked for. Never for a decode, limit or parse failure.
    */
   coverage: "complete" | "partial" | "not-applicable";
   incomplete?: ReaderIncompleteReason;
@@ -288,6 +288,11 @@ export interface ReaderResult {
  * - Any other throw is a failed read of that file, never a clean one.
  * - A file with the reader's extension that is not its format returns `not-applicable` (phase A2):
  *   it is counted as unscreened under its extension, so it never makes a dataset `unchecked`.
+ *   The decision is made from the file's content alone, and only when that content shows it is
+ *   another format (binary bytes where the reader's format is text, with none of the format's
+ *   structure anywhere). It is never returned for a failed decode, a limit or a parse that went
+ *   wrong: those are `failed` or `partial`. Content that is not recognizably another format is
+ *   screened with what rules still apply, and is `partial`.
  * - A note (`notes`) is informational: counted and printed, never gating.
  */
 export interface FormatReader {
