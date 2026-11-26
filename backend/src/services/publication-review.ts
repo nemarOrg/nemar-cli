@@ -1306,23 +1306,23 @@ export async function sweepPublicationReviews(
   const db = env.DB;
   const overdue = `created_at < datetime('now', '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes')`;
 
-  let rows: { id: number; request_id: number }[];
+  let rows: { id: number; request_id: number; confirm_of: number | null }[];
   try {
     rows = (
       await db
         .prepare(
-          `SELECT id, request_id FROM publication_reviews
+          `SELECT id, request_id, confirm_of FROM publication_reviews
             WHERE state = 'dispatched' AND ${overdue} ORDER BY id LIMIT ?`,
         )
         .bind(SWEEP_LIMIT)
-        .all<{ id: number; request_id: number }>()
+        .all<{ id: number; request_id: number; confirm_of: number | null }>()
     ).results;
   } catch (err) {
     result.errors++;
     console.error(`[publication-review-sweep] overdue query failed (${errorWords(err)})`);
     return result;
   }
-  for (const { id, request_id } of rows) {
+  for (const { id, request_id, confirm_of } of rows) {
     try {
       const moved = await db
         .prepare(
@@ -1334,6 +1334,18 @@ export async function sweepPublicationReviews(
       if ((moved.meta.changes ?? 0) !== 1) continue;
       result.timedOut++;
       console.warn(`[publication-review-sweep] review ${id} did not report in time`);
+      // A confirming run that never reported confirms nothing (ADR 0139): its first run says so,
+      // before the mail it was holding goes, and the digest lists it. Never a deny.
+      if (confirm_of !== null) {
+        await db
+          .prepare(
+            `UPDATE publication_reviews SET auto_deny_state = 'confirm_failed',
+                    auto_deny_at = datetime('now')
+              WHERE id = ? AND confirm_of IS NULL AND auto_deny_state = 'none'`,
+          )
+          .bind(confirm_of)
+          .run();
+      }
       if ((await tryMail(env, request_id)) === "sent") result.mailed++;
     } catch (err) {
       result.errors++;

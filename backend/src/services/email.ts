@@ -32,6 +32,8 @@ import {
   AUTO_DENY_STATE_COPY,
   type AutoDenyCode,
   type AutoDenyMode,
+  DIGEST_MAIL_NOT_DELIVERED_HEADING,
+  DIGEST_MAIL_NOT_DELIVERED_INTRO,
   DIGEST_STATES,
   DIGEST_STATE_HEADING,
   autoDenyDigestMode,
@@ -39,6 +41,7 @@ import {
   autoDenyMailResubmit,
   autoDenyMailSubject,
   autoDenyRecordLabel,
+  digestMoreNotShown,
 } from "../../../shared/publication-auto-deny.js";
 import {
   type PublicationReviewReproducibility,
@@ -2811,6 +2814,7 @@ export interface AutoDenyDigestRow {
 export async function sendAutoDenyDigestEmail(
   adminEmails: string[],
   rows: readonly AutoDenyDigestRow[],
+  extra: { more: number; undelivered: readonly { datasetId: string; requestId: number }[] },
   mode: AutoDenyMode,
   cap: number,
   resendApiKey: string,
@@ -2846,7 +2850,18 @@ export async function sendAutoDenyDigestEmail(
   <h1 style="color: #2563eb;">${escapeHtml(AUTO_DENY_DIGEST_HEADLINE)}</h1>
   <p>${escapeHtml(AUTO_DENY_DIGEST_INTRO)}</p>
   <p>${escapeHtml(autoDenyDigestMode(mode, cap))}</p>
-${sections}
+${sections}${
+  extra.more > 0 ? `\n  <p><strong>${escapeHtml(digestMoreNotShown(extra.more))}</strong></p>` : ""
+}${
+  extra.undelivered.length === 0
+    ? ""
+    : `
+  <h2 style="color: #dc2626; font-size: 16px; margin-top: 24px;">${escapeHtml(DIGEST_MAIL_NOT_DELIVERED_HEADING)} (${extra.undelivered.length})</h2>
+  <p style="color: #666; font-size: 13px;">${escapeHtml(DIGEST_MAIL_NOT_DELIVERED_INTRO)}</p>
+  <ul>${extra.undelivered
+    .map((u) => `<li><code>${escapeHtml(u.datasetId)}</code> request ${u.requestId}</li>`)
+    .join("")}</ul>`
+}
   <p>${escapeHtml(AUTO_DENY_DIGEST_RESTORE)}</p>
 </body>
 </html>

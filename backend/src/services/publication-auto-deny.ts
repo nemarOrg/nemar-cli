@@ -37,7 +37,9 @@ import {
   type AutoDenyReasonCode,
   type AutoDenyState,
   CAPPED_STATES,
+  DENIAL_MAIL_MAX_ATTEMPTS,
   DIGEST_STATES,
+  type DenialMailState,
   type Eligibility,
   MAX_EARLIER_AUTO_DENIALS,
   type RestoreRefusal,
@@ -57,6 +59,7 @@ import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.j
 import type { Bindings } from "../types/bindings.js";
 import {
   type AutoDenyDigestRow,
+  DevEmailFenceError,
   getAdminEmailsForCategory,
   resolveEmailConfig,
   sendAutoDeniedEmail,
@@ -68,10 +71,12 @@ import { denyPublicationRequest } from "./publication-deny.js";
 import { errorWords } from "./publication-review-log.js";
 import {
   type PublicationReviewRow,
+  ROW_COLUMNS,
   readReview,
   readReviewByKey,
   rowViewOf,
   screenedHeadSql,
+  toRow,
 } from "./publication-review-rows.js";
 import { startConfirmingReview } from "./publication-review.js";
 
@@ -206,10 +211,24 @@ export async function autoDenyStep(env: Bindings, reviewId: number): Promise<Aft
   if (row.confirmOf === null) {
     const now = await requestNow(db, row);
     if (!now) return "no_row";
+    // A first run the automatic denial already acted on (a restore among them) never starts
+    // another confirming run: a restored commit is not denied automatically again.
+    if (row.autoDenyState !== "none") return "not_eligible";
     const eligibility = await eligibilityOf(db, row, row, now);
     if (!eligibility.eligible) return "not_eligible";
     const started = await startConfirmingReview(env, row);
-    return started.started ? "confirming" : "confirm_not_started";
+    if (started.started) return "confirming";
+    // A second start of the same confirmation is not a failure of it.
+    if (started.reason === "duplicate") return "confirm_not_started";
+    // The request stopped waiting between the store and the start: it changed, not the reviews.
+    if (started.reason === "request_not_requested") {
+      await markFirst(db, row.id, "not_eligible");
+      return "not_eligible";
+    }
+    // Nothing will confirm this fail (the dispatch failed, the Worker could not hand it over, the
+    // platform's allowance declined it): the first run says so, and a person decides.
+    await markFirst(db, row.id, "confirm_failed");
+    return "confirm_failed";
   }
   const first = await readReview(db, row.confirmOf);
   if (!first || first.confirmOf !== null) return "no_row";
@@ -272,8 +291,8 @@ async function decide(
     return "not_eligible";
   }
   const agreement = confirmationOf(
-    { eligibility: a, inputDigest: first.inputDigest },
-    { eligibility: b, inputDigest: confirm.inputDigest },
+    { eligibility: a, inputDigest: first.inputDigest, promptVersion: first.promptVersion },
+    { eligibility: b, inputDigest: confirm.inputDigest, promptVersion: confirm.promptVersion },
   );
   if (!agreement.agrees) {
     await markFirst(db, first.id, "disagreed");
@@ -310,8 +329,8 @@ async function denyAutomatically(
   if (!service) {
     // Nobody to deny as: a configuration fault, which leaves the request to a person.
     console.error(`[auto-deny] review ${first.id}: the service account is missing; nothing denied`);
-    await markFirst(db, first.id, "not_eligible");
-    return "not_eligible";
+    await markFirst(db, first.id, "no_service_account");
+    return "no_service_account";
   }
   const details = JSON.stringify({
     request_id: first.requestId,
@@ -403,23 +422,33 @@ async function denyAutomatically(
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Mail the requester and the dataset's owner (once each) the transparent account of the denial.
- * Never throws; each send goes through the delivery fence, so the dev Worker reaches only
- * `DEV_EMAIL_ALLOWLIST`.
+ * The denial mail's recipients: the requester and every account with owner rights on the dataset,
+ * once each. The rights the backend grants on a dataset's repository come from two places
+ * (`repo-spec.ts`): `datasets.owner_user_id` (maintain) and `dataset_collaborators` (write, with
+ * no role column). So the owner is the one account with owner rights, and a collaborator, who can
+ * push but not decide on the dataset, is not mailed. A deleted account is never mailed.
+ */
+const RECIPIENTS_SQL = `SELECT u.email, u.username FROM users u
+  WHERE u.deleted_at IS NULL AND u.email IS NOT NULL
+    AND (u.id = (SELECT requested_by FROM publication_requests WHERE id = ?)
+         OR u.id = (SELECT owner_user_id FROM datasets WHERE dataset_id = ?))
+  ORDER BY u.id`;
+
+/**
+ * Mail the recipients the transparent account of the denial, and record what became of it on the
+ * first run (`denial_mail_state`, one more `denial_mail_attempts`): `failed` when any send failed
+ * other than by the dev fence, else `sent` when one went, else `fenced`. Never throws: a mail that
+ * could not even be built is `failed`, so the daily tick retries it and the digest shows it.
  */
 async function mailDepositor(
   env: Bindings,
   first: PublicationReviewRow,
   confirm: PublicationReviewRow,
-  codes: AutoDenyCode[],
-): Promise<void> {
+  codes: readonly AutoDenyCode[],
+): Promise<DenialMailState> {
+  let state: DenialMailState = "failed";
   try {
-    const { results } = await env.DB.prepare(
-      `SELECT u.email, u.username FROM users u
-        WHERE u.deleted_at IS NULL AND u.email IS NOT NULL
-          AND (u.id = (SELECT requested_by FROM publication_requests WHERE id = ?)
-               OR u.id = (SELECT owner_user_id FROM datasets WHERE dataset_id = ?))`,
-    )
+    const { results } = await env.DB.prepare(RECIPIENTS_SQL)
       .bind(first.requestId, first.datasetId)
       .all<{ email: string; username: string }>();
     const records: { kind: "first" | "confirming"; record: PublicationReviewReproducibility }[] =
@@ -430,6 +459,8 @@ async function mailDepositor(
     if (b) records.push({ kind: "confirming", record: b });
     const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
     const seen = new Set<string>();
+    let sent = 0;
+    let failed = 0;
     for (const r of results ?? []) {
       const key = r.email.trim().toLowerCase();
       if (seen.has(key)) continue;
@@ -447,17 +478,77 @@ async function mailDepositor(
           isDev,
           env,
         );
+        sent++;
       } catch (err) {
+        if (!(err instanceof DevEmailFenceError)) failed++;
         console.error(
           `[auto-deny] request ${first.requestId}: denial mail not sent (${errorWords(err)})`,
         );
       }
     }
+    state = failed > 0 || seen.size === 0 ? "failed" : sent > 0 ? "sent" : "fenced";
   } catch (err) {
     console.error(
       `[auto-deny] request ${first.requestId}: denial mail not read (${errorWords(err)})`,
     );
   }
+  try {
+    await env.DB.prepare(
+      `UPDATE publication_reviews
+          SET denial_mail_state = ?, denial_mail_attempts = denial_mail_attempts + 1
+        WHERE id = ?`,
+    )
+      .bind(state, first.id)
+      .run();
+  } catch (err) {
+    console.error(
+      `[auto-deny] review ${first.id}: denial mail state not recorded (${errorWords(err)})`,
+    );
+  }
+  return state;
+}
+
+/**
+ * Try once more each denial mail that failed (the daily tick, before the digest). Only a mail tried
+ * once: a second failure stays `failed` and the digest lists it.
+ */
+export async function retryFailedDenialMails(env: Bindings): Promise<number> {
+  const db = env.DB;
+  const { results } = await db
+    .prepare(
+      `SELECT ${ROW_COLUMNS} FROM publication_reviews
+        WHERE confirm_of IS NULL AND auto_deny_state = 'denied' AND denial_mail_state = 'failed'
+          AND denial_mail_attempts < ? ORDER BY id LIMIT 50`,
+    )
+    .bind(DENIAL_MAIL_MAX_ATTEMPTS)
+    .all<Record<string, unknown>>();
+  let retried = 0;
+  for (const raw of results ?? []) {
+    const first = toRow(raw);
+    const confirm = toRowOrNull(
+      await db
+        .prepare(`SELECT ${ROW_COLUMNS} FROM publication_reviews WHERE confirm_of = ?`)
+        .bind(first.id)
+        .first<Record<string, unknown>>(),
+    );
+    const view = rowViewOf(first, Date.now());
+    const codes = view.kind === "reported" && view.report ? eligibleCodesOf(view.report).codes : [];
+    const sharedCodes =
+      confirm === null
+        ? codes
+        : (() => {
+            const v = rowViewOf(confirm, Date.now());
+            const theirs = v.kind === "reported" && v.report ? eligibleCodesOf(v.report).codes : [];
+            return codes.filter((c) => theirs.includes(c));
+          })();
+    await mailDepositor(env, first, confirm ?? first, sharedCodes.length > 0 ? sharedCodes : codes);
+    retried++;
+  }
+  return retried;
+}
+
+function toRowOrNull(raw: Record<string, unknown> | null): PublicationReviewRow | null {
+  return raw ? toRow(raw) : null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -467,19 +558,44 @@ async function mailDepositor(
 export interface AutoDenyDigestResult {
   skipped: boolean;
   claimed: boolean;
+  /** Rows the digest listed. */
   rows: number;
+  /** Rows held back past the limit, for the next digest. */
+  more: number;
+  /** Denials whose mail reached nobody after its retry. */
+  undelivered: number;
+  /** Denial mails tried again before the digest. */
+  retried: number;
   delivered: number;
 }
 
+/** The most rows one digest lists; the rest wait for the next one. */
+export const DIGEST_ROW_LIMIT = 500;
+
 /**
- * The administrators' daily digest of what the automatic denial did (`denied`, `would_deny`,
- * `capped`, `disagreed`) since the last digest that was sent. PRODUCTION-ONLY (AGENTS.md's default
- * for a new cron job; the recipients come from `getAdminEmailsForCategory`, which is fenced too).
- * Claimed once per UTC day by an insert, so two ticks cannot both send it; a digest that reached
- * nobody leaves its window open, and the next day's starts where the last sent one ended.
+ * The administrators' daily digest of what the automatic denial did (every word of
+ * `DIGEST_STATES`) since the last digest that was sent, and of the denials whose mail reached
+ * nobody. PRODUCTION-ONLY (AGENTS.md's default for a new cron job; the recipients come from
+ * `getAdminEmailsForCategory`, which is fenced too).
+ *
+ * Claimed once per UTC day by an insert, so two ticks cannot both send it. Then, in order: the
+ * denial mails that failed once are tried again; the rows of the window are counted; at most
+ * {@link DIGEST_ROW_LIMIT} are listed, and when there are more, the window closes at the last row
+ * listed (rows with the same instant included) and the digest says how many wait, so the window
+ * never passes a row nobody was told about. A digest that reached nobody leaves its window open:
+ * the next one starts where the last SENT one ended. If anything after the claim throws, the claim
+ * is deleted so the next tick tries again.
  */
 export async function sendAutoDenyDigest(env: Bindings): Promise<AutoDenyDigestResult> {
-  const result: AutoDenyDigestResult = { skipped: false, claimed: false, rows: 0, delivered: 0 };
+  const result: AutoDenyDigestResult = {
+    skipped: false,
+    claimed: false,
+    rows: 0,
+    more: 0,
+    undelivered: 0,
+    retried: 0,
+    delivered: 0,
+  };
   if (isNonProductionEnv(env)) {
     result.skipped = true;
     return result;
@@ -494,6 +610,33 @@ export async function sendAutoDenyDigest(env: Bindings): Promise<AutoDenyDigestR
   if ((claim.meta.changes ?? 0) !== 1) return result;
   result.claimed = true;
   const digestId = Number(claim.meta.last_row_id);
+  try {
+    await digestAfterClaim(env, digestId, result);
+  } catch (err) {
+    console.error(`[auto-deny-digest] failed after its claim (${errorWords(err)}); released`);
+    try {
+      await db
+        .prepare("DELETE FROM publication_auto_deny_digests WHERE id = ? AND sent_at IS NULL")
+        .bind(digestId)
+        .run();
+    } catch (inner) {
+      console.error(`[auto-deny-digest] claim not released (${errorWords(inner)})`);
+    }
+    throw err;
+  }
+  return result;
+}
+
+const IN_WINDOW = `confirm_of IS NULL AND auto_deny_state IN (${sqlList(DIGEST_STATES)})
+  AND auto_deny_at > ? AND auto_deny_at <= ?`;
+
+async function digestAfterClaim(
+  env: Bindings,
+  digestId: number,
+  result: AutoDenyDigestResult,
+): Promise<void> {
+  const db = env.DB;
+  result.retried = await retryFailedDenialMails(env);
   const window = await db
     .prepare(
       `SELECT (SELECT window_end FROM publication_auto_deny_digests WHERE id = ?) AS until,
@@ -503,41 +646,78 @@ export async function sendAutoDenyDigest(env: Bindings): Promise<AutoDenyDigestR
     )
     .bind(digestId, digestId)
     .first<{ until: string; since: string }>();
+  const since = window?.since ?? "";
+  let until = window?.until ?? "";
+  const total = Number(
+    (
+      await db
+        .prepare(`SELECT COUNT(*) AS n FROM publication_reviews WHERE ${IN_WINDOW}`)
+        .bind(since, until)
+        .first<{ n: number }>()
+    )?.n ?? 0,
+  );
+  if (total > DIGEST_ROW_LIMIT) {
+    // Close the window at the instant of the last row listed, so every row after it is the next
+    // digest's; the rows of that same instant are listed with it.
+    const last = await db
+      .prepare(
+        `SELECT auto_deny_at AS at FROM publication_reviews WHERE ${IN_WINDOW}
+          ORDER BY auto_deny_at, id LIMIT 1 OFFSET ?`,
+      )
+      .bind(since, until, DIGEST_ROW_LIMIT - 1)
+      .first<{ at: string }>();
+    if (last?.at) until = last.at;
+  }
   const { results } = await db
     .prepare(
-      `SELECT id, request_id, dataset_id, head_sha, anonymous, state, report, confirm_of,
-              auto_deny_state
-         FROM publication_reviews
-        WHERE confirm_of IS NULL AND auto_deny_state IN (${sqlList(DIGEST_STATES)})
-          AND auto_deny_at > ? AND auto_deny_at <= ?
-        ORDER BY auto_deny_at, id LIMIT 500`,
+      `SELECT ${ROW_COLUMNS} FROM publication_reviews WHERE ${IN_WINDOW}
+        ORDER BY auto_deny_at, id`,
     )
-    .bind(window?.since ?? "", window?.until ?? "")
+    .bind(since, until)
     .all<Record<string, unknown>>();
   const rows: AutoDenyDigestRow[] = [];
   for (const raw of results ?? []) {
-    const state = raw.auto_deny_state;
+    const review = toRow(raw);
+    const state = review.autoDenyState;
     if (!isOneOf(DIGEST_STATES, state)) continue;
-    const review = await readReview(db, Number(raw.id));
-    const view = review ? rowViewOf(review, Date.now()) : null;
-    const report = view?.kind === "reported" ? view.report : null;
+    const view = rowViewOf(review, Date.now());
+    const report = view.kind === "reported" ? view.report : null;
     rows.push({
       state,
-      datasetId: String(raw.dataset_id),
-      requestId: Number(raw.request_id),
+      datasetId: review.datasetId,
+      requestId: review.requestId,
       codes: report === null ? [] : eligibleCodesOf(report).codes,
     });
   }
   result.rows = rows.length;
-  if (rows.length === 0) {
+  result.more = Math.max(0, total - rows.length);
+  // The denials whose mail failed at the denial and again on its retry, whatever their window.
+  const undelivered = (
+    await db
+      .prepare(
+        `SELECT dataset_id, request_id FROM publication_reviews
+          WHERE confirm_of IS NULL AND auto_deny_state = 'denied' AND denial_mail_state = 'failed'
+            AND denial_mail_attempts >= ? AND auto_deny_at > ?
+          ORDER BY auto_deny_at, id LIMIT ?`,
+      )
+      .bind(DENIAL_MAIL_MAX_ATTEMPTS, since, DIGEST_ROW_LIMIT)
+      .all<{ dataset_id: string; request_id: number }>()
+  ).results.map((r) => ({ datasetId: String(r.dataset_id), requestId: Number(r.request_id) }));
+  result.undelivered = undelivered.length;
+  await db
+    .prepare("UPDATE publication_auto_deny_digests SET window_end = ? WHERE id = ?")
+    .bind(until, digestId)
+    .run();
+  if (rows.length === 0 && undelivered.length === 0) {
     await markDigestSent(db, digestId);
-    return result;
+    return;
   }
   const admins = await getAdminEmailsForCategory(db, "publication_request", env);
   const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
   const outcome = await sendAutoDenyDigestEmail(
     admins,
     rows,
+    { more: result.more, undelivered },
     autoDenyMode(env),
     autoDenyDailyCap(env),
     env.RESEND_API_KEY ?? "",
@@ -548,7 +728,6 @@ export async function sendAutoDenyDigest(env: Bindings): Promise<AutoDenyDigestR
   );
   result.delivered = outcome.delivered;
   if (outcome.delivered > 0) await markDigestSent(db, digestId);
-  return result;
 }
 
 async function markDigestSent(db: Db, id: number): Promise<void> {
@@ -571,8 +750,9 @@ export const RESTORE_AUDIT_ACTION = "publication_restore";
 
 /**
  * Restore a denied request to `requested` (ADR 0139, decision 4): the dataset's newest request,
- * denied and not withdrawn, with no newer request. One batch: the guarded write and an audit row
- * that exists only if the write changed the request. `auto_denied` goes back to 0, so a denial that
+ * denied and not withdrawn, with no newer request. One batch: the guarded write, an audit row that
+ * exists only if the write changed the request, and the automatic denial's review marked
+ * `restored` (never denied automatically again for that commit; its cap place stays counted). `auto_denied` goes back to 0, so a denial that
  * was reversed does not count toward the dataset's two.
  */
 export async function restorePublicationRequest(
@@ -618,6 +798,17 @@ export async function restorePublicationRequest(
         details,
       }),
     ),
+    // The review the automatic denial acted on says it was restored. Its `auto_deny_at` is kept,
+    // so its place under the day's cap stays counted (`CAPPED_STATES`), and a first run that is no
+    // longer `none` never starts another confirming run: this commit is not denied again.
+    db
+      .prepare(
+        `UPDATE publication_reviews SET auto_deny_state = 'restored'
+          WHERE request_id = ? AND confirm_of IS NULL AND auto_deny_state = 'denied'
+            AND EXISTS (SELECT 1 FROM publication_requests
+                         WHERE id = ? AND status = 'requested' AND denied_at IS NULL)`,
+      )
+      .bind(newest.id, newest.id),
   ]);
   if ((results[0]?.meta?.changes ?? 0) !== 1) {
     // It moved between the read and the write: say why, by the same rule.

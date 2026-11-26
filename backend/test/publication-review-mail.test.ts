@@ -720,7 +720,7 @@ describe("a review that never reports is mailed once, and the mail says so", () 
     const broken = env({
       DB: interceptingD1(realD1(db), (sql) => {
         // The review watchdog's own query, and nothing else.
-        if (/^\s*SELECT id, request_id FROM publication_reviews/.test(sql)) {
+        if (/^\s*SELECT id, request_id, confirm_of FROM publication_reviews/.test(sql)) {
           throw new Error("D1_ERROR: simulated");
         }
       }),

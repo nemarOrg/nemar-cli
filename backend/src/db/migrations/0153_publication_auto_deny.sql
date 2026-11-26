@@ -14,10 +14,21 @@
 --       not_eligible  the confirming run agreed, but the request had changed (a race was lost);
 --       disagreed     the confirming run did not agree, so a person decides;
 --       confirm_failed the confirming run did not report a result (an error, a refusal, a cut-off
---                     answer), so nothing confirmed the fail and a person decides.
+--                     answer, a dispatch that failed or was declined, or the watchdog expired
+--                     it), so nothing confirmed the fail and a person decides;
+--       no_service_account the confirming run agreed and the mode is `on`, but the nemarAdmin
+--                     service account is missing, so nothing was denied;
+--       restored      the request was denied automatically and an administrator restored it; the
+--                     same commit is never denied automatically again, and its place under the
+--                     day's cap stays counted.
 --     A confirming row always holds `none`: the word is the first run's.
---   * `auto_deny_at`: when that word was written; NULL for `none`. The daily cap counts `denied`
---     and `would_deny` by it, and the administrators' digest reads every word but `none` by it.
+--   * `denial_mail_state`: what became of the depositor's denial mail, for a `denied` first run:
+--     `sent` (at least one recipient took it and none failed), `failed` (a provider refused or did
+--     not answer a send), `fenced` (the dev Worker's DEV_EMAIL_ALLOWLIST held every recipient).
+--     NULL when no denial mail was due. `denial_mail_attempts` counts the tries: the daily tick
+--     retries a `failed` mail once.
+--   * `auto_deny_at`: when that word was written; NULL for `none`. The daily cap counts `denied`,
+--     `would_deny` and `restored` by it, and the administrators' digest reads every word but `none` by it.
 --
 -- The table's UNIQUE (request_id, head_sha, anonymous) becomes a partial unique index over first
 -- runs only, and a second partial index allows one confirming row per first run. SQLite cannot drop
@@ -66,9 +77,13 @@ CREATE TABLE publication_reviews_new (
   inputs_served_at TEXT,
   confirm_of INTEGER,
   auto_deny_state TEXT NOT NULL DEFAULT 'none' CHECK (auto_deny_state IN (
-    'none', 'would_deny', 'denied', 'capped', 'not_eligible', 'disagreed', 'confirm_failed'
+    'none', 'would_deny', 'denied', 'capped', 'not_eligible', 'disagreed', 'confirm_failed',
+    'no_service_account', 'restored'
   )),
   auto_deny_at TEXT,
+  denial_mail_state TEXT CHECK (denial_mail_state IS NULL
+    OR denial_mail_state IN ('sent', 'failed', 'fenced')),
+  denial_mail_attempts INTEGER NOT NULL DEFAULT 0 CHECK (denial_mail_attempts >= 0),
   -- A verdict, and a stored report, exist exactly when the review reported.
   CHECK ((state = 'reported') = (verdict IS NOT NULL)),
   CHECK ((state = 'reported') = (report IS NOT NULL)),

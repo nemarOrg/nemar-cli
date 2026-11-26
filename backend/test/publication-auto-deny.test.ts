@@ -17,7 +17,8 @@ import { AUTO_DENY_STATE_COPY, CONFIRMING_MODEL } from "../../shared/publication
 import { PUBLICATION_PROMPT_VERSION, REVIEW_INPUTS } from "../../shared/publication-review";
 import { AUTO_DENY_AUDIT_ACTION } from "../../shared/resubmission-note";
 import { notifyAdminsOfScreen } from "../src/services/identifier-screen";
-import { sendAutoDenyDigest } from "../src/services/publication-auto-deny";
+import { autoDenyStep, sendAutoDenyDigest } from "../src/services/publication-auto-deny";
+import { sweepPublicationReviews } from "../src/services/publication-review";
 import type { Bindings } from "../src/types/bindings";
 import { realD1 } from "./helpers/d1";
 import {
@@ -1048,7 +1049,412 @@ describe("a confirming run and the allowances (ADR 0139: the platform's own chec
       expect(confirmOf(firstId)).toMatchObject({ state: "declined", detail: "platform_limit" });
       expect(h.dispatches()).toHaveLength(0);
       expect(h.requestRow(requestId).status).toBe("requested");
+      // Nothing will confirm it, and the first run says so.
+      expect(h.review(firstId).auto_deny_state).toBe("confirm_failed");
+    });
+  });
+});
+
+// ============================================================================
+// Review round 1
+// ============================================================================
+
+function mailState(firstId: number) {
+  return h.db
+    .query(
+      "SELECT denial_mail_state AS state, denial_mail_attempts AS attempts FROM publication_reviews WHERE id = ?",
+    )
+    .get(firstId) as { state: string | null; attempts: number };
+}
+
+/** A new UTC day for the digest: the claim of today is moved to the past, as a day passing does. */
+function nextDigestDay(): void {
+  h.db.run("UPDATE publication_auto_deny_digests SET day = date(day, '-1 day')");
+}
+
+describe("the denial mail is never silent", () => {
+  test("a send that fails is recorded failed, retried once by the daily tick, and listed when it fails again", async () => {
+    await accounts();
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    let firstId = 0;
+    let requestId = 0;
+    await withFakeResend(
+      async (calls) => {
+        const run = await firstRun();
+        firstId = run.firstId;
+        requestId = run.requestId;
+        await confirmRun(firstId, confirmingBody());
+        expect(h.requestRow(requestId).status).toBe("denied");
+        expect(depositorMails(calls).length).toBeGreaterThan(0);
+      },
+      { status: 500 },
+    );
+    expect(mailState(firstId)).toEqual({ state: "failed", attempts: 1 });
+
+    // The daily tick tries it again; it fails again, and the digest (which reaches the
+    // administrators this time) lists it.
+    let tries = 0;
+    await withFakeResend(
+      async (calls) => {
+        const r = await sendAutoDenyDigest(h.env());
+        tries = depositorMails(calls).length;
+        expect(r).toMatchObject({ claimed: true, retried: 1 });
+      },
+      { status: 500 },
+    );
+    expect(tries).toBeGreaterThan(0);
+    expect(mailState(firstId)).toEqual({ state: "failed", attempts: 2 });
+
+    nextDigestDay();
+    await withFakeResend(async (calls) => {
+      const r = await sendAutoDenyDigest(h.env());
+      // Tried twice already: not tried a third time.
+      expect(r).toMatchObject({ claimed: true, retried: 0, undelivered: 1 });
+      expect(depositorMails(calls)).toHaveLength(0);
+      const text = textOf(sendsTo(calls, ADMIN_EMAIL)[0]?.html ?? "");
+      expect(text).toContain("Denial mail not delivered (1)");
+      expect(text).toContain(`${PROD_DATASET} request ${requestId}`);
+    });
+  });
+
+  test("a failed mail that the retry delivers is sent, and not listed", async () => {
+    await accounts();
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    let firstId = 0;
+    await withFakeResend(
+      async () => {
+        const run = await firstRun();
+        firstId = run.firstId;
+        await confirmRun(firstId, confirmingBody());
+      },
+      { status: 500 },
+    );
+    await withFakeResend(async (calls) => {
+      const r = await sendAutoDenyDigest(h.env());
+      expect(r).toMatchObject({ retried: 1, undelivered: 0 });
+      expect(depositorMails(calls).length).toBeGreaterThan(0);
+      expect(textOf(sendsTo(calls, ADMIN_EMAIL)[0]?.html ?? "")).not.toContain(
+        "Denial mail not delivered",
+      );
+    });
+    expect(mailState(firstId)).toEqual({ state: "sent", attempts: 2 });
+  });
+
+  test("the dev fence holding every recipient is recorded fenced, not sent", async () => {
+    await accounts();
+    const devEnv = h.env({
+      ENVIRONMENT: "development",
+      PUBLICATION_AUTO_DENY_MODE: "on",
+      DEV_EMAIL_ALLOWLIST: "",
+    });
+    await withFakeResend(async (calls) => {
+      const { requestId, firstId } = await firstRun({ datasetId: DEV_DATASET, env: devEnv });
+      await confirmRun(firstId, confirmingBody(), { datasetId: DEV_DATASET, env: devEnv });
+      expect(h.requestRow(requestId).status).toBe("denied");
+      expect(depositorMails(calls, DEV_DATASET)).toHaveLength(0);
+      expect(mailState(firstId)).toEqual({ state: "fenced", attempts: 1 });
+    });
+  });
+});
+
+describe("a confirming run that never confirms is confirm_failed, and the digest shows it", () => {
+  test("its dispatch fails", async () => {
+    await accounts();
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    h.dispatchStatus = 500;
+    await withFakeResend(async (calls) => {
+      const { requestId, firstId } = await firstRun();
+      expect(confirmOf(firstId)).toMatchObject({ state: "errored", detail: "dispatch_failed" });
+      expect(h.review(firstId).auto_deny_state).toBe("confirm_failed");
+      expect(h.requestRow(requestId).status).toBe("requested");
+      // The administrators are told now, with the state's line.
+      expect(textOf(adminMails(calls)[0]?.html ?? "")).toContain(
+        AUTO_DENY_STATE_COPY.confirm_failed.statement,
+      );
+    });
+    await withFakeResend(async (calls) => {
+      expect(await sendAutoDenyDigest(h.env())).toMatchObject({ rows: 1 });
+      expect(textOf(sendsTo(calls, ADMIN_EMAIL)[0]?.html ?? "")).toContain(
+        "Confirming run did not finish (1)",
+      );
+    });
+  });
+
+  test("the watchdog expires it", async () => {
+    await accounts();
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    await withFakeResend(async (calls) => {
+      const { requestId, firstId } = await firstRun();
+      const confirmId = Number(confirmOf(firstId)?.id);
       expect(h.review(firstId).auto_deny_state).toBe("none");
+      h.db.run(
+        "UPDATE publication_reviews SET created_at = datetime('now', '-45 minutes') WHERE id = ?",
+        [confirmId],
+      );
+      const swept = await sweepPublicationReviews(h.env());
+      expect(swept.timedOut).toBe(1);
+      expect(h.review(confirmId).state).toBe("unreported");
+      expect(h.review(firstId).auto_deny_state).toBe("confirm_failed");
+      expect(h.requestRow(requestId).status).toBe("requested");
+      expect(textOf(adminMails(calls)[0]?.html ?? "")).toContain(
+        AUTO_DENY_STATE_COPY.confirm_failed.statement,
+      );
+      // A late report of the expired run decides nothing.
+      expect((await h.claim(confirmId)).status).toBe(200);
+      await h.result(confirmId, confirmRunBody(confirmingBody()));
+      expect(h.requestRow(requestId).status).toBe("requested");
+      expect(h.review(firstId).auto_deny_state).toBe("confirm_failed");
+    });
+    await withFakeResend(async (calls) => {
+      expect(await sendAutoDenyDigest(h.env())).toMatchObject({ rows: 1 });
+      expect(textOf(sendsTo(calls, ADMIN_EMAIL)[0]?.html ?? "")).toContain(
+        "Confirming run did not finish (1)",
+      );
+    });
+  });
+});
+
+describe("a stale review is never denied", () => {
+  /** The request's screened head, moved as a re-screen of a new commit leaves it. */
+  function rescreen(requestId: number, head: string): void {
+    h.db.run(
+      `UPDATE publication_requests
+          SET identifier_screen_report = json_set(identifier_screen_report, '$.head', ?)
+        WHERE id = ?`,
+      [head, requestId],
+    );
+  }
+
+  /** The common end: nothing denied, and `decide` wrote its word (so it ran). */
+  function notDenied(requestId: number, firstId: number, status = "requested"): void {
+    expect(h.requestRow(requestId)).toMatchObject({ status, auto_denied: 0 });
+    expect(h.review(firstId).auto_deny_state).toBe("not_eligible");
+    expect(h.review(firstId).auto_deny_at).not.toBeNull();
+    expect(auditRows(AUTO_DENY_AUDIT_ACTION)).toHaveLength(0);
+  }
+
+  async function claimed(): Promise<{ requestId: number; firstId: number; confirmId: number }> {
+    await accounts();
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    const { requestId, firstId } = await firstRun();
+    const confirmId = Number(confirmOf(firstId)?.id);
+    expect((await h.claim(confirmId)).status).toBe(200);
+    return { requestId, firstId, confirmId };
+  }
+
+  test("a re-screen to a new head before the confirming result", async () => {
+    await withFakeResend(async () => {
+      const { requestId, firstId, confirmId } = await claimed();
+      rescreen(requestId, "f".repeat(40));
+      // `decide` itself sees the review is no longer in force: the deny's batch never runs.
+      let batched = false;
+      const watched = {
+        ...h.env(),
+        DB: hookedD1(realD1(h.db), {
+          batch: (sqls) => {
+            if (sqls.some((sql) => sql.includes("SET status = 'denied'"))) batched = true;
+          },
+        }),
+      } as Bindings;
+      await h.result(confirmId, confirmRunBody(confirmingBody()), undefined, watched);
+      expect(batched).toBe(false);
+      notDenied(requestId, firstId);
+    });
+  });
+
+  test("a withdrawal before it", async () => {
+    await withFakeResend(async () => {
+      const { requestId, firstId, confirmId } = await claimed();
+      h.db.run(
+        `UPDATE publication_requests SET status = 'denied', withdrawn_at = datetime('now'),
+                denied_at = datetime('now') WHERE id = ?`,
+        [requestId],
+      );
+      await h.result(confirmId, confirmRunBody(confirmingBody()));
+      // Still the depositor's own withdrawal, untouched.
+      notDenied(requestId, firstId, "denied");
+      expect(h.requestRow(requestId).withdrawn_at).not.toBeNull();
+      expect(h.requestRow(requestId).denied_by).toBeNull();
+    });
+  });
+
+  test("a newer request of the dataset", async () => {
+    await withFakeResend(async () => {
+      const { requestId, firstId, confirmId } = await claimed();
+      const newer = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+      h.db.run(
+        "UPDATE publication_requests SET requested_at = datetime('now', '+1 minute') WHERE id = ?",
+        [newer.requestId],
+      );
+      await h.result(confirmId, confirmRunBody(confirmingBody()));
+      notDenied(requestId, firstId);
+      expect(h.requestRow(newer.requestId)).toMatchObject({ status: "requested", auto_denied: 0 });
+    });
+  });
+
+  test("two earlier automatic denials recorded after the first run", async () => {
+    // The request gets a high id (a closed request of another dataset holds id 100), so the two
+    // seeded after it can be EARLIER ones.
+    const other = seedScreenedRequest(h.db, { datasetId: "nm000489" });
+    h.db.run("UPDATE publication_requests SET id = 100, status = 'published' WHERE id = ?", [
+      other.requestId,
+    ]);
+    await withFakeResend(async () => {
+      const { requestId, firstId, confirmId } = await claimed();
+      expect(requestId).toBeGreaterThan(100);
+      for (const id of [10, 11]) {
+        h.db.run(
+          `INSERT INTO publication_requests (id, dataset_id, requested_by, status, auto_denied,
+                                              denied_at, requested_at)
+           VALUES (?, ?, ?, 'denied', 1, datetime('now', '-1 day'), datetime('now', '-2 days'))`,
+          [id, PROD_DATASET, Number(h.requestRow(requestId).requested_by)],
+        );
+      }
+      await h.result(confirmId, confirmRunBody(confirmingBody()));
+      notDenied(requestId, firstId);
+    });
+  });
+
+  test("a head change between decide's read and the batch: the SQL guard alone stops the write", async () => {
+    await withFakeResend(async () => {
+      const { requestId, firstId, confirmId } = await claimed();
+      let landed = false;
+      const raced = {
+        ...h.env(),
+        DB: hookedD1(realD1(h.db), {
+          batch: (sqls) => {
+            if (!landed && sqls.some((s) => s.includes("SET status = 'denied'"))) {
+              landed = true;
+              rescreen(requestId, "e".repeat(40));
+            }
+          },
+        }),
+      } as Bindings;
+      await h.result(confirmId, confirmRunBody(confirmingBody()), undefined, raced);
+      // The batch ran (the claim was taken and given back): only the guard could refuse it.
+      expect(landed).toBe(true);
+      notDenied(requestId, firstId);
+    });
+  });
+});
+
+describe("restore marks the review restored", () => {
+  test("restored, never denied automatically again for that head, and its cap place stays counted", async () => {
+    await accounts();
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on", PUBLICATION_AUTO_DENY_DAILY_CAP: "1" };
+    let run: FirstRun | null = null;
+    await withFakeResend(async () => {
+      run = await firstRun();
+      await confirmRun(run.firstId, confirmingBody());
+    });
+    const { requestId, firstId } = run as unknown as FirstRun;
+    const res = await h.app.request(
+      `/admin/publish/${PROD_DATASET}/restore`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer autodeny-admin-key-0123456789abcdef01",
+        },
+        body: "{}",
+      },
+      h.env(),
+    );
+    expect(res.status).toBe(200);
+    expect(h.review(firstId).auto_deny_state).toBe("restored");
+    expect(h.review(firstId).auto_deny_at).not.toBeNull();
+    expect(h.requestRow(requestId).status).toBe("requested");
+
+    // The same first run's step again starts nothing.
+    const before = h.dispatches().length;
+    expect(await autoDenyStep(h.env(), firstId)).toBe("not_eligible");
+    expect(h.dispatches()).toHaveLength(before);
+
+    // The restored denial still holds the day's only place: another agreed fail is capped.
+    await withFakeResend(async () => {
+      const other = await firstRun({ datasetId: "nm000481" });
+      await confirmRun(other.firstId, confirmingBody(), { datasetId: "nm000481" });
+      expect(h.review(other.firstId).auto_deny_state).toBe("capped");
+    });
+  });
+});
+
+describe("the digest's robustness", () => {
+  /** `n` first runs the automatic denial disagreed on, a minute apart, oldest first. */
+  function seedDisagreed(n: number): void {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: "nm000488" });
+    const insert = h.db.query(
+      `INSERT INTO publication_reviews (request_id, dataset_id, head_sha, anonymous, requested_by,
+                                        state, detail, decided_at, auto_deny_state, auto_deny_at)
+       VALUES (?, 'nm000488', ?, 0, 1, 'errored', 'workflow_failed', datetime('now'),
+               'disagreed', datetime('now', ?))`,
+    );
+    for (let i = 0; i < n; i++) {
+      insert.run(requestId, i.toString(16).padStart(40, "0"), `-${n - i + 1} minutes`);
+    }
+  }
+
+  test("past 500 rows it lists 500, says how many more, and the next digest lists the rest", async () => {
+    await accounts();
+    seedDisagreed(503);
+    await withFakeResend(async (calls) => {
+      const r = await sendAutoDenyDigest(h.env());
+      expect(r).toMatchObject({ rows: 500, more: 3 });
+      expect(textOf(sendsTo(calls, ADMIN_EMAIL)[0]?.html ?? "")).toContain(
+        "3 more not shown; they are in the next digest.",
+      );
+    });
+    nextDigestDay();
+    await withFakeResend(async (calls) => {
+      const r = await sendAutoDenyDigest(h.env());
+      expect(r).toMatchObject({ rows: 3, more: 0 });
+      expect(textOf(sendsTo(calls, ADMIN_EMAIL)[0]?.html ?? "")).toContain(
+        "Automated review disagreed (3)",
+      );
+    });
+  });
+
+  test("a fault after the day's claim releases the claim, so the next tick sends it", async () => {
+    await accounts();
+    seedDisagreed(2);
+    const faulty = {
+      ...h.env(),
+      DB: hookedD1(realD1(h.db), {
+        statement: (sql) => {
+          if (
+            sql.includes("SELECT COUNT(*) AS n FROM publication_reviews WHERE confirm_of IS NULL")
+          ) {
+            throw new Error("D1_ERROR: simulated");
+          }
+        },
+      }),
+    } as Bindings;
+    await withFakeResend(async (calls) => {
+      await expect(sendAutoDenyDigest(faulty)).rejects.toThrow("simulated");
+      expect(h.db.query("SELECT COUNT(*) AS n FROM publication_auto_deny_digests").get()).toEqual({
+        n: 0,
+      });
+      expect(await sendAutoDenyDigest(h.env())).toMatchObject({ claimed: true, rows: 2 });
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+    });
+  });
+
+  test("a missing service account is recorded, and the digest says nothing was denied", async () => {
+    await seedUser(h.db, "autodenyadmin", "admin", "autodeny-admin-key-0123456789abcdef01", {
+      email: ADMIN_EMAIL,
+    });
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    await withFakeResend(async () => {
+      const { requestId, firstId } = await firstRun();
+      await confirmRun(firstId, confirmingBody());
+      expect(h.review(firstId).auto_deny_state).toBe("no_service_account");
+      expect(h.requestRow(requestId).status).toBe("requested");
+    });
+    await withFakeResend(async (calls) => {
+      await sendAutoDenyDigest(h.env());
+      expect(textOf(sendsTo(calls, ADMIN_EMAIL)[0]?.html ?? "")).toContain(
+        "Service account missing; nothing was denied (1)",
+      );
     });
   });
 });

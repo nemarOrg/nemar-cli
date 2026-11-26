@@ -109,6 +109,8 @@ describe("0098 publication_reviews: columns", () => {
     confirm_of: { type: "INTEGER", notnull: 0, dflt: null },
     auto_deny_state: { type: "TEXT", notnull: 1, dflt: "'none'" },
     auto_deny_at: { type: "TEXT", notnull: 0, dflt: null },
+    denial_mail_state: { type: "TEXT", notnull: 0, dflt: null },
+    denial_mail_attempts: { type: "INTEGER", notnull: 1, dflt: "0" },
   };
 
   test("exactly the declared columns, types, NOT NULLs and defaults", () => {

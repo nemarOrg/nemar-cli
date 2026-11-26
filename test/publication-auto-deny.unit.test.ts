@@ -40,6 +40,7 @@ import {
 
 const ABSENT_INPUTS = Object.fromEntries(REVIEW_INPUTS.map((i) => [i, "absent"]));
 const DIGEST = "ab".repeat(32);
+const PV = PUBLICATION_PROMPT_VERSION;
 
 /** A version-2 report the production parser accepts, with `over` on top. */
 function report(
@@ -305,8 +306,8 @@ describe("the confirmation", () => {
   test("agrees when both are eligible over the same digest and share a code", () => {
     expect(
       confirmationOf(
-        { eligibility: first, inputDigest: DIGEST },
-        { eligibility: sonnet("readme_missing_or_stub"), inputDigest: DIGEST },
+        { eligibility: first, inputDigest: DIGEST, promptVersion: PV },
+        { eligibility: sonnet("readme_missing_or_stub"), inputDigest: DIGEST, promptVersion: PV },
       ),
     ).toEqual({ agrees: true, codes: ["readme_missing_or_stub"], reasons: ["question_failed"] });
   });
@@ -315,28 +316,44 @@ describe("the confirmation", () => {
     const disagree = { agrees: false };
     expect(
       confirmationOf(
-        { eligibility: first, inputDigest: DIGEST },
-        { eligibility: sonnet("name_not_descriptive"), inputDigest: DIGEST },
+        { eligibility: first, inputDigest: DIGEST, promptVersion: PV },
+        { eligibility: sonnet("name_not_descriptive"), inputDigest: DIGEST, promptVersion: PV },
       ),
     ).toEqual(disagree);
     expect(
       confirmationOf(
-        { eligibility: first, inputDigest: DIGEST },
-        { eligibility: sonnet("provenance_unclear"), inputDigest: DIGEST },
+        { eligibility: first, inputDigest: DIGEST, promptVersion: PV },
+        { eligibility: sonnet("provenance_unclear"), inputDigest: DIGEST, promptVersion: PV },
       ),
     ).toEqual(disagree);
     expect(
       confirmationOf(
-        { eligibility: first, inputDigest: DIGEST },
-        { eligibility: sonnet("readme_missing_or_stub"), inputDigest: "cd".repeat(32) },
+        { eligibility: first, inputDigest: DIGEST, promptVersion: PV },
+        {
+          eligibility: sonnet("readme_missing_or_stub"),
+          inputDigest: "cd".repeat(32),
+          promptVersion: PV,
+        },
       ),
     ).toEqual(disagree);
     expect(
       confirmationOf(
-        { eligibility: first, inputDigest: null },
-        { eligibility: sonnet("readme_missing_or_stub"), inputDigest: null },
+        { eligibility: first, inputDigest: null, promptVersion: PV },
+        { eligibility: sonnet("readme_missing_or_stub"), inputDigest: null, promptVersion: PV },
       ),
     ).toEqual(disagree);
+  });
+
+  test("disagrees on another prompt version, or one that is not recorded, over the same digest", () => {
+    const b = sonnet("readme_missing_or_stub");
+    for (const promptVersion of ["publication-review-prompt/1", null]) {
+      expect(
+        confirmationOf(
+          { eligibility: first, inputDigest: DIGEST, promptVersion: PV },
+          { eligibility: b, inputDigest: DIGEST, promptVersion },
+        ),
+      ).toEqual({ agrees: false });
+    }
   });
 
   test("the denial's reason is reason codes, which a later review is shown", () => {
@@ -372,5 +389,9 @@ describe("the copy", () => {
     expect(autoDenyStateLine("capped")).toContain("Recommended: deny");
     expect(autoDenyStateLine("would_deny")).toContain("Would deny");
     expect(autoDenyStateLine("confirm_failed")).toContain("did not finish");
+    expect(autoDenyStateLine("no_service_account")).toContain(
+      "Service account missing; nothing was denied",
+    );
+    expect(autoDenyStateLine("restored")).toContain("restored by an administrator");
   });
 });

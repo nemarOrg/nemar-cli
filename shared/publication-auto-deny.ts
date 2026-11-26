@@ -211,19 +211,29 @@ export function autoDenyEligibility(input: EligibilityInput): Eligibility {
   return { eligible: true, codes, reasons };
 }
 
+/** One review as the confirmation compares it. */
+export interface ConfirmationSide {
+  eligibility: Eligibility;
+  inputDigest: string | null;
+  promptVersion: string | null;
+}
+
 /**
  * Whether a confirming run confirms a first run: it is eligible by the same rule, it was made over
- * the same input digest (two digests that are both recorded and equal), and it names at least one
- * eligible code the first run named. The shared codes are what the denial names.
+ * the same input digest and the same prompt version (each recorded on both and equal), and it names
+ * at least one eligible code the first run named. The shared codes are what the denial names.
  */
 export function confirmationOf(
-  first: { eligibility: Eligibility; inputDigest: string | null },
-  confirm: { eligibility: Eligibility; inputDigest: string | null },
+  first: ConfirmationSide,
+  confirm: ConfirmationSide,
 ): { agrees: true; codes: AutoDenyCode[]; reasons: AutoDenyReasonCode[] } | { agrees: false } {
   const a = first.eligibility;
   const b = confirm.eligibility;
   if (!a.eligible || !b.eligible) return { agrees: false };
   if (first.inputDigest === null || first.inputDigest !== confirm.inputDigest) {
+    return { agrees: false };
+  }
+  if (first.promptVersion === null || first.promptVersion !== confirm.promptVersion) {
     return { agrees: false };
   }
   const shared = a.codes.filter((c) => b.codes.includes(c));
@@ -254,6 +264,8 @@ export const AUTO_DENY_STATES = [
   "not_eligible",
   "disagreed",
   "confirm_failed",
+  "no_service_account",
+  "restored",
 ] as const;
 export type AutoDenyState = (typeof AUTO_DENY_STATES)[number];
 
@@ -264,10 +276,26 @@ export const DIGEST_STATES = [
   "capped",
   "disagreed",
   "confirm_failed",
+  "no_service_account",
 ] as const satisfies readonly AutoDenyState[];
 
-/** The states the daily cap counts: a denial, or one that would have been one. */
-export const CAPPED_STATES = ["denied", "would_deny"] as const satisfies readonly AutoDenyState[];
+/**
+ * The states the daily cap counts: a denial, one that would have been one, and a denial an
+ * administrator restored since (its place under the day's cap was taken, and a restore does not give
+ * it back, so restoring cannot buy a further denial the same day).
+ */
+export const CAPPED_STATES = [
+  "denied",
+  "would_deny",
+  "restored",
+] as const satisfies readonly AutoDenyState[];
+
+/** What became of a denial mail (migration 0153, `denial_mail_state`). */
+export const DENIAL_MAIL_STATES = ["sent", "failed", "fenced"] as const;
+export type DenialMailState = (typeof DENIAL_MAIL_STATES)[number];
+
+/** How many times a denial mail is tried: once when the request is denied, once more a day later. */
+export const DENIAL_MAIL_MAX_ATTEMPTS = 2;
 
 // ---------------------------------------------------------------------------------------------
 // Copy
@@ -403,6 +431,20 @@ export const AUTO_DENY_STATE_COPY: Record<AutoDenyState, AutoDenyCopy> = {
       "Read the review and decide the request yourself; nothing was denied, and the confirming run is not retried.",
     anchor: anchor("confirm-failed"),
   },
+  no_service_account: {
+    statement:
+      "Service account missing; nothing was denied. A confirming run agreed and the mode is on, but the nemarAdmin account the denial is made as does not exist.",
+    read: "The users table, for the nemarAdmin account.",
+    remedy: "Decide the request yourself, and restore the nemarAdmin service account.",
+    anchor: anchor("no-service-account"),
+  },
+  restored: {
+    statement:
+      "Denied by an automated agent, then restored by an administrator; this commit is never denied automatically again.",
+    read: "The restore's audit row (publication_restore).",
+    remedy: "Decide the request yourself.",
+    anchor: anchor("restored"),
+  },
 };
 
 /** The administrators' line for a state, or null when the state says nothing (`none`). */
@@ -493,7 +535,19 @@ export const DIGEST_STATE_HEADING: Record<(typeof DIGEST_STATES)[number], string
   capped: "Recommended: deny (cap reached)",
   disagreed: "Automated review disagreed",
   confirm_failed: "Confirming run did not finish",
+  no_service_account: "Service account missing; nothing was denied",
 };
+
+/** The digest's section of denials whose mail reached nobody after its retry. */
+export const DIGEST_MAIL_NOT_DELIVERED_HEADING = "Denial mail not delivered";
+
+export const DIGEST_MAIL_NOT_DELIVERED_INTRO =
+  "These requests were denied, and the mail to the depositor failed twice (once at the denial and once a day later). Tell the depositor another way.";
+
+/** The digest's line when it holds back rows past its limit; they come in the next digest. */
+export function digestMoreNotShown(n: number): string {
+  return `${n} more not shown; they are in the next digest.`;
+}
 
 export function autoDenyDigestMode(mode: AutoDenyMode, cap: number): string {
   return `Mode: ${mode}. Daily cap: ${cap}.`;
