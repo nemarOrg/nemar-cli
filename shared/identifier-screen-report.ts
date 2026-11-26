@@ -79,6 +79,13 @@ const KIND_TABLE: Record<FindingKind, true> = {
   "nirx-header-date": true,
   "nirx-freetext": true,
   "brainvision-marker-text": true,
+  "eeglab-subject-name": true,
+  "eeglab-subject-freetext": true,
+  "eeglab-event-name": true,
+  "eeglab-history-name": true,
+  "mat-freetext": true,
+  "mat-freetext-name": true,
+  "mat-identifier-field": true,
 };
 export const FINDING_KINDS: readonly FindingKind[] = Object.keys(KIND_TABLE) as FindingKind[];
 const KIND_SET: ReadonlySet<string> = new Set(FINDING_KINDS);
@@ -622,7 +629,8 @@ function parseScanBody(x: Record<string, unknown>): Record<string, unknown> {
     }
   }
   for (const k of ["findings_by_kind", "edf_bdf_files_by_kind"]) {
-    if (x[k] !== undefined) out[k] = countMap(x[k], (key) => KIND_SET.has(key), 40, "scan-kinds");
+    if (x[k] !== undefined)
+      out[k] = countMap(x[k], (key) => KIND_SET.has(key), FINDING_KINDS.length, "scan-kinds");
   }
   if (x.unscreened_formats !== undefined) {
     out.unscreened_formats = countMap(

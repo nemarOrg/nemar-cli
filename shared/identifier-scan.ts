@@ -67,7 +67,14 @@ export type FindingKind =
   | "nirx-demographics"
   | "nirx-header-date"
   | "nirx-freetext"
-  | "brainvision-marker-text";
+  | "brainvision-marker-text"
+  | "eeglab-subject-name"
+  | "eeglab-subject-freetext"
+  | "eeglab-event-name"
+  | "eeglab-history-name"
+  | "mat-freetext"
+  | "mat-freetext-name"
+  | "mat-identifier-field";
 
 /**
  * Finding kinds that name a person or a clinical record: what must not stay public. A finding
@@ -89,6 +96,9 @@ export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "hdf5-identifier-field",
   "nirx-subject-name",
   "nirx-demographics",
+  "eeglab-subject-name",
+  "mat-freetext-name",
+  "mat-identifier-field",
 ]);
 
 /**

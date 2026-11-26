@@ -52,6 +52,12 @@ const HDF5_REMEDY =
 const BRAINVISION =
   "the text of BrainVision header (.vhdr) and marker (.vmrk) files, up to 1 MiB each";
 const NIRX = "the text of NIRx header (.hdr) and information (.inf) files, up to 1 MiB each";
+const EEGLAB =
+  "the text fields of EEGLAB .set files (classic MAT-files and v7.3), never the signal data and never the .fdt file";
+const MATLAB_TEXT =
+  "every character array of a MATLAB file (EEGLAB .set, Homer .nirs or .mat), walking its structs and cells; numeric arrays only under an identifier-key name, and signal data never";
+const MATLAB_REMEDY =
+  "Blank the value or replace it with a code in the file (in MATLAB, load it, edit the field and save it again) and upload again.";
 
 const kind = (statement: string, read: string, remedy: string, name: FindingKind): Copy => ({
   statement,
@@ -252,6 +258,48 @@ export const KIND_COPY: Record<FindingKind, Copy> = {
     NIRX,
     "Remove the contact details from the .inf file (or the header's notes) and upload again.",
     "nirx-freetext",
+  ),
+  "eeglab-subject-name": kind(
+    "The subject field of an EEGLAB .set file holds a name.",
+    EEGLAB,
+    "Replace EEG.subject with the BIDS subject label or another code, save the dataset and upload again.",
+    "eeglab-subject-name",
+  ),
+  "eeglab-subject-freetext": kind(
+    "The subject field of an EEGLAB .set file holds text that is neither the BIDS subject label nor a short code.",
+    EEGLAB,
+    "Check that it names nobody; replace EEG.subject with the BIDS subject label if in doubt.",
+    "eeglab-subject-freetext",
+  ),
+  "eeglab-event-name": kind(
+    "An event type of an EEGLAB .set file looks like a person's name.",
+    EEGLAB,
+    "Check the event types (EEG.event and EEG.urevent); rename any that names a person and upload again.",
+    "eeglab-event-name",
+  ),
+  "eeglab-history-name": kind(
+    "The processing history of an EEGLAB .set file holds what looks like a person's name.",
+    EEGLAB,
+    "Check EEG.history; remove any name from it, save the dataset and upload again.",
+    "eeglab-history-name",
+  ),
+  "mat-freetext": kind(
+    "A text value in a MATLAB file holds a path into someone's home directory, contact details, or text in a person's field that may name someone.",
+    MATLAB_TEXT,
+    MATLAB_REMEDY,
+    "mat-freetext",
+  ),
+  "mat-freetext-name": kind(
+    "A text value in a MATLAB file, in a field meant for a person (a name, a subject, a patient, an operator or an experimenter), holds a name.",
+    MATLAB_TEXT,
+    MATLAB_REMEDY,
+    "mat-freetext-name",
+  ),
+  "mat-identifier-field": kind(
+    "A MATLAB file has a field named for an identifier (a name, a birth date, a record number or a contact) that holds a value.",
+    MATLAB_TEXT,
+    "Scrub the field (blank it, or for a birth date keep the year only) in every file that has it, and resubmit.",
+    "mat-identifier-field",
   ),
   "brainvision-marker-text": kind(
     "A marker description in a BrainVision marker file, or text in a BrainVision file the reader could not place, holds an email address or a phone number.",
