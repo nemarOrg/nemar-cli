@@ -863,7 +863,9 @@ describe("third review: birth dates in the recording field, slots, vocabulary, a
 
   test("coverage counts archives, vendor-native files and unrecognized raw files under sourcedata", () => {
     const counted = (paths: string[]) => formatCoverage(paths).unscreened;
-    expect(counted(["sourcedata/raw.zip"])).toEqual({ ".zip": 1 });
+    // A .zip has a reader (card A6): its entries are counted by format, as `zip:<ext>`.
+    expect(counted(["sourcedata/raw.zip"])).toEqual({});
+    expect(formatCoverage(["sourcedata/raw.zip"]).byReader).toEqual({ zip: 1 });
     expect(counted(["sourcedata/raw.tar.gz"])).toEqual({ ".tar.gz": 1 });
     for (const ext of ["ns5", "lay", "rec", "smr", "dat", "npy", "parquet"]) {
       expect(counted([`data/recording.${ext}`]), ext).toEqual({ [`.${ext}`]: 1 });
@@ -977,7 +979,7 @@ describe("fourth review: birth words, strict slots, ages, month names, harmless 
         "sourcedata/a.log",
       ]),
     ).toEqual({});
-    expect(counted(["data/archive.zip"])).toEqual({ ".zip": 1 });
+    expect(counted(["data/archive.tar"])).toEqual({ ".tar": 1 });
   });
 });
 
