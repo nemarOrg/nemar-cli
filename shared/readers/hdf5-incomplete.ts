@@ -7,9 +7,16 @@
  * registry reason).
  */
 
-import { type Hdf5Incomplete, type Hdf5Walk, type RangeSource, walkHdf5 } from "../hdf5-meta";
+import {
+  type Hdf5Entry,
+  type Hdf5Incomplete,
+  type Hdf5Walk,
+  type RangeSource,
+  walkHdf5,
+} from "../hdf5-meta";
 // Types only: the registry imports the readers, so a runtime import back would be a cycle.
-import type { ReaderIncompleteReason, ReaderLimits } from "../identifier-readers";
+import type { LimitExceeded, ReaderIncompleteReason, ReaderLimits } from "../identifier-readers";
+import { canonical, identifierKeySeverity } from "../identifier-scan";
 
 /**
  * Each walker reason as the registry says it. `read-failed` has no entry: the walker records it
@@ -47,9 +54,9 @@ export const WALK_TIME_SHARE = 0.8;
 /**
  * The walker's own caps under a reader's limits. The network is bounded by the source
  * (`cachedSource`: bytes and fetches); the walker's caps bound its work in memory. Its logical
- * reads are many per fetched 64 KiB page (measured: 6,292 entries took more than 20,000 logical
- * reads in 40 fetches), so they get room above the fetch cap; its byte count is logical too, and
- * the source refuses first.
+ * reads are many per fetched 64 KiB page, so they get room above the fetch cap; its byte count is
+ * logical too, and the source refuses first. The measurements behind these numbers are in
+ * `test/fixtures/hdf5/README.md`.
  */
 export function walkLimits(limits: ReaderLimits): {
   maxBytes: number;
@@ -59,7 +66,7 @@ export function walkLimits(limits: ReaderLimits): {
   return {
     maxBytes: limits.maxBytes * 4,
     maxReads: Math.max(100_000, limits.maxReads * 250),
-    // High-density SNIRF files list more than 60,000 entries (measured); see HDF5_READER_LIMITS.
+    // High-density SNIRF files list more than 60,000 entries (fixtures README).
     maxObjects: 100_000,
   };
 }
@@ -68,6 +75,37 @@ export interface ReaderWalk {
   walk: Hdf5Walk;
   /** Why the file was read only in part; absent when the walk was complete. */
   incomplete?: ReaderIncompleteReason;
+}
+
+/** A source that may say it refused a read past its limits, as the registry's page cache does. */
+export type LimitedSource = RangeSource & { readonly limited?: boolean };
+
+/**
+ * The registry's refusal past a reader's limits. A type-only guard: the class cannot be imported
+ * at runtime here (see the imports), so it is told by its name, and counts only together with the
+ * source's own `limited` flag.
+ */
+function isLimitError(e: unknown): e is LimitExceeded {
+  return e instanceof Error && e.name === "LimitExceeded";
+}
+
+const isStringDtype = (dtype: string | null) => dtype?.includes("string") === true;
+
+/**
+ * Entries the walker listed but did not return a value for, where the value could be text a rule
+ * must read: a string over the walker's size rules (`limit`) or of a type it does not decode
+ * (`unsupported-datatype`), and any value under an identifier-key name (`MRN`, `DateOfBirth`,
+ * ...). A numeric value skipped for size is a signal and is not counted. The first such entry
+ * names the reason; null when there is none.
+ */
+export function unscannedReason(entries: readonly Hdf5Entry[]): ReaderIncompleteReason | null {
+  for (const e of entries) {
+    if (e.skipped !== "size" && e.skipped !== "type") continue;
+    if (isStringDtype(e.dtype) || identifierKeySeverity(canonical(e.name)) !== null) {
+      return e.skipped === "size" ? "limit" : "unsupported-datatype";
+    }
+  }
+  return null;
 }
 
 /**
@@ -79,10 +117,14 @@ export interface ReaderWalk {
  * - Past {@link WALK_TIME_SHARE} of `limits.timeMs` the next read is refused, and the file is
  *   `partial` (`time`), with the entries found so far.
  * - Any other failure of the source (a network error, an HTTP status) is rethrown: a failed read
- *   of the file, never a partial or clean one. The walker never throws, so this is the only throw.
+ *   of the file, never a partial or clean one. The first error the source threw decides; it is
+ *   `limit` only when it is the registry's refusal and the source says it was limited.
+ * - A walk that read everything is still `partial` when a string, or a value under an
+ *   identifier-key name, was listed without its value ({@link unscannedReason}): text no rule
+ *   read is never clean.
  */
 export async function walkForReader(
-  src: RangeSource,
+  src: LimitedSource,
   limits: ReaderLimits,
   now: () => number = Date.now,
 ): Promise<ReaderWalk> {
@@ -104,16 +146,18 @@ export async function walkForReader(
   };
   const walk = await walkHdf5(guarded, { limits: walkLimits(limits) });
   // A walk the source stopped says why it stopped: that reason outranks an earlier one the
-  // walker recorded, because it is why the rest of the file was not read. The registry's page
-  // cache (`cachedSource`) says when it refused a read past the limits.
-  if (thrown !== undefined && (src as { limited?: unknown }).limited === true) {
-    return { walk, incomplete: "limit" };
+  // walker recorded, because it is why the rest of the file was not read.
+  if (thrown !== undefined) {
+    if (isLimitError(thrown) && src.limited === true) return { walk, incomplete: "limit" };
+    if (thrown instanceof WalkDeadline) return { walk, incomplete: "time" };
+    // Any other failure of the source fails the file, whatever the walker made of it.
+    throw thrown;
   }
-  if (thrown instanceof WalkDeadline) return { walk, incomplete: "time" };
-  // Any other failure of the source fails the file, whatever the walker made of it.
-  if (thrown !== undefined) throw thrown;
-  if (walk.incomplete === undefined) return { walk };
   // The walker records `read-failed` only when the source threw, which was handled above.
   if (walk.incomplete === "read-failed") throw new Error("read-failed");
-  return { walk, incomplete: HDF5_INCOMPLETE_REASON[walk.incomplete] };
+  if (walk.incomplete !== undefined) {
+    return { walk, incomplete: HDF5_INCOMPLETE_REASON[walk.incomplete] };
+  }
+  const unscanned = unscannedReason(walk.entries);
+  return unscanned === null ? { walk } : { walk, incomplete: unscanned };
 }
