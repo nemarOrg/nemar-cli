@@ -2514,6 +2514,33 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     expect(row.key).toBe(await keyOfStamp(env, made.stampId));
   });
 
+  test("the sync gives a row with no checkpoint map its version's map while the registry holds it, and never replaces a recorded one (MUTATION: drop the fill)", async () => {
+    const env = envOf();
+    await bidsJob();
+    await syncAll(env);
+    const mapOf = async () =>
+      ((await one(env)) as Der & { checkpoint_map: string | null }).checkpoint_map;
+    const registry = await mapOf();
+    expect(registry).not.toBeNull();
+    // A row made before migration 0154, of a version the registry no longer holds: nothing to fill it with.
+    await sql(
+      env,
+      "UPDATE compute_derivatives SET checkpoint_map = NULL, recipe_version = '0.0.1'",
+    );
+    await syncAll(env);
+    expect(await mapOf()).toBeNull();
+    // Of the version the registry holds: that version's map.
+    const floor = findRecipe("nemar-floor");
+    await sql(env, "UPDATE compute_derivatives SET recipe_version = ?1", floor?.version);
+    await syncAll(env);
+    expect(await mapOf()).toBe(registry);
+    // A recorded map is the row's own, never replaced.
+    const own = JSON.stringify([{ checkpoint: "import", steps: ["load"] }]);
+    await sql(env, "UPDATE compute_derivatives SET checkpoint_map = ?1", own);
+    await syncAll(env);
+    expect(await mapOf()).toBe(own);
+  });
+
   test("the column takes none or a sha256: digest, on the archive input only", async () => {
     const env = envOf();
     await bidsJob();

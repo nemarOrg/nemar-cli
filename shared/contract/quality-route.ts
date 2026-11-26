@@ -53,9 +53,10 @@ export const QUALITY_RECORD_MAX_BYTES = 512 * 1024;
 export const QUALITY_FILE_MAX_BYTES = 4_194_304;
 
 /**
- * The most bytes of a run's recordings table the processing endpoint scans (the bound reconciliation reads a
- * table with), and the longest line it takes. The table is read as a stream and never held whole: the scan
- * keeps one line and stops at the recording's.
+ * The most bytes of a run's recordings table any reader takes (the backend's `TABLE_READ_MAX_BYTES` is this
+ * constant), and the longest line the processing endpoint takes. That endpoint reads the table in ranged
+ * parts and never holds it whole: it keeps one part and a line, and reads to the end, since a second row of
+ * the recording refuses the table.
  */
 export const QUALITY_TABLE_MAX_BYTES = 32 * 1024 * 1024;
 export const QUALITY_TABLE_LINE_MAX = 65_536;

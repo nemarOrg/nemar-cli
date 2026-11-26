@@ -40,6 +40,7 @@
  */
 
 import {
+  COMPUTE_RECIPES,
   RECIPE_PRODUCT_OUTPUT_PREFIX,
   RECIPE_SERVING_INDEX_FLAG,
   type RecipeInput,
@@ -70,6 +71,7 @@ import {
   inputDigestV2,
   validateDerivativeKeyFields,
 } from "../../../shared/contract/derivatives.js";
+import { QUALITY_TABLE_MAX_BYTES } from "../../../shared/contract/quality-route.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { VERSION_DOI_SQL } from "./anonymity.js";
@@ -130,8 +132,12 @@ export const DERIVATIVE_SYNC_AUDIT_ACTION = "compute.derivatives.sync";
 /** The recipe's dataset record is at most 256 KB; the read bound is the stamp sync's own. */
 export const RECORD_READ_MAX_BYTES = 512 * 1024;
 
-/** The recordings table of a dataset of 25,000 stores is a few megabytes; this is a bound, not a size. */
-export const TABLE_READ_MAX_BYTES = 32 * 1024 * 1024;
+/**
+ * The recordings table of a dataset of 25,000 stores is a few megabytes; this is a bound, not a size. It is
+ * the quality route's own (`QUALITY_TABLE_MAX_BYTES`), so every reader of a run's table (reconciliation,
+ * keying, the admin listing and the processing endpoint) takes the same tables.
+ */
+export const TABLE_READ_MAX_BYTES = QUALITY_TABLE_MAX_BYTES;
 
 /** The most JSON the record's `process` block may be for the description to carry it. */
 const PROCESS_BLOCK_MAX_BYTES = 16 * 1024;
@@ -620,6 +626,14 @@ const insertDerivativeSql = (eligible: string): string => `INSERT INTO compute_d
   ON CONFLICT(key) DO NOTHING`;
 
 export const INSERT_DERIVATIVE_SQL = insertDerivativeSql(PIPELINE_ELIGIBLE_SQL);
+
+/**
+ * Give the rows of one recipe version that have no checkpoint map (made before migration 0154) that
+ * version's map: `?1` the map as JSON, `?2` the recipe, `?3` its version. Only a NULL map is written; a
+ * recorded one is never replaced.
+ */
+export const FILL_CHECKPOINT_MAP_SQL = `UPDATE compute_derivatives SET checkpoint_map = ?1
+  WHERE checkpoint_map IS NULL AND recipe = ?2 AND recipe_version = ?3`;
 
 /**
  * Remember a stamp decided without a derivative. `?1` the stamp, `?2` the word. Not for a stamp that has a
@@ -1229,6 +1243,25 @@ export async function syncDerivatives(
     await cleanRows(stores, db, budgets.deletes, counts);
   } catch (err) {
     console.error(`[compute-derivatives] expire_failed error=${errorName(err)}`);
+    counts.errored++;
+  }
+
+  // 1b. A row made before migration 0154 has no checkpoint map: one whose recipe version the registry still
+  //     holds gets that version's map, so its recordings' outcomes are read after the registry moves on.
+  try {
+    let filled = 0;
+    for (const recipe of COMPUTE_RECIPES) {
+      const map = checkpointMapOf(recipe.name, recipe.version);
+      if (map === null) continue;
+      const done = await db
+        .prepare(FILL_CHECKPOINT_MAP_SQL)
+        .bind(map, recipe.name, recipe.version)
+        .run();
+      filled += done.meta?.changes ?? 0;
+    }
+    if (filled > 0) console.log(`[compute-derivatives] checkpoint_maps_filled rows=${filled}`);
+  } catch (err) {
+    console.error(`[compute-derivatives] checkpoint_map_fill_failed error=${errorName(err)}`);
     counts.errored++;
   }
 
