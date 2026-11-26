@@ -377,7 +377,7 @@ interface PromotedCountsRow extends CountsRow {
  * run row), its declared order cannot be read (`no_declared_order`), or the counts break the writer's rules
  * (`processingEntryProblem`'s words, `keys_differ` for a missing checkpoint).
  */
-export function promotedProcessingEntry(
+function promotedProcessingEntry(
   run: Pick<PromotedRunRow, "outcome" | "recipe_version" | "declared">,
   counts: readonly CountsRow[],
 ): { ok: true; entry: ProcessingDatasetEntry } | { ok: false; reason: string } {

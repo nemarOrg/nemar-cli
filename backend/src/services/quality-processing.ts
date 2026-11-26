@@ -93,7 +93,7 @@ const DECLARABLE: readonly string[] = STANDARD_CHECKPOINTS.filter((c) => c !== S
  * A checkpoint map as a derivative row keeps it (`[{checkpoint, steps}]`), or null when it is not one: every
  * entry a checkpoint a recipe may declare and a list of step words, no checkpoint twice, at least one.
  */
-export function checkpointMapOfRow(text: string): RecipeCheckpoint[] | null {
+function checkpointMapOfRow(text: string): RecipeCheckpoint[] | null {
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -126,7 +126,7 @@ export function checkpointMapOfRow(text: string): RecipeCheckpoint[] | null {
 }
 
 /** What the scan of a recordings table found. */
-export type RowScan =
+type RowScan =
   | { kind: "row"; row: RecordingRow }
   | { kind: "absent" }
   | { kind: "missing" }
@@ -144,7 +144,7 @@ export const TABLE_PART_BYTES = 4 * 1024 * 1024;
  * stops at the first line whose `path` cell is `recording`. A derivative's objects never change, and a part
  * whose etag is not the object's refuses the scan (`table_changed`).
  */
-export async function scanRecordingRow(
+async function scanRecordingRow(
   bucket: R2Bucket,
   key: string,
   recording: string,
