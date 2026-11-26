@@ -250,6 +250,7 @@ describe("the proxy's forward path (epic #2324 phase B3b, the delta review of #2
       "1.0",
       " 1",
       "99999999999999999",
+      "9999999999999999",
       "5/..",
       "%35",
     ]) {
