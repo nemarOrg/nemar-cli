@@ -19,6 +19,8 @@ import {
   type StartedPublicationReview,
 } from "../../../shared/contract/publication-review-admin.js";
 import { APPROVAL_DISPATCH_TOKEN_HEADER } from "../../../shared/contract/publication.js";
+import type { ActionRequiredOutcome } from "../../../shared/license-lineage.js";
+import type { RecordedMail } from "../../../shared/license-permission.js";
 import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import { isExactIdMatch, matchesListSearch } from "../../../shared/publish-list-search.js";
@@ -412,15 +414,20 @@ export interface LicensePermissionAnswer {
   dataset_id: string;
   request_id: number;
   review_id: number;
-  outcome: string;
+  outcome: ActionRequiredOutcome;
   target_license: string | null;
   sources: LicensePermissionSource[];
   ticket_id: number;
+  /** The ticket's subject and sender, shown so the administrator confirms it holds the evidence. */
+  ticket_subject: string;
+  ticket_sender: string;
+  ticket_sender_is_depositor: boolean;
+  ticket_warning: string | null;
   request_line: string;
   permission_id?: number;
   line?: string | null;
-  /** What the record sent: the administrators' "Ready to approve" mail and the depositor's notice. */
-  mail?: { administrators: string; depositor: string };
+  /** What the record sent: the administrators' "Ready to approve" mail and the depositor's mail. */
+  mail?: RecordedMail;
 }
 
 /**

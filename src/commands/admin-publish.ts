@@ -24,7 +24,10 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import { lineageExitCode, lineageLines } from "../../shared/license-lineage.js";
-import { LICENSE_PERMISSION_EVIDENCE_MAX } from "../../shared/license-permission.js";
+import {
+  LICENSE_PERMISSION_EVIDENCE_MAX,
+  mailNotSentLines,
+} from "../../shared/license-permission.js";
 import { DENIAL_REASON_MAX_LENGTH } from "../../shared/publication-limits.js";
 import { searchLimitProblem } from "../../shared/publish-list-search.js";
 import { RESUBMISSION_NOTE_LABEL } from "../../shared/resubmission-note.js";
@@ -716,10 +719,19 @@ Examples:
             : "unknown";
           console.log(`    - ${plain(src.id)}: ${plain(src.outcome)}; license ${plain(lic)}`);
         }
-        console.log(`  Ticket: ${plain(String(out.ticket_id))}`);
+        console.log(
+          `  Ticket: ${plain(String(out.ticket_id))}, "${plain(out.ticket_subject)}" from ${plain(out.ticket_sender)}`,
+        );
+        if (out.ticket_warning !== null)
+          console.log(chalk.yellow(`  ${plain(out.ticket_warning)}`));
         console.log(`  The depositor was asked: ${plain(out.request_line)}`);
         if (out.applied && typeof out.line === "string") console.log(`  ${plain(out.line)}`);
         console.log(out.applied ? chalk.green(plain(out.message)) : chalk.dim(plain(out.message)));
+        // Each mail that did not go out, so the person it was for is told by hand.
+        if (out.mail !== undefined) {
+          for (const line of mailNotSentLines(out.mail))
+            console.log(chalk.yellow(`  ${plain(line)}`));
+        }
       } catch (error) {
         failWith(error, null, "Failed to record the license permission", undefined, {
           json: options.json,

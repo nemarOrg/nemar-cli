@@ -152,9 +152,14 @@ export function parsePermissionBasis(raw: unknown): PermissionBasis | null {
 
 /** What a recorded permission was recorded for. */
 export interface PermissionScope {
-  outcome: string;
-  target_license: string | null;
+  outcome: ActionRequiredOutcome;
+  target_license: NormalizedLicense | null;
   source_ids: readonly string[];
+}
+
+/** A stored `target_license` column as a closed word, or undefined when it is not one. */
+export function storedTargetLicense(raw: unknown): NormalizedLicense | null | undefined {
+  return isLicenseOrNull(raw) ? raw : undefined;
 }
 
 /**
@@ -207,7 +212,7 @@ export function licenseWords(license: NormalizedLicense | null, version: string 
 
 /** One source as the message names it: its identifier when quotable, and its license. */
 function sourceWords(s: BasisSource): string {
-  const id = QUOTABLE_SOURCE_ID.test(s.id) ? s.id : "a source declared by URL or free text";
+  const id = QUOTABLE_SOURCE_ID.test(s.id) ? s.id : "a source given as a link or text";
   return `${id}, ${licenseWords(s.license, s.license_version)}`;
 }
 
@@ -225,11 +230,10 @@ export function licensePermissionRequest(
 ): string {
   const usable = basis !== null && basis.outcome === outcome;
   const sources = usable ? basis.sources.map(sourceWords).join("; ") : "";
-  const target = usable
-    ? basis.target_license === null
-      ? "the dataset's declared license"
-      : licenseWords(basis.target_license, null)
-    : "the dataset's declared license";
+  const target =
+    usable && basis.target_license !== null
+      ? licenseWords(basis.target_license, null)
+      : "a license NEMAR could not read";
   const dataset = PUBLICATION_DATASET_ID_RE.test(datasetId) ? datasetId : "your dataset's id";
   let text = LINEAGE_PERMISSION_REQUEST[outcome];
   text = sources === "" ? text.replace(" ({sources})", "") : text.replace("{sources}", sources);
@@ -283,7 +287,7 @@ export const LICENSE_NOTICE_CLOSING =
   "Send the evidence to support@nemar.org, where it opens a support ticket that an administrator answers.";
 
 /** The closed words a notice's mail can end in (`license_permission_notices.mail_state`). */
-export const LICENSE_NOTICE_MAIL_STATES = ["sent", "fenced", "failed"] as const;
+export const LICENSE_NOTICE_MAIL_STATES = ["sent", "fenced", "failed", "no_recipient"] as const;
 export type LicenseNoticeMailState = (typeof LICENSE_NOTICE_MAIL_STATES)[number];
 
 /** Why `POST /admin/publish/:id/license-permission` refused, one closed word each. */
@@ -329,8 +333,60 @@ export function licenseRecordedNotice(datasetId: string): string {
 export const LICENSE_RECORDED_HEADLINE = "License evidence recorded";
 
 /** What became of the administrators' "Ready to approve" mail after a permission was recorded. */
-export const READY_MAIL_OUTCOMES = ["sent", "not_ready", "undelivered"] as const;
+export const READY_MAIL_OUTCOMES = [
+  "sent",
+  "not_ready",
+  "undelivered",
+  "review_unreadable",
+] as const;
 export type ReadyMailOutcome = (typeof READY_MAIL_OUTCOMES)[number];
+
+/** What a record's mails did, as the route answers it. */
+export interface RecordedMail {
+  administrators: ReadyMailOutcome;
+  depositor: LicenseNoticeMailState;
+}
+
+/**
+ * The line the CLI prints for each mail of a record that did not go out: the person it was for
+ * must be told by hand. A `Record`, so a state without a line fails the build; `sent` and
+ * `not_ready` (nothing was due) print nothing.
+ */
+export const DEPOSITOR_MAIL_NOT_SENT: Record<Exclude<LicenseNoticeMailState, "sent">, string> = {
+  fenced:
+    "The depositor's mail was held by this Worker's mail fence (not production); tell the depositor by hand that the evidence was recorded.",
+  failed:
+    "The depositor's mail could not be sent; tell the depositor by hand that the evidence was recorded.",
+  no_recipient:
+    "The depositor has no address NEMAR can mail; tell the depositor by hand that the evidence was recorded.",
+};
+
+export const ADMIN_MAIL_NOT_SENT: Record<
+  Exclude<ReadyMailOutcome, "sent" | "not_ready">,
+  string
+> = {
+  undelivered:
+    "The administrators' Ready to approve mail reached nobody (the fence, no opted-in administrator, or a failed send); tell the administrators by hand that the request is ready to approve.",
+  review_unreadable:
+    "The review could not be read after the record, so no Ready to approve mail was sent; read it with nemar admin dataset publish show and tell the administrators by hand.",
+};
+
+/** The CLI's lines for a record's mails that were not sent. */
+export function mailNotSentLines(mail: RecordedMail): string[] {
+  const out: string[] = [];
+  if (mail.administrators !== "sent" && mail.administrators !== "not_ready") {
+    out.push(ADMIN_MAIL_NOT_SENT[mail.administrators]);
+  }
+  if (mail.depositor !== "sent") out.push(DEPOSITOR_MAIL_NOT_SENT[mail.depositor]);
+  return out;
+}
+
+/**
+ * The dry run's warning when the ticket's sender is not the depositor's address: forwarded
+ * evidence from the authors is fine, and the administrator confirms the ticket holds it.
+ */
+export const TICKET_SENDER_WARNING =
+  "The ticket's sender is not the depositor's address. Evidence forwarded from the original authors is fine, but confirm that this ticket holds the evidence before you apply.";
 
 export const LICENSE_PERMISSION_RECORDED =
   "License permission recorded. The license lineage reason is cleared for this request and for later requests with the same sources; every other reason still stands, and approval is still yours.";
