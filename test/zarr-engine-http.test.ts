@@ -34,14 +34,23 @@ const OBJECT = new Uint8Array(1000).map((_, i) => i % 251);
 let seen: Seen[] = [];
 let mode: "good" | "short206" | "bare200" | "5xx" = "good";
 let server: ReturnType<typeof Bun.serve>;
-/** Bytes an endless-stream route has produced, and whether its client hung up. */
+/** Bytes a long-stream route has produced, whether its client hung up, and whether it ran to
+ *  its end (which a bounded client never lets it reach). */
 let streamed = 0;
 let streamCancelled = false;
+let streamEnded = false;
 const CHUNK = new Uint8Array(64 * 1024).fill(0x20);
-/** A body that never ends: 64 KiB of spaces per pull, counted, until the client cancels. */
+/** Far past every cap below, so only a client that reads without a bound sees the end. */
+const LIMIT = 64 * 1024 * 1024;
+/** A long body: 64 KiB of spaces per pull until the client cancels or {@link LIMIT} is reached. */
 function endlessBody(): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
+      if (streamed >= LIMIT) {
+        streamEnded = true;
+        controller.close();
+        return;
+      }
       streamed += CHUNK.length;
       controller.enqueue(CHUNK);
       await Bun.sleep(0);
@@ -50,6 +59,12 @@ function endlessBody(): ReadableStream<Uint8Array> {
       streamCancelled = true;
     },
   });
+}
+/** Wait, at most 5 s, for the client to cancel the stream. A test that waits sets its own
+ *  timeout above that, so a client that never cancels fails the assertion, not the timeout. */
+const CANCEL_TEST_TIMEOUT_MS = 10_000;
+async function untilCancelled(): Promise<void> {
+  for (let i = 0; i < 200 && !streamCancelled; i++) await Bun.sleep(25);
 }
 const base = () => `http://127.0.0.1:${server.port}`;
 
@@ -112,6 +127,7 @@ afterAll(() => server.stop(true));
 beforeEach(() => {
   streamed = 0;
   streamCancelled = false;
+  streamEnded = false;
   seen = [];
   mode = "good";
 });
@@ -490,14 +506,18 @@ describe("fetchJsonDocument", () => {
 });
 
 describe("bounded bodies", () => {
-  test("a JSON body without Content-Length is cut off past the cap, not read whole", async () => {
-    const r = await fetchJsonDocument(createPublicFetcher(), `${base()}/endless.json`, 1_000_000);
-    expect(r).toMatchObject({ status: "error" });
-    expect((r as { detail: string }).detail).toContain("larger than 1000000 bytes");
-    await Bun.sleep(50);
-    expect(streamCancelled).toBe(true);
-    expect(streamed).toBeLessThan(10 * 1_000_000);
-  });
+  test(
+    "a JSON body without Content-Length is cut off past the cap, not read whole",
+    async () => {
+      const r = await fetchJsonDocument(createPublicFetcher(), `${base()}/endless.json`, 1_000_000);
+      expect(r).toMatchObject({ status: "error" });
+      expect((r as { detail: string }).detail).toContain("larger than 1000000 bytes");
+      await untilCancelled();
+      expect(streamCancelled).toBe(true);
+      expect(streamEnded).toBe(false);
+    },
+    CANCEL_TEST_TIMEOUT_MS,
+  );
 
   test("a JSON body with a Content-Length over the cap fails without reading it", async () => {
     // Bun sets Content-Length from the 1000-byte body.
@@ -522,15 +542,19 @@ describe("bounded bodies", () => {
     expect(body.bytes.length).toBe(100_000);
   });
 
-  test("a 206 that streams past the asked length fails as a fetch failure, and the stream is cancelled", async () => {
-    const f = withBodyCaps(createPublicFetcher());
-    await expect(f(`${base()}/endless-206`, rangeInit("bytes=0-9"))).rejects.toThrow(
-      "more than 10 bytes",
-    );
-    await Bun.sleep(50);
-    expect(streamCancelled).toBe(true);
-    expect(streamed).toBeLessThan(1_000_000);
-  });
+  test(
+    "a 206 that streams past the asked length fails as a fetch failure, and the stream is cancelled",
+    async () => {
+      const f = withBodyCaps(createPublicFetcher());
+      await expect(f(`${base()}/endless-206`, rangeInit("bytes=0-9"))).rejects.toThrow(
+        "more than 10 bytes",
+      );
+      await untilCancelled();
+      expect(streamCancelled).toBe(true);
+      expect(streamEnded).toBe(false);
+    },
+    CANCEL_TEST_TIMEOUT_MS,
+  );
 
   test("a 206 whose Content-Length differs from the asked length fails", async () => {
     const f = withBodyCaps(createPublicFetcher());
@@ -539,19 +563,23 @@ describe("bounded bodies", () => {
     );
   });
 
-  test("a 200 answer to a Range request keeps its status and is cut at the asked length", async () => {
-    const f = withBodyCaps(createPublicFetcher());
-    const r = await f(`${base()}/endless-200`, rangeInit("bytes=0-9"));
-    expect(r.status).toBe(200);
-    expect(new Uint8Array(await r.arrayBuffer()).length).toBe(10);
-    await Bun.sleep(50);
-    expect(streamCancelled).toBe(true);
-    expect(streamed).toBeLessThan(1_000_000);
-    // A whole 1000-byte object announced by Content-Length is not read at all.
-    const whole = await f(`${base()}/whole-200`, rangeInit("bytes=0-9"));
-    expect(whole.status).toBe(200);
-    expect(new Uint8Array(await whole.arrayBuffer()).length).toBe(0);
-  });
+  test(
+    "a 200 answer to a Range request keeps its status and is cut at the asked length",
+    async () => {
+      const f = withBodyCaps(createPublicFetcher());
+      const r = await f(`${base()}/endless-200`, rangeInit("bytes=0-9"));
+      expect(r.status).toBe(200);
+      expect(new Uint8Array(await r.arrayBuffer()).length).toBe(10);
+      await untilCancelled();
+      expect(streamCancelled).toBe(true);
+      expect(streamEnded).toBe(false);
+      // A whole 1000-byte object announced by Content-Length is not read at all.
+      const whole = await f(`${base()}/whole-200`, rangeInit("bytes=0-9"));
+      expect(whole.status).toBe(200);
+      expect(new Uint8Array(await whole.arrayBuffer()).length).toBe(0);
+    },
+    CANCEL_TEST_TIMEOUT_MS,
+  );
 
   test("a suffix range is bounded by its length, and honest reads are unchanged", async () => {
     const f = withBodyCaps(createPublicFetcher());
