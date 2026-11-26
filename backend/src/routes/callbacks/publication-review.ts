@@ -42,6 +42,7 @@ import { CONFIRMING_MODELS } from "../../../../shared/publication-auto-deny.js";
 import { parsePublicationCallbackOutcome } from "../../../../shared/publication-review.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyPublicationReviewCallbackToken } from "../../services/github/callback-tokens.js";
+import { licenseNoticeAfterStore } from "../../services/license-permission.js";
 import { afterPublicationReviewStored } from "../../services/publication-auto-deny.js";
 import { publicationReviewInputs } from "../../services/publication-review-inputs.js";
 import { errorWords } from "../../services/publication-review-log.js";
@@ -51,6 +52,7 @@ import {
   pendingPublicationReviewNonce,
   storePublicationReviewResult,
 } from "../../services/publication-review.js";
+import type { Bindings } from "../../types/bindings.js";
 import type { WebhookContext, WebhookRouter } from "../webhooks/shared.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
 import { deferAfterAnswer } from "./defer.js";
@@ -113,6 +115,19 @@ async function verify(c: WebhookContext, route: string): Promise<Verified | Resp
     return c.json(UNAUTHORIZED, 401);
   }
   return { reviewId, datasetId, nonce: pending.nonce, body: b };
+}
+
+/**
+ * After a result is stored: the automatic denial's step (ADR 0139), then the depositor's license
+ * notice (card B6), which reads the request's status after that step, so a request the step denied
+ * is not told that its review will continue. The notice never throws.
+ */
+async function afterReviewStored(env: Bindings, reviewId: number): Promise<void> {
+  try {
+    await afterPublicationReviewStored(env, reviewId);
+  } finally {
+    await licenseNoticeAfterStore(env, reviewId);
+  }
 }
 
 export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
@@ -203,7 +218,7 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
         v.nonce,
         outcome,
         deferAfterAnswer(c),
-        afterPublicationReviewStored,
+        afterReviewStored,
       );
     } catch (err) {
       // Nothing was stored and the token is not spent (the store is one transaction), so the job

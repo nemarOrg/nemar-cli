@@ -15,6 +15,7 @@ import {
   isCiPendingReason,
 } from "../../../../shared/contract/publication.js";
 import { publicationRequestNotice } from "../../../../shared/identifier-screen-report.js";
+import { licensePermissionRecordedForDepositor } from "../../../../shared/license-permission.js";
 import {
   type PublicationReviewReproducibility,
   reproducibilityLines,
@@ -64,10 +65,11 @@ import {
   screenView,
   startScreenAndNotify,
 } from "../../services/identifier-screen";
+import { licenseNoticeLines, permissionFactOf } from "../../services/license-permission";
 import { readReviewIntent } from "../../services/pr-review-eligibility";
 import { ownedHere } from "../../services/pr-review-queue";
 import { errorWords } from "../../services/publication-review-log";
-import { ROW_COLUMNS, toRow } from "../../services/publication-review-rows";
+import { ROW_COLUMNS, rowViewOf, toRow } from "../../services/publication-review-rows";
 import {
   publicationReviewApplies,
   publicationReviewEmailSection,
@@ -931,6 +933,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // what a depositor needs to see what the review was given and to recompute the evidence.
     // Checked values and fixed words only; a read that fails is no record, never a failed status.
     let reviewRecord: PublicationReviewReproducibility | null = null;
+    // What the depositor is asked to send when that review's license lineage needs action (ADR
+    // 0139, decision 7, amendment of 2026-11-25), the lines of the notice mail; or, once an
+    // administrator recorded the evidence, that it was. Never the evidence text itself.
+    let licenseLines: string[] = [];
     try {
       const row = await db
         .prepare(
@@ -941,7 +947,17 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         )
         .bind(request.id, datasetId)
         .first<Record<string, unknown>>();
-      reviewRecord = row ? reproducibilityOf(toRow(row)) : null;
+      const reviewRow = row ? toRow(row) : null;
+      reviewRecord = reviewRow ? reproducibilityOf(reviewRow) : null;
+      if (reviewRow) {
+        const view = rowViewOf(reviewRow, Date.now());
+        const report = view.kind === "reported" ? view.report : null;
+        const permission = await permissionFactOf(db, request, reviewRow, report);
+        licenseLines =
+          permission !== null
+            ? [licensePermissionRecordedForDepositor(permission)]
+            : licenseNoticeLines(datasetId, reviewRow, report);
+      }
     } catch (err) {
       console.error(
         `[publish-status] could not read the review record of request ${request.id}: ${errorWords(err)}`,
@@ -997,6 +1013,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       // The record of the newest reported review, with the lines every surface prints for it.
       review_record: reviewRecord,
       review_record_lines: reviewRecord === null ? [] : reproducibilityLines(reviewRecord),
+      license_permission_lines: licenseLines,
     });
   });
 

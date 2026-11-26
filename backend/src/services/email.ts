@@ -13,6 +13,12 @@ import {
 } from "../../../shared/contract/mail-categories.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import {
+  LICENSE_NOTICE_CLOSING,
+  LICENSE_NOTICE_HEADLINE,
+  licenseNoticeOpening,
+  licenseNoticeSubject,
+} from "../../../shared/license-permission.js";
+import {
   AUTO_DENY_CODE_COPY,
   AUTO_DENY_DIGEST_HEADLINE,
   AUTO_DENY_DIGEST_INTRO,
@@ -2632,6 +2638,63 @@ export async function sendAccessRequestEmail(
   await sendEmail(
     ownerEmail,
     `[NEMAR] Access request: ${datasetId} by ${requesterUsername}`,
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
+}
+
+/**
+ * Tell a depositor what license evidence to send, and where (ADR 0139, decision 7, amendment of
+ * 2026-11-25; epic #2182, card B6). `lines` are the depositor's message for the lineage outcome,
+ * built by `licensePermissionRequest` from closed words and checked identifiers; the mail adds the
+ * dataset id and fixed words from `shared/license-permission.ts`, and nothing else: no model text,
+ * no README, no evidence. Through `sendEmail`'s delivery fence, so the dev Worker reaches only
+ * `DEV_EMAIL_ALLOWLIST`; a send that does not go throws, and the caller records it.
+ */
+export async function sendLicenseNoticeEmail(
+  to: string,
+  username: string,
+  datasetId: string,
+  lines: readonly string[],
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const body = lines.map((l) => `<p>${escapeHtml(l)}</p>`).join("\n  ");
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #f59e0b;">${escapeHtml(LICENSE_NOTICE_HEADLINE)}</h1>
+
+  <p>Hello ${escapeHtml(username)},</p>
+
+  <p>${escapeHtml(licenseNoticeOpening(datasetId))}</p>
+
+  ${body}
+
+  <p>${escapeHtml(LICENSE_NOTICE_CLOSING)}</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+  await sendEmail(
+    to,
+    licenseNoticeSubject(datasetId),
     html,
     resendApiKey,
     fromEmail,
