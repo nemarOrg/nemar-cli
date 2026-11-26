@@ -115,3 +115,100 @@ export function qualityFileHeaders(
     "X-Content-Type-Options": "nosniff",
   };
 }
+
+// --- The admin mount (ADR 0137 decision 7, epic #2324 phase B3b) ----------------------------------------------
+//
+//   GET /admin/compute/pipeline/runs/<stamp>/quality/record/<recording path>
+//   GET /admin/compute/pipeline/runs/<stamp>/quality/file/<sha256>/<recording path>
+//
+// The same record and file a public request gets, of the run's own derivative (canary, catalog or
+// published, superseded included) while it is stored and in date, for an administrator only. No dataset
+// gate and no cache: every answer is `no-store` and carries no `Cache-Tag`, since an administrator reads
+// concealed deposits (ADR 0065) too. The record's answer is `QUALITY_RECORD_FORMAT`'s; refusals are
+// `{ "error": <word> }` of `QUALITY_ADMIN_ROUTE_WORDS`.
+//
+// THE PATH GRAMMAR, which the website's same-origin proxy enforces on its `rest` before it forwards, and
+// which the backend enforces again (`qualityAdminRest`): `rest` is the raw, still percent-encoded path after
+// `.../quality/`, and is exactly
+//   record/<recording>            or    file/<64 lowercase hexadecimal digits>/<recording>
+// where <recording> is one or more `/`-separated segments, each non-empty, not `.` or `..`, made of the
+// characters `QUALITY_ADMIN_SEGMENT_RE` allows, with no encoded `/` (`%2F`), `\` (`%5C`) or `.` (`%2E`), no
+// encoded control character, and at most `QUALITY_RECORDING_PATH_MAX` characters once decoded. No query
+// string, and GET only.
+
+/** The admin mount's segment after `runs/<stamp>/`. */
+export const QUALITY_ADMIN_SEGMENT = "quality";
+
+/** The admin mount's words: the public route's, and where the run's derivative stands when it is not served. */
+export const QUALITY_ADMIN_ROUTE_WORDS = Object.freeze({
+  ...QUALITY_ROUTE_WORDS,
+  /** There is no such stamp, or the stamp in the path is not a stamp id. */
+  stamp_not_found: 404,
+  /** The run has no derivative: it has not succeeded, is not keyed, or the store has not decided yet. */
+  derivative_not_keyed: 404,
+  /** The run's derivative is being copied, so its files are partial. */
+  derivative_copying: 409,
+  /** The run's derivative failed and its copy cannot be trusted. */
+  derivative_failed: 409,
+  /** A method other than GET. */
+  method_not_allowed: 405,
+  /** The derivatives store is not bound, or the read failed. Logged. */
+  quality_unavailable: 503,
+});
+
+export type QualityAdminRouteWord = keyof typeof QUALITY_ADMIN_ROUTE_WORDS;
+
+/** One raw recording segment: unreserved characters, sub-delimiters, `:` `@`, and percent escapes. */
+export const QUALITY_ADMIN_SEGMENT_RE = /^(?:[A-Za-z0-9._~!$&'()*+,;=:@-]|%[0-9A-Fa-f]{2})+$/;
+
+/** Percent escapes a recording segment may never carry: `/`, `\`, `.` and the control characters. */
+const FORBIDDEN_ESCAPE_RE = /%(?:2[Ff]|5[Cc]|2[Ee]|[01][0-9A-Fa-f]|7[Ff])/;
+
+const HEX64_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The admin request a raw `rest` names, or null when it is outside the grammar above. The recording is
+ * decoded; the backend still checks it is a recording path its route takes.
+ */
+export function qualityAdminRest(
+  rest: string,
+):
+  | { kind: "record"; recording: string }
+  | { kind: "file"; sha256: string; recording: string }
+  | null {
+  const segments = rest.split("/");
+  const kind = segments.shift();
+  let sha256: string | undefined;
+  if (kind === QUALITY_FILE_SEGMENT) {
+    sha256 = segments.shift();
+    if (sha256 === undefined || !HEX64_RE.test(sha256)) return null;
+  } else if (kind !== QUALITY_RECORD_SEGMENT) {
+    return null;
+  }
+  if (segments.length === 0) return null;
+  const decoded: string[] = [];
+  for (const segment of segments) {
+    if (segment === "." || segment === ".." || !QUALITY_ADMIN_SEGMENT_RE.test(segment)) return null;
+    if (FORBIDDEN_ESCAPE_RE.test(segment)) return null;
+    let part: string;
+    try {
+      part = decodeURIComponent(segment);
+    } catch {
+      return null;
+    }
+    decoded.push(part);
+  }
+  const recording = decoded.join("/");
+  if (recording.length > QUALITY_RECORDING_PATH_MAX) return null;
+  return sha256 === undefined ? { kind: "record", recording } : { kind: "file", sha256, recording };
+}
+
+/** The admin record path of a run's recording. */
+export function qualityAdminRecordPath(stampId: number, recording: string): string {
+  return `/admin/compute/pipeline/runs/${stampId}/${QUALITY_ADMIN_SEGMENT}/${QUALITY_RECORD_SEGMENT}/${encodePath(recording)}`;
+}
+
+/** The admin file path of one declared file of a run's recording. */
+export function qualityAdminFilePath(stampId: number, sha256: string, recording: string): string {
+  return `/admin/compute/pipeline/runs/${stampId}/${QUALITY_ADMIN_SEGMENT}/${QUALITY_FILE_SEGMENT}/${sha256}/${encodePath(recording)}`;
+}
