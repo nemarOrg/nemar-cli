@@ -14,7 +14,10 @@
  *  - The ticket must exist and be visible to the administrator (ADR 0112's one predicate; a
  *    ticket they may not see is "not found").
  *  - Without `apply` it is a dry run: it answers what would be recorded (the request, the outcome,
- *    the target license and the sources) and writes nothing.
+ *    the target license and the sources) and the ticket's subject and sender, with a warning when
+ *    the sender is not the depositor, and writes nothing. The audit row records the same two.
+ *  - One permission per request, outcome and target license (a unique index): of two applies at
+ *    once, one writes and mails, and the other answers `already_covered`.
  *  - With `apply`, the permission and its audit row (`license_permission_recorded`) are written in
  *    one batch. The permission names exactly the sources behind the review's outcome. Then the
  *    verdict is derived again: a `pass` with a clear screen mails the administrators the existing
@@ -41,6 +44,7 @@ import {
   LICENSE_PERMISSION_RECORDED,
   LICENSE_PERMISSION_REFUSAL_TEXT,
   type LicensePermissionRefusal,
+  TICKET_SENDER_WARNING,
   isActionRequiredOutcome,
   licensePermissionRecordedLine,
   licensePermissionRequest,
@@ -57,6 +61,7 @@ import {
   readReviewContext,
   reportOf,
 } from "../../services/publication-review-view";
+import { plainLine } from "../../services/ticket-notify";
 import type { AdminRouter } from "./shared";
 
 const bodySchema = z
@@ -67,6 +72,11 @@ const bodySchema = z
     apply: z.boolean().optional(),
   })
   .strict();
+
+/** A ticket's text field on one line, as the mail code shows it (`plainLine`). */
+function oneLine(text: string | null | undefined): string {
+  return plainLine(text ?? "", 200);
+}
 
 const STATUS: Record<LicensePermissionRefusal, 404 | 409> = {
   no_active_request: 404,
@@ -130,6 +140,19 @@ export function registerLicensePermissionRoutes(admin: AdminRouter): void {
 
     const ticket = await loadVisibleTicket(db, { id: admin.id, role: admin.role }, body.ticket_id);
     if (!ticket) return refuse("ticket_not_found");
+    // Trust the administrator, visibly: the ticket's subject and sender are shown and audited, and
+    // a sender that is not the depositor is warned about (forwarded evidence is fine, but the
+    // administrator confirms the ticket holds it).
+    const depositor = await db
+      .prepare(
+        `SELECT u.email FROM publication_requests pr JOIN users u ON u.id = pr.requested_by
+          WHERE pr.id = ?`,
+      )
+      .bind(active.id)
+      .first<{ email: string | null }>();
+    const sender = oneLine(ticket.requester_email);
+    const senderIsDepositor =
+      depositor?.email != null && sender.toLowerCase() === depositor.email.trim().toLowerCase();
 
     const sourceIds = basis.sources.map((s) => s.id);
     const preview = {
@@ -140,6 +163,10 @@ export function registerLicensePermissionRoutes(admin: AdminRouter): void {
       target_license: basis.target_license,
       sources: basis.sources,
       ticket_id: body.ticket_id,
+      ticket_subject: oneLine(ticket.subject),
+      ticket_sender: sender,
+      ticket_sender_is_depositor: senderIsDepositor,
+      ticket_warning: senderIsDepositor ? null : TICKET_SENDER_WARNING,
       // What the depositor was asked for, so the administrator checks the evidence against it.
       request_line: licensePermissionRequest(datasetId, outcome, basis),
     };
@@ -160,6 +187,8 @@ export function registerLicensePermissionRoutes(admin: AdminRouter): void {
         target_license: basis.target_license,
         source_ids: sourceIds,
         ticket_id: body.ticket_id,
+        ticket_sender: sender,
+        ticket_subject: oneLine(ticket.subject),
       }),
     });
     const results = await db.batch([
@@ -168,7 +197,8 @@ export function registerLicensePermissionRoutes(admin: AdminRouter): void {
           `INSERT INTO license_permissions
              (dataset_id, request_id, outcome, target_license, source_ids, ticket_id, evidence,
               recorded_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT DO NOTHING`,
         )
         .bind(
           datasetId,
@@ -184,6 +214,9 @@ export function registerLicensePermissionRoutes(admin: AdminRouter): void {
         .prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL)
         .bind(userId, action, resourceType, resourceId, details),
     ]);
+    // Another administrator's apply landed first: one row, one audit row (the audit insert needs
+    // `changes()`), and only that apply sends the mails.
+    if ((results[0]?.meta?.changes ?? 0) !== 1) return refuse("already_covered");
     const permissionId = Number(results[0]?.meta?.last_row_id);
     const recorded = await coveringPermission(db, datasetId, active.id, basis);
     // Close the loop: the verdict is derived again, the administrators get "Ready to approve" when

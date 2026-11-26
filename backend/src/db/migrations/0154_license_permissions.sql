@@ -20,7 +20,8 @@
 -- `license_permission_notices`: the depositor's notice, one per request and outcome. The row is
 -- inserted (claimed) before the mail is sent, so a second store of the same review, or a second
 -- review of the same request with the same outcome, sends nothing; `mail_state` records what
--- became of the one mail (`sent`, `fenced` by the dev Worker's DEV_EMAIL_ALLOWLIST, or `failed`).
+-- became of the one mail (`sent`, `fenced` by the dev Worker's DEV_EMAIL_ALLOWLIST, `failed`, or
+-- `no_recipient` when the requester has no address to mail).
 
 ALTER TABLE publication_reviews ADD COLUMN lineage_basis TEXT
   CHECK (lineage_basis IS NULL OR json_valid(lineage_basis));
@@ -44,12 +45,17 @@ CREATE TABLE license_permissions (
 
 -- The derivation asks for a dataset's permissions recorded up to a request.
 CREATE INDEX idx_license_permissions_dataset ON license_permissions (dataset_id, request_id);
+-- One permission per request, outcome and target license: two administrators applying at once
+-- write one row (the route's INSERT ... ON CONFLICT DO NOTHING), and the second is told so.
+CREATE UNIQUE INDEX idx_license_permissions_once ON license_permissions
+  (request_id, outcome, COALESCE(target_license, ''));
 
 CREATE TABLE license_permission_notices (
   request_id INTEGER NOT NULL,
   outcome TEXT NOT NULL,
   review_id INTEGER NOT NULL,
-  mail_state TEXT CHECK (mail_state IS NULL OR mail_state IN ('sent', 'fenced', 'failed')),
+  mail_state TEXT CHECK (mail_state IS NULL
+    OR mail_state IN ('sent', 'fenced', 'failed', 'no_recipient')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (request_id, outcome)
 );
