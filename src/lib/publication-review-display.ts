@@ -435,6 +435,9 @@ export function reviewDetailLines(d: PublicationReviewDetail): string[] {
       );
     }
   }
+  // ADR 0139, decision 7 (amendment of 2026-11-25): the evidence an administrator recorded.
+  const permission = d.license_permission;
+  if (permission !== null && permission !== undefined) out.push(`  ${plain(permission.line)}`);
   if (standing !== null) out.push(`  ${chalk.dim(plain(standing))}`);
   if (desc.next !== null && desc.next !== undefined) out.push(`  Next: ${plain(desc.next)}`);
 

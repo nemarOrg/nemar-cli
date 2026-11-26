@@ -24,6 +24,7 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import { lineageExitCode, lineageLines } from "../../shared/license-lineage.js";
+import { LICENSE_PERMISSION_EVIDENCE_MAX } from "../../shared/license-permission.js";
 import { DENIAL_REASON_MAX_LENGTH } from "../../shared/publication-limits.js";
 import { searchLimitProblem } from "../../shared/publish-list-search.js";
 import { RESUBMISSION_NOTE_LABEL } from "../../shared/resubmission-note.js";
@@ -34,6 +35,7 @@ import {
   acknowledgeBatch,
   denyPublication,
   listPublishRequests,
+  recordLicensePermission,
   rerunIdentifierScreen,
   restorePublication,
 } from "../lib/api/publish.js";
@@ -607,6 +609,124 @@ Examples:
       });
     }
   });
+
+// `nemar admin dataset publish license-permission <id>` (epic #2182 card B6; ADR 0139 decision 7,
+// amendment of 2026-11-25): record the evidence a depositor sent to support@nemar.org. A dry run
+// unless --apply.
+publishCommand
+  .command("license-permission")
+  .description(
+    "Record license evidence from a support ticket against a request (dry run unless --apply)",
+  )
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000480)")
+  .requiredOption("--ticket <id>", "The support ticket the evidence arrived on (its number)")
+  .requiredOption(
+    "--evidence <text>",
+    `Your own summary of what was received, at most ${LICENSE_PERMISSION_EVIDENCE_MAX} characters (administrators only)`,
+  )
+  .option("--request-id <n>", "The request this is for (default: the active one)")
+  .option("--apply", "Record the permission (without it, nothing is written)")
+  .option("--json", "Print the answer as one JSON document")
+  .addHelpText(
+    "after",
+    `
+Description:
+  When a request's license lineage needs action, the depositor is asked to
+  send evidence from the original authors (or, for data a repository such
+  as PhysioNet restricts, from that repository) that they accept this copy
+  under the dataset's license, to support@nemar.org. An email chain from the
+  authors is acceptable evidence.
+
+  This command records that evidence against the dataset's active request,
+  linked to the support ticket. The dry run shows the request, its lineage
+  outcome, the target license and the sources the permission would name.
+  With --apply it records the permission and an audit row together. The
+  permission clears the license lineage reason for this request and for
+  later requests of the dataset with the same sources and license; it never
+  clears another reason, and it never approves.
+
+  The evidence text is stored for administrators only: it is never shown to
+  the depositor, never sent to a model, and never printed back.
+
+Examples:
+  $ nemar admin dataset publish license-permission nm000480 --ticket 412 --evidence "Authors' email of 2026-11-20 accepts CC BY 4.0 for this copy"
+  $ nemar admin dataset publish license-permission nm000480 --ticket 412 --evidence "..." --apply`,
+  )
+  .action(
+    async (
+      rawId: string,
+      options: {
+        ticket: string;
+        evidence: string;
+        requestId?: string;
+        apply?: boolean;
+        json?: boolean;
+      },
+    ) => {
+      if (!requireSignedIn(options.json)) return;
+      const datasetId = checkedDatasetId(rawId, options.json);
+      if (!datasetId) return;
+      const bad = (message: string) => {
+        if (options.json) console.log(JSON.stringify({ error: message }));
+        else console.log(chalk.red(message));
+        process.exitCode = 1;
+        markReportedExit();
+      };
+      const ticketId = requestNumber(options.ticket);
+      if (ticketId === undefined) {
+        bad(
+          `--ticket needs a ticket number (a positive whole number); "${plain(options.ticket)}" is not one.`,
+        );
+        return;
+      }
+      const named = options.requestId === undefined ? undefined : requestNumber(options.requestId);
+      if (options.requestId !== undefined && named === undefined) {
+        bad(
+          `--request-id needs a request number (a positive whole number); "${plain(options.requestId)}" is not one.`,
+        );
+        return;
+      }
+      const evidence = options.evidence.trim();
+      if (evidence === "" || evidence.length > LICENSE_PERMISSION_EVIDENCE_MAX) {
+        bad(
+          `--evidence needs 1 to ${LICENSE_PERMISSION_EVIDENCE_MAX} characters; it has ${evidence.length}.`,
+        );
+        return;
+      }
+      try {
+        const out = await recordLicensePermission(datasetId, {
+          ticketId,
+          evidence,
+          requestId: named,
+          apply: options.apply === true,
+        });
+        if (options.json) {
+          console.log(JSON.stringify(out, null, 2));
+          return;
+        }
+        console.log(
+          `${chalk.bold(plain(out.dataset_id))}  request ${plain(String(out.request_id))}, review ${plain(String(out.review_id))}`,
+        );
+        console.log(`  License lineage: ${plain(out.outcome)}`);
+        console.log(`  Target license: ${plain(out.target_license ?? "unknown")}`);
+        console.log(`  Sources the permission names (${out.sources.length}):`);
+        for (const src of out.sources) {
+          const lic = src.license
+            ? `${src.license}${src.license_version ? ` ${src.license_version}` : ""}`
+            : "unknown";
+          console.log(`    - ${plain(src.id)}: ${plain(src.outcome)}; license ${plain(lic)}`);
+        }
+        console.log(`  Ticket: ${plain(String(out.ticket_id))}`);
+        console.log(`  The depositor was asked: ${plain(out.request_line)}`);
+        if (out.applied && typeof out.line === "string") console.log(`  ${plain(out.line)}`);
+        console.log(out.applied ? chalk.green(plain(out.message)) : chalk.dim(plain(out.message)));
+      } catch (error) {
+        failWith(error, null, "Failed to record the license permission", undefined, {
+          json: options.json,
+        });
+      }
+    },
+  );
 
 // `nemar admin dataset publish acknowledge-batch` (epic #2182 card D3; ADR 0086, amendment
 // 2026-11-25): one documented act acknowledging the screens of conversions of a public upstream.
