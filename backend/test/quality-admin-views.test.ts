@@ -406,6 +406,7 @@ describe("only a stored, in-date derivative of the run is read", () => {
       expectWord(await record(stampId), "record_unreadable");
       expectWord(await file(stampId, SPECTRUM[0]), "record_unreadable");
     });
+    expect(lines.join("\n")).toContain(`[quality-admin] stamp=${stampId} record_unreadable`);
     expect(lines.join("\n")).toContain("reason=record_elsewhere");
     expect(lines.join("\n")).not.toContain(RECORDING);
   });
@@ -495,6 +496,14 @@ describe("the path grammar, before anything is read", () => {
       await call(`${qualityAdminRecordPath(stampId, RECORDING)}?after=x`),
       "recording_path_invalid",
     );
+    // A bare `?`, which `URL.search` reads as no query at all.
+    expect(new URL(`http://api.test${qualityAdminRecordPath(stampId, RECORDING)}?`).search).toBe(
+      "",
+    );
+    expectWord(
+      await call(`${qualityAdminRecordPath(stampId, RECORDING)}?`),
+      "recording_path_invalid",
+    );
     const head = await call(qualityAdminRecordPath(stampId, RECORDING), "admin", {
       method: "HEAD",
     });
@@ -526,7 +535,10 @@ describe("the file checks of the public route", () => {
     const lines = await logged(async () => {
       expectWord(await file(stampId, sha), "view_data_corrupt");
     });
-    expect(lines.join("\n")).toContain("[quality-admin] view_data_corrupt");
+    // Every line of the mount leads with its stamp, so it can be traced to the run.
+    expect(lines.join("\n")).toContain(
+      `[quality-admin] stamp=${stampId} view_data_corrupt dataset=${DATASET} key=${key.slice(0, 12)}`,
+    );
     expect(lines.join("\n")).toContain("reason=digest");
     // One byte longer: refused by its size, before it is hashed.
     await bucket.put(`d/${key}/${location}`, new Uint8Array([...original, 10]));
