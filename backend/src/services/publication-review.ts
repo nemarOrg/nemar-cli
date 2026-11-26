@@ -172,10 +172,13 @@ export const CAP_CALLS_SQL = `COALESCE(SUM(attempts), 0)
  * The depositor's tally includes calls an administrator started on the depositor's requests, and
  * it is intended: an administrator is not held by the depositor's allowance (it exists to stop a
  * depositor spending the platform's money), but the call still costs the platform, so it bounds
- * the depositor's own next request. See `capDecision`.
+ * the depositor's own next request. See `capDecision`. A confirming run (ADR 0139, `confirm_of`
+ * set) is the platform's own check, so it is left out of the depositor's tally; the platform's
+ * allowance still counts it.
  */
 export const DEPOSITOR_RANK_SQL = `SELECT ${CAP_CALLS_SQL} AS n FROM publication_reviews
-  WHERE requested_by = ? AND created_at >= datetime('now', '-1 day') AND id <= ?`;
+  WHERE requested_by = ? AND confirm_of IS NULL AND created_at >= datetime('now', '-1 day')
+    AND id <= ?`;
 export const PLATFORM_RANK_SQL = `SELECT ${CAP_CALLS_SQL} AS n FROM publication_reviews
   WHERE created_at >= datetime('now', '-1 day') AND id <= ?`;
 
@@ -645,7 +648,7 @@ async function markDispatchFailed(db: Db, reviewId: number, nonce: string): Prom
  *
  * At most one per first run (the partial unique index of migration 0153). The platform's allowance
  * holds it and the depositor's does not: the call is the platform's own check, not the depositor's
- * spend (it still counts toward the depositor's tally, as an administrator's start does). The
+ * spend, so it is left out of the depositor's tally too (`DEPOSITOR_RANK_SQL`). The
  * request's mail is never tried here: the caller tries it next, and the live row holds it until the
  * confirming run decides. Writes and dispatches nothing when the Worker cannot hand a review over.
  */

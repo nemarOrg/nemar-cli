@@ -12,7 +12,9 @@
 --       denied        the confirming run agreed, the mode is `on`, and the request was denied;
 --       capped        the confirming run agreed, but the daily cap was reached, so a person decides;
 --       not_eligible  the confirming run agreed, but the request had changed (a race was lost);
---       disagreed     the confirming run did not agree, so a person decides.
+--       disagreed     the confirming run did not agree, so a person decides;
+--       confirm_failed the confirming run did not report a result (an error, a refusal, a cut-off
+--                     answer), so nothing confirmed the fail and a person decides.
 --     A confirming row always holds `none`: the word is the first run's.
 --   * `auto_deny_at`: when that word was written; NULL for `none`. The daily cap counts `denied`
 --     and `would_deny` by it, and the administrators' digest reads every word but `none` by it.
@@ -64,7 +66,7 @@ CREATE TABLE publication_reviews_new (
   inputs_served_at TEXT,
   confirm_of INTEGER,
   auto_deny_state TEXT NOT NULL DEFAULT 'none' CHECK (auto_deny_state IN (
-    'none', 'would_deny', 'denied', 'capped', 'not_eligible', 'disagreed'
+    'none', 'would_deny', 'denied', 'capped', 'not_eligible', 'disagreed', 'confirm_failed'
   )),
   auto_deny_at TEXT,
   -- A verdict, and a stored report, exist exactly when the review reported.

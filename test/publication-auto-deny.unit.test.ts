@@ -371,5 +371,6 @@ describe("the copy", () => {
     expect(autoDenyStateLine("disagreed")).toContain("Automated review disagreed");
     expect(autoDenyStateLine("capped")).toContain("Recommended: deny");
     expect(autoDenyStateLine("would_deny")).toContain("Would deny");
+    expect(autoDenyStateLine("confirm_failed")).toContain("did not finish");
   });
 });

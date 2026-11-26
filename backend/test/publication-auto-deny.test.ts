@@ -423,14 +423,19 @@ describe("disagreement goes to the administrators", () => {
     });
   }
 
-  test("disagreed when the confirming run errors", async () => {
+  test("a confirming run that errors is confirm_failed, its own state with its own line, never a deny", async () => {
     await accounts();
     h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
-    await withFakeResend(async () => {
+    await withFakeResend(async (calls) => {
       const { requestId, firstId } = await firstRun();
       await confirmRun(firstId, { outcome: "error", error: "model_truncated" });
-      expect(h.review(firstId).auto_deny_state).toBe("disagreed");
-      expect(h.requestRow(requestId).status).toBe("requested");
+      expect(h.review(firstId).auto_deny_state).toBe("confirm_failed");
+      expect(h.requestRow(requestId)).toMatchObject({ status: "requested", auto_denied: 0 });
+      expect(auditRows(AUTO_DENY_AUDIT_ACTION)).toHaveLength(0);
+      expect(depositorMails(calls)).toHaveLength(0);
+      const text = textOf(adminMails(calls)[0]?.html ?? "");
+      expect(text).toContain(AUTO_DENY_STATE_COPY.confirm_failed.statement);
+      expect(text).not.toContain("Automated review disagreed");
     });
   });
 
@@ -441,7 +446,7 @@ describe("disagreement goes to the administrators", () => {
       const { requestId, firstId } = await firstRun();
       const confirmId = await confirmRun(firstId, confirmingBody({ effort: "high" }));
       expect(h.review(confirmId)).toMatchObject({ state: "errored", detail: "report_invalid" });
-      expect(h.review(firstId).auto_deny_state).toBe("disagreed");
+      expect(h.review(firstId).auto_deny_state).toBe("confirm_failed");
       expect(h.requestRow(requestId).status).toBe("requested");
     });
   });
@@ -453,7 +458,7 @@ describe("disagreement goes to the administrators", () => {
       const { requestId, firstId } = await firstRun();
       const confirmId = await confirmRun(firstId, { outcome: "reported", report: reportBody() });
       expect(h.review(confirmId)).toMatchObject({ state: "errored", detail: "report_invalid" });
-      expect(h.review(firstId).auto_deny_state).toBe("disagreed");
+      expect(h.review(firstId).auto_deny_state).toBe("confirm_failed");
       expect(h.requestRow(requestId).status).toBe("requested");
     });
     await withFakeResend(async () => {
@@ -869,6 +874,14 @@ describe("the administrators' daily digest", () => {
       await confirmRun(b.firstId, confirmRunBody(confirmingBody({ blockers: [] })), {
         datasetId: "nm000482",
       });
+      const c = await firstRun({ datasetId: "nm000483" });
+      await confirmRun(
+        c.firstId,
+        { outcome: "error", error: "model_unavailable" },
+        {
+          datasetId: "nm000483",
+        },
+      );
     });
     // Moved into the window, which closes at the digest's own instant.
     h.db.run(
@@ -881,13 +894,15 @@ describe("the administrators' daily digest", () => {
       expect(calls).toHaveLength(0);
 
       const first = await sendAutoDenyDigest(h.env());
-      expect(first).toMatchObject({ skipped: false, claimed: true, rows: 2 });
+      expect(first).toMatchObject({ skipped: false, claimed: true, rows: 3 });
       const mail = sendsTo(calls, ADMIN_EMAIL);
       expect(mail).toHaveLength(1);
       expect(mail[0]?.subject).toBe("[NEMAR] Automatic denials: daily digest");
       const text = textOf(mail[0]?.html ?? "");
       expect(text).toContain("Denied (1)");
       expect(text).toContain("Automated review disagreed (1)");
+      // Shown apart from a disagreement.
+      expect(text).toContain("Confirming run did not finish (1)");
       expect(text).toContain("nm000481 request");
       expect(text).toContain("readme_missing_or_stub");
       expect(text).toContain(AUTO_DENY_STATE_COPY.denied.statement);
@@ -965,6 +980,75 @@ describe("the administrators' mail for a review that passed (ADR 0139, decision 
       expect(text).toContain("Publication review: FAIL");
       expect(text).not.toContain("Ready to approve");
       expect(text).not.toContain("Review passed");
+    });
+  });
+});
+
+describe("a confirming run and the allowances (ADR 0139: the platform's own check)", () => {
+  const head = (n: number) => n.toString(16).padStart(40, "c");
+
+  test("it is left out of the depositor's tally: a depositor whose reviews were confirmed is not held", async () => {
+    await accounts();
+    const { userId } = seedScreenedRequest(h.db, { datasetId: "nm000481" });
+    // Four of the depositor's own calls today, each confirmed by a confirming run: eight rows.
+    for (let i = 0; i < 4; i++) {
+      const { requestId } = seedScreenedRequest(h.db, {
+        datasetId: `nm00049${i}`,
+        requestedBy: userId,
+      });
+      const firstId = seedPublicationReview(h.db, {
+        requestId,
+        datasetId: `nm00049${i}`,
+        state: "reported",
+        report: reportBody(),
+      });
+      const c = seedPublicationReview(h.db, {
+        requestId,
+        datasetId: `nm00049${i}`,
+        head: head(i + 1),
+        state: "reported",
+        report: reportBody({ head: head(i + 1) }),
+      });
+      h.db.run("UPDATE publication_reviews SET confirm_of = ? WHERE id = ?", [firstId, c]);
+    }
+    // A fifth request of the depositor starts its review: 4 + 1 is inside the cap of 5, and the
+    // four confirming calls do not count.
+    const { requestId } = seedScreenedRequest(h.db, {
+      datasetId: "nm000485",
+      requestedBy: userId,
+      status: "pending",
+    });
+    await withFakeResend(async () => {
+      expect((await h.screenResult(requestId, "nm000485")).status).toBe(200);
+    });
+    const started = h.db
+      .query(
+        "SELECT state, detail FROM publication_reviews WHERE request_id = ? AND confirm_of IS NULL",
+      )
+      .get(requestId);
+    expect(started).toEqual({ state: "dispatched", detail: null });
+  });
+
+  test("it is held by the platform's allowance: past it, the confirming run is declined and nothing denies", async () => {
+    await accounts();
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    // The platform's fifty calls today, on another dataset.
+    const { requestId: other } = seedScreenedRequest(h.db, { datasetId: "nm000488" });
+    for (let i = 0; i < 50; i++) {
+      seedPublicationReview(h.db, {
+        requestId: other,
+        datasetId: "nm000488",
+        head: head(100 + i),
+        state: "reported",
+        report: reportBody({ head: head(100 + i) }),
+      });
+    }
+    await withFakeResend(async () => {
+      const { requestId, firstId } = await firstRun();
+      expect(confirmOf(firstId)).toMatchObject({ state: "declined", detail: "platform_limit" });
+      expect(h.dispatches()).toHaveLength(0);
+      expect(h.requestRow(requestId).status).toBe("requested");
+      expect(h.review(firstId).auto_deny_state).toBe("none");
     });
   });
 });

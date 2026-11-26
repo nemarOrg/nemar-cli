@@ -253,6 +253,7 @@ export const AUTO_DENY_STATES = [
   "capped",
   "not_eligible",
   "disagreed",
+  "confirm_failed",
 ] as const;
 export type AutoDenyState = (typeof AUTO_DENY_STATES)[number];
 
@@ -262,6 +263,7 @@ export const DIGEST_STATES = [
   "would_deny",
   "capped",
   "disagreed",
+  "confirm_failed",
 ] as const satisfies readonly AutoDenyState[];
 
 /** The states the daily cap counts: a denial, or one that would have been one. */
@@ -393,6 +395,14 @@ export const AUTO_DENY_STATE_COPY: Record<AutoDenyState, AutoDenyCopy> = {
     remedy: "Read the review and decide the request yourself.",
     anchor: anchor("disagreed"),
   },
+  confirm_failed: {
+    statement:
+      "The confirming run did not finish (it errored, was refused or was cut off), so nothing confirmed the first run's fail and a person decides.",
+    read: "The confirming run's recorded error word.",
+    remedy:
+      "Read the review and decide the request yourself; nothing was denied, and the confirming run is not retried.",
+    anchor: anchor("confirm-failed"),
+  },
 };
 
 /** The administrators' line for a state, or null when the state says nothing (`none`). */
@@ -482,6 +492,7 @@ export const DIGEST_STATE_HEADING: Record<(typeof DIGEST_STATES)[number], string
   would_deny: "Would deny (shadow mode)",
   capped: "Recommended: deny (cap reached)",
   disagreed: "Automated review disagreed",
+  confirm_failed: "Confirming run did not finish",
 };
 
 export function autoDenyDigestMode(mode: AutoDenyMode, cap: number): string {

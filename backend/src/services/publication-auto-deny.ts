@@ -259,6 +259,11 @@ async function decide(
   if (first.autoDenyState !== "none") return first.autoDenyState as AutoDenyState;
   const now = await requestNow(db, first);
   if (!now) return "no_row";
+  // A confirming run that reported nothing confirms nothing: a state of its own, never a deny.
+  if (confirm.state !== "reported") {
+    await markFirst(db, first.id, "confirm_failed");
+    return "confirm_failed";
+  }
   const a = await eligibilityOf(db, first, first, now);
   const b = await eligibilityOf(db, confirm, first, now);
   const changed = [a, b].some((e) => !e.eligible && REQUEST_CHANGED.includes(e.why));
