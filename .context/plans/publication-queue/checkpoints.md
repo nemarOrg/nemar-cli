@@ -4,7 +4,7 @@
 | --- | --- | --- | --- |
 | CP-D1 | D2 merged | `d2-blockers-report.md` | The owner question on acknowledgment groups (which are harmless, which need individual looks), then card D3 |
 | CP-D2 | The owner approves ADR 0139 | The ADR | ADR 0139 accepted and indexed; cards B3, B4 and B5 |
-| CP-D3 | D1, D3, D4 and B3 to B5 merged | The decide branch's diff | A `seam` review (`project:pr-review-toolkit`, lens `seam`, mode `epic`); the manager opens the decide epic PR into `dev`; the owner merges and releases; then C1 in shadow mode |
+| CP-D3 | D1, D3, D4 and B3 to B5 merged | The decide branch's diff | A `seam` review (`project:pr-review-toolkit`, lens `seam`, mode `epic`); the manager opens the decide epic PR into `dev`; the owner merges and releases; then C1 in shadow mode. Release order: the Worker serving `/publication-review-inputs` must be deployed before the review script on `main` runs. Both come from the same merge, so for the minutes in between, reviews report `inputs_unavailable` and are restarted with `nemar admin repo publish start`. In the same release, add vocabulary entries for `license_lineage_unconfirmed`, `resubmission_note_unaddressed`, `source_credit_missing` and `inputs_unavailable`, and swap B4's local v2 screen-report reader for A1's types at the epic merge. |
 | CP-E1 | A2, A4, A5, A6 and A9 merged | The copy tables | Card A10: docs in nemarOrg/docs, live before release |
 | CP-E2 | Every lane E step done and A10 live | The evidence branch's diff | A `seam` review; the evidence epic PR into `dev`; the owner releases (the Worker parses v2 in the same release); then O2 |
 
