@@ -37,6 +37,9 @@
  *    what the CLI's CRT transfer client sends): decoded before it is stored, its length checked
  *    against `x-amz-decoded-content-length` and its trailing checksum verified (`BadDigest`), as S3
  *    documents; a verified trailing checksum counts as the request's checksum. See `readPayload`.
+ *    Only that trailing checksum is verified: a plain `x-amz-checksum-*` header on an unchunked
+ *    body is counted as present but not checked, and part checksums in
+ *    CompleteMultipartUpload are ignored.
  *  - PutObject with `If-None-Match: *`: 412 PreconditionFailed when the key has a current version.
  *  - PutObject with `If-Match`: 412 PreconditionFailed when the current version's ETag is not the
  *    one named, and 404 NoSuchKey when the key has no current version, as S3 documents for
@@ -406,8 +409,9 @@ function readPayload(
   };
   for (;;) {
     const header = line();
-    const size =
-      header === undefined ? Number.NaN : Number.parseInt(header.split(";")[0] ?? "", 16);
+    const hex = header?.split(";")[0] ?? "";
+    // parseInt alone would read "1fzz" as 31; a chunk size is hex digits only.
+    const size = /^[0-9a-f]+$/i.test(hex) ? Number.parseInt(hex, 16) : Number.NaN;
     if (!Number.isInteger(size) || size < 0)
       return bad("IncompleteBody", "malformed aws-chunked body");
     if (size === 0) break;
@@ -426,6 +430,7 @@ function readPayload(
     if (colon < 1) return bad("IncompleteBody", "malformed aws-chunked trailer");
     trailers.set(t.slice(0, colon).trim().toLowerCase(), t.slice(colon + 1).trim());
   }
+  if (at !== raw.length) return bad("IncompleteBody", "bytes after the aws-chunked trailer");
   const body = Buffer.concat(chunks);
   if (body.length !== Number(declared)) {
     return bad("IncompleteBody", "the decoded body is not x-amz-decoded-content-length bytes");

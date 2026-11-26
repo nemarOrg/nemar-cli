@@ -432,6 +432,11 @@ describe("S3 stand-in", () => {
     const bad = await put(frame("hello", wrong), 5);
     expect(bad.status).toBe(400);
     expect(await codeOf(bad)).toBe("BadDigest");
+    // A chunk size with trailing junk ("5zz" would parse as 5) and bytes after the trailer.
+    const junkSize = await put(frame("hello", good).replace(/^5\r\n/, "5zz\r\n"), 5);
+    expect(await codeOf(junkSize)).toBe("IncompleteBody");
+    const tail = await put(`${frame("hello", good)}extra`, 5);
+    expect(await codeOf(tail)).toBe("IncompleteBody");
     expect(standin.versions(BUCKET, key).length).toBe(0);
 
     const ok = await put(frame("hello", good), 5);
