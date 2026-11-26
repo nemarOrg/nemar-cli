@@ -176,6 +176,12 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
 - **nemar-ica's archive runs are keyed by the serving index they were given (ADR 0140, owner ruling of 2026-11-25).**
   A recipe that reads the serving index on the archive input has a version 2 derivative key, `nemar.derivative-key.v2`, whose ninth line is `serving_index` (`none`, or the SHA-256 of the index file), so runs with and without an index never share a key; every other key stays version 1, byte for byte (migration 0153 keeps the field on the row, with the recipe version's `quality` plugins).
   Until the dispatcher stages the index, a run handed `--serving-index` is not keyed (`serving_index_unattested`).
+- **The dispatcher stages the serving index for nemar-ica's archive runs, and the launch specification is version 2 (ADR 0141, epic #2324 phase B2b).**
+  `nemar.launch-spec.v2` is version 1 and one optional member, `serving_index: {sha256, size}`; every version 1 document keeps its bytes, and the member is written only for a recipe that keys the serving index on the archive input, which runs on Tapis only.
+  At dispatch the Worker reads `<id>/zarr/index.json` and the tag's commit, and stages the index only when its `source_commit` is exactly that commit (never under the Zarr input's `metadata_only` allowance); the bytes are kept under `serving-index/<sha256>.json` in the records bucket before the job exists, and the job's specification records the digest and size, or a fixed word for why none was staged, which never refuses the run.
+  A staged run is handed `--serving-index /data/serving-index/index.json --source-commit <tag commit>`; the launcher fetches the copy with its job token from `POST /compute/jobs/<id>/serving-index` (a ten-minute presigned GET of the copy the recorded specification names), checks it, and binds it read-only (`dataset_fetch_failed`, `serving_index_mismatch` otherwise).
+  The derivative key reads the recorded digest (`sha256:<hex>`), so `serving_index_unattested` now applies only to a run whose arguments do not match what was recorded.
+  nemar-ica is still a placeholder that no path dispatches.
 
 ### Changed
 
