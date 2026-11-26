@@ -176,6 +176,10 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
 - **nemar-ica's archive runs are keyed by the serving index they were given (ADR 0140, owner ruling of 2026-11-25).**
   A recipe that reads the serving index on the archive input has a version 2 derivative key, `nemar.derivative-key.v2`, whose ninth line is `serving_index` (`none`, or the SHA-256 of the index file), so runs with and without an index never share a key; every other key stays version 1, byte for byte (migration 0153 keeps the field on the row, with the recipe version's `quality` plugins).
   Until the dispatcher stages the index, a run handed `--serving-index` is not keyed (`serving_index_unattested`).
+- **A run's quality, for administrators (ADR 0137 decision 7, epic #2324 phase B3).**
+  `GET /admin/compute/pipeline/runs/:stamp/quality` says where the run's derivative stands in one word (`run_not_succeeded`, `not_keyed` with the store's skip word, `awaiting_derivative`, `failed`, `expired`, `copying`, `canary`, `current`, `superseded` or `not_current`), with its retention, `stored_at` and `expires_at`; a canary past its date is `expired` before the sync marks it, and no state is a 500.
+  When the derivative's files stand, it lists the recordings that succeeded, 100 a page in path order (`after` continues; a cursor that is not a recording path is `invalid_query`), from the recordings table stored under the derivative's key: read once, at most 32 MiB, and kept in the edge cache under that key, so a later page reads no store. Every answer is `no-store`.
+  `nemar admin compute pipeline quality <stamp-id> [--after <path>]` prints it.
 
 ### Changed
 
