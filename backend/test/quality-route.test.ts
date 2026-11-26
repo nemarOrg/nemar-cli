@@ -117,6 +117,8 @@ async function derivative(
     key?: string;
     supersededAt?: string | null;
     expiresAt?: string | null;
+    recipeVersion?: string;
+    qualityPlugins?: string | null;
     /** Store the product under the key (default true). */
     files?: boolean;
   } = {},
@@ -173,9 +175,11 @@ describe("a recording's views and files, from the current public derivative", ()
     expect(res.status).toBe(200);
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=300");
     expect(res.headers.get("Cache-Tag")).toBe(`nemar-dq-${DATASET}`);
-    expect(res.headers.get("ETag")).toBe(`"${sha256(PRODUCT.get(RECORD_PATH) as Uint8Array)}"`);
     expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
-    const body = (await res.json()) as Loose;
+    const text = await res.text();
+    // A strong ETag: the SHA-256 of the body's own bytes (MUTATION: the record's digest).
+    expect(res.headers.get("ETag")).toBe(`"${sha256(text)}"`);
+    const body = JSON.parse(text) as Loose;
     expect(body.format).toBe(QUALITY_RECORD_FORMAT);
     expect(body.dataset_id).toBe(DATASET);
     expect(body.recording).toBe(RECORDING);
@@ -353,10 +357,40 @@ describe("which derivative serves", () => {
     expect(((await res.json()) as Loose).derivative.key).toBe(tie);
   });
 
-  test("a derivative of a recipe version the registry does not hold serves nothing", async () => {
-    const key = await derivative();
-    db.run("UPDATE compute_derivatives SET recipe_version = '0.9.0' WHERE key = ?", [key]);
-    expect(await word(await get(recordUrl()))).toBe("quality_not_found");
+  for (const retention of ["catalog", "published"] as const) {
+    test(`a ${retention} derivative of a recipe version the registry has moved past is served, checked against the plugins its row recorded (MUTATION: check against the registry's current version)`, async () => {
+      const key = await derivative({ retention, recipeVersion: "0.9.0" });
+      // The run of that version wrote its version into its record.
+      const record = JSON.parse(RECORD_TEXT);
+      record.extensions.nemar.recipe.version = "0.9.0";
+      await putRecord(key, JSON.stringify(record));
+      const res = await get(recordUrl());
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Loose;
+      expect(body.derivative).toMatchObject({ key, recipe_version: "0.9.0", retention });
+      expect((await get(fileUrl(key, SPECTRUM[0]))).status).toBe(200);
+    });
+  }
+
+  test("the recorded plugin list decides: a plugin view of a plugin the row does not list is refused (MUTATION: ignore the stored list)", async () => {
+    const key = await derivative({ qualityPlugins: JSON.stringify(["nemar-quality"]) });
+    const res = await get(recordUrl());
+    expect(res.status).toBe(502);
+    expect(await word(res)).toBe("record_unreadable");
+    expect((await get(fileUrl(key, SPECTRUM[0]))).status).toBe(502);
+  });
+
+  test("a row with no recorded plugins (made before migration 0153) serves nothing (MUTATION: fall back to the registry)", async () => {
+    const key = await derivative({ qualityPlugins: null });
+    let res: Response | undefined;
+    const lines = await logged(async () => {
+      res = await get(recordUrl());
+    });
+    expect(res?.status).toBe(404);
+    expect(await word(res as Response)).toBe("quality_not_found");
+    expect(lines).toEqual([
+      `[quality] quality_plugins_unknown dataset=${DATASET} key=${key.slice(0, 12)}`,
+    ]);
   });
 
   test("a recording the run did not record answers quality_not_found", async () => {
@@ -577,7 +611,7 @@ describe("paths that are not a recording's are refused before anything is read",
   test("a key or digest that is not 64 lowercase hexadecimal digits", async () => {
     const key = await derivative();
     for (const url of [
-      `/${DATASET}/quality/v1/nemar-ica/file/${key.toUpperCase()}/${SPECTRUM[0]}/${RECORDING}`,
+      `/${DATASET}/quality/v1/nemar-ica/file/${"A".repeat(64)}/${SPECTRUM[0]}/${RECORDING}`,
       `/${DATASET}/quality/v1/nemar-ica/file/${key}/${SPECTRUM[0].slice(1)}/${RECORDING}`,
       `/${DATASET}/quality/v1/nemar-ica/file/${key}/${RECORDING}`,
     ]) {
@@ -672,15 +706,16 @@ describe("migration 0152: the dataset's quality cache epoch", () => {
     }
   });
 
-  test("the table takes a dataset id and a positive epoch only", () => {
-    expect(() =>
-      db.run("INSERT INTO dataset_quality_epochs (dataset_id, epoch) VALUES ('NM000001', 1)"),
-    ).toThrow();
-    expect(() =>
-      db.run("INSERT INTO dataset_quality_epochs (dataset_id, epoch) VALUES ('nm000001', 0)"),
-    ).toThrow();
-    expect(() =>
-      db.run("INSERT INTO dataset_quality_epochs (dataset_id, epoch) VALUES ('nm000001', 1.5)"),
-    ).toThrow();
+  test("the table refuses nothing the trigger writes: a dataset id of any shape still advances (review of #2383)", () => {
+    db.run("PRAGMA ignore_check_constraints = 1");
+    db.run(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox, anonymous)
+       VALUES ('legacy-id-1', 'legacy', -1, 'active', 'public', 0, 0)`,
+    );
+    db.run("PRAGMA ignore_check_constraints = 0");
+    db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'legacy-id-1'");
+    expect(
+      db.query("SELECT epoch FROM dataset_quality_epochs WHERE dataset_id = 'legacy-id-1'").get(),
+    ).toEqual({ epoch: 1 });
   });
 });

@@ -2203,6 +2203,7 @@ describe("a dataset that is no longer eligible after its job finished", () => {
           1,
           1,
           row.serving_index,
+          row.quality_plugins,
         )
         .run();
     expect((await insert("a".repeat(64))).meta.changes).toBe(0);
@@ -2266,7 +2267,7 @@ describe("a dataset that is no longer eligible after its job finished", () => {
   });
 });
 
-// --- nemar-ica on the archive input: the key names the serving index (ADR 0138) --------------------------------
+// --- nemar-ica on the archive input: the key names the serving index (ADR 0140) --------------------------------
 
 /**
  * A run of nemar-ica on the archive input. nemar-ica is a placeholder that no path dispatches, so the floor's
@@ -2327,13 +2328,18 @@ async function icaBidsJob(o: { servingIndex?: "flag" | "equals" } = {}): Promise
   return made;
 }
 
-describe("nemar-ica on the archive input: the key names the serving index (ADR 0138)", () => {
-  test("a run given no serving index is keyed under version 2 with serving_index none, never the eight-line key (MUTATION: leave serving_index out of the key)", async () => {
+describe("nemar-ica on the archive input: the key names the serving index (ADR 0140)", () => {
+  test("a run given no serving index is keyed under version 2 with serving_index none, never the eight-line key, and its quality plugins recorded (MUTATION: leave serving_index out of the key; record no plugins)", async () => {
     const env = envOf();
     const made = await icaBidsJob();
     expect(await syncAll(env)).toMatchObject({ created: 1, stored: 1, errored: 0 });
-    const row = (await one(env)) as Der & { serving_index: string | null };
+    const row = (await one(env)) as Der & {
+      serving_index: string | null;
+      quality_plugins: string | null;
+    };
     expect(row.serving_index).toBe("none");
+    // The recipe version's quality plugins are recorded with the row, for the quality route (review of #2383).
+    expect(JSON.parse(row.quality_plugins as string)).toEqual(["nemar-quality", "nemar-spectrum"]);
     const eight = await keyOfStamp(env, made.stampId);
     const stamp = await env.DB.prepare(
       "SELECT dataset_id, version, recipe_version, engine, input_digest FROM compute_pipeline_stamps WHERE id = ?1",
@@ -2382,8 +2388,12 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     const env = envOf();
     const made = await bidsJob();
     await syncAll(env);
-    const row = (await one(env)) as Der & { serving_index: string | null };
+    const row = (await one(env)) as Der & {
+      serving_index: string | null;
+      quality_plugins: string | null;
+    };
     expect(row.serving_index).toBeNull();
+    expect(row.quality_plugins).toBe("[]");
     expect(row.key).toBe(await keyOfStamp(env, made.stampId));
   });
 
@@ -2406,6 +2416,17 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
       await expect(set(bad)).rejects.toThrow();
     }
     await sql(env, "UPDATE compute_derivatives SET serving_index = NULL WHERE key = ?1", row.key);
+    const plugins = (value: string | null) =>
+      sql(
+        env,
+        "UPDATE compute_derivatives SET quality_plugins = ?1 WHERE key = ?2",
+        value,
+        row.key,
+      );
+    await plugins(null);
+    await plugins('["nemar-quality"]');
+    for (const bad of ["{}", "nemar-quality", "", "[1"])
+      await expect(plugins(bad)).rejects.toThrow();
     await zarrJob();
     await syncAll(env);
     const zarr = await one(env, "input = 'zarr'");

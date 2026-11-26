@@ -1,4 +1,5 @@
--- The serving index a derivative's key names (ADR 0138, owner ruling of 2026-11-25, nemar-cli #2341).
+-- The serving index a derivative's key names (ADR 0140, owner ruling of 2026-11-25, nemar-cli #2341),
+-- and the quality plugins of its recipe version (review of #2383).
 --
 -- WHAT THIS IS FOR. A run of nemar-ica on the archive (`bids`) input can be handed the serving copy's
 -- index (`--serving-index`), and the index changes its product: the views of the serving copy are declared
@@ -22,3 +23,14 @@ ALTER TABLE compute_derivatives ADD COLUMN serving_index TEXT
     OR (input = 'bids' AND (serving_index = 'none'
       OR (length(serving_index) = 71 AND substr(serving_index, 1, 7) = 'sha256:'
         AND substr(serving_index, 8) NOT GLOB '*[^0-9a-f]*'))));
+
+-- The plugins the derivative's recipe version runs at its `quality` checkpoint, recorded when the row is
+-- made (a JSON array of plugin names, in the registry's order; `[]` for a recipe with none). The quality
+-- route checks each plugin view's source against THIS list, so a derivative made by a recipe version the
+-- registry has since moved past is still checked against its own version's plugins and still served.
+-- NULL is a row made before this column existed, or one whose recipe version the registry did not hold
+-- when it was keyed: the route serves no view of it, since nothing says which plugins were the recipe's.
+ALTER TABLE compute_derivatives ADD COLUMN quality_plugins TEXT
+  CONSTRAINT compute_derivatives_quality_plugins CHECK (
+    quality_plugins IS NULL
+    OR (json_valid(quality_plugins) AND json_type(quality_plugins) = 'array'));

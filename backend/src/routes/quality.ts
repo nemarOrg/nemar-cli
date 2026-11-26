@@ -21,22 +21,26 @@
  *     and never outlives a change of the dataset or of its current derivative.
  *  4. The recording's record (at most 512 KiB), projected and checked whole (`recordingViews`): the
  *     record's integers, its identity (the derivative's dataset and the recording asked for), every plugin
- *     view's plugin against the recipe version's `quality` checkpoint, the vendored schema, recording scope
- *     and `nemar.record-checks.v1`.
+ *     view's plugin against the `quality` plugins the derivative row recorded for its recipe version when
+ *     it was made (`compute_derivatives.quality_plugins`; a row without them serves nothing), the vendored
+ *     schema, recording scope and `nemar.record-checks.v1`.
  *  5. For a file: the digest must be one a validated view declares; the object (at most 4 MiB) must be its
  *     declared size and is hashed again before a byte is served.
  *
- * Public answers carry `Cache-Control: public, max-age=300`, `Cache-Tag: nemar-dq-<id>` and an `ETag` (the
- * record's or the file's SHA-256). Every refusal is `no-store` and is never put in the cache. A log line
+ * Public answers carry `Cache-Control: public, max-age=300`, `Cache-Tag: nemar-dq-<id>` and a strong `ETag`
+ * (the SHA-256 of the body's bytes). Every refusal is `no-store` and is never put in the cache. A log line
  * carries the dataset id, the first twelve digits of a key and a fixed word, never a path.
+ *
+ * WHAT AN UNPUBLISH REACHES, AND WHAT IT DOES NOT. The gate and the epoch take effect at this Worker's next
+ * request, and an unpublish, a withdrawal or a concealment also purges the tag `nemar-dq-<id>` from
+ * Cloudflare's cache (`purgeQualityCache`, best effort, after the D1 write). A copy already in a browser,
+ * or in a shared cache outside Cloudflare, is beyond any of them: it may be served for up to
+ * `QUALITY_PUBLIC_MAX_AGE` (300 seconds) after the change. That residual is accepted (ADR 0137 decision 7
+ * allows a browser 300 seconds); the bytes it covers were public when they were served.
  */
 
 import { label, matchRecording, productPath } from "../../../shared/compute-naming.js";
-import {
-  findRecipe,
-  recipeCheckpointMap,
-  recipeQualityPlugins,
-} from "../../../shared/compute-recipes.js";
+import { findRecipe } from "../../../shared/compute-recipes.js";
 import {
   QUALITY_FILE_MAX_BYTES,
   QUALITY_FILE_SEGMENT,
@@ -53,36 +57,18 @@ import {
 } from "../../../shared/contract/quality-route.js";
 import { sha256HexOfBytes } from "../../../shared/contract/view-digest.js";
 import { DERIVATIVE_OBJECT_PREFIX, derivativesBound } from "../services/compute-derivatives.js";
-import { PIPELINE_TERMS, type PipelineTermId } from "../services/compute-pipeline-eligibility.js";
 import { isValidDatasetId } from "../services/datasetId.js";
 import type { ManifestCache } from "../services/manifest-source.js";
-import { CURRENT_PUBLIC_DERIVATIVE_SQL, QUALITY_PATTERNS } from "../services/quality-documents.js";
+import {
+  CURRENT_PUBLIC_DERIVATIVE_SQL,
+  QUALITY_DATASET_GATE_SQL,
+  QUALITY_PATTERNS,
+} from "../services/quality-documents.js";
 import { recordingViews } from "../services/quality-views.js";
 import type { Bindings } from "../types/bindings.js";
 
-/**
- * The terms of the dataset gate, the pipeline eligibility's own (`compute-pipeline-eligibility.ts`) so the
- * two never drift: what a public page may show of a dataset's pipeline. Not `eeg`, `has_version` or
- * `real_dataset`, which decide what is RUN, not what is SHOWN.
- */
-export const QUALITY_GATE_TERMS: readonly PipelineTermId[] = Object.freeze([
-  "active",
-  "public",
-  "not_anonymous",
-  "first_published",
-  "not_withdrawn",
-  "not_tombstoned",
-]);
-
-/** The gate over `datasets d`: every term of {@link QUALITY_GATE_TERMS}, ANDed. */
-export const QUALITY_DATASET_GATE_SQL = QUALITY_GATE_TERMS.map((id) => {
-  const term = PIPELINE_TERMS.find((t) => t.id === id);
-  if (term === undefined) throw new Error(`no pipeline term ${id}`);
-  return `(${term.sql})`;
-}).join("\n     AND ");
-
 const DERIVATIVE_FIELDS = `cd.key, cd.version, cd.recipe_version, cd.input, cd.retention, cd.stored_at,
-       COALESCE(e.epoch, 0) AS epoch`;
+       cd.quality_plugins, COALESCE(e.epoch, 0) AS epoch`;
 
 const GATED_FROM = `FROM datasets d
   JOIN compute_derivatives cd ON cd.dataset_id = d.dataset_id AND cd.recipe = ?2
@@ -113,12 +99,25 @@ interface DerivativeRead {
   input: "bids" | "zarr";
   retention: string;
   stored_at: string;
+  quality_plugins: string | null;
   epoch: number;
   current?: number;
   expired?: number;
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
+
+/** The plugin names a row's `quality_plugins` holds, or null when it holds none that can be read. */
+function pluginsOf(text: string | null): string[] | null {
+  if (text === null) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return Array.isArray(value) && value.every((v) => typeof v === "string") ? value : null;
+}
 
 function refuse(word: QualityRouteWord): Response {
   return new Response(JSON.stringify({ error: word }), {
@@ -131,7 +130,10 @@ function refuse(word: QualityRouteWord): Response {
   });
 }
 
-/** The public headers of an answer: browser cache, the dataset's tag and the content's digest. */
+/**
+ * The public headers of an answer: browser cache, the dataset's tag and a strong `ETag`, the SHA-256 of the
+ * exact bytes of the body.
+ */
 function publicHeaders(datasetId: string, sha256: string): Record<string, string> {
   return {
     "Cache-Control": `public, max-age=${QUALITY_PUBLIC_MAX_AGE}`,
@@ -260,9 +262,11 @@ export async function qualityHandler(
   // 4. The record, checked whole.
   const short = row.key.slice(0, 12);
   const recipe = findRecipe(asked.recipe);
-  const map = recipeCheckpointMap(asked.recipe, row.recipe_version);
-  if (recipe === null || map === null) {
-    console.warn(`[quality] recipe_version_unknown dataset=${datasetId} key=${short}`);
+  // The recipe version's quality plugins as the row recorded them when it was made, so a derivative of a
+  // version the registry has moved past is checked against its own version's plugins.
+  const plugins = pluginsOf(row.quality_plugins);
+  if (recipe === null || plugins === null) {
+    console.warn(`[quality] quality_plugins_unknown dataset=${datasetId} key=${short}`);
     return refuse("quality_not_found");
   }
   const recordPath = productPath(asked.recording, label(recipe.name), "signalJourney", "json");
@@ -284,7 +288,7 @@ export async function qualityHandler(
       recipe: recipe.name,
       recipeVersion: row.recipe_version,
       input: row.input,
-      plugins: recipeQualityPlugins({ checkpoints: map }),
+      plugins,
     },
     { datasetId, recording: asked.recording },
   );
@@ -297,7 +301,6 @@ export async function qualityHandler(
 
   let response: Response;
   if (asked.kind === "record") {
-    const entry = views.document.recipes[recipe.name] as { record_sha256: string };
     const body = {
       format: QUALITY_RECORD_FORMAT,
       dataset_id: datasetId,
@@ -313,11 +316,12 @@ export async function qualityHandler(
       dataQuality: views.document,
       view_digests: views.digests,
     };
-    response = new Response(JSON.stringify(body), {
+    const bytes = new TextEncoder().encode(JSON.stringify(body));
+    response = new Response(bytes, {
       headers: {
         "Content-Type": "application/json",
         "X-Content-Type-Options": "nosniff",
-        ...publicHeaders(datasetId, entry.record_sha256),
+        ...publicHeaders(datasetId, await sha256HexOfBytes(bytes)),
       },
     });
   } else {
