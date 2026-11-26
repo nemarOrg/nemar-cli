@@ -6,6 +6,7 @@ script printed once and that is committed beside each fixture.
     uv run --with 'h5py==3.16.0' python scripts/dev/hdf5-oracle.py <file>          # print entries
     uv run --with 'h5py==3.16.0' python scripts/dev/hdf5-oracle.py --generate <dir> # write fixtures
     uv run --with 'h5py==3.16.0' python scripts/dev/hdf5-oracle.py --snirf-variants <dir>  # card A4
+    uv run --with 'h5py==3.16.0' python scripts/dev/hdf5-oracle.py --a4-review <dir>  # A4 review 1
 
 The entry list follows the walker's rules exactly (see the module docstring of
 shared/hdf5-meta.ts): one entry per group, dataset and attribute, a value only for a string of at
@@ -360,9 +361,30 @@ def snirf_variants(outdir: str) -> None:
         f.create_dataset("signal", data=np.zeros(1000, dtype="<f8"))
 
 
+def a4_review(outdir: str) -> None:
+    """Two synthetic files for review round 1 of card A4: strings the walker does not return
+    (over its size rules), and identifier fields that hold numbers."""
+    with h5py.File(f"{outdir}/unscanned-strings.h5", "w") as f:
+        f.attrs["notes"] = "x" * 70_000  # one string over 64 KiB
+        f.create_dataset("labels", data=np.array([b"a"] * 5000, dtype="S1"))  # over 4,096
+        f.create_dataset("signal", data=np.zeros(1000, dtype="<f8"))
+    with h5py.File(f"{outdir}/numeric-identifiers.h5", "w") as f:
+        g = f.create_group("meta")
+        g.create_dataset("MRN", data=np.int64(48213907))
+        g.create_dataset("dob", data=np.int32(19710423))
+        g.create_dataset("BirthDate", data=np.int32(1971))
+        g.create_dataset("signal", data=np.zeros(1000, dtype="<f8"))
+    with h5py.File(f"{outdir}/skipped-identifier.h5", "w") as f:
+        # An identifier-named field too large for the walker to return: not read, so not clean.
+        f.create_dataset("PatientID", data=np.arange(100, dtype="<i8"))
+
+
 def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[1] == "--generate":
         generate(argv[2])
+        return 0
+    if len(argv) == 3 and argv[1] == "--a4-review":
+        a4_review(argv[2])
         return 0
     if len(argv) == 3 and argv[1] == "--snirf-variants":
         snirf_variants(argv[2])

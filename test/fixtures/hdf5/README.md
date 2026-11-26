@@ -12,7 +12,7 @@ uv run --with 'h5py==3.16.0' python scripts/dev/hdf5-oracle.py --generate test/f
 The committed oracle files were printed by h5py 3.16.0.
 CI does not run Python; the tests read the committed JSON.
 
-The ten HDF5 files total 6,574,680 bytes (under 6.5 MiB).
+The thirteen HDF5 files total 6,677,136 bytes (under 6.5 MiB).
 They are committed as plain git blobs, not git-annex pointers (`git -c annex.largefiles=nothing add`).
 
 ## Real recordings
@@ -68,3 +68,34 @@ SHA-256:
 - `snirf-two-groups.snirf`: `187f523b7e6932a6b3730065ab232320241497d84a78e3e0f307613fcfcf150c`
 - `snirf-subject-name.snirf`: `b4db1af8df8559fd9b0566a7af8c54138c464270beb20d409b15905de1663b3a`
 - `identifier-fields.h5`: `549c223d5b72e1a9b622045526778f8235718c4212167ad7b11da07f089b7268`
+
+## Variants for review round 1 of card A4
+
+`scripts/dev/hdf5-oracle.py --a4-review test/fixtures/hdf5` writes these three synthetic files with h5py 3.16.0; every value is made up.
+
+| File | Bytes | What it holds |
+|---|---|---|
+| `unscanned-strings.h5` | 85,080 | A string attribute over 64 KiB, a string array over 4,096 elements, and a 1,000-element float signal: the file is `partial` (`limit`), because text no rule read is never clean |
+| `numeric-identifiers.h5` | 14,528 | Identifier fields holding numbers: an int64 `MRN`, an int32 `dob` that is a `YYYYMMDD` date, and an int32 `BirthDate` that is a year |
+| `skipped-identifier.h5` | 2,848 | A `PatientID` dataset of 100 integers, too large for the walker to return: `partial` (`limit`) |
+
+SHA-256:
+
+- `unscanned-strings.h5`: `3f9b829cc1bc56d8b8cadf46aab4ee04e50fd8276cb382b262eb7f1f96b20cd2`
+- `numeric-identifiers.h5`: `370d1933faf01604796f29cf0400fa01012b688c44e4076336cfb9b41674e234`
+- `skipped-identifier.h5`: `2543fed6b19458bade2b68f364b595387863957f328cbcc41db471ba44cfb0b7`
+
+## Identifier field names
+
+The HDF5 rules read field names through the scanner's JSON identifier-key set (`identifierKeySeverity` in `shared/identifier-scan.ts`), so the two agree on what is an identifier.
+Birth-date variants outside that set (`Birthday`, `BirthYear`) follow it by design: they are not identifier fields here either, until the set changes for both.
+
+## The reader limits, measured (card A4)
+
+The false-positive gate read 296 public SNIRF files from 30 OpenNeuro fNIRS datasets by HTTP range requests, through the registry's page cache (`scripts/dev/reader-fp-measure.ts`).
+A typical file's metadata took 1.7 MiB (median) to 6.9 MiB (90th percentile) in 27 to 104 fetches, because the page cache reads 64 KiB pages and a large file's object headers lie among its data.
+High-density files, with thousands of `measurementList` groups, need much more: 13 MiB in 203 fetches for 31,800 entries, and 38 MiB in 573 fetches for 66,500 entries.
+The walker's logical reads are many per fetched page: one file of 6,292 entries took more than 20,000 logical reads in 40 fetches.
+The caps (48 MiB, 1,000 fetches, 100,000 walker entries, 180 s) admit those files with room.
+The gate's slowest complete file took 51 s over a home connection; the screen reads from storage in the same region.
+On public SNIRF files read as generic HDF5, counting a bare `name` field as a person's made about 8 identifier findings per file, which is why `name` alone names its own object.
