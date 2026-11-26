@@ -946,6 +946,28 @@ describe("status from recording formats", () => {
   });
 });
 
+describe("ZIP archives (card A6): inner findings and inner formats reach the record", () => {
+  const fixture = (name: string) =>
+    new Uint8Array(readFileSync(join(import.meta.dir, "fixtures", "zip", name)));
+  test("an archive's inner EDF findings and its unread .xdf are in the record", async () => {
+    const { record } = await scanFiles({ "sourcedata/raw.zip": fixture("edf-and-xdf.zip") });
+    expect(record.status).toBe("direct-identifiers");
+    expect(record.findings_by_kind?.["edf-patient-name"]).toBe(1);
+    expect(record.unscreened_formats).toEqual({ "zip:.xdf": 1 });
+    expect(record.incomplete).toBe(false);
+  });
+  test("an archive holding only a nested archive and a clean EDF is partially screened", async () => {
+    const { record } = await scanFiles({ "sourcedata/raw.zip": fixture("nested.zip") });
+    expect(record.status).toBe("partially-screened");
+    expect(record.unscreened_formats).toEqual({ "zip:.zip": 1 });
+  });
+  test("an encrypted archive is unchecked, never clean", async () => {
+    const { record } = await scanFiles({ "sourcedata/raw.zip": fixture("encrypted.zip") });
+    expect(record.incomplete).toBe(true);
+    expect(record.incomplete_reasons).toContain("encrypted");
+  });
+});
+
 describe("recording data this scanner cannot parse is counted by what the file is", () => {
   const bids = (name: string, ext: string) => `sub-01/${name}/sub-01_task-a_${name}.${ext}`;
   const never = (w: StandIn, ...paths: string[]) => {

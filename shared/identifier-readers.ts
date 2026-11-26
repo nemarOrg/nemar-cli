@@ -23,10 +23,11 @@ import {
   OTHER_RECORDING_EXTENSIONS,
   scanEdfHeader,
 } from "./identifier-scan";
-import { HDF5_GENERIC_READER } from "./readers/hdf5-generic";
-import { SNIRF_READER } from "./readers/snirf";
 import { BRAINVISION_READER } from "./readers/brainvision";
+import { HDF5_GENERIC_READER } from "./readers/hdf5-generic";
 import { NIRX_READER } from "./readers/nirx";
+import { SNIRF_READER } from "./readers/snirf";
+import { createZipReader } from "./readers/zip";
 
 // ---------------------------------------------------------------------------------------
 // Vocabulary
@@ -34,7 +35,8 @@ import { NIRX_READER } from "./readers/nirx";
 
 /**
  * Every reader the screen may name. Closed: the report's door accepts exactly these, so a later
- * reader changes no vocabulary. `edf`, `brainvision`, `nirx`, `snirf` and `hdf5` have readers today.
+ * reader changes no vocabulary. `edf`, `brainvision`, `nirx`, `snirf`, `hdf5` and `zip` have readers
+ * today.
  */
 export const READER_IDS = [
   "edf",
@@ -275,6 +277,11 @@ export interface ReaderResult {
   incomplete?: ReaderIncompleteReason;
   /** Informational notes, one per kind per file (see {@link READER_NOTES}). */
   notes?: ReaderNote[];
+  /**
+   * Recording data inside the file that no reader read, by format name: an archive's entries as
+   * `zip:<ext>`. The caller counts them as unscreened, as it counts `not-applicable` files.
+   */
+  unscreened?: Record<string, number>;
 }
 
 /**
@@ -331,6 +338,22 @@ export const EDF_READER: FormatReader = {
   },
 };
 
+/**
+ * ZIP archives (`shared/readers/zip.ts`). Its entries are read by every other registered reader:
+ * nesting is followed one level only. The kit hands the reader the registry's functions, so the
+ * reader module imports none at runtime (no module cycle); `READERS` is read at scan time.
+ */
+export const ZIP_READER: FormatReader = createZipReader({
+  inner: () => READERS.filter((r) => r.id !== "zip"),
+  cachedSource,
+  limitsFor,
+  readerMatch,
+  companionsOf,
+  formatCoverage,
+  limitExceeded: () => new LimitExceeded(),
+  pageBytes: PAGE_BYTES,
+});
+
 /** The registry. A reader registered here is what makes its extension screened. */
 export const READERS: readonly FormatReader[] = [
   EDF_READER,
@@ -338,6 +361,7 @@ export const READERS: readonly FormatReader[] = [
   NIRX_READER,
   SNIRF_READER,
   HDF5_GENERIC_READER,
+  ZIP_READER,
 ];
 
 /** The limits a reader reads one path under: its extension's own, else the reader's. */
