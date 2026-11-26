@@ -256,7 +256,13 @@ export async function qualityHandler(
   );
   if (cache !== null) {
     const hit = await cache.match(cacheKey);
-    if (hit) return new Response(hit.body, hit);
+    if (hit) {
+      // The Workers Cache API strips `Cache-Tag` from what it stores, so the tag is set again: a browser or
+      // an outer cache keeps the answer under the dataset's tag, which an unpublish purges.
+      const answer = new Response(hit.body, hit);
+      answer.headers.set("Cache-Tag", qualityCacheTag(datasetId));
+      return answer;
+    }
   }
 
   // 4. The record, checked whole.
