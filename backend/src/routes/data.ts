@@ -2152,11 +2152,13 @@ dataRoutes.get("/:datasetId/qa/*", (c) => {
 // handler sets, so `ETag` is added here, after the handler, on this route only: the shared list (and so
 // every other api route, the admin quality views included) stays as it was (#2324).
 const QUALITY_EXPOSED = "ETag";
-const exposeQualityEtag: MiddlewareHandler<{ Bindings: Bindings; Variables: Variables }> = async (
-  c,
-  next,
-) => {
+export const exposeQualityEtag: MiddlewareHandler<{
+  Bindings: Bindings;
+  Variables: Variables;
+}> = async (c, next) => {
   await next();
+  // A refusal carries no ETag, so it exposes nothing more than the shared list.
+  if (!c.res.ok) return;
   const listed = c.res.headers.get("Access-Control-Expose-Headers");
   const names = (listed ?? "").split(",").map((n) => n.trim().toLowerCase());
   if (names.includes(QUALITY_EXPOSED.toLowerCase())) return;
