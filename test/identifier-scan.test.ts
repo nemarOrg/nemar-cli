@@ -742,7 +742,7 @@ describe("second review: delimiters, record numbers, slots, coverage, canonical 
         ["sub-01/meg/sub-01_task-x_meg.ds/a.meg4", "sub-01/meg/sub-01_task-x_meg.ds/a.res4"],
         { ".ds/": 1 },
       ],
-      [["sub-01/emg/sub-01_task-x_emg.hdf5"], { ".hdf5": 1 }],
+      [["sub-01/ieeg/sub-01_task-x_ieeg.nwb"], { ".nwb": 1 }],
       [["sub-01/eeg/sub-01_task-x_eeg.edf.gz"], { ".edf.gz": 1 }],
       [["sub-01/eeg/sub-01_task-x_eeg.eeg", "sub-01/eeg/sub-01_task-x_eeg.json"], { ".eeg": 1 }],
       [["sub-01/eeg/a.mff/info.xml", "sub-01/eeg/a.mff/signal1.bin"], { ".mff/": 1 }],
@@ -868,7 +868,7 @@ describe("third review: birth dates in the recording field, slots, vocabulary, a
     for (const ext of ["ns5", "lay", "rec", "smr", "dat", "npy", "parquet"]) {
       expect(counted([`data/recording.${ext}`]), ext).toEqual({ [`.${ext}`]: 1 });
     }
-    expect(counted(["data/raw.hdf5"])).toEqual({ ".hdf5": 1 });
+    expect(counted(["data/raw.nwb"])).toEqual({ ".nwb": 1 });
     expect(counted(["sourcedata/sub-01/rec.xyz"])).toEqual({ ".xyz": 1 });
     expect(counted(["sourcedata/sub-01/rec"])).toEqual({ "(no extension)": 1 });
     expect(

@@ -23,6 +23,8 @@ import {
   OTHER_RECORDING_EXTENSIONS,
   scanEdfHeader,
 } from "./identifier-scan";
+import { HDF5_GENERIC_READER } from "./readers/hdf5-generic";
+import { SNIRF_READER } from "./readers/snirf";
 import { BRAINVISION_READER } from "./readers/brainvision";
 import { NIRX_READER } from "./readers/nirx";
 
@@ -32,7 +34,7 @@ import { NIRX_READER } from "./readers/nirx";
 
 /**
  * Every reader the screen may name. Closed: the report's door accepts exactly these, so a later
- * reader changes no vocabulary. `edf`, `brainvision` and `nirx` have readers today.
+ * reader changes no vocabulary. `edf`, `brainvision`, `nirx`, `snirf` and `hdf5` have readers today.
  */
 export const READER_IDS = [
   "edf",
@@ -330,7 +332,13 @@ export const EDF_READER: FormatReader = {
 };
 
 /** The registry. A reader registered here is what makes its extension screened. */
-export const READERS: readonly FormatReader[] = [EDF_READER, BRAINVISION_READER, NIRX_READER];
+export const READERS: readonly FormatReader[] = [
+  EDF_READER,
+  BRAINVISION_READER,
+  NIRX_READER,
+  SNIRF_READER,
+  HDF5_GENERIC_READER,
+];
 
 /** The limits a reader reads one path under: its extension's own, else the reader's. */
 export function limitsFor(reader: FormatReader, path: string): ReaderLimits {

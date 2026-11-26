@@ -55,6 +55,12 @@ export type FindingKind =
   | "image-or-document-file"
   | "tooling-debris"
   | "local-user-path"
+  | "snirf-subject-name"
+  | "snirf-subject-freetext"
+  | "snirf-measurement-date"
+  | "hdf5-freetext"
+  | "hdf5-freetext-name"
+  | "hdf5-identifier-field"
   | "brainvision-comment-name"
   | "brainvision-segment-date"
   | "nirx-subject-name"
@@ -78,6 +84,9 @@ export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-recording-freetext",
   "json-identifier-key",
   "participants-identifier-column",
+  "snirf-subject-name",
+  "hdf5-freetext-name",
+  "hdf5-identifier-field",
   "nirx-subject-name",
   "nirx-demographics",
 ]);
@@ -91,6 +100,7 @@ export const DATE_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-startdate",
   "edf-recording-startdate",
   "acq-time-dated",
+  "snirf-measurement-date",
   "brainvision-segment-date",
   "nirx-header-date",
 ]);
@@ -399,6 +409,8 @@ function isNameLikePart(part: string, strict: boolean): boolean {
 
 /**
  * A whitespace token that could be a name, after splitting on delimiters such as `^ , / = :`.
+ * `strict` is the rule for a slot that should hold a code: only placeholders and study-group words
+ * are exempt, not the neutral vocabulary.
  * Exported for the text-header readers (`shared/readers/`), so every format asks the same question.
  */
 export function isNameLike(token: string, strict = false): boolean {
@@ -1049,6 +1061,25 @@ const IDENTIFIER_KEYS = new Set([
 /** Keys that may be an author's public contact or a participant's: a person decides. */
 const REVIEW_KEYS = new Set(["address", "contact", "phone", "telephone", "email", "national"]);
 
+/** Canonical key names that hold a birth date. */
+export const BIRTH_KEYS: ReadonlySet<string> = new Set([
+  "patientbirthdate",
+  "birthdate",
+  "dateofbirth",
+  "dob",
+]);
+
+/**
+ * The severity a key or field name carries by itself, from its canonical spelling: `identifier`
+ * for a name, a birth date or a record number, `review` for a contact, null for anything else.
+ * The JSON key rule and the HDF5 field rule share it.
+ */
+export function identifierKeySeverity(canonicalName: string): Severity | null {
+  if (IDENTIFIER_KEYS.has(canonicalName)) return "identifier";
+  if (REVIEW_KEYS.has(canonicalName)) return "review";
+  return null;
+}
+
 /** True when a JSON value holds anything at all, at any depth. */
 export function hasContent(value: unknown): boolean {
   if (value === null || value === undefined) return false;
@@ -1074,11 +1105,7 @@ export function scanJsonKeys(doc: unknown): Finding[] {
   if (doc === null || typeof doc !== "object") return out;
   for (const [key, value] of Object.entries(doc as Record<string, unknown>)) {
     const name = canonical(key);
-    const severity: Severity | null = IDENTIFIER_KEYS.has(name)
-      ? "identifier"
-      : REVIEW_KEYS.has(name)
-        ? "review"
-        : null;
+    const severity = identifierKeySeverity(name);
     if (severity && hasContent(value)) {
       const sample = Array.isArray(value) ? "[]" : typeof value === "object" ? "{}" : String(value);
       out.push({ kind: "json-identifier-key", severity, field: name, shape: shapeOf(sample) });
@@ -1177,7 +1204,9 @@ export function scanTextForLocalPaths(text: string): Finding[] {
 export const DIRECTORY_FORMATS: readonly string[] = [".ds", ".mff", ".mefd", ".zarr"];
 /**
  * Formats counted as recording or signal data wherever they sit, named or not by BIDS, when no
- * registered reader reads them. An extension leaves this list when a reader is registered for it.
+ * registered reader reads them. An extension stays here after a reader is registered for it: the
+ * report's closed list of format names (`KNOWN_FORMATS`) is built from this list, and stored
+ * reports, and formats inside a ZIP, still name it.
  */
 export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
   ".set",

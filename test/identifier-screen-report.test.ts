@@ -509,6 +509,7 @@ describe("dateFindingCount and dateWarningLines", () => {
       "edf-recording-startdate",
       "edf-startdate",
       "nirx-header-date",
+      "snirf-measurement-date",
     ]);
     // Text in a date slot that is not a date is a different kind, and does not warn.
     expect(dateWarningLines({ findings_by_kind: { "edf-startdate-unparsed": 5 } })).toEqual([]);

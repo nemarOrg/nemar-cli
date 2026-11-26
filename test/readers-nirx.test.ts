@@ -19,6 +19,7 @@ import { classifyDataset, readRecordings } from "../shared/identifier-report-bui
 import { DATE_KINDS, DIRECT_KINDS } from "../shared/identifier-scan";
 import { KIND_COPY } from "../shared/identifier-screen-copy";
 import { NIRX_READER } from "../shared/readers/nirx";
+import { isPersonField } from "../shared/readers/person-fields";
 import { TEXT_HEADER_MAX_BYTES, contactIn, decodeHeader } from "../shared/readers/text-header";
 
 const DIR = join(import.meta.dir, "fixtures/text-headers/nirx");
@@ -453,5 +454,41 @@ describe("review round 2: not-applicable needs binary bytes, no section name and
   test("a binary start naming any NIRx section in another case is scanned", async () => {
     const r = await scan(glue(nul, "imagingparameters\n"), "x.hdr");
     expect(r).toEqual({ findings: [], coverage: "partial", incomplete: "unsupported-version" });
+  });
+});
+
+describe("one person-field rule for every reader (shared/readers/person-fields.ts)", () => {
+  const withLine = (line: string) => encode(text(CLEAN_INF).replace("Age=0", `Age=0\n${line}`));
+
+  test("a NIRx ManufacturerName is a thing's name; an ExperimenterName is a person's", async () => {
+    expect(isPersonField("ManufacturerName")).toBe(false);
+    expect(kinds(await scan(withLine('ManufacturerName="Quintavius Hollberry"'), "x.inf"))).toEqual(
+      [],
+    );
+    expect(isPersonField("ExperimenterName")).toBe(true);
+    expect(kinds(await scan(withLine('ExperimenterName="Quintavius Hollberry"'), "x.inf"))).toEqual(
+      ["nirx-subject-name"],
+    );
+  });
+
+  test("a NIRx Notes field gets the free-text rules only: a name is not a finding, a home path is", async () => {
+    expect(isPersonField("Notes")).toBe(false);
+    expect(kinds(await scan(withLine('Notes="Quintavius Hollberry"'), "x.inf"))).toEqual([]);
+    expect(kinds(await scan(withLine('Notes="C:\\Users\\Quintavius\\x.txt"'), "x.inf"))).toEqual([
+      "local-user-path",
+    ]);
+  });
+
+  test("a field that describes the person is not a person field; SubjectName still is", async () => {
+    expect(kinds(await scan(withLine('Subject_Type="Marlow"'), "x.inf"))).toEqual([]);
+    expect(kinds(await scan(withLine('SubjectInfo="Marlow"'), "x.inf"))).toEqual([]);
+    expect(kinds(await scan(withLine('SubjectName="Marlow"'), "x.inf"))).toEqual([
+      "nirx-subject-name",
+    ]);
+  });
+
+  test("a bare Name is the subject's in NIRx demographics and an object's in HDF5", () => {
+    expect(isPersonField("Name", { bareName: "person" })).toBe(true);
+    expect(isPersonField("Name")).toBe(false);
   });
 });
