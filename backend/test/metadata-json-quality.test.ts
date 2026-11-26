@@ -13,8 +13,9 @@
  *  - the dataset is bound from the rows, never from a summary: a summary kept for another dataset's stamp
  *    never shows;
  *  - a private dataset is a 404 on both documents, and a concealed deposit gets no pipeline namespace;
- *  - `metadata.json` and the page bundle carry the same `processing`, `signalJourney` (an `in_progress`
- *    link included) and `dataQuality`, and the extensions validate against the vendored neuroschema.
+ *  - `metadata.json` and the page bundle carry the same `processing`, `signalJourney` and `dataQuality`,
+ *    all of the promoted run and none of a run in progress, and the extensions validate against the
+ *    vendored neuroschema.
  */
 
 import type { Database } from "bun:sqlite";
@@ -162,6 +163,36 @@ beforeEach(() => {
   app.route("/", dataRoutes);
 });
 
+/** The completed link the promoted run's reconciliation kept. */
+const LINK = {
+  recipe_version: "1.0.0-b2",
+  processing_status: "completed",
+  location: "desc-nemarica_signalJourney.json",
+  sha256: "4".repeat(64),
+  sj_version: "0.1.0",
+};
+
+/**
+ * The run row and reconciled counts reconciliation leaves for a run (one recording that passed every
+ * checkpoint of `declared`, `stored` last and still pending), with its link: rows the tables accept, as
+ * `compute-progress-reconcile.test.ts` drives the writer.
+ */
+function promotedRun(r: { stampId: number; jobId: string }, declared: string[]): void {
+  db.run(
+    `INSERT INTO compute_pipeline_progress_runs (stamp_id, job_id, reports, reconciled_at, outcome,
+       recipe_version, declared, link)
+     VALUES (?, ?, 0, datetime('now'), 'reconciled', '1.0.0-b2', ?, ?)`,
+    [r.stampId, r.jobId, JSON.stringify(declared), JSON.stringify(LINK)],
+  );
+  for (const checkpoint of declared.slice(0, -1)) {
+    db.run(
+      `INSERT INTO compute_pipeline_progress (stamp_id, checkpoint, passed, failed, skipped, total,
+         reported_at, reconciled) VALUES (?, ?, 1, 0, 0, 1, datetime('now'), 1)`,
+      [r.stampId, checkpoint],
+    );
+  }
+}
+
 describe("which derivative's summary a page shows", () => {
   test("a promoted derivative's summary is served, and the extensions validate", async () => {
     seedDataset("nm000901");
@@ -291,21 +322,11 @@ describe("the dataset's gate", () => {
     expect((await bundleMetadata("nm000920")).status).toBe(404);
   });
 
-  test("a concealed deposit gets no pipeline namespace on either document (MUTATION: drop the anonymous gate)", async () => {
+  test("a concealed deposit gets no pipeline namespace on either document (guarded twice: the route's own check and the read's not_anonymous and first-publication terms; metadata-json-pipeline-route.test.ts holds each term alone)", async () => {
     seedDataset("nm000921", { anonymous: 1 });
-    await run("nm000921");
-    db.run(
-      "INSERT INTO compute_pipeline_documents (dataset_id, namespace, recipe, stamp_id, entry) VALUES ('nm000921', 'signalJourney', 'nemar-ica', 1, ?)",
-      [
-        JSON.stringify({
-          recipe_version: "1.0.0-b2",
-          processing_status: "failed",
-          location: null,
-          sha256: null,
-          sj_version: null,
-        }),
-      ],
-    );
+    const concealed = await run("nm000921");
+    // The run's link, which a public dataset's promoted run would show.
+    promotedRun(concealed, ["import", "quality", "stored"]);
     const meta = await metadata("nm000921");
     expect(meta.status).toBe(200);
     expect(meta.body?.extensions).not.toHaveProperty("dataQuality");
@@ -395,23 +416,21 @@ describe("the page bundle when the pipeline read fails (#2375 review)", () => {
 });
 
 describe("metadata.json and the page bundle agree (#2331)", () => {
-  test("processing, signalJourney with an in_progress link, and dataQuality (MUTATION: drop the bundle's read)", async () => {
+  test("processing, signalJourney and dataQuality of the promoted run, and no in_progress link (MUTATION: drop the bundle's read)", async () => {
     seedDataset("nm000930");
     const ica = await run("nm000930");
+    const declared = ["import", "quality", "stored"];
+    promotedRun(ica, declared);
     const processing = {
       recipe_version: "1.0.0-b2",
-      declared_checkpoints: ["import", "quality", "stored"],
+      declared_checkpoints: declared,
       counts: {
         import: { passed: 1, failed: 0, skipped: 0, total: 1 },
         quality: { passed: 1, failed: 0, skipped: 0, total: 1 },
         stored: { passed: 1, failed: 0, skipped: 0, total: 1 },
       },
     };
-    db.run(
-      "INSERT INTO compute_pipeline_documents (dataset_id, namespace, recipe, stamp_id, entry) VALUES ('nm000930', 'processing', 'nemar-ica', ?, ?)",
-      [ica.stampId, JSON.stringify(processing)],
-    );
-    // A run of nemar-floor reporting now: its link is worked out on read, on both documents.
+    // A run of nemar-floor reporting now: nothing of it shows on either document.
     db.run(
       `INSERT INTO compute_jobs (id, account_id, source, kind, app_id, app_version, spec_digest,
                                  partition, pool, nodes, cores_per_node, minutes, state, held_milli)
@@ -437,7 +456,7 @@ describe("metadata.json and the page bundle agree (#2331)", () => {
     const fromMeta = meta.body?.extensions as Loose;
     const fromBundle = bundle.data?.extensions as Loose;
     expect(fromMeta.processing.recipes["nemar-ica"]).toEqual(processing);
-    expect(fromMeta.signalJourney.recipes["nemar-floor"].processing_status).toBe("in_progress");
+    expect(fromMeta.signalJourney.recipes).toEqual({ "nemar-ica": LINK });
     expect(fromMeta.dataQuality.recipes["nemar-ica"]).toEqual(ENTRY);
     for (const ns of ["processing", "signalJourney", "dataQuality"]) {
       expect(fromBundle[ns], ns).toEqual(fromMeta[ns]);

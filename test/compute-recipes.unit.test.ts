@@ -168,6 +168,17 @@ describe("the registry", () => {
         expect(recipe.engine).toMatch(/^[0-9A-Za-z._+@-]{1,64}$/);
       });
 
+      test("every plugin step sits in its last declared checkpoint, where a skipped plugin cannot break the cascade (ADR 0134 amendment of 2026-11-26)", () => {
+        const plugins: readonly string[] = RECIPE_PLUGIN_STEPS;
+        const last = recipe.checkpoints[recipe.checkpoints.length - 1];
+        for (const c of recipe.checkpoints) {
+          for (const step of c.steps) {
+            if (plugins.includes(step))
+              expect([step, c.checkpoint]).toEqual([step, last.checkpoint]);
+          }
+        }
+      });
+
       test("its required outputs are under the product directory and named by its label", () => {
         const out = recipeRequiredOutputs(recipe);
         const label = recipeLabel(recipe);

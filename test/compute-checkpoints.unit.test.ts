@@ -16,6 +16,7 @@ import {
   type PipelineCellMark,
   type PipelineGridStatus,
   type RecordingRow,
+  UNRECORDED_CODE,
   countRecordings,
   failuresByCheckpoint,
   firstCheckpointOf,
@@ -25,9 +26,14 @@ import {
   pipelineRunStatus,
   processingDatasetEntry,
   processingEntryProblem,
+  processingRecordEntry,
+  processingRecordProblem,
   progressProblem,
+  readRecordingsHeader,
+  readRecordingsRow,
   recordingOutcomes,
   signalJourneyLink,
+  storedCounts,
 } from "../shared/compute-checkpoints";
 import { RECORD_STEP, declaredCheckpoints, findRecipe } from "../shared/compute-recipes";
 import { PROGRESS_FORMAT, type Progress } from "../shared/contract/compute-progress";
@@ -154,6 +160,11 @@ describe("parseRecordingsTable", () => {
 
   test("an empty table with only a header has no rows", () => {
     expect(parseRecordingsTable(`${header.join("\t")}\n`)).toEqual({ ok: true, rows: [] });
+  });
+
+  test("refuses a path two rows name: one recording has one outcome (MUTATION: accept a repeated path)", () => {
+    const text = `${header.join("\t")}\n${line("a.set", "succeeded", "n/a", "n/a")}\n${line("b.set", "succeeded", "n/a", "n/a")}\n${line("a.set", "failed", "load_failed", "load")}\n`;
+    expect(parseRecordingsTable(text)).toEqual({ ok: false, reason: "duplicate_path" });
   });
 
   test("refuses a table of more rows than PROGRESS_MAX_RECORDINGS", () => {
@@ -672,6 +683,207 @@ describe("the progress vectors file", () => {
       writeFileSync(VECTORS_PATH, `${JSON.stringify(computed, null, 2)}\n`);
     }
     expect(JSON.parse(readFileSync(VECTORS_PATH, "utf8"))).toEqual(computed);
+  });
+});
+
+// Phase B4: a recording's own entries, which summed over a run's rows are the run's reconciled counts.
+describe("record-level entries", () => {
+  const nscProcessing = compileNeuroschemaValidator("nsc:/extensions/processing.schema.json");
+  const nscSignalJourney = compileNeuroschemaValidator("nsc:/extensions/signalJourney.schema.json");
+  const VECTORS = JSON.parse(
+    readFileSync(join(import.meta.dir, "../shared/contract/compute-progress-vectors.json"), "utf8"),
+  ) as { vectors: Array<{ name: string; recipe: string; total: number; rows: RecordingRow[] }> };
+
+  test("storedCounts: kept stores the last checkpoint's passed, lost fails them, none skips all (MUTATION: swap kept and lost)", () => {
+    expect(storedCounts("kept", 3, 5)).toEqual({ passed: 3, failed: 0, skipped: 2, total: 5 });
+    expect(storedCounts("lost", 3, 5)).toEqual({ passed: 0, failed: 3, skipped: 2, total: 5 });
+    expect(storedCounts("none", 3, 5)).toEqual({ passed: 0, failed: 0, skipped: 5, total: 5 });
+  });
+
+  test("over every vector of a completed table, the entries sum to the reconciled counts with stored kept, validate and keep the writer's rules (MUTATION: stored passed for every row)", () => {
+    let checked = 0;
+    for (const v of VECTORS.vectors) {
+      // A killed run's unwritten recordings have no row and no entry; only a run whose rows are its total.
+      if (v.total !== v.rows.length) continue;
+      const recipe = v.recipe === "nemar-floor" ? floor : ica;
+      const declared = declaredCheckpoints(recipe);
+      const sums: Record<
+        string,
+        { passed: number; failed: number; skipped: number; total: number }
+      > = Object.fromEntries(
+        declared.map((d) => [d, { passed: 0, failed: 0, skipped: 0, total: 0 }]),
+      );
+      for (const r of v.rows) {
+        const entry = processingRecordEntry({
+          recipeVersion: recipe.version,
+          checkpoints: recipe.checkpoints,
+          row: r,
+        });
+        expect([v.name, r.path, processingRecordProblem(entry, declared)]).toEqual([
+          v.name,
+          r.path,
+          null,
+        ]);
+        const doc = { level: "record", recipes: { [recipe.name]: entry } };
+        if (!nscProcessing(doc)) throw new Error(`${r.path}: ${formatAjvErrors(nscProcessing)}`);
+        for (const d of declared) {
+          sums[d][entry.checkpoints[d].status] += 1;
+          sums[d].total += 1;
+        }
+        checked++;
+      }
+      const counts = countRecordings(v.rows, recipe.checkpoints);
+      const last = counts[recipe.checkpoints[recipe.checkpoints.length - 1].checkpoint];
+      expect([v.name, sums]).toEqual([
+        v.name,
+        { ...counts, stored: storedCounts("kept", last.passed, last.total) },
+      ]);
+    }
+    expect(checked).toBeGreaterThan(10);
+  });
+
+  test("a recording that did not pass carries its first code and step to stored; one that passed is stored", () => {
+    const failed = processingRecordEntry({
+      recipeVersion: floor.version,
+      checkpoints: F,
+      row: row("b.set", "failed", "step_failed", "bad_channels"),
+    });
+    expect(failed.checkpoints).toEqual({
+      import: { status: "passed", code: null, step: null },
+      preprocess: { status: "failed", code: "step_failed", step: "bad_channels" },
+      quality: { status: "skipped", code: "step_failed", step: "bad_channels" },
+      stored: { status: "skipped", code: "step_failed", step: "bad_channels" },
+    });
+    const plugin = processingRecordEntry({
+      recipeVersion: ica.version,
+      checkpoints: I,
+      row: row("i.set", "succeeded", null, null, [
+        { step: "nemar-quality", code: "plugin_failed" },
+      ]),
+    });
+    expect(plugin.checkpoints.quality).toEqual({
+      status: "skipped",
+      code: "plugin_failed",
+      step: "nemar-quality",
+    });
+    expect(plugin.checkpoints.stored).toEqual(plugin.checkpoints.quality);
+    const passed = processingRecordEntry({
+      recipeVersion: floor.version,
+      checkpoints: F,
+      row: row("a.set", "succeeded", null, null),
+    });
+    expect(Object.values(passed.checkpoints).every((o) => o.status === "passed")).toBe(true);
+  });
+
+  test("a code that does not fit failureCode is written unrecorded_code, and the entry still validates (MUTATION: keep the row's null code)", () => {
+    for (const code of ["ValueError", "x".repeat(70)]) {
+      const entry = processingRecordEntry({
+        recipeVersion: floor.version,
+        checkpoints: F,
+        row: row("b.set", "failed", code, "bad_channels"),
+      });
+      expect(entry.checkpoints.preprocess).toEqual({
+        status: "failed",
+        code: UNRECORDED_CODE,
+        step: "bad_channels",
+      });
+      expect(entry.checkpoints.stored.code).toBe(UNRECORDED_CODE);
+      expect(processingRecordProblem(entry, declaredCheckpoints(floor))).toBeNull();
+      const doc = { level: "record", recipes: { "nemar-floor": entry } };
+      if (!nscProcessing(doc)) throw new Error(`${code}: ${formatAjvErrors(nscProcessing)}`);
+    }
+    // The counts and the live failure lists keep the row as it is.
+    expect(recordingOutcomes(row("b.set", "failed", "ValueError", "load"), F)[0].code).toBeNull();
+  });
+
+  test("processingRecordProblem: the declared keys in order, and the cascade (MUTATION: drop the code comparison)", () => {
+    const declared = declaredCheckpoints(floor);
+    const ok = processingRecordEntry({
+      recipeVersion: floor.version,
+      checkpoints: F,
+      row: row("b.set", "failed", "load_failed", "load"),
+    });
+    expect(processingRecordProblem(ok, declared)).toBeNull();
+    const { stored, ...noStored } = ok.checkpoints;
+    expect(processingRecordProblem({ ...ok, checkpoints: noStored }, declared)).toBe("keys_differ");
+    expect(processingRecordProblem({ ...ok, checkpoints: { stored, ...noStored } }, declared)).toBe(
+      "keys_differ",
+    );
+    const passedAfter = {
+      ...ok,
+      checkpoints: {
+        ...ok.checkpoints,
+        quality: { status: "passed" as const, code: null, step: null },
+      },
+    };
+    expect(processingRecordProblem(passedAfter, declared)).toBe("cascade_broken");
+    const otherCode = {
+      ...ok,
+      checkpoints: {
+        ...ok.checkpoints,
+        stored: { status: "skipped" as const, code: "other_code", step: "load" },
+      },
+    };
+    expect(processingRecordProblem(otherCode, declared)).toBe("cascade_broken");
+    const otherStep = {
+      ...ok,
+      checkpoints: {
+        ...ok.checkpoints,
+        stored: { status: "skipped" as const, code: "load_failed", step: null },
+      },
+    };
+    expect(processingRecordProblem(otherStep, declared)).toBe("cascade_broken");
+  });
+
+  test("a recording's completed link takes neuroschema's relativeLocation, Unicode included, and validates", () => {
+    const location = "sub-01/eeg/sub-01_tâche_desc-nemarfloor_signalJourney.json";
+    const link = signalJourneyLink({
+      recipeVersion: floor.version,
+      status: "completed",
+      location,
+      sha256: "a".repeat(64),
+      sjVersion: "0.1.0",
+    });
+    expect(link?.location).toBe(location);
+    if (!nscSignalJourney({ recipes: { "nemar-floor": link } })) {
+      throw new Error(formatAjvErrors(nscSignalJourney));
+    }
+    const long = `${"a/".repeat(511)}x.json`;
+    expect([...long].length).toBeGreaterThan(1024);
+    expect(
+      signalJourneyLink({
+        recipeVersion: floor.version,
+        status: "completed",
+        location: long,
+        sha256: "a".repeat(64),
+        sjVersion: "0.1.0",
+      }),
+    ).toBeNull();
+  });
+
+  test("the one-row reader reads every line exactly as the whole-table reader does", () => {
+    const text = [
+      "path\tstatus\tcode\tstep\tskipped_steps",
+      "sub-01/eeg/a.set\tsucceeded\tn/a\tn/a\tnemar-quality:plugin_failed",
+      "sub-02/eeg/b.edf\tfailed\tload_failed\tload\tn/a",
+      "sub-05/eeg/e.bdf\tskipped\tunsupported_format\tn/a\tn/a",
+    ].join("\n");
+    const whole = parseRecordingsTable(text);
+    if (!whole.ok) throw new Error(whole.reason);
+    const lines = text.split("\n");
+    const head = readRecordingsHeader(lines[0]);
+    if (!head.ok) throw new Error(head.reason);
+    expect(lines.slice(1).map((l) => readRecordingsRow(l, head.header))).toEqual(
+      whole.rows.map((r) => ({ ok: true, row: r })),
+    );
+    expect(readRecordingsHeader("path\tstatus\tcode")).toEqual({
+      ok: false,
+      reason: "missing_column",
+    });
+    expect(readRecordingsRow("a\tsucceeded", head.header)).toEqual({
+      ok: false,
+      reason: "row_width",
+    });
   });
 });
 

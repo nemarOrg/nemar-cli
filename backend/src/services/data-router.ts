@@ -897,9 +897,12 @@ export interface NeuroschemaDataset {
   external_links: DatasetExternalLinks;
   extensions: {
     nemar: NemarExtensionBlock;
-    /** neuroschema `processing`, dataset level (ADR 0134): the reconciled counts of each recipe's latest run. */
+    /**
+     * neuroschema `processing`, dataset level (ADR 0134 decision 9 as amended 2026-11-26): the reconciled
+     * counts of each recipe's promoted run (its current public derivative).
+     */
     processing?: { level: "dataset"; recipes: Record<string, unknown> };
-    /** neuroschema `signalJourney` (ADR 0134): a link to each recipe's latest signalJourney record. */
+    /** neuroschema `signalJourney`: a link to the dataset record of each recipe's promoted run. */
     signalJourney?: { recipes: Record<string, unknown> };
     /**
      * neuroschema `dataQuality`, dataset level (ADR 0137 decision 8): the quality summary of each recipe's
@@ -907,13 +910,6 @@ export interface NeuroschemaDataset {
      */
     dataQuality?: { level: "dataset"; recipes: Record<string, unknown> };
   };
-}
-
-/** A stored (final) dataset document of NEMAR's pipeline (migration 0150), as the route reads it. */
-export interface PipelineDocumentRow {
-  namespace: string;
-  recipe: string;
-  entry: string;
 }
 
 /** The pipeline's namespaces of a dataset document's `extensions`. */
@@ -924,39 +920,26 @@ export interface PipelineExtensions {
 }
 
 /**
- * The neuroschema `processing`, `signalJourney` and `dataQuality` extensions of a dataset (ADR 0134 and
- * ADR 0137 decision 8, epic #2324): the final entries of each recipe's latest ended run; for a recipe whose
- * run is reporting now, the `in_progress` link worked out on read (`live`), which stands in front of the
- * last final link without replacing it in storage; and the quality summary of each recipe's current public
- * derivative (`quality`, already parsed). An entry that does not parse as a JSON object is left out. Each
- * namespace is present only when it has an entry.
+ * The neuroschema `processing`, `signalJourney` and `dataQuality` extensions of a dataset (ADR 0134 decision
+ * 9 as amended 2026-11-26, ADR 0137 decision 8, epic #2324), from the entries of each recipe's PROMOTED run
+ * (its current public derivative), already built and parsed: the reconciled counts, the link of its dataset
+ * record and its quality summary. Each namespace is present only when it has an entry.
  */
-export function pipelineExtensions(
-  rows: readonly PipelineDocumentRow[],
-  live: Readonly<Record<string, unknown>> = {},
-  quality: Readonly<Record<string, unknown>> = {},
-): PipelineExtensions {
-  const processing: Record<string, unknown> = {};
-  const signalJourney: Record<string, unknown> = {};
-  for (const row of rows) {
-    let entry: unknown;
-    try {
-      entry = JSON.parse(row.entry);
-    } catch {
-      continue;
-    }
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
-    if (row.namespace === "processing") processing[row.recipe] = entry;
-    if (row.namespace === "signalJourney") signalJourney[row.recipe] = entry;
-  }
-  Object.assign(signalJourney, live);
+export function pipelineExtensions(entries: {
+  processing: Readonly<Record<string, unknown>>;
+  signalJourney: Readonly<Record<string, unknown>>;
+  dataQuality: Readonly<Record<string, unknown>>;
+}): PipelineExtensions {
+  const { processing, signalJourney, dataQuality } = entries;
   return {
     ...(Object.keys(processing).length > 0
-      ? { processing: { level: "dataset" as const, recipes: processing } }
+      ? { processing: { level: "dataset" as const, recipes: { ...processing } } }
       : {}),
-    ...(Object.keys(signalJourney).length > 0 ? { signalJourney: { recipes: signalJourney } } : {}),
-    ...(Object.keys(quality).length > 0
-      ? { dataQuality: { level: "dataset" as const, recipes: { ...quality } } }
+    ...(Object.keys(signalJourney).length > 0
+      ? { signalJourney: { recipes: { ...signalJourney } } }
+      : {}),
+    ...(Object.keys(dataQuality).length > 0
+      ? { dataQuality: { level: "dataset" as const, recipes: { ...dataQuality } } }
       : {}),
   };
 }

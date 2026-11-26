@@ -1,6 +1,7 @@
 /**
  * The public quality view route (ADR 0137 decisions 6 and 7, epic #2324 phase B2): a recording's quality
- * views and the files they declare, from a recipe's CURRENT PUBLIC derivative only. Paths, words and bounds
+ * views and the files they declare, and its checkpoint outcomes and signalJourney link (ADR 0134 decision 9
+ * as amended 2026-11-26, phase B4), from a recipe's CURRENT PUBLIC derivative only. Paths, words and bounds
  * are `shared/contract/quality-route.ts`'s; the route is mounted on the data plane (`routes/data.ts`, before
  * the version routes, so `quality` is never read as a version).
  *
@@ -27,11 +28,19 @@
  *  5. For a file: the digest must be one a validated view declares; the object (at most 4 MiB) must be its
  *     declared size and is hashed again before a byte is served.
  * Steps 4 and 5 are `serveRecordingViews` (`services/quality-serve.ts`), which the admin mount
- * (`routes/admin/quality-views.ts`) calls too; only this route caches.
+ * (`routes/admin/quality-views.ts`) calls too; only this route caches. For `processing`, steps 4 and 5 are
+ * `serveRecordingProcessing` (`services/quality-processing.ts`): the recording's row of the derivative's
+ * recordings table and, for a recording that succeeded, its record, read with the same bounds, the same
+ * dataset binding and the same gate, cache and headers. A processing miss reads the whole table, so it is
+ * charged to the caller's data miss budget (`checkDataMissBudget`, as a brokered git file's miss is), and a
+ * recording the table does not list is remembered in the edge cache under the same key (the client still
+ * gets `quality_not_found`, `no-store`), so repeated probes scan a table once per derivative and epoch.
  *
  * Public answers carry `Cache-Control: public, max-age=300`, `Cache-Tag: nemar-dq-<id>` and a strong `ETag`
- * (the SHA-256 of the body's bytes). Every refusal is `no-store` and is never put in the cache. A log line
- * carries the dataset id, the first twelve digits of a key and a fixed word, never a path.
+ * (the SHA-256 of the body's bytes). Every refusal is `no-store`, and only one is ever put in the cache: a
+ * recording the derivative's recordings table does not list (the processing endpoint), remembered under the
+ * same key as an internal marker that is never sent; the client still gets `quality_not_found`, `no-store`.
+ * A log line carries the dataset id, the first twelve digits of a key and a fixed word, never a path.
  *
  * WHAT AN UNPUBLISH REACHES, AND WHAT IT DOES NOT. The gate and the epoch take effect at this Worker's next
  * request, and an unpublish, a withdrawal or a concealment also purges the tag `nemar-dq-<id>` from
@@ -45,6 +54,7 @@ import { matchRecording } from "../../../shared/compute-naming.js";
 import { findRecipe } from "../../../shared/compute-recipes.js";
 import {
   QUALITY_FILE_SEGMENT,
+  QUALITY_PROCESSING_SEGMENT,
   QUALITY_PUBLIC_MAX_AGE,
   QUALITY_RECORDING_PATH_MAX,
   QUALITY_RECORD_SEGMENT,
@@ -54,6 +64,7 @@ import {
   isQualityRecordingPath,
   qualityCacheTag,
 } from "../../../shared/contract/quality-route.js";
+import { checkDataMissBudget } from "../middleware/rateLimit.js";
 import { derivativesBound } from "../services/compute-derivatives.js";
 import { isValidDatasetId } from "../services/datasetId.js";
 import type { ManifestCache } from "../services/manifest-source.js";
@@ -62,11 +73,15 @@ import {
   QUALITY_DATASET_GATE_SQL,
   QUALITY_PATTERNS,
 } from "../services/quality-documents.js";
-import { type ServedDerivative, serveRecordingViews } from "../services/quality-serve.js";
+import {
+  type ProcessingDerivative,
+  serveRecordingProcessing,
+} from "../services/quality-processing.js";
+import { serveRecordingViews } from "../services/quality-serve.js";
 import type { Bindings } from "../types/bindings.js";
 
 const DERIVATIVE_FIELDS = `cd.key, cd.dataset_id, cd.recipe, cd.version, cd.recipe_version, cd.input, cd.retention, cd.stored_at,
-       cd.quality_plugins, COALESCE(e.epoch, 0) AS epoch`;
+       cd.quality_plugins, cd.checkpoint_map, COALESCE(e.epoch, 0) AS epoch`;
 
 const GATED_FROM = `FROM datasets d
   JOIN compute_derivatives cd ON cd.dataset_id = d.dataset_id AND cd.recipe = ?2
@@ -90,7 +105,13 @@ export const QUALITY_NAMED_SQL = `SELECT ${DERIVATIVE_FIELDS},
   ${GATED_FROM}
    AND cd.key = ?3`;
 
-interface DerivativeRead extends ServedDerivative {
+/**
+ * The header of the edge-cache entry that remembers a recording the derivative's table does not list. It is
+ * only ever in the Worker's own cache: the client is answered `quality_not_found`, `no-store`.
+ */
+const QUALITY_ABSENT_MARK = "X-Nemar-Quality-Absent";
+
+interface DerivativeRead extends ProcessingDerivative {
   epoch: number;
   current?: number;
   expired?: number;
@@ -141,6 +162,7 @@ export function recordingOf(segments: readonly string[]): string | null {
 
 type QualityRequest =
   | { kind: "record"; recipe: string; recording: string }
+  | { kind: "processing"; recipe: string; recording: string }
   | { kind: "file"; recipe: string; key: string; sha256: string; recording: string };
 
 /** The request a path after `/<id>/quality/` names, or the word it is refused with. */
@@ -149,9 +171,12 @@ export function parseQualityPath(segments: readonly string[]): QualityRequest | 
   if (version !== QUALITY_ROUTE_VERSION || recipe === undefined || findRecipe(recipe) === null) {
     return "quality_not_found";
   }
-  if (kind === QUALITY_RECORD_SEGMENT) {
+  if (kind === QUALITY_RECORD_SEGMENT || kind === QUALITY_PROCESSING_SEGMENT) {
     const recording = recordingOf(rest);
-    return recording === null ? "recording_path_invalid" : { kind: "record", recipe, recording };
+    if (recording === null) return "recording_path_invalid";
+    return kind === QUALITY_RECORD_SEGMENT
+      ? { kind: "record", recipe, recording }
+      : { kind: "processing", recipe, recording };
   }
   if (kind === QUALITY_FILE_SEGMENT) {
     const [key, sha256, ...path] = rest;
@@ -186,7 +211,7 @@ export async function qualityHandler(
 
   // 2. The dataset and the derivative, in one statement.
   let row: DerivativeRead | null;
-  if (asked.kind === "record") {
+  if (asked.kind === "record" || asked.kind === "processing") {
     row = await env.DB.prepare(QUALITY_CURRENT_SQL)
       .bind(datasetId, asked.recipe)
       .first<DerivativeRead>();
@@ -203,9 +228,9 @@ export async function qualityHandler(
   // 3. The edge cache, keyed by the dataset's epoch and the derivative.
   const cache = edgeCache();
   const tail =
-    asked.kind === "record"
-      ? `${QUALITY_RECORD_SEGMENT}/${asked.recording}`
-      : `${QUALITY_FILE_SEGMENT}/${asked.sha256}/${asked.recording}`;
+    asked.kind === "file"
+      ? `${QUALITY_FILE_SEGMENT}/${asked.sha256}/${asked.recording}`
+      : `${asked.kind === "record" ? QUALITY_RECORD_SEGMENT : QUALITY_PROCESSING_SEGMENT}/${asked.recording}`;
   const cacheKey = new Request(
     `${new URL(request.url).origin}/__quality-cache/${QUALITY_ROUTE_VERSION}/${datasetId}/e${row.epoch}/${row.key}/${tail
       .split("/")
@@ -214,6 +239,12 @@ export async function qualityHandler(
   );
   if (cache !== null) {
     const hit = await cache.match(cacheKey);
+    if (hit?.headers.get(QUALITY_ABSENT_MARK) === "1") {
+      // A recording the derivative's table does not list, remembered: the client is answered as on the
+      // first request (no-store), and the table is not scanned again.
+      await hit.body?.cancel();
+      return refuse("quality_not_found");
+    }
     if (hit) {
       // The Workers Cache API strips `Cache-Tag` from what it stores, so the tag is set again: a browser or
       // an outer cache keeps the answer under the dataset's tag, which an unpublish purges.
@@ -223,10 +254,41 @@ export async function qualityHandler(
     }
   }
 
+  // A processing miss scans the derivative's whole recordings table (up to `QUALITY_TABLE_MAX_BYTES` in
+  // ranged reads), so it is charged to the caller's miss budget, as a brokered git file's miss is; a hit is
+  // never charged. With no Cache API there is no counter to charge, and the budget itself would fail open.
+  if (asked.kind === "processing" && cache !== null) {
+    const budget = await checkDataMissBudget(env, request, defer);
+    if (!budget.allowed) return budget.response;
+  }
+
   // 4 and 5. The record, checked whole, and a declared file, read again and hashed (`quality-serve.ts`,
-  // the steps the admin mount runs too).
-  const served = await serveRecordingViews(bucket, row, asked, { tag: "quality" });
-  if (!served.ok) return refuse(served.word);
+  // the steps the admin mount runs too); or the recording's outcomes and link (`quality-processing.ts`).
+  const served =
+    asked.kind === "processing"
+      ? await serveRecordingProcessing(bucket, row, asked.recording, { tag: "quality" })
+      : await serveRecordingViews(bucket, row, asked, { tag: "quality" });
+  if (!served.ok) {
+    // The derivative's table is immutable, so a recording it does not list stays unlisted under this key:
+    // remembered in the edge cache (never sent to a client, which still gets no-store), so a probe of
+    // recordings that do not exist scans the table once per key.
+    if ("absent" in served && cache !== null) {
+      const mark = new Response(null, {
+        headers: {
+          [QUALITY_ABSENT_MARK]: "1",
+          "Cache-Control": `public, max-age=${QUALITY_PUBLIC_MAX_AGE}`,
+        },
+      });
+      const write = cache.put(cacheKey, mark).catch((err: unknown) => {
+        console.warn(
+          `[quality] cache_put_failed dataset=${datasetId} error=${err instanceof Error ? err.name : typeof err}`,
+        );
+      });
+      if (defer) defer(write);
+      else await write;
+    }
+    return refuse(served.word);
+  }
   const response = new Response(served.bytes, {
     headers: { ...served.headers, ...publicHeaders(datasetId, served.sha256) },
   });

@@ -17,7 +17,7 @@ import type { Server } from "bun";
 import { PROGRESS_FORMAT, type Progress } from "../../shared/contract/compute-progress";
 import { submitComputeJob } from "../src/services/compute-lifecycle";
 import { dispatchPipelineJob } from "../src/services/compute-pipeline";
-import { liveSignalJourneyLinks } from "../src/services/compute-pipeline-progress";
+import { readPipelineExtensions } from "../src/services/compute-pipeline-progress";
 import type { Bindings } from "../src/types/bindings";
 import {
   type LifecycleFixture,
@@ -130,14 +130,14 @@ const progressRows = async (stampId: number) =>
 const anyRows = async () =>
   (
     await env.DB.prepare(
-      "SELECT (SELECT COUNT(*) FROM compute_pipeline_progress) + (SELECT COUNT(*) FROM compute_pipeline_progress_runs) + (SELECT COUNT(*) FROM compute_pipeline_documents) AS n",
+      "SELECT (SELECT COUNT(*) FROM compute_pipeline_progress) + (SELECT COUNT(*) FROM compute_pipeline_progress_runs) AS n",
     ).first<{ n: number }>()
   )?.n ?? 0;
 const setState = (jobId: string, state: string) =>
   env.DB.prepare("UPDATE compute_jobs SET state = ?1 WHERE id = ?2").bind(state, jobId).run();
 
 describe("an accepted report", () => {
-  test("stores the counts and the run row, and no document", async () => {
+  test("stores the counts and the run row, and nothing public", async () => {
     const { jobId, token, stampId, datasetId } = await tapisJob();
     const res = await report(jobId, { token });
     expect(res.status).toBe(200);
@@ -153,16 +153,8 @@ describe("an accepted report", () => {
       .bind(stampId)
       .first<Loose>();
     expect(run).toMatchObject({ job_id: jobId, checkpoint: "import", reports: 1 });
-    // Nothing live is a document: the in_progress link is worked out on read.
-    const docs = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM compute_pipeline_documents WHERE dataset_id = ?1",
-    )
-      .bind(datasetId)
-      .first<{ n: number }>();
-    expect(docs?.n).toBe(0);
-    expect(await liveSignalJourneyLinks(env.DB, datasetId)).toMatchObject({
-      "nemar-floor": { processing_status: "in_progress" },
-    });
+    // Nothing live is public: a run in progress shows nothing on the dataset's pages.
+    expect(await readPipelineExtensions(env.DB, datasetId)).toEqual({});
   });
 
   test("is accepted in submitted, queued and running, since D1 lags Tapis (MUTATION: running only)", async () => {

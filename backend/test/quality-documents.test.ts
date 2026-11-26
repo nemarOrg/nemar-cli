@@ -19,7 +19,11 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Miniflare } from "miniflare";
-import { recipeQualityDocumentPath, recipeRequiredOutputs } from "../../shared/compute-recipes";
+import {
+  declaredCheckpoints,
+  recipeQualityDocumentPath,
+  recipeRequiredOutputs,
+} from "../../shared/compute-recipes";
 import { resultsOutputKey } from "../../shared/contract/compute-launch";
 import {
   compileNeuroschemaValidator,
@@ -142,11 +146,11 @@ describe("a succeeded run's dataset summary", () => {
     const recordSha = await sha256Hex(run.files.get(DATASET_RECORD) as Uint8Array);
     expect(row?.record_sha256).toBe(recordSha);
     const link = await env.DB.prepare(
-      "SELECT entry FROM compute_pipeline_documents WHERE dataset_id = ?1 AND namespace = 'signalJourney'",
+      "SELECT link FROM compute_pipeline_progress_runs WHERE stamp_id = ?1",
     )
-      .bind(run.datasetId)
-      .first<{ entry: string }>();
-    expect(JSON.parse(link?.entry as string).sha256).toBe(recordSha);
+      .bind(run.stampId)
+      .first<{ link: string }>();
+    expect(JSON.parse(link?.link as string).sha256).toBe(recordSha);
     // The recipe's quality checkpoint, nemar-quality and nemar-spectrum, passed for the one recording.
     const quality = await env.DB.prepare(
       "SELECT passed, total FROM compute_pipeline_progress WHERE stamp_id = ?1 AND checkpoint = 'quality'",
@@ -269,18 +273,18 @@ describe("a page shows a summary once its derivative is promoted", () => {
     "nsc:/extensions/extensionsContainer.schema.json",
   );
 
-  test("no derivative and a canary show nothing; the real promotion shows it (MUTATION: drop the retention term)", async () => {
+  test("no derivative and a canary show nothing; the real promotion shows the run's summary, counts and link together (MUTATION: drop the retention term)", async () => {
     const run = await finishedRun();
     await reconcilePipelineProgress(env);
     expect(await kept(run.stampId)).not.toBeNull();
-    expect((await readPipelineExtensions(env.DB, run.datasetId)).dataQuality).toBeUndefined();
+    expect(await readPipelineExtensions(env.DB, run.datasetId)).toEqual({});
 
     const key = await seedDerivative(env.DB, {
       datasetId: run.datasetId,
       stampId: run.stampId,
       jobId: run.jobId,
     });
-    expect((await readPipelineExtensions(env.DB, run.datasetId)).dataQuality).toBeUndefined();
+    expect(await readPipelineExtensions(env.DB, run.datasetId)).toEqual({});
 
     const promoted = await promoteDerivative(env, {
       key,
@@ -294,6 +298,23 @@ describe("a page shows a summary once its derivative is promoted", () => {
       level: "dataset",
       recipes: { "nemar-ica": fixtureEntry() },
     });
+    // The same run's counts (one recording, passed everywhere, stored kept) and the link to the very record
+    // its summary names.
+    const counts = { passed: 1, failed: 0, skipped: 0, total: 1 };
+    expect(extensions.processing?.recipes["nemar-ica"]).toEqual({
+      recipe_version: ICA.version,
+      declared_checkpoints: declaredCheckpoints(ICA),
+      counts: Object.fromEntries(declaredCheckpoints(ICA).map((c) => [c, counts])),
+    });
+    const recordSha = await sha256Hex(run.files.get(DATASET_RECORD) as Uint8Array);
+    expect(extensions.signalJourney?.recipes["nemar-ica"]).toMatchObject({
+      processing_status: "completed",
+      location: DATASET_RECORD,
+      sha256: recordSha,
+    });
+    expect(
+      (extensions.dataQuality?.recipes["nemar-ica"] as { record_sha256: string }).record_sha256,
+    ).toBe(recordSha);
     if (!validateExtensions(extensions)) throw new Error(formatAjvErrors(validateExtensions));
   });
 

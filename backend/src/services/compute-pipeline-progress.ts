@@ -1,13 +1,14 @@
 /**
  * Live progress of NEMAR's pipeline runs (ADR 0134 decisions 3 and 4, epic #2324 phase 2): one write
  * path for a report, shared by the runner heartbeat and the job-token route of a job on the supercomputer,
- * and the reconciliation that replaces live counts with final ones when a run ends.
+ * the reconciliation that replaces live counts with final ones when a run ends, and the dataset-level
+ * neuroschema entries a public page shows of the PROMOTED run.
  *
  *   `stampForJob`                 the dispatched pipeline stamp of a job and its recipe's checkpoint map
  *   `recordProgress`              one guarded batch that stores a report, or writes nothing
- *   `reconcilePipelineProgress`   ended runs reconciled from their recordings tables, `stored` resolved,
- *                                 and a succeeded run's dataset quality summary checked and kept
- *   `liveSignalJourneyLinks`      the `in_progress` links of a dataset's reporting runs, worked out on read
+ *   `reconcilePipelineProgress`   ended runs reconciled from their recordings tables (counts, the run's
+ *                                 link), `stored` resolved, and a succeeded run's dataset quality summary
+ *                                 checked and kept
  *   `readPipelineExtensions`      a dataset's `processing`, `signalJourney` and `dataQuality`, for its pages
  *
  * THE GATE. A report is one D1 batch whose FIRST statement upserts the run row of the stamp
@@ -19,9 +20,12 @@
  * two concurrent reports of one run give exactly one winner. A refusal is then told apart by reading the
  * run and the job (`too_soon` when only the clock refused it).
  *
- * NOTHING LIVE IS A DOCUMENT. `compute_pipeline_documents` holds only final entries of ended runs. A
- * running job's `in_progress` link is worked out when `metadata.json` is read, so a run that ends without a
- * link of its own never leaves one standing and a new run never erases the last completed link.
+ * WHAT A PUBLIC PAGE SHOWS IS THE PROMOTED RUN (ADR 0134 decision 9 as amended 2026-11-26). The dataset's
+ * `processing`, `signalJourney` and `dataQuality` all describe each recipe's current public derivative
+ * (ADR 0137 decision 7), built when they are read from rows kept per run: the reconciled counts, the order
+ * the run declared, the link reconciliation wrote on the run row, and the quality summary. Nothing live is
+ * public: a run in progress, a canary run and a failed run show nothing, and administrators see them on
+ * the grid.
  *
  * Every value written is a count, a checkpoint the registry declares, a capped failure list that already
  * passed the closed schema and `progressProblem`, or an entry the shared builders made from registry values
@@ -30,8 +34,10 @@
 
 import {
   PIPELINE_STALLED_SECONDS,
+  type ProcessingDatasetEntry,
   type RecordingRow,
   STALLABLE_JOB_STATES,
+  type StoredDecision,
   WAITING_JOB_STATES,
   countRecordings,
   failuresByCheckpoint,
@@ -41,6 +47,7 @@ import {
   processingEntryProblem,
   progressProblem,
   signalJourneyLink,
+  storedCounts,
 } from "../../../shared/compute-checkpoints.js";
 import {
   type ComputeRecipe,
@@ -64,12 +71,19 @@ import { DATA_QUALITY_MAX_BYTES } from "../../../shared/contract/data-quality.js
 import { sha256HexOfBytes } from "../../../shared/contract/view-digest.js";
 import type { Bindings } from "../types/bindings.js";
 import { RECORD_READ_MAX_BYTES, TABLE_READ_MAX_BYTES } from "./compute-derivatives.js";
+import { type PipelineExtensions, pipelineExtensions } from "./data-router.js";
 import {
-  type PipelineDocumentRow,
-  type PipelineExtensions,
-  pipelineExtensions,
-} from "./data-router.js";
-import { checkDatasetQualityDocument, currentQualityDocuments } from "./quality-documents.js";
+  CURRENT_PUBLIC_DERIVATIVE_SQL,
+  CURRENT_QUALITY_DOCUMENTS_SQL,
+  QUALITY_DATASET_GATE_SQL,
+  checkDatasetQualityDocument,
+  qualityEntriesOf,
+} from "./quality-documents.js";
+import {
+  PROCESSING_SCHEMA_ID,
+  SIGNAL_JOURNEY_SCHEMA_ID,
+  pipelineDocumentValid,
+} from "./quality-processing.js";
 
 /** The job states in which a job on the supercomputer may report (its state in D1 lags Tapis). */
 export const PROGRESS_TAPIS_STATES = ["submitted", "queued", "running"] as const;
@@ -321,55 +335,140 @@ export const PIPELINE_RUN_STATUS_SQL = `(CASE
     ELSE 'running'
   END)`;
 
-/** The job states of a run that is still under way, for the `in_progress` link (as `pipelineRunStatus`). */
-export const LIVE_LINK_JOB_STATES = ["submitted", "queued", "running", "archiving"] as const;
+// --- What a public page shows ---------------------------------------------------------------------
 
 /**
- * The `in_progress` links of a dataset's runs that are reporting now: a dispatched stamp whose job is
- * still under way and whose run has reported and is not reconciled. Worked out on read; never stored.
+ * Each recipe's PROMOTED run of a dataset (`?1`): its current public derivative (ADR 0137 decision 7) of a
+ * dataset that passes the quality route's gate, with the run row reconciliation left for that derivative's
+ * stamp (its outcome, the recipe version and declared order it recorded, and its link). One predicate with
+ * {@link PROMOTED_COUNTS_SQL} and the quality summaries, read in one batch, so the three namespaces of one
+ * answer describe one run.
  */
-export const LIVE_LINKS_SQL = `SELECT s.recipe, s.recipe_version
-  FROM compute_pipeline_stamps s
-  JOIN compute_pipeline_progress_runs r ON r.stamp_id = s.id
-  JOIN compute_jobs j ON j.id = s.job_id
-  WHERE s.dataset_id = ?1 AND s.state = 'dispatched' AND r.reconciled_at IS NULL
-    AND j.state IN (${quoted(LIVE_LINK_JOB_STATES)})
-  ORDER BY s.id ASC`;
+export const PROMOTED_RUNS_SQL = `SELECT cd.recipe, cd.stamp_id, r.outcome, r.recipe_version, r.declared, r.link
+  FROM compute_derivatives cd
+  JOIN datasets d ON d.dataset_id = cd.dataset_id AND ${QUALITY_DATASET_GATE_SQL}
+  LEFT JOIN compute_pipeline_progress_runs r ON r.stamp_id = cd.stamp_id
+  WHERE cd.dataset_id = ?1 AND ${CURRENT_PUBLIC_DERIVATIVE_SQL("cd")}
+  ORDER BY cd.recipe`;
 
-export async function liveSignalJourneyLinks(
-  db: D1Database,
-  datasetId: string,
-): Promise<Record<string, unknown>> {
-  const rows = (
-    await db
-      .prepare(LIVE_LINKS_SQL)
-      .bind(datasetId)
-      .all<{ recipe: string; recipe_version: string }>()
-  ).results;
-  const links: Record<string, unknown> = {};
-  for (const r of rows) {
-    links[r.recipe] = signalJourneyLink({ recipeVersion: r.recipe_version, status: "in_progress" });
-  }
-  return links;
+/**
+ * The reconciled counts of those runs (`?1` the dataset), every declared checkpoint but `stored`: a promoted
+ * derivative is stored by definition, so its `stored` counts are worked out with `storedCounts("kept")`,
+ * which is the rule its pending `stored` row is resolved with, and never wait for that row.
+ */
+export const PROMOTED_COUNTS_SQL = `SELECT p.stamp_id, p.checkpoint, p.passed, p.failed, p.skipped, p.total
+  FROM compute_pipeline_progress p
+  JOIN compute_derivatives cd ON cd.stamp_id = p.stamp_id
+  JOIN datasets d ON d.dataset_id = cd.dataset_id AND ${QUALITY_DATASET_GATE_SQL}
+  WHERE cd.dataset_id = ?1 AND ${CURRENT_PUBLIC_DERIVATIVE_SQL("cd")}
+    AND p.checkpoint <> '${STORED_CHECKPOINT}' AND p.reconciled = 1`;
+
+interface PromotedRunRow {
+  recipe: string;
+  stamp_id: number;
+  outcome: string | null;
+  recipe_version: string | null;
+  declared: string | null;
+  link: string | null;
 }
 
-/** A dataset's stored pipeline documents (migration 0150), for `/<id>/metadata.json` and the page bundle. */
-export const PIPELINE_DOCUMENTS_SQL =
-  "SELECT namespace, recipe, entry FROM compute_pipeline_documents WHERE dataset_id = ?1 ORDER BY recipe";
+interface PromotedCountsRow extends CountsRow {
+  stamp_id: number;
+}
+
+/**
+ * The dataset-level `processing` entry of a promoted run from its reconciled counts, or the word it is not
+ * shown with: the run was not reconciled from a table (`not_reconciled`: an outcome without counts, or no
+ * run row), its declared order cannot be read (`no_declared_order`), or the counts break the writer's rules
+ * (`processingEntryProblem`'s words, `keys_differ` for a missing checkpoint).
+ */
+function promotedProcessingEntry(
+  run: Pick<PromotedRunRow, "outcome" | "recipe_version" | "declared">,
+  counts: readonly CountsRow[],
+): { ok: true; entry: ProcessingDatasetEntry } | { ok: false; reason: string } {
+  if (run.outcome !== "reconciled" || run.recipe_version === null) {
+    return { ok: false, reason: "not_reconciled" };
+  }
+  const declared = declaredOf(run.declared);
+  if (declared === null) return { ok: false, reason: "no_declared_order" };
+  const byName: Record<string, ProgressCheckpointCounts | undefined> = Object.fromEntries(
+    counts.map((c) => [
+      c.checkpoint,
+      { passed: c.passed, failed: c.failed, skipped: c.skipped, total: c.total },
+    ]),
+  );
+  const last = byName[declared[declared.length - 2]];
+  if (last === undefined) return { ok: false, reason: "keys_differ" };
+  byName[STORED_CHECKPOINT] = storedCounts("kept", last.passed, last.total);
+  const entry = processingDatasetEntry({
+    recipeVersion: run.recipe_version,
+    declared,
+    counts: byName,
+  });
+  if (entry === null) return { ok: false, reason: "keys_differ" };
+  const problem = processingEntryProblem(entry);
+  return problem === null ? { ok: true, entry } : { ok: false, reason: problem };
+}
 
 /**
  * The pipeline's namespaces of a dataset document (`processing`, `signalJourney` and `dataQuality`), as
- * `/<id>/metadata.json` and the page bundle both serve them: one read, so the two documents cannot differ.
- * The caller gates the dataset first (public, and never a concealed deposit). A failed read throws.
+ * `/<id>/metadata.json` and the page bundle both serve them: one read, so the two documents cannot differ,
+ * and one batch, so its three namespaces describe each recipe's one promoted run. Each entry is checked
+ * against the vendored schema before it is shown, as a recording's is. A promoted run whose counts make no
+ * valid entry, or whose link is not a valid one, shows the rest, with a fixed-word log line; one that kept
+ * no link shows no link. The caller gates the dataset first (public, and never a concealed deposit); the
+ * statements gate it again. A failed read throws.
  */
 export async function readPipelineExtensions(
   db: D1Database,
   datasetId: string,
 ): Promise<PipelineExtensions> {
-  const docs = await db.prepare(PIPELINE_DOCUMENTS_SQL).bind(datasetId).all<PipelineDocumentRow>();
-  const live = await liveSignalJourneyLinks(db, datasetId);
-  const quality = await currentQualityDocuments(db, datasetId);
-  return pipelineExtensions(docs.results ?? [], live, quality);
+  const [runs, counts, quality] = await db.batch([
+    db.prepare(PROMOTED_RUNS_SQL).bind(datasetId),
+    db.prepare(PROMOTED_COUNTS_SQL).bind(datasetId),
+    db.prepare(CURRENT_QUALITY_DOCUMENTS_SQL).bind(datasetId),
+  ]);
+  const processing: Record<string, unknown> = {};
+  const signalJourney: Record<string, unknown> = {};
+  const countRows = (counts.results ?? []) as PromotedCountsRow[];
+  for (const run of (runs.results ?? []) as PromotedRunRow[]) {
+    const built = promotedProcessingEntry(
+      run,
+      countRows.filter((c) => c.stamp_id === run.stamp_id),
+    );
+    const reason = !built.ok
+      ? built.reason
+      : pipelineDocumentValid(PROCESSING_SCHEMA_ID, {
+            level: "dataset",
+            recipes: { [run.recipe]: built.entry },
+          })
+        ? null
+        : "processing_invalid";
+    if (built.ok && reason === null) processing[run.recipe] = built.entry;
+    else if (reason !== "not_reconciled") {
+      console.warn(
+        `${LOG} processing_not_shown dataset=${datasetId} recipe=${run.recipe} reason=${reason}`,
+      );
+    }
+    // The column holds a JSON object or nothing (its CHECK, migration 0154); the link is shown only when it
+    // is a neuroschema link, as a recording's is.
+    if (run.link !== null) {
+      const link: unknown = JSON.parse(run.link);
+      if (pipelineDocumentValid(SIGNAL_JOURNEY_SCHEMA_ID, { recipes: { [run.recipe]: link } })) {
+        signalJourney[run.recipe] = link;
+      } else {
+        console.warn(`${LOG} link_not_shown dataset=${datasetId} recipe=${run.recipe}`);
+      }
+    }
+  }
+  return pipelineExtensions({
+    processing,
+    signalJourney,
+    dataQuality: qualityEntriesOf(
+      datasetId,
+      (quality.results ?? []) as { recipe: string; entry: string }[],
+    ),
+  });
 }
 
 // --- Reconciliation ---------------------------------------------------------------------------------
@@ -424,17 +523,18 @@ export const RECONCILE_CANDIDATES_SQL = `SELECT s.id, s.dataset_id, s.version, s
   ORDER BY s.updated_at ASC, s.id ASC LIMIT ?1`;
 
 /**
- * THE RECONCILE GATE: the run row given its outcome, the recipe version and the declared checkpoints,
- * only while it has no outcome. ?1 stamp, ?2 job, ?3 write id, ?4 outcome, ?5 disagreement, ?6 recipe
- * version, ?7 declared (JSON list or null). Every later statement writes only where the write id stands.
+ * THE RECONCILE GATE: the run row given its outcome, the recipe version, the declared checkpoints and the
+ * run's link, only while it has no outcome. ?1 stamp, ?2 job, ?3 write id, ?4 outcome, ?5 disagreement, ?6
+ * recipe version, ?7 declared (JSON list or null), ?8 the completed link of the run's dataset record (JSON
+ * object or null, migration 0154). Every later statement writes only where the write id stands.
  */
 export const RECONCILE_GATE_SQL = `INSERT INTO compute_pipeline_progress_runs
-    (stamp_id, job_id, write_id, reconciled_at, outcome, disagreement, recipe_version, declared)
-  VALUES (?1, ?2, ?3, datetime('now'), ?4, ?5, ?6, ?7)
+    (stamp_id, job_id, write_id, reconciled_at, outcome, disagreement, recipe_version, declared, link)
+  VALUES (?1, ?2, ?3, datetime('now'), ?4, ?5, ?6, ?7, ?8)
   ON CONFLICT(stamp_id) DO UPDATE SET
     write_id = excluded.write_id, reconciled_at = excluded.reconciled_at,
     outcome = excluded.outcome, disagreement = excluded.disagreement,
-    recipe_version = excluded.recipe_version, declared = excluded.declared
+    recipe_version = excluded.recipe_version, declared = excluded.declared, link = excluded.link
    WHERE compute_pipeline_progress_runs.reconciled_at IS NULL`;
 
 const BY_WRITE = (stampParam: string, writeParam: string) => `EXISTS (SELECT 1
@@ -456,18 +556,6 @@ export const RECONCILE_ROW_SQL = `INSERT INTO compute_pipeline_progress
     live_passed = excluded.live_passed, live_failed = excluded.live_failed,
     live_skipped = excluded.live_skipped, live_total = excluded.live_total,
     reconciled = excluded.reconciled, disagreement = excluded.disagreement`;
-
-/**
- * A dataset's final document of one namespace and recipe, only where the write id stands: the newest
- * stamp wins, the same stamp may write again. ?1 dataset, ?2 namespace, ?3 recipe, ?4 stamp, ?5 entry,
- * ?6 write id.
- */
-export const FINAL_DOCUMENT_SQL = `INSERT INTO compute_pipeline_documents
-    (dataset_id, namespace, recipe, stamp_id, entry, written_at)
-  SELECT ?1, ?2, ?3, ?4, ?5, datetime('now') WHERE ${BY_WRITE("?4", "?6")}
-  ON CONFLICT(dataset_id, namespace, recipe) DO UPDATE SET
-    stamp_id = excluded.stamp_id, entry = excluded.entry, written_at = excluded.written_at
-   WHERE excluded.stamp_id >= compute_pipeline_documents.stamp_id`;
 
 /**
  * A succeeded run's dataset quality summary (migration 0151, ADR 0137 decision 8), kept for its stamp, only
@@ -569,37 +657,22 @@ export async function reconcilePipelineProgress(
   return result;
 }
 
-/** A failed link, final: the run ended without a record NEMAR can point to. */
-const failedLinkStatement = (db: D1Database, stamp: CandidateRow, writeId: string) =>
-  db
-    .prepare(FINAL_DOCUMENT_SQL)
-    .bind(
-      stamp.dataset_id,
-      "signalJourney",
-      stamp.recipe,
-      stamp.id,
-      JSON.stringify(signalJourneyLink({ recipeVersion: stamp.recipe_version, status: "failed" })),
-      writeId,
-    );
-
 /**
- * The final signalJourney link of an ended run, or null when none is written, or `later`:
- *  - a failed stamp: a `failed` link (the run ended without a record NEMAR can point to);
+ * The completed signalJourney link of a succeeded run's dataset record, kept on its run row (migration
+ * 0154) as JSON, or null, or `later`:
+ *  - a failed stamp: null (the run ended without a record NEMAR shows; a failed run is never promoted);
  *  - a succeeded stamp of a known recipe: the `completed` link built from its record, which needs no
- *    checkpoint map; a record that cannot make one leaves the last final link standing
- *    (`link_not_written reason=record_unlinkable`);
- *  - a succeeded stamp of a recipe the registry does not know: nothing to read, the last final link stands
+ *    checkpoint map; a record that cannot make one keeps none (`link_not_written reason=record_unlinkable`);
+ *  - a succeeded stamp of a recipe the registry does not know: nothing to read, none kept
  *    (`link_not_written reason=recipe_unknown`).
  */
-async function finalLinkStatement(
+async function runLink(
   env: Bindings,
   stamp: CandidateRow,
-  writeId: string,
   /** The record, when the caller has read it already. */
   read?: BytesRead,
-): Promise<D1PreparedStatement | null | "later"> {
-  const db = env.DB;
-  if (stamp.state === "failed") return failedLinkStatement(db, stamp, writeId);
+): Promise<string | null | "later"> {
+  if (stamp.state === "failed") return null;
   const recipe = findRecipe(stamp.recipe);
   if (!recipe) {
     console.log(`${LOG} link_not_written stamp=${stamp.id} reason=recipe_unknown`);
@@ -633,9 +706,7 @@ async function finalLinkStatement(
     console.log(`${LOG} link_not_written stamp=${stamp.id} reason=record_unlinkable`);
     return null;
   }
-  return db
-    .prepare(FINAL_DOCUMENT_SQL)
-    .bind(stamp.dataset_id, "signalJourney", stamp.recipe, stamp.id, JSON.stringify(link), writeId);
+  return JSON.stringify(link);
 }
 
 /** A run's dataset record (bounded), or `later` when the results bucket did not answer. */
@@ -728,9 +799,8 @@ async function qualityDocumentStatement(
 }
 
 /**
- * An outcome with no counts: the run row and the run's final link (`finalLinkStatement`): `failed` for a
- * failed stamp, the record's `completed` link for a succeeded one, never a `failed` link over a completed
- * run.
+ * An outcome with no counts: the run row, with the run's link (`runLink`) when a succeeded run's record
+ * makes one, so a promoted run of a version the registry no longer maps still shows its link.
  */
 async function outcomeOnly(
   env: Bindings,
@@ -738,14 +808,12 @@ async function outcomeOnly(
   outcome: ReconcileOutcome,
 ): Promise<{ outcome: ReconcileOutcome; won: boolean } | "later"> {
   const db = env.DB;
-  const writeId = randomHex(16);
-  const link = await finalLinkStatement(env, stamp, writeId);
+  const link = await runLink(env, stamp);
   if (link === "later") return "later";
   const done = await db.batch([
     db
       .prepare(RECONCILE_GATE_SQL)
-      .bind(stamp.id, stamp.job_id, writeId, outcome, 0, stamp.recipe_version, null),
-    ...(link === null ? [] : [link]),
+      .bind(stamp.id, stamp.job_id, randomHex(16), outcome, 0, stamp.recipe_version, null, link),
   ]);
   return { outcome, won: (done[0]?.meta?.changes ?? 0) === 1 };
 }
@@ -802,7 +870,7 @@ async function reconcileRun(
   const last = counts[checkpoints[checkpoints.length - 1].checkpoint];
   const storedFinal = stamp.state === "failed";
   const stored: ProgressCheckpointCounts = storedFinal
-    ? { passed: 0, failed: 0, skipped: total, total }
+    ? storedCounts("none", last.passed, total)
     : { passed: 0, failed: 0, skipped: total - last.passed, total };
 
   let disagreement = 0;
@@ -841,18 +909,16 @@ async function reconcileRun(
   }
   statements.push(rowStatement(STORED_CHECKPOINT, stored, storedFinal ? 1 : 0, []));
 
-  // The signalJourney link: completed with the record's digest and version; failed for a failed run; for
-  // a succeeded run whose link cannot be built, the last final link stands. A succeeded run's record is
-  // read once, for its link and for the digest its quality summary must name.
+  // The run's link, kept on its run row: completed with the record's digest and version, or none. A
+  // succeeded run's record is read once, for its link and for the digest its quality summary must name.
   let record: BytesRead | undefined;
   if (stamp.state === "succeeded") {
     const read = await readRunRecord(results, stamp, recipe);
     if (read === "later") return "later";
     record = read;
   }
-  const link = await finalLinkStatement(env, stamp, writeId, record);
+  const link = await runLink(env, stamp, record);
   if (link === "later") return "later";
-  if (link !== null) statements.push(link);
   if (record !== undefined) {
     const quality = await qualityDocumentStatement(
       db,
@@ -867,30 +933,6 @@ async function reconcileRun(
     if (quality === "later") return "later";
     if (quality !== null) statements.push(quality);
   }
-  if (storedFinal) {
-    const entry = processingDatasetEntry({
-      recipeVersion: stamp.recipe_version,
-      declared,
-      counts: { ...counts, [STORED_CHECKPOINT]: stored },
-    });
-    const problem = entry === null ? "keys_differ" : processingEntryProblem(entry);
-    if (entry !== null && problem === null) {
-      statements.push(
-        db
-          .prepare(FINAL_DOCUMENT_SQL)
-          .bind(
-            stamp.dataset_id,
-            "processing",
-            stamp.recipe,
-            stamp.id,
-            JSON.stringify(entry),
-            writeId,
-          ),
-      );
-    } else {
-      console.log(`${LOG} processing_not_written stamp=${stamp.id} reason=${problem}`);
-    }
-  }
   // The gate goes first; its disagreement is known only now, so it is built last and put in front.
   statements.unshift(
     db
@@ -903,6 +945,7 @@ async function reconcileRun(
         disagreement,
         stamp.recipe_version,
         JSON.stringify(declared),
+        link,
       ),
   );
   const done = await db.batch(statements);
@@ -911,22 +954,17 @@ async function reconcileRun(
 
 interface StoredPending {
   stamp_id: number;
-  dataset_id: string;
-  recipe: string;
-  recipe_version: string | null;
   declared: string | null;
   derivative_state: string | null;
   stored_at: string | null;
 }
 
 /**
- * The pending `stored` rows whose derivative is decided, with the declared order and recipe version the
- * run recorded when it was reconciled (never the live registry), and what decided the derivative.
+ * The pending `stored` rows whose derivative is decided, with the declared order the run recorded when it
+ * was reconciled (never the live registry), and what decided the derivative.
  */
-export const STORED_PENDING_SQL = `SELECT p.stamp_id, s.dataset_id, s.recipe, r.recipe_version, r.declared,
-    d.state AS derivative_state, d.stored_at
+export const STORED_PENDING_SQL = `SELECT p.stamp_id, r.declared, d.state AS derivative_state, d.stored_at
   FROM compute_pipeline_progress p
-  JOIN compute_pipeline_stamps s ON s.id = p.stamp_id
   JOIN compute_pipeline_progress_runs r ON r.stamp_id = p.stamp_id
   LEFT JOIN compute_derivatives d ON d.stamp_id = p.stamp_id
   WHERE p.checkpoint = 'stored' AND p.reconciled = 0
@@ -957,10 +995,10 @@ function declaredOf(text: string | null): string[] | null {
 }
 
 /**
- * Resolve one pending `stored` row from the derivative store and write its `processing` entry. A row that
- * cannot make an entry (no recorded order, a missing column, a broken rule) is still resolved, without a
- * document and with a fixed-word log line, so it never blocks the rows behind it. True when this call
- * resolved it.
+ * Resolve one pending `stored` row from the derivative store (`storedCounts`, from the passed count of the
+ * last checkpoint the run declared). A row whose declared order or last checkpoint cannot be read is still
+ * resolved, as if nothing passed, with a fixed-word log line, so it never blocks the rows behind it. True
+ * when this call resolved it.
  */
 async function resolveStored(db: D1Database, p: StoredPending): Promise<boolean> {
   const rows = (
@@ -975,48 +1013,26 @@ async function resolveStored(db: D1Database, p: StoredPending): Promise<boolean>
   const declared = declaredOf(p.declared);
   const lastName = declared ? declared[declared.length - 2] : undefined;
   const last = lastName === undefined ? undefined : byName.get(lastName);
+  if (last === undefined) {
+    console.log(
+      `${LOG} stored_without_order stamp=${p.stamp_id} reason=${declared === null ? "no_declared_order" : "keys_differ"}`,
+    );
+  }
   const storedRow = byName.get(STORED_CHECKPOINT);
   const total = storedRow?.total ?? last?.total ?? 0;
-  const lastPassed = last?.passed ?? 0;
-  const kept =
-    p.derivative_state === "stored" || (p.derivative_state === "expired" && p.stored_at !== null);
-  const lost = p.derivative_state === "failed";
-  const stored: ProgressCheckpointCounts = kept
-    ? { passed: lastPassed, failed: 0, skipped: total - lastPassed, total }
-    : lost
-      ? { passed: 0, failed: lastPassed, skipped: total - lastPassed, total }
-      : { passed: 0, failed: 0, skipped: total, total };
-
-  let reason: string | null = null;
-  let entryText: string | null = null;
-  if (declared === null || p.recipe_version === null) {
-    reason = "no_declared_order";
-  } else if (last === undefined) {
-    reason = "keys_differ";
-  } else {
-    const counts: Record<string, ProgressCheckpointCounts | undefined> = Object.fromEntries(byName);
-    counts[STORED_CHECKPOINT] = stored;
-    const entry = processingDatasetEntry({ recipeVersion: p.recipe_version, declared, counts });
-    reason = entry === null ? "keys_differ" : processingEntryProblem(entry);
-    if (entry !== null && reason === null) entryText = JSON.stringify(entry);
-  }
-
+  const decision: StoredDecision =
+    p.derivative_state === "stored" || (p.derivative_state === "expired" && p.stored_at !== null)
+      ? "kept"
+      : p.derivative_state === "failed"
+        ? "lost"
+        : "none";
+  const stored = storedCounts(decision, last?.passed ?? 0, total);
   const writeId = randomHex(16);
-  const statements = [
+  const done = await db.batch([
     db.prepare(STORED_CLAIM_SQL).bind(p.stamp_id, writeId),
     db
       .prepare(STORED_RESOLVE_SQL)
       .bind(p.stamp_id, stored.passed, stored.failed, stored.skipped, writeId),
-  ];
-  if (entryText !== null) {
-    statements.push(
-      db
-        .prepare(FINAL_DOCUMENT_SQL)
-        .bind(p.dataset_id, "processing", p.recipe, p.stamp_id, entryText, writeId),
-    );
-  } else {
-    console.log(`${LOG} processing_not_written stamp=${p.stamp_id} reason=${reason}`);
-  }
-  const done = await db.batch(statements);
+  ]);
   return (done[1]?.meta?.changes ?? 0) === 1;
 }
