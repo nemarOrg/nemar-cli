@@ -16,3 +16,4 @@
 | R12: Mass denial of one depositor (our group's batch) | Shadow would-deny count in C1 | C1 | The owner decides a per-depositor daily cap | owner |
 | R13: Approval throughput: each approval runs the orchestrator, mints a DOI (EZID) and writes to GitHub | Time per approval in the D0 batch | D0 | Pace the approvals; the owner decides batch sizes | owner |
 | R14: SNIRF reads time out on large files (37 of 296 files hit the 180 s time limit from a home connection) | Count of `partial`/`time` SNIRF files in the first production re-screen | Release E + 1 day | Raise the time cap or the fetch concurrency; the files stay partial, never clean | lead |
+| R15: the EEGLAB reader peaks at about 1 GB RSS on a 741k-array .set, so concurrent files could exhaust the screen job's memory | Peak RSS in the first production re-screen of the .set datasets; the job's memory limit | Release E + 1 day | Lower the per-job file concurrency for .set, or cap retained entries | lead |

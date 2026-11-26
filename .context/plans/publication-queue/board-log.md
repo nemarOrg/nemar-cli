@@ -33,6 +33,13 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T17:37-08:00 | Owner raised today's agent limit to 60 (Q2) | owner |  |
 | 2026-11-25T18:13-08:00 | A9: index.ts local-only skip accepted; packaged scanner id = identifier-scan@nemar-cli-v<version>; LOCAL_COPY into shared copy; screen in common commands | lead |  |
 | 2026-11-25T18:27-08:00 | Owner: license-lineage failures get a known workflow: depositor sends author evidence to support@nemar.org; admin records it linked to the ticket; clears that reason only (card B6, issue #2391) | owner |  |
+| 2026-11-25T18:38-08:00 | A5: maxElements 1,000,000 (time cap bounds); event/history name rule = two capitalized name-like words after path removal; all location fields unscanned; ReaderResult.needs = same-dir bare names | lead |  |
+| 2026-11-25T18:49-08:00 | A5: EEG.BIDS.* gets no person-field rule (MATLAB layer); shared rule gains 'thing word + name = thing' and 'description' as describing word (one definition) | lead |  |
+| 2026-11-25T18:56-08:00 | A6: path kinds inside archives aggregated per kind per archive and exempt from the reader gate; unread inner entries = zip:<ext>; NIRx Name via readSubjectId | lead |  |
+| 2026-11-25T18:59-08:00 | A5: P1 event-table columns = event-type rule; P2 shared location-field predicate (path/file/filename/dir/folder/original_*); P3 one finding per kind+field per file; path rule kept on comments and README copy | lead |  |
+| 2026-11-25T19:10-08:00 | A5: event tables name rule on 'type' only (other columns unscanned, like events.tsv); setname: no path rule, keeps the two-word name rule | lead |  |
+| 2026-11-25T19:15-08:00 | B6: deviations accepted (permission bound to sources, outcome and target license); basis_unrecorded -> start a new review; recording re-derives verdict, mails admins Ready to approve if pass+clear, tells depositor evidence recorded | lead |  |
+| 2026-11-25T19:20-08:00 | B6 ticket binding: trust the admin visibly (dry run shows ticket subject and sender, warns if sender is not the depositor, audit records both) | lead |  |
 
 ## Log
 
@@ -54,3 +61,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T15:47-08:00 | Incident closed: A4 verified worktree intact (rules and later edits present, 35 tests pass) |
 | 2026-11-25T16:47-08:00 | Seam: text-header.ts had its own isPersonField (drifted) and biome errors outside lint scope; A4 consolidates |
 | 2026-11-25T18:36-08:00 | CP-D3 seam review: ready-with-fixes (CHANGELOG missing; command wording drift); tests pass except known parallel/compute and stale-website failures |
+| 2026-11-25T19:53-08:00 | A5 PR #2395: FP gate mostly within bounds; .mat cfg paths 7.09/100 and .set comments 6.10/100 over; R15 memory risk recorded |
