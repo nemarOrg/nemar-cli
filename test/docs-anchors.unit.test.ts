@@ -37,6 +37,9 @@ import {
   walkCopy,
 } from "../scripts/docs/screen-copy-docs";
 import * as copy from "../shared/identifier-screen-copy";
+import { MAT_LIMITS } from "../shared/mat-meta";
+import { MARKER_FILE_MAX_BYTES, TEXT_HEADER_MAX_BYTES } from "../shared/readers/text-header";
+import { ZIP_ENTRY_MAX_BYTES } from "../shared/readers/zip";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const GENERATOR = join(REPO_ROOT, "scripts", "docs", "screen-copy-docs.ts");
@@ -192,6 +195,29 @@ describe("the walk of the copy module", () => {
       KIND_COPY: { ...copy.KIND_COPY, bad: entry('kind-x"><script>') },
     };
     expect(() => renderScreenCopyDocs(ns)).toThrow(/anchor/);
+  });
+});
+
+describe("the limits the copy and the page state are the readers' constants", () => {
+  const MiB = 1024 * 1024;
+  const mib = (bytes: number) => `${bytes / MiB} MiB`;
+
+  test("the BrainVision copy names the header and marker file limits", () => {
+    const text = copy.KIND_COPY["brainvision-comment-name"].read;
+    expect(text).toContain(`.vhdr) files, up to ${mib(TEXT_HEADER_MAX_BYTES)}`);
+    expect(text).toContain(`.vmrk) files, up to ${mib(MARKER_FILE_MAX_BYTES)}`);
+  });
+
+  test("the NIRx copy names the header limit", () => {
+    expect(copy.KIND_COPY["nirx-header-date"].read).toContain(
+      `up to ${mib(TEXT_HEADER_MAX_BYTES)} each`,
+    );
+  });
+
+  test("the page prose says the ZIP member and MATLAB array limits the code has", () => {
+    // The prose is hand-written; these are the numbers it states (docs #143).
+    expect(ZIP_ENTRY_MAX_BYTES).toBe(64 * MiB);
+    expect(MAT_LIMITS.numericElements).toBe(64);
   });
 });
 

@@ -50,7 +50,7 @@ const HDF5_TEXT =
 const HDF5_REMEDY =
   "Blank the value or replace it with a code in the file (h5py or MATLAB can edit it in place) and upload again.";
 const BRAINVISION =
-  "the text of BrainVision header (.vhdr) and marker (.vmrk) files, up to 1 MiB each";
+  "the text of BrainVision header (.vhdr) files, up to 1 MiB, and marker (.vmrk) files, up to 16 MiB";
 const NIRX = "the text of NIRx header (.hdr) and information (.inf) files, up to 1 MiB each";
 const EEGLAB =
   "the text fields of EEGLAB .set files (classic MAT-files and v7.3), never the signal data and never the .fdt file";
