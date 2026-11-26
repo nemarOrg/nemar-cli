@@ -641,6 +641,7 @@ describe("launcher details and who pays", () => {
         "content_missing",
         "file_not_found",
         "disk_error",
+        "serving_index_mismatch",
       ],
       submitter: ["bad_include", "too_many_files", "too_many_bytes"],
     },

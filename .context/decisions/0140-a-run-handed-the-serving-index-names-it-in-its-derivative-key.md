@@ -4,6 +4,8 @@
 **Date:** 2026-11-25
 **Owner:** Seyed Yahya Shirazi
 
+Decision 3 is refined by [ADR 0141](0141-the-dispatcher-stages-the-serving-index-and-the-launch-specification-is-version-2.md) decision 6: the dispatcher now stages the index and records its digest.
+
 Refines [ADR 0123](0123-derivatives-live-in-a-keyed-store-named-by-what-they-read.md) decision 2 with a second key format, as its Consequences require of any change to the key ("a new format name and a new ADR").
 Every key ADR 0123 defines stays valid and keeps its bytes.
 

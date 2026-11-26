@@ -211,6 +211,19 @@ export function logKey(jobId: string, file: LogFile): string {
   return `logs/${jobId}/${file}`;
 }
 
+/**
+ * `serving-index/<sha256>.json`: a serving copy's index as the Worker staged it for a pipeline job (ADR 0141),
+ * named by the SHA-256 of its bytes. Content-addressed, so it is written BEFORE the job that names it exists
+ * (a job's specification never names a digest whose bytes are not kept), and the jobs of one index share one
+ * copy. Throws for anything that is not 64 lowercase hex digits.
+ */
+export function servingIndexKey(sha256: string): string {
+  if (typeof sha256 !== "string" || !COMPUTE_SHA256_RE.test(sha256)) {
+    throw new RangeError("not a SHA-256");
+  }
+  return `serving-index/${sha256}.json`;
+}
+
 /** `incoming/<id>/<path>`: an upload in flight, before the job's hold is known to have committed. */
 export function incomingKey(jobId: string, path: string): string {
   return `incoming/${jobIdOrThrow(jobId)}/${pathOrThrow(path)}`;
@@ -933,6 +946,42 @@ export async function presignBundleRead(
   }
   const key = submittedKey(jobId, BUNDLE_ARCHIVE_NAME);
   if ((await bucket.head(key)) === null) return { ok: false, code: "bad_state" };
+  const signed = await presignGet(s3, "records", key, { expiresIn: COMPUTE_BUNDLE_READ_SECONDS });
+  return { ok: true, url: signed.url, expires_at: signed.expires_at };
+}
+
+/**
+ * Keep the staged serving index under {@link servingIndexKey}: written once, and a copy already there must
+ * hold the same bytes (`compare`). True when the bytes are kept, false when the key holds other bytes, which
+ * a digest key cannot, so the caller stages nothing. A bucket that throws is the caller's.
+ */
+export async function putServingIndexCopy(
+  env: Pick<Bindings, "COMPUTE_RECORDS">,
+  sha256: string,
+  bytes: Uint8Array,
+): Promise<boolean> {
+  const bucket = env.COMPUTE_RECORDS;
+  if (!bucket) throw new Error("the records bucket is not bound");
+  const key = servingIndexKey(sha256);
+  return (await putOnce(bucket, key, bytes, "application/json", "compare")) !== "conflict";
+}
+
+/**
+ * A 10-minute presigned GET of a staged serving index (ADR 0141), for the serving index route (the launcher,
+ * with its job token). The route hands in what the job's RECORDED specification names (`readRecordedSpec`),
+ * never anything the request carries, so the key is the job's own index. A copy that is not in the bucket, or
+ * whose size is not the one recorded, is `bad_state`.
+ */
+export async function presignServingIndexRead(
+  env: ComputeRecordsEnv,
+  staged: { sha256: string; size: number },
+): Promise<BundleReadResult> {
+  const bucket = env.COMPUTE_RECORDS;
+  const s3 = computeS3(env);
+  if (!bucket || !s3) return { ok: false, code: "compute_disabled" };
+  const key = servingIndexKey(staged.sha256);
+  const head = await bucket.head(key);
+  if (head === null || head.size !== staged.size) return { ok: false, code: "bad_state" };
   const signed = await presignGet(s3, "records", key, { expiresIn: COMPUTE_BUNDLE_READ_SECONDS });
   return { ok: true, url: signed.url, expires_at: signed.expires_at };
 }

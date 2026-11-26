@@ -50,7 +50,11 @@ import {
   recipeQualityPlugins,
   recipeRequiredOutputs,
 } from "../../../shared/compute-recipes.js";
-import { resultsLauncherKey, resultsOutputKey } from "../../../shared/contract/compute-launch.js";
+import {
+  SERVING_INDEX_CONTAINER_PATH,
+  resultsLauncherKey,
+  resultsOutputKey,
+} from "../../../shared/contract/compute-launch.js";
 import { LAUNCHER_FILES, ResultManifestSchema } from "../../../shared/contract/compute.js";
 import {
   CANARY_DAYS,
@@ -421,19 +425,28 @@ export async function keyStamp(stores: Stores, stamp: CandidateStamp): Promise<K
     }
     const imageDigest = recipeImageDigestArg(spec.args);
     if (imageDigest === null) return unkeyable("spec_unreadable");
-    // A recipe that keys the serving index on this input (ADR 0140): a run handed none is keyed `none`. The
-    // dispatcher stages no index yet (nemar-cli #2341), so nothing records the digest of one a run was
-    // handed; such a run is not keyed, rather than keyed as if it had none and colliding with one that had.
+    // A recipe that keys the serving index on this input (ADR 0140, ADR 0141): the value is what the
+    // dispatcher RECORDED in the specification, never what the record claims. A staged index is keyed by its
+    // digest, and the arguments must hand the run that copy (the flag once, at the path the launcher places
+    // it); a run with none staged is keyed `none`, and must name no index. Anything else names an index the
+    // platform cannot attest (`serving_index_unattested`): it is not keyed, rather than keyed as if it had
+    // none and colliding with one that had.
     let servingIndex: string | undefined;
     if (recipeKeysServingIndex(recipe, stamp.input)) {
-      if (
-        argv.some(
-          (a) => a === RECIPE_SERVING_INDEX_FLAG || a.startsWith(`${RECIPE_SERVING_INDEX_FLAG}=`),
-        )
-      ) {
-        return unkeyable("serving_index_unattested");
+      const flagged = argv.filter(
+        (a) => a === RECIPE_SERVING_INDEX_FLAG || a.startsWith(`${RECIPE_SERVING_INDEX_FLAG}=`),
+      ).length;
+      const staged = spec.serving_index;
+      if (staged !== undefined && "sha256" in staged) {
+        const at = spec.args.indexOf(RECIPE_SERVING_INDEX_FLAG);
+        if (flagged !== 1 || at < 0 || spec.args[at + 1] !== SERVING_INDEX_CONTAINER_PATH) {
+          return unkeyable("serving_index_unattested");
+        }
+        servingIndex = `sha256:${staged.sha256}`;
+      } else {
+        if (flagged > 0) return unkeyable("serving_index_unattested");
+        servingIndex = SERVING_INDEX_NONE;
       }
-      servingIndex = SERVING_INDEX_NONE;
     }
 
     // 2. The recordings table, every row: a rerun under the same key could differ on a transient code.

@@ -1306,7 +1306,7 @@ export type BuildResult =
   | { ok: false; why: "unconfigured" | "unbuildable" };
 
 /**
- * Build the launch specification for a job (`nemar.launch-spec.v1`): from the job's RECORDED
+ * Build the launch specification for a job (`nemar.launch-spec.v2`, ADR 0141): from the job's RECORDED
  * specification (read back from the records bucket and accepted only if its bytes are the ones whose
  * digest the row holds), each dataset version as its data-plane tag (`dataTagForVersion`; a null
  * refuses the job here, never at the launcher), the image (the job's own for an `image` runtime, the
@@ -1358,6 +1358,11 @@ export async function buildLaunch(env: Bindings, job: ComputeJobRow): Promise<Bu
       ...(spec.bundle === undefined
         ? {}
         : { bundle: { sha256: spec.bundle.sha256, size: spec.bundle.size } }),
+      // The serving index the dispatcher staged and recorded (ADR 0141): the launcher fetches the copy with
+      // the job token and checks these two. A recorded word (none staged) is not part of the launch.
+      ...(spec.serving_index === undefined || !("sha256" in spec.serving_index)
+        ? {}
+        : { serving_index: { sha256: spec.serving_index.sha256, size: spec.serving_index.size } }),
       datasets,
       api_base: apiBase,
       image: { uri: imageRef, digest, sif },

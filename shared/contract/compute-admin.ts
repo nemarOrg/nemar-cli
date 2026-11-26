@@ -599,6 +599,13 @@ export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
    * later (DM-06b).
    */
   zarr_source_unverifiable: 503,
+  /**
+   * A run of the archive whose serving index could not be staged for a temporary fault (GitHub or the index
+   * could not be read, or the copy could not be kept; ADR 0141): nothing is dispatched, a `refused` stamp
+   * records the deferral, and a later pass tries again; 24 hours after the run's first deferral it goes ahead
+   * without the index (`runs_without_index_after` says when).
+   */
+  serving_index_deferred: 503,
   /** The runners switch is off (portable compute): the status is the runner protocol's, declared once. */
   runners_disabled: RUNNER_REFUSAL_STATUS.runners_disabled,
   /**
@@ -641,8 +648,13 @@ export const ComputePipelineResultSchema = z
     records_written: z.boolean().optional(),
     code: z.string().optional(),
     blocked_by: z.array(z.string()).optional(),
-    /** A Zarr source refusal's reason: a fixed word (`zarr_source_mismatch`, `zarr_source_unverifiable`). */
+    /**
+     * A Zarr source refusal's reason (`zarr_source_mismatch`, `zarr_source_unverifiable`), or the fault of a
+     * `serving_index_deferred`: a fixed word.
+     */
     reason: z.string().optional(),
+    /** `serving_index_deferred` only: when the run goes ahead without the index, 24 hours after its first deferral. */
+    runs_without_index_after: z.string().optional(),
   })
   .passthrough();
 

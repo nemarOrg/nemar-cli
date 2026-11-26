@@ -41,7 +41,8 @@ export const VIEWS_SKIPPED_NEUROSCHEMA_WORDS = [
 /**
  * The words nemar-process adds for its own views (`OWN_SKIP_REASONS` in `recipes/nemar_process/common/
  * views.py`, nemar-cli #2341): no two-second window of good samples, a layout of positions known to be
- * turned, and the three ways a run of the archive finds no row of the serving index. A plugin's view can
+ * turned, the three ways a run of the archive finds no row of the serving index, and an index it was handed
+ * but cannot use (`serving_index_unusable`, ADR 0141). A plugin's view can
  * be skipped with `frame_rotated` or `cap_exceeded` while its plugin ran.
  */
 export const VIEWS_SKIPPED_NEMAR_PROCESS_WORDS = [
@@ -50,6 +51,7 @@ export const VIEWS_SKIPPED_NEMAR_PROCESS_WORDS = [
   "no_serving_index",
   "not_in_serving_index",
   "serving_index_stale",
+  "serving_index_unusable",
 ] as const;
 
 /** The plugin a metric name names (`<plugin>:<name>`), or null for a recipe's bare name. */

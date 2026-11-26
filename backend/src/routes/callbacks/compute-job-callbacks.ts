@@ -3,6 +3,8 @@
  * launcher on Expanse" and "The launch specification"):
  *
  *   POST /compute/jobs/:id/bundle             a 10-minute presigned GET of THIS job's own code bundle
+ *   POST /compute/jobs/:id/serving-index      a 10-minute presigned GET of the serving index the Worker
+ *                                             staged for THIS job (ADR 0141)
  *   POST /compute/jobs/:id/outputs            what the job produced, and an upload address for each file
  *   POST /compute/jobs/:id/outputs/complete   the uploads are done
  *   POST /compute/jobs/:id/progress           live progress of a NEMAR pipeline job on Tapis (ADR 0134)
@@ -21,6 +23,10 @@
  * token, another job's token, a cleared nonce, a terminal job, no header, a malformed job id and a job
  * that does not exist (and, for `bundle`, a job that has no bundle). The door says nothing about which
  * jobs exist or why it refused. Only then, for a verified token, are the other answers given.
+ *
+ * The serving index address is made by `presignServingIndexRead`, from the digest the job's RECORDED
+ * specification names (read back and accepted only if its bytes are the ones whose digest the row holds), and
+ * a job whose specification names no staged index is refused like a job with no bundle.
  *
  * The bundle address is made by `presignBundleRead`, from the job id the token was verified for and
  * nothing the request carries: no path, no key and no query is read, so there is nothing to steer it to
@@ -68,9 +74,10 @@ import {
   recordProgress,
   stampForJob,
 } from "../../services/compute-pipeline-progress.js";
-import { presignBundleRead } from "../../services/compute-records.js";
+import { presignBundleRead, presignServingIndexRead } from "../../services/compute-records.js";
 import { computeEnabled } from "../../services/compute-switches.js";
 import { NO_NONCE, verifyComputeToken } from "../../services/compute-tokens.js";
+import { readRecordedSpec } from "../../services/compute-verify.js";
 import type { Bindings, Variables } from "../../types/bindings.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
 
@@ -136,6 +143,25 @@ export function registerComputeJobCallbackRoutes(router: Router): void {
     if (declaredTooLarge(c, SMALL_BODY_BYTES)) return answer(c, 413, "invalid_spec");
     // The key is the job's own, made from the verified id: nothing in the request is read.
     const signed = await presignBundleRead(c.env, job.id);
+    if (!signed.ok) {
+      return signed.code === "compute_disabled"
+        ? answer(c, COMPUTE_REFUSAL_STATUS.compute_disabled, "compute_disabled")
+        : refused(c);
+    }
+    return c.json({ url: signed.url, expires_at: signed.expires_at });
+  });
+
+  router.post("/jobs/:id/serving-index", async (c) => {
+    const job = await authorize(c);
+    if (!job) return refused(c);
+    if (declaredTooLarge(c, SMALL_BODY_BYTES)) return answer(c, 413, "invalid_spec");
+    const records = c.env.COMPUTE_RECORDS;
+    if (!records) return answer(c, COMPUTE_REFUSAL_STATUS.compute_disabled, "compute_disabled");
+    // The digest is the RECORDED specification's, never anything the request carries (ADR 0141).
+    const spec = await readRecordedSpec(records, job);
+    const staged = spec?.serving_index;
+    if (staged === undefined || !("sha256" in staged)) return refused(c);
+    const signed = await presignServingIndexRead(c.env, staged);
     if (!signed.ok) {
       return signed.code === "compute_disabled"
         ? answer(c, COMPUTE_REFUSAL_STATUS.compute_disabled, "compute_disabled")
