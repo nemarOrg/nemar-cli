@@ -10,7 +10,9 @@
  *     [--any-extension]
  *
  * `files.tsv` holds `<dataset>\t<size>\t<key>` lines, as `aws s3 ls --no-sign-request --recursive`
- * gives them after a reshape. Files are read by HTTP range requests through the registry's page
+ * gives them after a reshape. A key that is a full `https://` URL (a Zenodo file's content link)
+ * is fetched as it is, with an optional fourth column naming the file (its extension picks the
+ * reader). Entries a reader counted unscreened inside a file (a ZIP's `zip:<ext>`) are totalled. Files are read by HTTP range requests through the registry's page
  * cache and limits, exactly as the screen reads them, so nothing is downloaded whole and nothing
  * is written to disk. Output names kinds, counts, dataset ids and byte counts; never a value.
  */
@@ -46,30 +48,41 @@ if (!found || !args.list) {
 const reader: FormatReader = found;
 const list: string = args.list;
 
-/** An anonymous HTTP range source. A response that is not 206 is a failed read. */
+/**
+ * An anonymous HTTP range source. A response that is not 206 is a failed read; a 429 or 503 is
+ * waited out (its Retry-After, else 5 s) up to three times first.
+ */
 function httpSource(url: string, size: number): RangeSource {
   return {
     size,
     async read(offset, length) {
       const end = Math.min(size, offset + length) - 1;
       if (end < offset) return new Uint8Array(0);
-      const res = await fetch(url, {
-        headers: { Range: `bytes=${offset}-${end}`, "User-Agent": "nemar-reader-fp-measure" },
-      });
-      if (res.status !== 206) throw new ReadFailure(`http-${res.status}`, { status: res.status });
-      return new Uint8Array(await res.arrayBuffer());
+      for (let attempt = 0; ; attempt++) {
+        const res = await fetch(url, {
+          headers: { Range: `bytes=${offset}-${end}`, "User-Agent": "nemar-reader-fp-measure" },
+        });
+        if ((res.status === 429 || res.status === 503) && attempt < 3) {
+          const wait = Number(res.headers.get("retry-after") ?? "5");
+          await res.arrayBuffer();
+          await Bun.sleep(1000 * (Number.isFinite(wait) ? Math.min(wait, 60) : 5));
+          continue;
+        }
+        if (res.status !== 206) throw new ReadFailure(`http-${res.status}`, { status: res.status });
+        return new Uint8Array(await res.arrayBuffer());
+      }
     },
   };
 }
 
+/** A row's file name: the fourth column, else the key. */
+const nameOf = (row: readonly (string | undefined)[]) => (row[3] ?? row[2] ?? "").toLowerCase();
+
 const rows = (await Bun.file(list).text())
   .trim()
   .split("\n")
-  .map((l) => l.split("\t") as [string, string, string])
-  .filter(
-    ([, , key]) =>
-      args["any-extension"] || reader.extensions.some((e) => key.toLowerCase().endsWith(e)),
-  );
+  .map((l) => l.split("\t") as [string, string, string, string?])
+  .filter((row) => args["any-extension"] || reader.extensions.some((e) => nameOf(row).endsWith(e)));
 // Up to N files per dataset, spread across its list, so one large dataset cannot dominate.
 const perDataset = Number(args["per-dataset"]);
 const byDataset = new Map<string, typeof rows>();
@@ -88,6 +101,7 @@ interface FileOutcome {
   incomplete?: string;
   failure?: string;
   kinds: Record<string, { identifier: number; review: number }>;
+  unscreened: Record<string, number>;
   reads: number;
   bytes: number;
   ms: number;
@@ -97,12 +111,24 @@ const outcomes: FileOutcome[] = [];
 let next = 0;
 async function worker() {
   while (next < picked.length) {
-    const [dataset, size, key] = picked[next++] as (typeof rows)[number];
-    const src = cachedSource(httpSource(args.url + key, Number(size)), reader.limits);
+    const row = picked[next++] as (typeof rows)[number];
+    const [dataset, size, key] = row;
+    const full = key.startsWith("https://");
+    const src = cachedSource(httpSource(full ? key : args.url + key, Number(size)), reader.limits);
     const started = Date.now();
-    const o: FileOutcome = { dataset, outcome: "failed", kinds: {}, reads: 0, bytes: 0, ms: 0 };
+    const o: FileOutcome = {
+      dataset,
+      outcome: "failed",
+      kinds: {},
+      unscreened: {},
+      reads: 0,
+      bytes: 0,
+      ms: 0,
+    };
     try {
-      const result = await reader.scan(src, key.slice(dataset.length + 1), reader.limits);
+      const path = full ? `sourcedata/${row[3] ?? "file"}` : key.slice(dataset.length + 1);
+      const result = await reader.scan(src, path, reader.limits);
+      o.unscreened = result.unscreened ?? {};
       o.outcome = result.coverage === "complete" && !src.limited ? "complete" : "partial";
       if (o.outcome === "partial") o.incomplete = result.incomplete ?? "limit";
       for (const f of result.findings) {
@@ -162,6 +188,11 @@ console.log("failed by class:", JSON.stringify(tally("failure")));
 console.log(
   `complete files, bytes fetched p50/p90/max: ${quantile(bytes, 0.5)}/${quantile(bytes, 0.9)}/${Math.max(0, ...bytes)}; fetches p50/p90/max: ${quantile(reads, 0.5)}/${quantile(reads, 0.9)}/${Math.max(0, ...reads)}`,
 );
+const unscreened: Record<string, number> = {};
+for (const o of outcomes) {
+  for (const [k, n] of Object.entries(o.unscreened)) unscreened[k] = (unscreened[k] ?? 0) + n;
+}
+console.log("unscreened inside the files:", JSON.stringify(unscreened));
 console.log("findings per 100 files (identifier / review), files with the kind, by dataset:");
 for (const [kind, t] of Object.entries(kindTotals).sort()) {
   console.log(
