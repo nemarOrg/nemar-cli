@@ -268,7 +268,7 @@ jobs:
           # core: see the same flag in test.yml's unit-pure-shard for why.
           halves=2
           esc=$(printf '\033')
-          failed=0
+          failed=0; total_ran=0; total_tests=0
           for half in $(seq 1 "$halves"); do
             part=$(( (shard - 1) * halves + half ))
             parts=$(( SHARD_TOTAL * halves ))
@@ -282,8 +282,10 @@ jobs:
             header=$(grep -E -m1 '^--shard=[0-9]+/[0-9]+: running [0-9]+/[0-9]+ test files' <<<"$plain" || true)
             summary=$(grep -E '^Ran [0-9]+ tests? across [0-9]+ files?' <<<"$plain" | tail -1 || true)
             if [ -z "$header" ] || [ -z "$summary" ]; then
+              # Recorded, not fatal here, so the next part still runs; the step fails below.
               echo "::error::bun printed no shard header or run summary for part $part/$parts, so what this shard ran is unknown"
-              exit 1
+              failed=1
+              continue
             fi
             read -r planned discovered < <(sed -E 's#^--shard=[0-9]+/[0-9]+: running ([0-9]+)/([0-9]+) test files.*#\1 \2#' <<<"$header")
             read -r tests ran < <(sed -E 's#^Ran ([0-9]+) tests? across ([0-9]+) files?.*#\1 \2#' <<<"$summary")
@@ -291,9 +293,14 @@ jobs:
               echo "::error::part $part/$parts planned $planned of $discovered files, ran $ran files and $tests tests; the classifier listed ${#files[@]}"
               exit 1
             fi
+            total_ran=$((total_ran + ran)); total_tests=$((total_tests + tests))
           done
           if [ "$failed" != 0 ]; then
-            echo "::error::a test failed in shard $shard/$SHARD_TOTAL (see the failures above)"
+            echo "::error::shard $shard/$SHARD_TOTAL failed: a test failed or a part left no summary (see above)"
+            exit 1
+          fi
+          if [ "$total_ran" -lt 1 ] || [ "$total_tests" -lt 1 ]; then
+            echo "::error::shard $shard/$SHARD_TOTAL ran $total_tests tests across $total_ran files"
             exit 1
           fi
 

@@ -1161,8 +1161,10 @@ jobs:
           # runner the two workers of shard 1 climbed from 2.9 to 8.6 GB while its last ~250 short
           # files ran, and the old shard 1 (466 files in one process) ran the runner out of memory,
           # which hangs the job rather than failing it. Each half is bun's own shard of a
-          # 2 * SHARD_TOTAL split, so the halves balance on the same timings table and together
-          # are exactly this shard's slice. Every half runs even when an earlier one fails, so one
+          # 2 * SHARD_TOTAL split, so the halves balance on the same timings table (on bun 1.4.4
+          # the 12 parts nest inside the old six slices; that is an observation, not something the
+          # checks rely on: they hold the parts to partitioning the list, and the gate checks the
+          # union across shards). Every half runs even when an earlier one fails, so one
           # red half does not hide the other.
           #
           # --parallel=2: worker processes, each file in a fresh global (the default isolation).
@@ -1190,7 +1192,9 @@ jobs:
             passline=$(grep -E '^ *[0-9]+ pass$' <<<"$plain" | tail -1 || true)
             if [ -z "$header" ] || [ -z "$summary" ] || [ -z "$passline" ]; then
               echo "::error::bun printed no shard header, run summary or pass count for part $part/$parts, so what this shard ran is unknown"
-              exit 1
+              # Recorded, not fatal here, so the next part still runs; the step fails below.
+              failed=1
+              continue
             fi
             read -r h_planned h_discovered < <(sed -E 's#^--shard=[0-9]+/[0-9]+: running ([0-9]+)/([0-9]+) test files.*#\1 \2#' <<<"$header")
             read -r h_tests h_ran < <(sed -E 's#^Ran ([0-9]+) tests? across ([0-9]+) files?.*#\1 \2#' <<<"$summary")
@@ -1212,7 +1216,12 @@ jobs:
             tests=$((tests + h_tests)); passed=$((passed + h_passed))
           done
           if [ "$failed" != 0 ]; then
-            echo "::error::a test failed in shard $shard/$SHARD_TOTAL (see the failures above)"
+            echo "::error::shard $shard/$SHARD_TOTAL failed: a test failed or a part left no summary (see above)"
+            exit 1
+          fi
+          # Every part was read, so the totals are this shard's: refuse an empty sum as well.
+          if [ "$ran" -lt 1 ] || [ "$tests" -lt 1 ] || [ "$passed" -lt 1 ] || [ "$discovered" != "${#files[@]}" ]; then
+            echo "::error::shard $shard/$SHARD_TOTAL ran $tests tests across $ran files and $passed passed, of $discovered files bun matched; the classifier listed ${#files[@]}"
             exit 1
           fi
 
@@ -1220,8 +1229,9 @@ jobs:
           # the job); --update-timings writes only the files its own part ran.
           jq -s '{version: 1, files: (map(.files) | add)}' "$out"/timings-*.json > "$timings"
 
-          # The files this shard actually ran, from the junit reports: every test file appears as
-          # a testsuite carrying its path in `file`. The gate compares these lists across shards.
+          # The files this shard actually ran, read from both parts' junit reports (uploaded as
+          # junit-1.xml and junit-2.xml, not merged into one): every test file appears as a
+          # testsuite carrying its path in `file`. The gate compares these lists across shards.
           cat "$out"/junit-*.xml | grep -o '<testsuite [^>]*' | sed -nE 's/.* file="([^"]*)".*/\1/p' | sort -u > "$out/ran-files.txt"
           if [ "$(wc -l < "$out/ran-files.txt" | tr -d ' ')" != "$ran" ]; then
             echo "::error::bun reported $ran files and the junit reports name $(wc -l < "$out/ran-files.txt" | tr -d ' ') distinct ones"
