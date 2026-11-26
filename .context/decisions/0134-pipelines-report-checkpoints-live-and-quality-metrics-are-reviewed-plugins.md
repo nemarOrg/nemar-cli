@@ -11,6 +11,8 @@ decisions 2, 6, 7 and 9 (the `figures` checkpoint, figure formats and caps, the 
 NEMAR stores no figure image: a quality view is declared data that a browser draws, and the word "figures" in decision 1 now reads "views".
 Every other part of this record stands, and its text below is unchanged.
 
+Amended 2026-11-26 (below, after decision 9): what a public page shows of `processing` and `signalJourney`, at both levels, is the promoted run, built on read.
+
 ## Context
 
 nemar-process runs NEMAR's own processing in containers, on workstation runners (ADR 0121) and on the supercomputer through Tapis (ADR 0118).
@@ -115,6 +117,23 @@ Nothing here enters neuroschema's core; it uses extension namespaces, which neur
 nemar-cli already vendors neuroschema as one bundle in `shared/contract/neuroschema/`, rooted at the dataset document; the vendor script gains a record root (or validates extension objects by their `$id`), and nemar-process will validate against that bundle through its existing nemar-cli pin, so no third pin is added.
 neuroschema's extension-manager table is corrected so the NEMAR backend is the writer of `dataQuality`, `processing` and `signalJourney`.
 Proposed upstream to signalJourney, in order: checksum and size on output targets (signalJourney#7), the `nemar` namespace (signalJourney#8), a typed metric entry, and optionally a step `stage` label; none of these blocks the work here.
+
+## Amendment 2026-11-26: what a public page shows of a run
+
+Decision 9 places checkpoint outcomes and signalJourney links at two levels and does not say which run a public page shows.
+This amendment settles it; where it and the decisions above differ, it holds, and decision 4's "what the backend writes to neuroschema" reads "what the backend builds into neuroschema".
+
+1. **Both levels describe the promoted run.**
+   A public page's `processing` and `signalJourney` entries, at the dataset level and at the record level, describe each recipe's current public derivative: the run whose `dataQuality` the page shows (ADR 0137 decision 7), a `catalog` or `published` derivative, the newest by `stored_at`.
+   A run in progress, a `canary` run and a failed run show nothing on a public page, and no `in_progress` link is served; administrators see those runs on the grid and in the admin quality views.
+   The three namespaces of one public answer therefore describe one run: a recording's outcomes summed over the run equal the dataset counts, and a recording's link names the record its `dataQuality` entry came from.
+2. **Built on read from what is kept per run, never stored per recording.**
+   The dataset entry is built from the run's reconciled counts and the order it declared, with `stored` worked out from its stored derivative, and the dataset link from the link reconciliation keeps on the run's row.
+   A recording's entry and link are built on request from the derivative's recordings table and the recording's record, under the quality route's gate, edge cache and purge (`GET /<id>/quality/v1/<recipe>/processing/<recording>`); a recording that failed or was skipped has no record, so its link is `failed`.
+   D1 gains no row per recording (ADR 0137 decision 8).
+   Migration 0154 drops the latest-run documents of migration 0150, keeps each run's link on its run row, and keeps each derivative's checkpoint map, so a derivative made by a recipe version the registry has moved past is still read with its own map.
+3. **neuroschema's wording.**
+   neuroschema's `signalJourney` extension says a link describes "the latest run"; on NEMAR's public pages that is the latest run NEMAR shows, the promoted one, and each record-level answer names the derivative it came from.
 
 ## Consequences
 
