@@ -105,6 +105,45 @@ describe("the checker's set", () => {
     expect(set.check("nsc:/o.json", JSON.parse('{"a": 1}')).valid).toBe(true);
   });
 
+  test("dependentSchemas: a montage needs template positions, and template positions need a montage (viewData)", () => {
+    const ref = "nsc:/definitions/view.schema.json#/$defs/viewData";
+    const base = {
+      role: "positions",
+      location: "sub-01/eeg/sub-01_desc-x_chanlocs.tsv",
+      format: "tsv",
+      size: 10,
+      sha256: "a".repeat(64),
+    };
+    const cases: Array<[Record<string, unknown>, boolean]> = [
+      [base, true],
+      [{ ...base, montage: "standard_1005" }, false],
+      [{ ...base, montage: "standard_1005", position_source: "measured" }, false],
+      [{ ...base, position_source: "template" }, false],
+      [
+        {
+          ...base,
+          montage: "standard_1005",
+          position_source: "template",
+          coordinate_system: "n/a",
+        },
+        true,
+      ],
+      [
+        {
+          ...base,
+          montage: "standard_1005",
+          position_source: "template",
+          coordinate_system: "CTF",
+        },
+        false,
+      ],
+    ];
+    for (const [instance, valid] of cases) {
+      expect(ajvVerdict(ref, instance)).toBe(valid);
+      expect(ours(ref, instance)).toBe(valid);
+    }
+  });
+
   test("JSON equality: numbers by value, objects by members, arrays by order", () => {
     expect(jsonEqual(1, 1.0)).toBe(true);
     expect(jsonEqual({ a: [1, 2] }, { a: [1, 2] })).toBe(true);

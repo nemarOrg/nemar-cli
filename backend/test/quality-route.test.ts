@@ -38,6 +38,7 @@ import { viewFiles } from "../src/services/quality-views";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { InMemoryCache } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
+import { logged } from "./helpers/logs";
 import { newJobId, productFiles, seedDerivative, seedIcaStamp } from "./helpers/quality-fixture";
 
 // biome-ignore lint/suspicious/noExplicitAny: documents are read field by field
@@ -460,12 +461,26 @@ describe("the record is checked whole before anything of it is served", () => {
     await refused(key);
   });
 
-  test("one digest declared as two files of different sizes", async () => {
+  test("one digest declared as two files of one format and different sizes (MUTATION: drop the one-digest-one-size rule)", async () => {
     const key = await derivative();
     await putRecord(
       key,
       edited((r) => {
-        r.extensions.nemar.views[3].data[0].size += 1;
+        const spectrum = r.extensions.nemar.views[4];
+        expect(spectrum.data[0].format).toBe(spectrum.data[1].format);
+        spectrum.data[1].sha256 = spectrum.data[0].sha256;
+        spectrum.data[1].size = spectrum.data[0].size + 1;
+      }),
+    );
+    await refused(key);
+  });
+
+  test("one digest declared as files of two formats", async () => {
+    const key = await derivative();
+    await putRecord(
+      key,
+      edited((r) => {
+        r.extensions.nemar.views[3].data[0].size = r.extensions.nemar.views[4].data[0].size;
         r.extensions.nemar.views[3].data[0].sha256 = r.extensions.nemar.views[4].data[0].sha256;
       }),
     );
@@ -504,13 +519,19 @@ describe("only declared files, read again and hashed", () => {
     expect(await word(res)).toBe("view_data_corrupt");
   });
 
-  test("a stored file of another size is view_data_corrupt (MUTATION: drop the size check)", async () => {
+  test("a stored file of another size is view_data_corrupt, refused for its size before it is hashed (MUTATION: drop the size check)", async () => {
     const key = await derivative();
     const good = PRODUCT.get(ICCLASSES[1]) as Uint8Array;
     await bucket.put(`d/${key}/${ICCLASSES[1]}`, new Uint8Array([...good, 0x0a]));
-    const res = await get(fileUrl(key, ICCLASSES[0]));
-    expect(res.status).toBe(502);
-    expect(await word(res)).toBe("view_data_corrupt");
+    let res: Response | undefined;
+    const lines = await logged(async () => {
+      res = await get(fileUrl(key, ICCLASSES[0]));
+    });
+    expect(res?.status).toBe(502);
+    expect(await word(res as Response)).toBe("view_data_corrupt");
+    expect(lines).toEqual([
+      `[quality] view_data_corrupt dataset=${DATASET} key=${key.slice(0, 12)} reason=size`,
+    ]);
   });
 
   test("a declared file missing from the store is view_data_missing (404), never a server error", async () => {
