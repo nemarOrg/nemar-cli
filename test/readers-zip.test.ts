@@ -252,6 +252,19 @@ describe("archives built with Info-ZIP", () => {
     expect(has(result.findings, "edf-patient-name")).toBe(true);
   });
 
+  test("a ZIP64 end record whose declared size does not end at its locator is corrupt", async () => {
+    const bytes = zip("zip64.zip").slice();
+    const view = new DataView(bytes.buffer);
+    // The locator (20 bytes before the end record) names where the ZIP64 end record is.
+    const endAt = bytes.length - 22;
+    const recordAt = Number(view.getBigUint64(endAt - 20 + 8, true));
+    expect(view.getUint32(recordAt, true)).toBe(0x06064b50);
+    view.setBigUint64(recordAt + 4, view.getBigUint64(recordAt + 4, true) + 8n, true);
+    const { result } = await scan(bytes);
+    expect(result.coverage).toBe("partial");
+    expect(result.incomplete).toBe("corrupt");
+  });
+
   test("an encrypted entry is partial (encrypted) and counted unscreened; its name is screened", async () => {
     const { result } = await scan(zip("encrypted.zip"));
     expect(result.coverage).toBe("partial");
