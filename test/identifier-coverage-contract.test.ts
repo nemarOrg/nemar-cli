@@ -6,7 +6,7 @@
  * Real code paths throughout: the fleet scan's `scanDatasetFromManifest` runs unchanged over
  * entries whose bytes come from memory (the only stand-in is where the bytes live), and the
  * readers below are registered through the scan's public `readers` option. They exist only in
- * this file; the registry itself holds EDF/BDF alone.
+ * this file; the registry itself holds EDF/BDF, BrainVision and NIRx (phase A2).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -42,6 +42,7 @@ import { shapeOf } from "../shared/identifier-scan";
 import {
   INCOMPLETE_COPY,
   KIND_COPY,
+  NOTE_COPY,
   READ_FAILURE_COPY,
   SCREEN_DOCS_URL,
   STATUS_COPY,
@@ -125,7 +126,9 @@ async function scan(
  * The registry without the real SNIRF and HDF5 readers, so a stub can stand for `.snirf` (the
  * registry picks the first reader of the longest matching extension).
  */
-const EDF_ONLY: readonly FormatReader[] = [EDF_READER];
+const WITHOUT_HDF5: readonly FormatReader[] = READERS.filter(
+  (r) => r.id !== "snirf" && r.id !== "hdf5",
+);
 
 /** A reader for `.snirf` that reads its first 64 bytes and finds nothing. */
 const stubReader = (over: Partial<FormatReader> = {}): FormatReader => ({
@@ -149,7 +152,7 @@ const bytes = (n: number) => new Uint8Array(n).fill(7);
 describe("recordings are read through the registry", () => {
   test("a clean v2 report with no EDF and one complete other reader is accepted", async () => {
     const files = { "sub-01/nirs/sub-01_task-a_nirs.snirf": bytes(4096), README: bytes(8) };
-    const { record, report } = await scan(files, [...EDF_ONLY, stubReader()]);
+    const { record, report } = await scan(files, [...WITHOUT_HDF5, stubReader()]);
     expect(record.status).toBe("clean");
     expect(report.version).toBe(2);
     expect(report.scan?.status).toBe("clean");
@@ -157,9 +160,14 @@ describe("recordings are read through the registry", () => {
     expect(report.scan?.read_by_format).toEqual({
       snirf: { files: 1, read: 1, partial: 0, failed: 0 },
     });
-    expect(report.scan?.readers).toEqual({ edf: EDF_READER.version, snirf: "test-1" });
+    expect(report.scan?.readers).toEqual({
+      edf: EDF_READER.version,
+      brainvision: "1",
+      nirx: "1",
+      snirf: "test-1",
+    });
     // The twin: without the reader the same file is a format nobody reads.
-    const without = await scan(files, EDF_ONLY);
+    const without = await scan(files, WITHOUT_HDF5);
     expect(without.report.scan?.status).toBe("not-screened");
     expect(without.report.scan?.unscreened_formats).toEqual({ ".snirf": 1 });
   });
@@ -170,7 +178,10 @@ describe("recordings are read through the registry", () => {
         throw new TypeError("a parser bug");
       },
     });
-    const { report } = await scan({ "sub-01/nirs/a.snirf": bytes(4096) }, [...EDF_ONLY, throwing]);
+    const { report } = await scan({ "sub-01/nirs/a.snirf": bytes(4096) }, [
+      ...WITHOUT_HDF5,
+      throwing,
+    ]);
     expect(report.scan?.status).toBe("unchecked");
     expect(report.scan?.read_by_format?.snirf).toEqual({
       files: 1,
@@ -184,7 +195,10 @@ describe("recordings are read through the registry", () => {
 
   test("a source read past the reader's limit is partial, reason limit", async () => {
     const greedy = stubReader({ limits: { ...DEFAULT_READER_LIMITS, maxBytes: 32 } });
-    const { report } = await scan({ "sub-01/nirs/a.snirf": bytes(4096) }, [...EDF_ONLY, greedy]);
+    const { report } = await scan({ "sub-01/nirs/a.snirf": bytes(4096) }, [
+      ...WITHOUT_HDF5,
+      greedy,
+    ]);
     expect(report.scan?.status).toBe("unchecked");
     expect(report.scan?.read_by_format?.snirf).toEqual({
       files: 1,
@@ -195,7 +209,7 @@ describe("recordings are read through the registry", () => {
     expect(report.scan?.incomplete_reasons).toEqual(["limit"]);
     // The twin, one byte of budget more than the read needs: complete.
     const enough = stubReader({ limits: { ...DEFAULT_READER_LIMITS, maxBytes: 64 } });
-    const ok = await scan({ "sub-01/nirs/a.snirf": bytes(4096) }, [...EDF_ONLY, enough]);
+    const ok = await scan({ "sub-01/nirs/a.snirf": bytes(4096) }, [...WITHOUT_HDF5, enough]);
     expect(ok.report.scan?.status).toBe("clean");
   });
 
@@ -205,7 +219,7 @@ describe("recordings are read through the registry", () => {
         return { findings: [], coverage: "partial", incomplete: "encrypted" };
       },
     });
-    const { report } = await scan({ "a.snirf": bytes(128) }, [...EDF_ONLY, encrypted]);
+    const { report } = await scan({ "a.snirf": bytes(128) }, [...WITHOUT_HDF5, encrypted]);
     expect(report.scan?.status).toBe("unchecked");
     expect(report.scan?.incomplete_reasons).toEqual(["encrypted"]);
   });
@@ -220,7 +234,7 @@ describe("recordings are read through the registry", () => {
           : { claimed: [], missing: [dat] };
       },
     });
-    const lacking = await scan({ "sub-01/nirs/a.snirf": bytes(128) }, [...EDF_ONLY, paired]);
+    const lacking = await scan({ "sub-01/nirs/a.snirf": bytes(128) }, [...WITHOUT_HDF5, paired]);
     expect(lacking.report.scan?.companion_missing).toBe(1);
     expect(lacking.report.scan?.findings_by_kind).toEqual({});
     expect(lacking.report.scan?.read_by_format?.snirf?.partial).toBe(1);
@@ -228,7 +242,7 @@ describe("recordings are read through the registry", () => {
     // Present, it is claimed: part of its recording, not an unscreened `.dat`.
     const whole = await scan(
       { "sub-01/nirs/a.snirf": bytes(128), "sub-01/nirs/a.dat": bytes(16) },
-      [...EDF_ONLY, paired],
+      [...WITHOUT_HDF5, paired],
     );
     expect(whole.report.scan?.status).toBe("clean");
     expect(whole.report.scan?.companion_missing).toBe(0);
@@ -236,7 +250,7 @@ describe("recordings are read through the registry", () => {
     // Only a declared pairing claims a file: without the reader's pairing, `.dat` is unscreened.
     const unpaired = await scan(
       { "sub-01/nirs/a.snirf": bytes(128), "sub-01/nirs/a.dat": bytes(16) },
-      [...EDF_ONLY, stubReader()],
+      [...WITHOUT_HDF5, stubReader()],
     );
     expect(unpaired.report.scan?.status).toBe("partially-screened");
     expect(unpaired.report.scan?.unscreened_formats).toEqual({ ".dat": 1 });
@@ -245,7 +259,7 @@ describe("recordings are read through the registry", () => {
   test("past the dataset's time budget every file still to read is partial, reason time", async () => {
     const { report } = await scan(
       { "a.snirf": bytes(128), "b.snirf": bytes(128) },
-      [...EDF_ONLY, stubReader()],
+      [...WITHOUT_HDF5, stubReader()],
       { limits: { datasetTimeMs: 0 } },
     );
     expect(report.scan?.read_by_format?.snirf).toEqual({
@@ -255,6 +269,53 @@ describe("recordings are read through the registry", () => {
       failed: 0,
     });
     expect(report.scan?.incomplete_reasons).toEqual(["time"]);
+  });
+
+  test("not-applicable (phase A2): unscreened under its extension, never read, partial or failed", async () => {
+    // A reader that finds a file is not its format, with a companion it would otherwise want.
+    const picky = stubReader({
+      companions: (path) => ({ claimed: [], missing: [path.replace(/\.snirf$/, ".dat")] }),
+      async scan() {
+        return { findings: [], coverage: "not-applicable" };
+      },
+    });
+    const { record, report } = await scan(
+      { "sub-01/eeg/a.edf": edfHeader(), "sub-01/nirs/b.snirf": bytes(128) },
+      [...WITHOUT_HDF5, picky],
+    );
+    expect(record.unscreened_formats).toEqual({ ".snirf": 1 });
+    expect(report.scan?.read_by_format?.snirf).toEqual({
+      files: 0,
+      read: 0,
+      partial: 0,
+      failed: 0,
+    });
+    expect(report.scan?.companion_missing).toBe(0);
+    expect(report.scan?.incomplete_reasons).toEqual([]);
+    expect(report.scan?.status).toBe("partially-screened");
+  });
+
+  test("a note (phase A2) is counted and printed with its remedy, and never gates", async () => {
+    const noting = stubReader({
+      async scan(src: RangeSource) {
+        await src.read(0, 64);
+        return { findings: [], coverage: "complete", notes: ["companion-name-mismatch"] };
+      },
+    });
+    const { report } = await scan({ "sub-01/nirs/a.snirf": bytes(128) }, [...WITHOUT_HDF5, noting]);
+    expect(report.scan?.status).toBe("clean");
+    expect(report.scan?.companion_name_mismatch).toBe(1);
+    const lines = describeScreen("clean", report).lines;
+    const copy = NOTE_COPY["companion-name-mismatch"];
+    const at = lines.indexOf(`Note (x1): ${copy.statement}`);
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(lines[at + 1]).toBe(`What to do: ${copy.remedy}`);
+    // Without a note the key is absent, so a report reads as it did before.
+    const quiet = await scan({ "sub-01/nirs/a.snirf": bytes(128) }, [
+      ...WITHOUT_HDF5,
+      stubReader(),
+    ]);
+    expect(quiet.report.scan).not.toHaveProperty("companion_name_mismatch");
   });
 
   test("a recording beside an unread format is partially-screened, which asks for a person", async () => {
@@ -319,7 +380,7 @@ describe("the registry and the page cache", () => {
 
   test("the EDF/BDF reader keeps its 256 bytes", () => {
     expect(EDF_READER.limits.maxBytes).toBe(256);
-    expect(READERS.map((r) => r.id)).toEqual(["edf", "snirf", "hdf5"]);
+    expect(READERS.map((r) => r.id)).toEqual(["edf", "brainvision", "nirx", "snirf", "hdf5"]);
   });
 });
 
@@ -619,7 +680,7 @@ describe("review round 1", () => {
         return { findings: [finding], coverage: "complete" };
       },
     });
-    const { report } = await scan({ "a.snirf": bytes(4096) }, [...EDF_ONLY, careless]);
+    const { report } = await scan({ "a.snirf": bytes(4096) }, [...WITHOUT_HDF5, careless]);
     expect(report.scan?.read_by_format?.snirf).toEqual({
       files: 1,
       read: 0,

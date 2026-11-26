@@ -92,7 +92,7 @@ Birth-date variants outside that set (`Birthday`, `BirthYear`) follow it by desi
 
 ## The reader limits, measured (card A4)
 
-The false-positive gate read 296 public SNIRF files from 30 OpenNeuro fNIRS datasets by HTTP range requests, through the registry's page cache (`scripts/dev/reader-fp-measure.ts`).
+The false-positive gate read 296 public SNIRF files from 30 OpenNeuro fNIRS datasets by HTTP range requests, through the registry's page cache (`scripts/dev/reader-fp-measure-remote.ts`).
 A typical file's metadata took 1.7 MiB (median) to 6.9 MiB (90th percentile) in 27 to 104 fetches, because the page cache reads 64 KiB pages and a large file's object headers lie among its data.
 High-density files, with thousands of `measurementList` groups, need much more: 13 MiB in 203 fetches for 31,800 entries, and 38 MiB in 573 fetches for 66,500 entries.
 The walker's logical reads are many per fetched page: one file of 6,292 entries took more than 20,000 logical reads in 40 fetches.

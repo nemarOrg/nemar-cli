@@ -17,6 +17,7 @@ import {
 // Types only: the registry imports the readers, so a runtime import back would be a cycle.
 import type { LimitExceeded, ReaderIncompleteReason, ReaderLimits } from "../identifier-readers";
 import { canonical, identifierKeySeverity } from "../identifier-scan";
+import { FREE_TEXT_MAX_CHARS } from "./text-header";
 
 /**
  * Each walker reason as the registry says it. `read-failed` has no entry: the walker records it
@@ -95,11 +96,17 @@ const isStringDtype = (dtype: string | null) => dtype?.includes("string") === tr
  * Entries the walker listed but did not return a value for, where the value could be text a rule
  * must read: a string over the walker's size rules (`limit`) or of a type it does not decode
  * (`unsupported-datatype`), and any value under an identifier-key name (`MRN`, `DateOfBirth`,
- * ...). A numeric value skipped for size is a signal and is not counted. The first such entry
- * names the reason; null when there is none.
+ * ...). A numeric value skipped for size is a signal and is not counted. A string longer than
+ * the text rules read (`FREE_TEXT_MAX_CHARS`, shared with the text header readers) was read only
+ * in part (`limit`). The first such entry names the reason; null when there is none.
  */
 export function unscannedReason(entries: readonly Hdf5Entry[]): ReaderIncompleteReason | null {
   for (const e of entries) {
+    const values: unknown[] =
+      typeof e.value === "string" ? [e.value] : Array.isArray(e.value) ? e.value : [];
+    if (values.some((v) => typeof v === "string" && v.length > FREE_TEXT_MAX_CHARS)) {
+      return "limit";
+    }
     if (e.skipped !== "size" && e.skipped !== "type") continue;
     if (isStringDtype(e.dtype) || identifierKeySeverity(canonical(e.name)) !== null) {
       return e.skipped === "size" ? "limit" : "unsupported-datatype";

@@ -34,6 +34,7 @@ import {
   shapeOf,
 } from "../identifier-scan";
 import { walkForReader } from "./hdf5-incomplete";
+import { capText, contactIn } from "./text-header";
 
 /**
  * Which field names are a person's: a canonical name (lowercase, no space, `_` or `-`) that
@@ -93,13 +94,21 @@ export const EMPTY_VALUES: ReadonlySet<string> = new Set([
   "x",
 ]);
 
-/** The strings an entry holds, or none. */
-export function stringsOf(entry: Hdf5Entry): string[] {
+/** The strings an entry holds, uncut. */
+export function rawStringsOf(entry: Hdf5Entry): string[] {
   if (typeof entry.value === "string") return [entry.value];
   if (Array.isArray(entry.value)) {
     return (entry.value as unknown[]).filter((v): v is string => typeof v === "string");
   }
   return [];
+}
+
+/**
+ * The strings an entry holds, each cut to the text rules' bound (`capText`, shared with the text
+ * header readers). A cut value makes the read `partial` (`limit`): `walkForReader` says so.
+ */
+export function stringsOf(entry: Hdf5Entry): string[] {
+  return rawStringsOf(entry).map((v) => capText(v).text);
 }
 
 /** A whitespace token of letters only (and the `' . -` a name may hold). */
@@ -149,9 +158,11 @@ export function scanEntryText(entry: Hdf5Entry, field: string): Finding[] {
     if (name !== undefined) add("hdf5-freetext-name", "identifier", field, name);
     else if (other !== undefined) add("hdf5-freetext", "review", field, other);
   }
+  // A home-directory path or contact details (the text header readers' rules), once per entry.
   for (const v of values) {
-    if (out.some((f) => f.kind === "hdf5-freetext")) break;
-    if (scanTextForLocalPaths(v).length > 0) {
+    // One finding per entry for its text: an identifier field already says it holds a value.
+    if (out.some((f) => f.kind === "hdf5-freetext" || f.kind === "hdf5-identifier-field")) break;
+    if (scanTextForLocalPaths(v).length > 0 || contactIn(v) !== null) {
       add("hdf5-freetext", "review", field, v);
       break;
     }

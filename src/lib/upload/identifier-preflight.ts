@@ -255,6 +255,9 @@ export async function scanLocalDataset(
     read_failures: record.read_failures,
     read_by_format: record.read_by_format,
     companion_missing: record.companion_missing,
+    ...(record.companion_name_mismatch
+      ? { companion_name_mismatch: record.companion_name_mismatch }
+      : {}),
     readers: record.readers,
   };
   // Format names come from whatever a file is called, so only the closed list is kept.

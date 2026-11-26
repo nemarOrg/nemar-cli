@@ -3,7 +3,7 @@
  * through its step function against real directories on disk.
  *
  * Every dataset here is a real tree: EDF/BDF files whose 256-byte headers are laid out as the
- * format specifies, real BrainVision and EEGLAB file names, real symlinks, a real FIFO, a real
+ * format specifies, real Neuroscan and EEGLAB file names, real symlinks, a real FIFO, a real
  * sparse file. The step under test runs the real walk, the real local reader, the fleet scan's
  * real `scanDatasetFromManifest` and the report contract's real parser; nothing is replaced. The
  * command-level behavior (exit codes, what is printed, that nothing is sent) is in
@@ -189,40 +189,35 @@ describe("direct identifiers refuse the upload, with no way around it", () => {
 });
 
 describe("a verdict that needs a person proceeds only on an acknowledgment that names it", () => {
-  /** BrainVision: the scanner does not parse its header, so the name in it is never read. */
-  function brainVision(): void {
+  /** Neuroscan: no reader parses its header, so the name in it is never read. */
+  function neuroscan(): void {
     write("dataset_description.json", JSON.stringify({ Name: "Fixture", BIDSVersion: "1.9.0" }));
     write("participants.tsv", "participant_id\nsub-01\n");
-    write(
-      "sub-01/eeg/sub-01_task-rest_eeg.vhdr",
-      "Brain Vision Data Exchange Header File Version 1.0\n; Quillfeather\n",
-    );
-    write("sub-01/eeg/sub-01_task-rest_eeg.vmrk", "Brain Vision Data Exchange Marker File\n");
-    write("sub-01/eeg/sub-01_task-rest_eeg.eeg", new Uint8Array(1024));
+    write("sub-01/eeg/sub-01_task-rest_eeg.cnt", "Version 3.0\0Quillfeather\0");
   }
 
   test("a format the scanner skips is not screened, never clean, whatever it holds", async () => {
-    brainVision();
+    neuroscan();
     const scan = await scanLocalDataset(root);
     expect(scan.status).toBe("not-screened");
-    expect(scan.unscreened_formats).toEqual({ ".vhdr": 1, ".vmrk": 1, ".eeg": 1 });
+    expect(scan.unscreened_formats).toEqual({ ".cnt": 1 });
     expect(scan.files.edf_bdf).toBe(0);
   });
 
   test("without a terminal or a flag it stops; --dry-run previews and sends nothing", async () => {
-    brainVision();
+    neuroscan();
     expect((await run()).status).toBe("fail");
     const preview = await run({ dryRun: true });
     expect(preview).toEqual({ status: "ok", value: null });
   });
 
   test("--no declines", async () => {
-    brainVision();
+    neuroscan();
     expect((await run({ no: true })).status).toBe("fail");
   });
 
   test("the flag acknowledges only the verdict it names", async () => {
-    brainVision();
+    neuroscan();
     for (const other of PREFLIGHT_ACKNOWLEDGEABLE.filter((s) => s !== "not-screened")) {
       expect((await run({ acknowledgeIdentifierPreflight: [other] })).status).toBe("fail");
     }
@@ -632,10 +627,10 @@ describe("the walk, the reader and the limits, at their edges", () => {
     bidsWith(recording(CLEAN_PATIENT));
     write("sourcedata/raw/session.quillfeather", new Uint8Array(16));
     write("sourcedata/raw/backup.dat_backup", new Uint8Array(16));
-    write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    write("sub-01/eeg/sub-01_task-rest_eeg.cnt", "Version 3.0\n");
     const scan = await scanLocalDataset(root);
     expect(scan.status).toBe("partially-screened");
-    expect(scan.unscreened_formats).toEqual({ ".other": 2, ".vhdr": 1 });
+    expect(scan.unscreened_formats).toEqual({ ".other": 2, ".cnt": 1 });
   });
 
   test("a dataset path that is not a directory is refused before anything else", async () => {
@@ -685,7 +680,7 @@ describe("a verdict hides nothing an acknowledgment must name", () => {
   test("an image beside recordings it cannot parse needs review AND not-screened", async () => {
     write("dataset_description.json", JSON.stringify({ Name: "Fixture" }));
     write("sourcedata/figure.png", new Uint8Array(8));
-    write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    write("sub-01/eeg/sub-01_task-rest_eeg.cnt", "Version 3.0\n");
     const scan = await scanLocalDataset(root);
     expect(scan.status).toBe("review");
     expect(preflightConditions(scan)).toEqual(["not-screened", "review"]);
@@ -705,7 +700,7 @@ describe("the tree is screened again right before anything is sent", () => {
 
   test("unchanged: the second scan is the record, with the same acknowledgment", async () => {
     write("dataset_description.json", JSON.stringify({ Name: "Fixture" }));
-    write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    write("sub-01/eeg/sub-01_task-rest_eeg.cnt", "Version 3.0\n");
     const record = await first({ acknowledgeIdentifierPreflight: ["not-screened"] });
     // The CLI writes files of its own between the two scans; a LICENSE changes nothing found.
     write("LICENSE", "CC0\n");
@@ -725,7 +720,7 @@ describe("the tree is screened again right before anything is sent", () => {
   test("a condition the acknowledgment did not name stops it too", async () => {
     bidsWith(recording(CLEAN_PATIENT));
     const record = await first();
-    write("sub-01/eeg/sub-01_task-two_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    write("sub-01/eeg/sub-01_task-two_eeg.cnt", "Version 3.0\n");
     expect((await recheckIdentifierPreflight(root, record)).status).toBe("fail");
   });
 
@@ -811,7 +806,7 @@ describe("the tree is screened again right before anything is sent", () => {
     // The case the contract alone cannot catch: the first record carries an acknowledgment, so a
     // second record with a new condition under the same acknowledgment is still well formed.
     write("dataset_description.json", JSON.stringify({ Name: "Fixture" }));
-    write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    write("sub-01/eeg/sub-01_task-rest_eeg.cnt", "Version 3.0\n");
     const record = await first({ acknowledgeIdentifierPreflight: ["not-screened"] });
     write("sourcedata/figure.png", new Uint8Array(8));
     expect((await recheckIdentifierPreflight(root, record)).status).toBe("fail");

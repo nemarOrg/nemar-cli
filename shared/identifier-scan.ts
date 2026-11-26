@@ -60,7 +60,14 @@ export type FindingKind =
   | "snirf-measurement-date"
   | "hdf5-freetext"
   | "hdf5-freetext-name"
-  | "hdf5-identifier-field";
+  | "hdf5-identifier-field"
+  | "brainvision-comment-name"
+  | "brainvision-segment-date"
+  | "nirx-subject-name"
+  | "nirx-demographics"
+  | "nirx-header-date"
+  | "nirx-freetext"
+  | "brainvision-marker-text";
 
 /**
  * Finding kinds that name a person or a clinical record: what must not stay public. A finding
@@ -80,6 +87,8 @@ export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "snirf-subject-name",
   "hdf5-freetext-name",
   "hdf5-identifier-field",
+  "nirx-subject-name",
+  "nirx-demographics",
 ]);
 
 /**
@@ -92,6 +101,8 @@ export const DATE_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-recording-startdate",
   "acq-time-dated",
   "snirf-measurement-date",
+  "brainvision-segment-date",
+  "nirx-header-date",
 ]);
 
 /** The shape of some text: produced only by {@link shapeOf}, so a raw value cannot be assigned to it. */
@@ -400,6 +411,7 @@ function isNameLikePart(part: string, strict: boolean): boolean {
  * A whitespace token that could be a name, after splitting on delimiters such as `^ , / = :`.
  * `strict` is the rule for a slot that should hold a code: only placeholders and study-group words
  * are exempt, not the neutral vocabulary.
+ * Exported for the text-header readers (`shared/readers/`), so every format asks the same question.
  */
 export function isNameLike(token: string, strict = false): boolean {
   if (token === "" || isCodeLike(token)) return false;
@@ -568,17 +580,25 @@ function findDates(text: string): DateMatch[] {
 }
 
 /**
- * The finest date some text holds: `day` for a calendar date with a day that is not the
- * year-only 1 January under every reading, `month` for a year and month, `year` for 1 January or
- * a bare year, and null when it holds no date.
+ * True when the text holds a calendar date finer than the year (any date that is not 1 January
+ * under every reading), by the same layouts {@link scanEdfHeader} reads. For the text-header
+ * readers (`shared/readers/`).
+ */
+export function hasDateFinerThanYear(text: string): boolean {
+  return findDates(text).some((d) => !isYearOnly(d.candidates));
+}
+
+/**
+ * The finest date in some text: `day` for a calendar date that is not 1 January, `month` for a
+ * year and month, `year` for a year-only date (1 January, or a bare four-digit year), or null
+ * when the scanner reads no date in it. For the text-header readers' birth-date rule.
  */
 export function datePrecision(text: string): "day" | "month" | "year" | null {
   const dates = findDates(text);
-  if (dates.some((d) => !isYearOnly(d.candidates) && d.candidates.some((c) => c.day > 0))) {
-    return "day";
-  }
-  if (dates.some((d) => d.candidates.some((c) => c.day === 0))) return "month";
-  if (dates.length > 0 || /(?<!\d)(?:19|20)\d{2}(?!\d)/.test(text)) return "year";
+  const fine = dates.filter((d) => !isYearOnly(d.candidates));
+  if (fine.some((d) => d.candidates.some((c) => c.day > 0))) return "day";
+  if (fine.length > 0) return "month";
+  if (dates.length > 0 || /(?<!\d)(19|20)\d{2}(?!\d)/.test(text)) return "year";
   return null;
 }
 
@@ -1189,7 +1209,6 @@ export const DIRECTORY_FORMATS: readonly string[] = [".ds", ".mff", ".mefd", ".z
  * reports, and formats inside a ZIP, still name it.
  */
 export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
-  ".vhdr",
   ".set",
   ".fdt",
   ".fif",

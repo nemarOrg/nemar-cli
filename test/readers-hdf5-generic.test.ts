@@ -20,6 +20,7 @@ import {
   scanNumericIdentifier,
 } from "../shared/readers/hdf5-generic";
 import { unscannedReason } from "../shared/readers/hdf5-incomplete";
+import { FREE_TEXT_MAX_CHARS } from "../shared/readers/text-header";
 
 const DIR = join(import.meta.dir, "fixtures", "hdf5");
 const load = (name: string) => new Uint8Array(readFileSync(join(DIR, name)));
@@ -252,5 +253,35 @@ describe("numeric identifier fields (review round 1)", () => {
     expect(sev("PatientID", [1])).toEqual(["identifier"]);
     expect(sev("phone", [5550100])).toEqual(["review"]);
     expect(sev("count", [19710423])).toEqual([]);
+  });
+});
+
+describe("the shared text bound and contact rule (A2's helpers)", () => {
+  const text = (name: string, value: string): Hdf5Entry => ({
+    path: "/",
+    kind: "attribute",
+    name,
+    dtype: "vlen:string",
+    shape: [],
+    value,
+  });
+
+  test("a string longer than FREE_TEXT_MAX_CHARS is read in part (limit); one at the bound is not", () => {
+    expect(unscannedReason([text("notes", "x".repeat(FREE_TEXT_MAX_CHARS))])).toBeNull();
+    expect(unscannedReason([text("notes", "x".repeat(FREE_TEXT_MAX_CHARS + 1))])).toBe("limit");
+    // The rules read the first FREE_TEXT_MAX_CHARS characters: a path past them is not seen.
+    const far = `${"x ".repeat(FREE_TEXT_MAX_CHARS)} /home/qmarlow/data`;
+    expect(kindsOf(text("notes", far))).toEqual([]);
+    expect(kindsOf(text("notes", "/home/qmarlow/data"))).toEqual(["hdf5-freetext/review"]);
+  });
+
+  test("an email address or a cued phone number in free text is review", () => {
+    expect(kindsOf(text("Notes", "write to someone@example.org"))).toEqual([
+      "hdf5-freetext/review",
+    ]);
+    expect(kindsOf(text("Notes", "tel +1 555 010 0199"))).toEqual(["hdf5-freetext/review"]);
+    expect(kindsOf(text("Notes", "trial 12 34 56 78"))).toEqual([]);
+    // An identifier field says it once, not twice.
+    expect(kindsOf(text("Email", "someone@example.org"))).toEqual(["hdf5-identifier-field/review"]);
   });
 });

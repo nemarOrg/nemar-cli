@@ -1,169 +1,210 @@
+#!/usr/bin/env bun
 /**
- * The reader merge gate's false-positive measurement (publication-queue plan, "Reader merge
- * gate"): run one registered reader over public files and count its findings per kind per 100
- * files. Dev-only; CI does not run it.
+ * False-positive measurement for a format reader (the owner's merge gate for every reader).
  *
- *   bun scripts/dev/reader-fp-measure.ts --reader snirf --list files.tsv [--per-dataset 10]
- *     [--concurrency 8] [--url https://s3.amazonaws.com/openneuro.org/] [--json out.json]
- *     [--any-extension]
+ *   bun scripts/dev/reader-fp-measure.ts --root <dir> [--reader <id>] [--listing <dir>] [--json <out>]
  *
- * `files.tsv` holds `<dataset>\t<size>\t<key>` lines, as `aws s3 ls --no-sign-request --recursive`
- * gives them after a reshape. Files are read by HTTP range requests through the registry's page
- * cache and limits, exactly as the screen reads them, so nothing is downloaded whole and nothing
- * is written to disk. Output names kinds, counts, dataset ids and byte counts; never a value.
+ * Runs the registered readers over every file under `--root` that a reader parses, through the
+ * screen's own `readRecordings` (the same limits, timers and companion pairing as the publication
+ * screen), and prints the findings per kind per 100 files, the read outcomes and the incomplete
+ * reasons. `--reader` keeps one reader's files. Each top-level directory under the root is one
+ * dataset (an OpenNeuro accession, say), so the companion pairing sees that dataset's paths.
+ * `--listing <dir>` names a directory of `<dataset>.txt` files, one root-relative path per line
+ * (the dataset's full file list), so companions that were not downloaded still pair; a dataset
+ * whose readers fell short anyway (a partial or failed read) is counted in `incompleteDatasets`.
+ *
+ * The per-100 denominator is the files the readers counted: a file a reader found to be another
+ * format (`not-applicable`) is counted as unscreened and is not in it.
+ *
+ * **It prints no value.** Only kinds, counts, and the dataset directories that produced a kind,
+ * so its output can go in a pull request. The files it reads are the caller's: download public
+ * headers into the OS temp directory, run this, and delete them.
  */
 
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import {
   type FormatReader,
   READERS,
-  type RangeSource,
-  ReadFailure,
   type ReaderId,
+  bufferSource,
   cachedSource,
+  limitsFor,
+  readerFor,
 } from "../../shared/identifier-readers";
+import { readRecordings } from "../../shared/identifier-report-builder";
 
-const { values: args } = parseArgs({
-  options: {
-    reader: { type: "string" },
-    list: { type: "string" },
-    "per-dataset": { type: "string", default: "10" },
-    concurrency: { type: "string", default: "8" },
-    url: { type: "string", default: "https://s3.amazonaws.com/openneuro.org/" },
-    json: { type: "string" },
-    // Read every listed file, whatever its extension (the generic HDF5 reader over SNIRF files).
-    "any-extension": { type: "boolean", default: false },
-  },
-});
-
-const found = READERS.find((r) => r.id === (args.reader as ReaderId));
-if (!found || !args.list) {
-  console.error("usage: --reader <id> --list <tsv>");
-  process.exit(2);
+interface Measured {
+  reader: ReaderId | "all";
+  files: number;
+  datasets: number;
+  read: number;
+  partial: number;
+  failed: number;
+  reasons: Record<string, number>;
+  /** Datasets whose recordings did not all read completely (the screen would say `unchecked`). */
+  incompleteDatasets: number;
+  /** Headers that name a companion other than their own base name (a note). */
+  companionNameMismatch: number;
+  /** Files a reader found not to be its format, by extension (counted as unscreened). */
+  notApplicable: Record<string, number>;
+  /** Files whose own read ended `partial`, by the reason the reader gave (companions aside). */
+  fileReasons: Record<string, number>;
+  failures: Record<string, number>;
+  /** Findings per kind, with the severity they carry. */
+  kinds: Record<string, { severity: string; findings: number; per100: number; datasets: string[] }>;
 }
-const reader: FormatReader = found;
-const list: string = args.list;
 
-/** An anonymous HTTP range source. A response that is not 206 is a failed read. */
-function httpSource(url: string, size: number): RangeSource {
-  return {
-    size,
-    async read(offset, length) {
-      const end = Math.min(size, offset + length) - 1;
-      if (end < offset) return new Uint8Array(0);
-      const res = await fetch(url, {
-        headers: { Range: `bytes=${offset}-${end}`, "User-Agent": "nemar-reader-fp-measure" },
-      });
-      if (res.status !== 206) throw new ReadFailure(`http-${res.status}`, { status: res.status });
-      return new Uint8Array(await res.arrayBuffer());
-    },
+/** A dataset's full path list from `<listing>/<dataset>.txt`, or null when there is none. */
+function listingOf(listing: string | undefined, dataset: string): string[] | null {
+  if (!listing) return null;
+  const file = join(listing, `${dataset}.txt`);
+  if (!existsSync(file)) return null;
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter((line) => line !== "");
+}
+
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) out.push(...walk(full));
+    else out.push(full);
+  }
+  return out;
+}
+
+/** Measure the readers over every file under `root`, one dataset per top-level directory. */
+export async function measure(
+  root: string,
+  readers: readonly FormatReader[] = READERS,
+  listing?: string,
+): Promise<Measured> {
+  const all = walk(root).map((full) => relative(root, full).split("\\").join("/"));
+  const byDataset = new Map<string, string[]>();
+  for (const path of all) {
+    const dataset = path.split("/")[0] as string;
+    byDataset.set(dataset, [...(byDataset.get(dataset) ?? []), path]);
+  }
+  const result: Measured = {
+    reader: readers.length === 1 ? (readers[0] as FormatReader).id : "all",
+    files: 0,
+    datasets: 0,
+    read: 0,
+    partial: 0,
+    failed: 0,
+    reasons: {},
+    incompleteDatasets: 0,
+    companionNameMismatch: 0,
+    notApplicable: {},
+    fileReasons: {},
+    failures: {},
+    kinds: {},
   };
-}
-
-const rows = (await Bun.file(list).text())
-  .trim()
-  .split("\n")
-  .map((l) => l.split("\t") as [string, string, string])
-  .filter(
-    ([, , key]) =>
-      args["any-extension"] || reader.extensions.some((e) => key.toLowerCase().endsWith(e)),
-  );
-// Up to N files per dataset, spread across its list, so one large dataset cannot dominate.
-const perDataset = Number(args["per-dataset"]);
-const byDataset = new Map<string, typeof rows>();
-for (const row of rows) byDataset.set(row[0], [...(byDataset.get(row[0]) ?? []), row]);
-const picked: typeof rows = [];
-for (const list of byDataset.values()) {
-  const step = Math.max(1, list.length / perDataset);
-  for (let i = 0; i < Math.min(perDataset, list.length); i++) {
-    picked.push(list[Math.floor(i * step)] as (typeof rows)[number]);
-  }
-}
-
-interface FileOutcome {
-  dataset: string;
-  outcome: "complete" | "partial" | "failed";
-  incomplete?: string;
-  failure?: string;
-  kinds: Record<string, { identifier: number; review: number }>;
-  reads: number;
-  bytes: number;
-  ms: number;
-}
-
-const outcomes: FileOutcome[] = [];
-let next = 0;
-async function worker() {
-  while (next < picked.length) {
-    const [dataset, size, key] = picked[next++] as (typeof rows)[number];
-    const src = cachedSource(httpSource(args.url + key, Number(size)), reader.limits);
-    const started = Date.now();
-    const o: FileOutcome = { dataset, outcome: "failed", kinds: {}, reads: 0, bytes: 0, ms: 0 };
-    try {
-      const result = await reader.scan(src, key.slice(dataset.length + 1), reader.limits);
-      o.outcome = result.coverage === "complete" && !src.limited ? "complete" : "partial";
-      if (o.outcome === "partial") o.incomplete = result.incomplete ?? "limit";
-      for (const f of result.findings) {
-        const k = o.kinds[f.kind] ?? { identifier: 0, review: 0 };
-        k[f.severity]++;
-        o.kinds[f.kind] = k;
-      }
-    } catch (e) {
-      o.failure = e instanceof ReadFailure ? e.cls : e instanceof Error ? e.name : "unknown";
+  for (const [dataset, paths] of byDataset) {
+    const entries = paths
+      .filter((path) => readerFor(path, readers) !== null)
+      .map((path) => ({ path, size: statSync(join(root, path)).size }));
+    if (entries.length === 0) continue;
+    result.datasets++;
+    const outcome = await readRecordings({
+      entries,
+      paths: listingOf(listing, dataset) ?? paths,
+      readers,
+      open: (entry) => bufferSource(new Uint8Array(readFileSync(join(root, entry.path)))),
+      concurrency: 8,
+      now: () => Date.now(),
+      datasetTimeMs: 20 * 60_000,
+      failureClass: (error) => (error instanceof Error ? error.name : "unknown"),
+    });
+    result.companionNameMismatch += outcome.companionNameMismatch;
+    for (const [ext, n] of Object.entries(outcome.notApplicable)) {
+      result.notApplicable[ext] = (result.notApplicable[ext] ?? 0) + n;
     }
-    o.reads = src.tally.reads;
-    o.bytes = src.tally.bytes;
-    o.ms = Date.now() - started;
-    outcomes.push(o);
+    if (outcome.reasons.size > 0) result.incompleteDatasets++;
+    for (const reader of readers) {
+      const t = outcome.tallies[reader.id];
+      result.files += t.files;
+      result.read += t.read;
+      result.partial += t.partial;
+      result.failed += t.failed;
+    }
+    // The reader's own verdict per file, which the dataset's reasons fold together.
+    for (const entry of entries) {
+      const reader = readerFor(entry.path, readers) as FormatReader;
+      const bytes = new Uint8Array(readFileSync(join(root, entry.path)));
+      try {
+        const limits = limitsFor(reader, entry.path);
+        const r = await reader.scan(cachedSource(bufferSource(bytes), limits), entry.path, limits);
+        if (r.coverage === "partial") {
+          const key = r.incomplete ?? "unstated";
+          result.fileReasons[key] = (result.fileReasons[key] ?? 0) + 1;
+        }
+      } catch (error) {
+        const key = error instanceof Error ? error.name : "unknown";
+        result.fileReasons[key] = (result.fileReasons[key] ?? 0) + 1;
+      }
+    }
+    for (const reason of outcome.reasons)
+      result.reasons[reason] = (result.reasons[reason] ?? 0) + 1;
+    for (const [key, n] of Object.entries(outcome.failures)) {
+      result.failures[key] = (result.failures[key] ?? 0) + n;
+    }
+    for (const f of outcome.findings) {
+      // A kind can carry two severities (a birth date to the day, or only a year).
+      const key = `${f.kind} (${f.severity})`;
+      const k = result.kinds[key] ?? {
+        severity: f.severity,
+        findings: 0,
+        per100: 0,
+        datasets: [],
+      };
+      k.findings++;
+      if (!k.datasets.includes(dataset)) k.datasets.push(dataset);
+      result.kinds[key] = k;
+    }
   }
+  for (const k of Object.values(result.kinds)) {
+    k.per100 = result.files === 0 ? 0 : Math.round((10_000 * k.findings) / result.files) / 100;
+  }
+  return result;
 }
-await Promise.all(Array.from({ length: Number(args.concurrency) }, worker));
 
-const files = outcomes.length;
-const per100 = (n: number) => ((n * 100) / files).toFixed(2);
-const kindTotals: Record<string, { identifier: number; review: number; files: number }> = {};
-const kindByDataset: Record<string, Record<string, number>> = {};
-for (const o of outcomes) {
-  for (const [kind, c] of Object.entries(o.kinds)) {
-    const t = kindTotals[kind] ?? { identifier: 0, review: 0, files: 0 };
-    kindTotals[kind] = t;
-    t.identifier += c.identifier;
-    t.review += c.review;
-    t.files++;
-    const d = kindByDataset[kind] ?? {};
-    d[o.dataset] = (d[o.dataset] ?? 0) + 1;
-    kindByDataset[kind] = d;
+if (import.meta.main) {
+  const { values } = parseArgs({
+    options: {
+      root: { type: "string" },
+      reader: { type: "string" },
+      listing: { type: "string" },
+      json: { type: "string" },
+    },
+  });
+  if (!values.root) {
+    console.error(
+      "usage: bun scripts/dev/reader-fp-measure.ts --root <dir> [--reader <id>] [--listing <dir>] [--json <out>]",
+    );
+    process.exit(2);
+  }
+  const readers = values.reader ? READERS.filter((r) => r.id === values.reader) : READERS;
+  if (readers.length === 0) {
+    console.error("no registered reader has that id");
+    process.exit(2);
+  }
+  const m = await measure(values.root, readers, values.listing);
+  if (values.json) await Bun.write(values.json, `${JSON.stringify(m, null, 2)}\n`);
+  console.log(`reader ${m.reader}: ${m.files} files in ${m.datasets} datasets`);
+  console.log(`read ${m.read}, partial ${m.partial}, failed ${m.failed}`);
+  console.log(`incomplete reasons (datasets): ${JSON.stringify(m.reasons)}`);
+  console.log(`datasets with an incomplete read: ${m.incompleteDatasets} of ${m.datasets}`);
+  console.log(`companion-name-mismatch notes: ${m.companionNameMismatch}`);
+  console.log(`not-applicable (counted unscreened): ${JSON.stringify(m.notApplicable)}`);
+  console.log(`partial files by the reader's own reason: ${JSON.stringify(m.fileReasons)}`);
+  console.log(`failures: ${JSON.stringify(m.failures)}`);
+  console.log("| kind (severity) | findings | per 100 files | datasets |");
+  console.log("|---|---|---|---|");
+  for (const [kind, k] of Object.entries(m.kinds).sort()) {
+    console.log(`| ${kind} | ${k.findings} | ${k.per100} | ${k.datasets.length} |`);
   }
 }
-const count = (pred: (o: FileOutcome) => boolean) => outcomes.filter(pred).length;
-const quantile = (xs: number[], q: number) =>
-  xs.length === 0 ? 0 : ([...xs].sort((a, b) => a - b)[Math.floor(q * (xs.length - 1))] as number);
-const bytes = outcomes.filter((o) => o.outcome === "complete").map((o) => o.bytes);
-const reads = outcomes.filter((o) => o.outcome === "complete").map((o) => o.reads);
-
-console.log(
-  `reader ${reader.id} v${reader.version}: ${files} files from ${byDataset.size} datasets`,
-);
-console.log(
-  `complete ${count((o) => o.outcome === "complete")}, partial ${count((o) => o.outcome === "partial")}, failed ${count((o) => o.outcome === "failed")}`,
-);
-const tally = (key: "incomplete" | "failure") => {
-  const m: Record<string, number> = {};
-  for (const o of outcomes) {
-    const v = o[key];
-    if (v) m[v] = (m[v] ?? 0) + 1;
-  }
-  return m;
-};
-console.log("partial by reason:", JSON.stringify(tally("incomplete")));
-console.log("failed by class:", JSON.stringify(tally("failure")));
-console.log(
-  `complete files, bytes fetched p50/p90/max: ${quantile(bytes, 0.5)}/${quantile(bytes, 0.9)}/${Math.max(0, ...bytes)}; fetches p50/p90/max: ${quantile(reads, 0.5)}/${quantile(reads, 0.9)}/${Math.max(0, ...reads)}`,
-);
-console.log("findings per 100 files (identifier / review), files with the kind, by dataset:");
-for (const [kind, t] of Object.entries(kindTotals).sort()) {
-  console.log(
-    `  ${kind}: ${per100(t.identifier)} / ${per100(t.review)}; files ${t.files}; ${JSON.stringify(kindByDataset[kind])}`,
-  );
-}
-if (args.json) await Bun.write(args.json, JSON.stringify(outcomes, null, 1));

@@ -505,8 +505,10 @@ describe("dateFindingCount and dateWarningLines", () => {
     }
     expect([...DATE_KINDS].sort()).toEqual([
       "acq-time-dated",
+      "brainvision-segment-date",
       "edf-recording-startdate",
       "edf-startdate",
+      "nirx-header-date",
       "snirf-measurement-date",
     ]);
     // Text in a date slot that is not a date is a different kind, and does not warn.
