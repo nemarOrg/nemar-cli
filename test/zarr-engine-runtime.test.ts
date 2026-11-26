@@ -26,7 +26,7 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020";
@@ -854,6 +854,48 @@ describe("the disk cache across engine restarts (G4)", () => {
     expect(stderr.split("\n").filter((l) => l.includes("disk cache")).length).toBe(1);
   });
 
+  test("a cached chunk that is well framed but does not decode is dropped, so the next read refetches", async () => {
+    const first = await firstRead();
+    // Damage the body of one cached chunk read (not a footer, not JSON) and keep its framing, so
+    // the disk cache serves it as a valid entry and only the decoder can tell. (A read stops at
+    // the first chunk that fails, so each damaged entry costs one failed read before it is gone.)
+    let damaged = 0;
+    for (const sub of readdirSync(cacheDir).filter((n) => /^[0-9a-f]{2}$/.test(n))) {
+      for (const name of readdirSync(join(cacheDir, sub))) {
+        const file = join(cacheDir, sub, name);
+        const data = new Uint8Array(readFileSync(file));
+        const keyLen = new DataView(data.buffer).getUint32(4, true);
+        const key = new TextDecoder().decode(data.subarray(12, 12 + keyLen));
+        if (damaged > 0 || key.startsWith("json\n") || !/\nbytes=\d+-\d+$/.test(key)) continue;
+        data.fill(0xff, 12 + keyLen, Math.min(data.length, 12 + keyLen + 32));
+        writeFileSync(file, data);
+        damaged++;
+      }
+    }
+    expect(damaged).toBe(1);
+    await withEngine(async (e) => {
+      const h = await e.ready();
+      rangeRequests = [];
+      const bad = await e.read(h, args);
+      expect(code(bad), JSON.stringify(bad.header)).toBe("decode_error");
+      // Served from disk: the host was never asked for a chunk.
+      expect(rangeRequests.filter((q) => !/^bytes=-\d+$/.test(q.range))).toEqual([]);
+      const again = await e.read(h, args);
+      expect(again.header.type, JSON.stringify(again.header)).toBe("window");
+      expect(again.payload).toEqual(first.payload);
+      // What the failed window read was dropped and went back to the host.
+      expect(rangeRequests.filter((q) => !/^bytes=-\d+$/.test(q.range)).length).toBeGreaterThan(0);
+    }, cached());
+    // The refetched bytes replaced the damaged entries on disk.
+    await withEngine(async (e) => {
+      const h = await e.ready();
+      rangeRequests = [];
+      const third = await e.read(h, args);
+      expect(third.payload).toEqual(first.payload);
+      expect(rangeRequests).toEqual([]);
+    }, cached());
+  });
+
   test("a corrupted cache file is a miss: the engine reads from the host and heals it", async () => {
     const first = await firstRead();
     // Corrupt every entry.
@@ -969,8 +1011,9 @@ describe("host failures never produce a window", () => {
     { mode: "short206", code: "upstream_error", retry: true },
     { mode: "long206", code: "upstream_error", retry: true },
     { mode: "streamed-long206", code: "upstream_error", retry: true },
-    // Corrupt bytes arrive as a perfectly good 206, so they are cached; no retry claim.
-    { mode: "corrupt-chunk", code: "decode_error", retry: false },
+    // Corrupt bytes arrive as a perfectly good 206, so they are cached; the window that could
+    // not decode them drops what it read, so the read succeeds once the host recovers.
+    { mode: "corrupt-chunk", code: "decode_error", retry: true },
   ];
   for (const c of cases) {
     test(`${c.mode} -> ${c.code}`, async () => {

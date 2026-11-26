@@ -75,7 +75,7 @@ const ERROR_HINTS: Record<string, { hint: string; answered: boolean }> = {
     answered: false,
   },
   decode_error: {
-    hint: "The store's bytes could not be decoded. Run again with --debug and attach the log to an issue.",
+    hint: "The store's bytes could not be decoded. The engine dropped the cached copies it read, so try again; if it fails again, run `nemar engine cache clear`, then run again with --debug and attach the log to an issue.",
     answered: false,
   },
   timeout: {

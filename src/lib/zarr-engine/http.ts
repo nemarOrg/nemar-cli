@@ -451,6 +451,15 @@ export class RangeCache {
     }
   }
 
+  /** Drop one entry (a window that could not decode what it read, see `forget` in source.ts). */
+  delete(url: string, range: string, scope = ""): void {
+    const k = this.key(url, range, scope);
+    const old = this.entries.get(k);
+    if (old === undefined) return;
+    this.entries.delete(k);
+    this.bytes -= old.length;
+  }
+
   stats(): RangeCacheStats {
     return { hits: this.hits, misses: this.misses, entries: this.entries.size, bytes: this.bytes };
   }
@@ -522,6 +531,11 @@ export class MemoryJsonCache implements JsonCache {
       if (oldest.done) break;
       this.entries.delete(oldest.value);
     }
+  }
+
+  /** Drop one entry (a window that could not decode what it read, see `forget` in source.ts). */
+  delete(key: CacheKey): void {
+    this.entries.delete(this.key(key));
   }
 
   get size(): number {

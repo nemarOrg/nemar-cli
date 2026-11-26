@@ -37,24 +37,29 @@ export interface Standin {
   setUpdatedUtc(value: string | null): void;
   /** Serve a 503 for every request to the shards. */
   setShardsDown(down: boolean): void;
+  /** Serve chunk ranges (not footers) with their first 32 bytes overwritten, so they do not decode. */
+  setChunksCorrupt(corrupt: boolean): void;
   stop(): void;
   /** The environment a spawned `nemar` needs: base, data plane, isolated cache and config. */
   env(dirs: { config: string; cache: string }): Record<string, string>;
 }
 
-function rangeResponse(req: Request, body: Uint8Array): Response {
+function rangeResponse(req: Request, body: Uint8Array, corruptChunks = false): Response {
   const range = req.headers.get("range") ?? "";
   const m = /^bytes=(?:(\d+)-(\d+)|-(\d+))$/.exec(range);
   if (!m) return new Response(body, { status: 200 });
   const isFooter = m[3] !== undefined;
   const start = isFooter ? Math.max(0, body.length - Number(m[3])) : Number(m[1]);
   const end = isFooter ? body.length - 1 : Math.min(Number(m[2]), body.length - 1);
-  return new Response(body.slice(start, end + 1), { status: 206 });
+  const slice = body.slice(start, end + 1);
+  if (corruptChunks && !isFooter) slice.fill(0xff, 0, Math.min(slice.length, 32));
+  return new Response(slice, { status: 206 });
 }
 
 export function startStandin(): Standin {
   let updatedUtc: string | null = null;
   let shardsDown = false;
+  let chunksCorrupt = false;
   const requests: string[] = [];
   const ranges: string[] = [];
   const server = Bun.serve({
@@ -81,7 +86,7 @@ export function startStandin(): Standin {
       const shard = `/${ID}/zarr/${ZARR}/eeg_250hz/0/c/0/`;
       if (path === `${shard}0` || path === `${shard}1`) {
         if (shardsDown) return new Response("down", { status: 503 });
-        return rangeResponse(req, path.endsWith("0") ? shard0 : shard1);
+        return rangeResponse(req, path.endsWith("0") ? shard0 : shard1, chunksCorrupt);
       }
       if (path === `/data/${ID}`) {
         return doc({ latest: "1.0.0", versions: [{ version: "1.0.0" }] });
@@ -102,6 +107,9 @@ export function startStandin(): Standin {
     },
     setShardsDown: (d) => {
       shardsDown = d;
+    },
+    setChunksCorrupt: (c) => {
+      chunksCorrupt = c;
     },
     stop: () => server.stop(true),
     env: (dirs) => ({

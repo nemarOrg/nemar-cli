@@ -42,7 +42,13 @@ import {
 import { loadLevel0ArrayMetadata } from "../../../shared/zarr/array-metadata.js";
 import type { CacheKey, Fetcher, JsonCache } from "../../../shared/zarr/interfaces.js";
 import { nInnerForShard } from "../../../shared/zarr/sharding.js";
-import { type DiskCache, TieredJsonCache, withDiskRangeCache } from "./disk-cache.js";
+import {
+  type DiskCache,
+  TieredJsonCache,
+  diskJsonKey,
+  diskRangeKey,
+  withDiskRangeCache,
+} from "./disk-cache.js";
 import {
   type BaseFetch,
   DEFAULT_RANGE_CACHE_BYTES,
@@ -141,6 +147,13 @@ export interface StoreRef {
   convertedAt: string | null;
 }
 
+/** What one window read through a store's caches: every `Range` it asked for and every JSON
+ *  cache entry that answered it. */
+export interface WindowReads {
+  ranges: Array<{ url: string; range: string }>;
+  json: CacheKey[];
+}
+
 /** Everything the engine needs from a place that holds datasets. */
 export interface DataSource {
   readonly kind: SourceKind;
@@ -152,6 +165,11 @@ export interface DataSource {
   /** The footer and array-metadata cache for one store (memory, then disk when there is one),
    *  keyed by the store's identity. */
   jsonCacheFor(store: StoreRef): JsonCache;
+  /** Drop every cached entry (memory and disk) a window read, after the window could not decode
+   *  what it read: a corrupt entry on disk would otherwise fail every later read until the cache
+   *  was cleared by hand. The next read fetches those bytes again. Optional: a source without
+   *  caches of its own has nothing to drop. */
+  forget?(store: StoreRef, reads: WindowReads): void;
   /** The dataset's Zarr index, parsed; the {@link MAX_CACHED_DATASETS} most recent are kept. */
   readIndex(datasetId: string): Promise<IndexOutcome>;
   /** The dataset's latest published `records.json`. */
@@ -242,6 +260,18 @@ export function publicSource(options: PublicSourceOptions = {}): DataSource {
       return disk
         ? new TieredJsonCache(jsonCache, disk, storeIdentity("public", store))
         : jsonCache;
+    },
+
+    forget(store, reads) {
+      const scope = storeIdentity("public", store);
+      for (const { url, range } of reads.ranges) {
+        rangeCache.delete(url, range, scope);
+        disk?.delete(diskRangeKey(scope, url, range));
+      }
+      for (const key of reads.json) {
+        jsonCache.delete(key);
+        disk?.delete(diskJsonKey(scope, key));
+      }
     },
 
     async readIndex(datasetId) {

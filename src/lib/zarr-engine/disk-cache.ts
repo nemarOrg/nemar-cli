@@ -285,6 +285,12 @@ export class DiskCache {
     );
   }
 
+  /** Delete the entry for `key`, when there is one. Best effort, like every disk operation. */
+  delete(key: string): void {
+    if (!this.enabled || this.rootRefused()) return;
+    this.removeName(this.paths(key).file);
+  }
+
   /** Store `body` under `key`. Best effort: a failure is logged once and otherwise ignored. */
   put(key: string, body: Uint8Array): void {
     if (!this.enabled || this.rootRefused()) return;
@@ -593,7 +599,7 @@ export function withDiskRangeCache(fetcher: Fetcher, disk: DiskCache, scope: str
     const range = init?.headers?.Range;
     if (range === undefined || !disk.enabled) return fetcher(url, init);
     const want = expectedRangeLength(range);
-    const key = `${scope}\n${url}\n${range}`;
+    const key = diskRangeKey(scope, url, range);
     const hit = disk.get(key);
     if (hit && hit.length === want) return new Response(hit, { status: 206 });
     const response = await fetcher(url, init);
@@ -602,6 +608,16 @@ export function withDiskRangeCache(fetcher: Fetcher, disk: DiskCache, scope: str
     if (body.length === want) disk.put(key, body);
     return new Response(body, { status: 206, headers: response.headers });
   };
+}
+
+/** The disk key of a `Range` body: the store identity, the URL and the Range. */
+export function diskRangeKey(scope: string, url: string, range: string): string {
+  return `${scope}\n${url}\n${range}`;
+}
+
+/** The disk key of a JSON cache entry under the store identity `scope`. */
+export function diskJsonKey(scope: string, key: CacheKey): string {
+  return `json\n${scope}\n${JSON.stringify(key)}`;
 }
 
 /** A `JsonCache` with memory in front of `disk`: a hit on disk is promoted to memory. Keys
@@ -614,7 +630,7 @@ export class TieredJsonCache implements JsonCache {
   ) {}
 
   private diskKey(key: CacheKey): string {
-    return `json\n${this.scope}\n${JSON.stringify(key)}`;
+    return diskJsonKey(this.scope, key);
   }
 
   async get(key: CacheKey): Promise<unknown | undefined> {

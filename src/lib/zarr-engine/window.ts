@@ -28,11 +28,12 @@ import {
   type RecipeRequest,
 } from "../../../shared/contract/zarr-engine-protocol.js";
 import { assembleChannelMajor } from "../../../shared/zarr/assemble.js";
+import type { CacheKey, Fetcher, JsonCache } from "../../../shared/zarr/interfaces.js";
 import { readLevel0Window } from "../../../shared/zarr/read.js";
 import { footerByteLength } from "../../../shared/zarr/sharding.js";
 import { secondsToSampleWindow } from "../../../shared/zarr/window-samples.js";
 import { withRangeCeiling } from "./http.js";
-import type { Binding, DataSource, SourceFailure, SourceResult } from "./source.js";
+import type { Binding, DataSource, SourceFailure, SourceResult, WindowReads } from "./source.js";
 
 /** Bytes per digital (int16) sample in a store, for the decode-work check. */
 const STORE_SAMPLE_BYTES = 2;
@@ -79,6 +80,27 @@ export function windowByteBudget(geometry: {
     Math.floor(startSample / shardSamples) +
     1;
   return chunks * chunkBytes + shards * footerByteLength(nInner);
+}
+
+/** `fetcher`, noting every `Range` it is asked for in `reads`. */
+function recordingRanges(fetcher: Fetcher, reads: WindowReads): Fetcher {
+  return (url, init) => {
+    const range = init?.headers?.Range;
+    if (range !== undefined) reads.ranges.push({ url, range });
+    return fetcher(url, init);
+  };
+}
+
+/** `cache`, noting in `reads` every key it answered with a value. */
+function recordingHits(cache: JsonCache, reads: WindowReads): JsonCache {
+  return {
+    async get(key: CacheKey) {
+      const value = await cache.get(key);
+      if (value !== undefined) reads.json.push(key);
+      return value;
+    },
+    put: (key, value) => cache.put(key, value),
+  };
 }
 
 export interface WindowPlan {
@@ -187,9 +209,10 @@ export async function readWindow(
     startSample,
     nSamples,
   });
+  const reads: WindowReads = { ranges: [], json: [] };
   const read = await readLevel0Window({
-    fetcher: withRangeCeiling(binding.fetcher, ceiling, budget),
-    cache: binding.jsonCache,
+    fetcher: recordingRanges(withRangeCeiling(binding.fetcher, ceiling, budget), reads),
+    cache: recordingHits(binding.jsonCache, reads),
     key: binding.cacheKey,
     dataBase: binding.dataBase,
     zarr: binding.store.zarr,
@@ -203,6 +226,12 @@ export async function readWindow(
     endSampleExclusive: startSample + nSamples,
   });
   if (!read.ok) {
+    // Bytes that do not decode may have come from a cache (a disk entry damaged after it was
+    // written, or footer offsets cached from an earlier read): drop what this window read, so
+    // the next read fetches it again instead of failing the same way until `cache clear`.
+    if (read.cause === "decode") {
+      source.forget?.({ ...binding.cacheKey, dataBase: binding.dataBase }, reads);
+    }
     return failure(
       read.cause === "decode" ? "decode_error" : "upstream_error",
       `reading the ${read.stage} failed: ${read.detail}`,

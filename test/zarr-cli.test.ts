@@ -47,6 +47,7 @@ beforeEach(() => {
   standin.ranges.length = 0;
   standin.setUpdatedUtc(null);
   standin.setShardsDown(false);
+  standin.setChunksCorrupt(false);
 });
 afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -304,6 +305,14 @@ describe("errors are exit 1 with a hint", () => {
     const r = await read(window(0, 1));
     expect(r.exitCode).toBe(1);
     expect(r.stdout + r.stderr).toContain("data host failed");
+  });
+
+  test("decode_error: chunks that do not decode name the cache clear command", async () => {
+    standin.setChunksCorrupt(true);
+    const r = await read(window(0, 1));
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout + r.stderr).toContain("could not be decoded");
+    expect(r.stdout + r.stderr).toContain("nemar engine cache clear");
   });
 
   test("a bad engine setting is a configuration error with a hint, before any engine starts", async () => {
