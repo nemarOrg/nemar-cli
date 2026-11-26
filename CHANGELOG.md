@@ -15,6 +15,108 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Added
+
+- **Live progress of NEMAR's pipeline runs (ADR 0134, epic #2324 phase 2).**
+  A pipeline job reports a closed `nemar.progress.v1` object (counts per checkpoint and up to ten recent failures) at most once a minute: a runner in its heartbeat, a job on the supercomputer on the new job-token route `POST /compute/jobs/:id/progress`.
+  A report sooner than 50 seconds after the last is refused `report_too_soon` (429) and stores nothing; a heartbeat's progress never costs its lease.
+  Migration 0150 adds `compute_pipeline_progress_runs`, `compute_pipeline_progress` and `compute_pipeline_documents`.
+  When a run ends, the stamp sync reconciles its counts from the recordings table it uploaded (a disagreement with the live counts is recorded), resolves `stored` from the derivative store with the checkpoint order the run recorded, and writes the final dataset-level neuroschema `processing` and `signalJourney` entries, which `/<id>/metadata.json` now serves for public datasets.
+  Only final entries are stored: a reporting run's `in_progress` link is worked out when the document is read, so it never outlives its run or replaces the last completed link.
+  A `tuple_mismatch` hold stamp, which shares its run's job, is never reconciled.
+  `stalled` (no report for three minutes while `submitted`, `queued` or `running`, or `unreported`) is worked out on read; no schedule is added and no switch.
+  The pipeline dispatcher's log line reports reconciliation that could not decide or threw.
+- **The quality plugin manifest contract `nemar.plugin-manifest.v1`** and the recipe registry's step-to-checkpoint maps.
+- **The standalone launcher's contracts (ADR 0134 decision 8, epic #2324 phase 6):** the local launch specification `nemar.local-launch.v1` (the launch specification's members for what runs, plus a format word and dataset names; no job id, token, API address or limits), the recipe progress file `nemar.recipe-progress.v1` a job writes for the launcher to read, and the results report `nemar.results-report.v1` the launcher writes on a person's own machine.
+  Each is a closed zod schema with a JSON Schema that nemar-process copies byte for byte; the recipe progress schema is held to the verdicts of nemar-process's own reader on files its recipe layer wrote.
+- **The admin pipeline grid (ADR 0134 decision 5, epic #2324 phase 4a).**
+  `GET /admin/compute/pipeline/grid` shows one recipe's runs over the eligible datasets, a row per dataset and a column per checkpoint, each cell `passed/total` with a mark, filtered by status, recipe version, executor, runner or dataset and paged by dataset id, with the counts over the whole filtered set.
+  `GET /admin/compute/pipeline/coverage` gives each recipe's coverage (a succeeded run at the dataset's newest version with the registry's current recipe version; complete; at any recipe version) and a daily failure trend from the stamps (30 days by default, 90 at most).
+  `GET /admin/compute/pipeline/runs/:stamp` lists one run's failures per checkpoint (at most ten each, from D1; `stamp_not_found` for none).
+  All three are admin-only and read only: the grid syncs the open stamps first only with `sync=1`.
+  `nemar admin compute pipeline status` now shows the grid (it syncs first unless `--no-sync`), and `nemar admin compute pipeline failures <stamp-id>` the drill-down.
+  Follow-ups: a coverage history in the observability snapshot (#2333) and paging the full recordings table (#2334).
+- **`nemar-ica` declares its quality plugin's checkpoint (ADR 0134 decisions 6 and 7, epic #2324 phase 5 N1).**
+  Its map gains `quality` (`nemar-quality`) after `iclabel`, so the step `record` now counts at `quality`; `RECIPE_PLUGIN_STEPS` names the plugin steps, and only `nemar-ica` runs plugins. Figure plugins wait for the live-rendering design.
+  A plugin that fails is absorbed and named in the recordings table's existing `skipped_steps` column (`step:reason`, comma-joined): a succeeded recording that skipped a plugin counts `skipped` at that plugin's checkpoint and passed elsewhere, and is listed among that checkpoint's failures; a table without the column reads as before, and a malformed plugin pair is refused `bad_skipped_steps`.
+  The progress vectors are regenerated, and `shared/contract/plugin-manifest-vectors.json` gives the manifest verdicts (schema and rule word) for nemar-process to replay.
+  The recipe drift test reads nemar-process's `PLUGINS` literal once a `steps.py` declares it, leaves the plugin steps out of the comparison until then, and fails on a `PLUGINS` assignment it cannot read.
+- **A pipeline job is held to its recipe's own result limit (owner decision of 2026-11-23).**
+  A registry entry may declare `resultLimits.maxFiles` (never above 100,000); the outputs route, its body cap and the launcher-document bound let it raise the limit (never lower it) for a NEMAR pipeline job a stamp names, and every other job keeps the owner's policy.
+  `nemar-floor` and `nemar-ica` declare 25,000: about 6 and 17 files per recording, so the policy's 5,000 stopped at about 830 and 294 recordings.
+  The launcher still caps its outputs request at 1 MiB (about 8,000 entries), so raising its cap is a nemar-process change before a job lists more.
+- **Dataset quality summaries in D1 and `metadata.json` (ADR 0137 decision 8, epic #2324 phase B1).**
+  When a succeeded run is reconciled, the backend reads its dataset `dataQuality` document (`product/desc-<label>_dataquality.json`, at most 65,536 bytes) and keeps the recipe's entry for the run's stamp (migration 0151, `compute_quality_documents`) once it has checked it.
+  The checks: UTF-8 I-JSON (no duplicate member, lone surrogate, noncharacter or nesting past 64); the zod mirror of neuroschema 0.6.0 (`level` and `recipes` only, every integer at most 2^53 - 1); the writer's rules run again (counts that add up, the listed and left-out recordings, each histogram's `n`, the `observed_range`); the stamp's recipe, recipe version, dataset version and input; the digest of the dataset record the run wrote; the recordings table's counts; metric names that are the recipe's own or a plugin's it runs; and an entry, written again, of at most 65,536 characters (`entry_too_large`, since a number such as `1000e17` prints longer than it was written).
+  The counts rule (owner ruling of 2026-11-25): `passed` is the recordings that succeeded, so a recording whose plugin was skipped still counts as passed, as nemar-process writes it; neuroschema's `processing-extensions.md`, which ties `passed` to the last checkpoint's, is to change in 0.6.1.
+  A refused document is logged with a fixed word (`quality_not_written reason=...`) and never holds the run back; the dataset a summary belongs to is the stamp's, never the document's.
+  `/<id>/metadata.json` serves `extensions.dataQuality` (`level: dataset`) with the summary of each recipe's current public derivative only: stored, `catalog` or `published`, not a superseded `catalog` row (a `published` row stays public, superseded or not) and not past its date, the newest by `stored_at`.
+  A `canary` run shows nothing until an administrator promotes it, a superseded `catalog` run is replaced by the one that superseded it, and a concealed deposit or a withdrawn dataset gets none.
+  `/<id>/page-bundle.json` now carries `processing`, `signalJourney` and `dataQuality` by the same read (#2331); when that read fails, the bundle keeps its metadata without them, says so in `pipeline_degraded`, and is not `complete` (so `no-store`).
+  `shared/contract/view-digest.ts` holds the I-JSON reader and `nemar.view-digest.v1` (RFC 8785), replaying neuroschema's nine cases and fourteen refusals; `shared/contract/data-quality.ts` holds `nemar.record-checks.v1`.
+  The projection of a recording's entry (served by phase B2) takes the recipe's metrics from `extensions.nemar.metrics` and each plugin's from its step's `qualityMetrics`, and admits nemar-process's own `views_skipped` words.
+- **The public quality view route (ADR 0137 decisions 6 and 7, epic #2324 phase B2).**
+  `GET /<id>/quality/v1/<recipe>/record/<recording>` serves a recording's `dataQuality` document (`level: record`) from the recipe's current public derivative, with the derivative's key and dataset version and each view's `nemar.view-digest.v1`; `GET /<id>/quality/v1/<recipe>/file/<key>/<sha256>/<recording>` serves one file a view of that recording declares.
+  A dataset that is not active, public, first published, unconcealed (ADR 0065), unwithdrawn and untombstoned answers as an unknown one (`quality_not_found`), checked in D1 before any cache; a public derivative that expired answers `views_expired` (410).
+  The record (at most 512 KiB) is checked whole before anything of it is served: the vendored neuroschema schema over every view, an integer literal past 2^53 - 1 anywhere in it (`integer_unsafe`), each plugin view's plugin against the `quality` plugins the derivative row recorded for its recipe version when it was keyed (so a derivative of a version the registry has moved past is still served; a row without them serves nothing), recording scope, and the record's own dataset and recording.
+  A file is served only when a validated view declares its digest, at its declared size, hashed again (`view_data_corrupt` otherwise, 502); an unlisted format is an `application/octet-stream` attachment, and every file carries `nosniff`.
+  Public answers carry `Cache-Control: public, max-age=300`, `Cache-Tag: nemar-dq-<id>` and a strong `ETag` (the SHA-256 of the body), and sit in the edge cache under the dataset's epoch (migration 0152, `dataset_quality_epochs`, advanced by a trigger on every change of a gate column; the table has no CHECK, so it never refuses a gate-column update); no refusal is cached.
+  An unpublish, a withdrawal or a concealment purges the tag `nemar-dq-<id>` from Cloudflare's cache after its D1 write, best effort (`purgeQualityCache`, a failure is logged and never blocks the write); a copy already in a browser or a shared cache outside Cloudflare may still be served for up to 300 seconds.
+  The dataset summary on `metadata.json` and the page bundle now uses the route's own gate (`QUALITY_DATASET_GATE_SQL`), so a tombstoned or never-published dataset shows no `dataQuality` either.
+  The Worker checks JSON Schema with `shared/contract/schema-check.ts`, an interpreter of the vendored schemas held to python-jsonschema's verdicts and to Ajv.
+  A page on a NEMAR web origin can read the route's `ETag`: its answers add `ETag` to `Access-Control-Expose-Headers`, on this route only, so the website can check the body's digest before it parses it (nemarOrg/website#596); the shared CORS list, the origin and credentials policy and the admin quality views are unchanged.
+- **nemar-ica's archive runs are keyed by the serving index they were given (ADR 0140, owner ruling of 2026-11-25).**
+  A recipe that reads the serving index on the archive input has a version 2 derivative key, `nemar.derivative-key.v2`, whose ninth line is `serving_index` (`none`, or the SHA-256 of the index file), so runs with and without an index never share a key; every other key stays version 1, byte for byte (migration 0153 keeps the field on the row, with the recipe version's `quality` plugins).
+  Until the dispatcher stages the index, a run handed `--serving-index` is not keyed (`serving_index_unattested`).
+- **The dispatcher stages the serving index for nemar-ica's archive runs, and the launch specification is version 2 (ADR 0141, epic #2324 phase B2b).**
+  `nemar.launch-spec.v2` is version 1 and one optional member, `serving_index: {sha256, size}`; every version 1 document keeps its bytes, and the member is written only for a recipe that keys the serving index on the archive input, which runs on Tapis only.
+  At dispatch the Worker reads `<id>/zarr/index.json` and the tag's commit, and stages the index only when its `source_commit` is exactly that commit (never under the Zarr input's `metadata_only` allowance); the bytes are kept under `serving-index/<sha256>.json` in the records bucket before the job exists, and the job's specification records the digest and size, or a fixed word for why none was staged.
+  When GitHub or the index cannot be read, or the copy cannot be kept, the run is deferred (a `refused` stamp, and the dispatch answers `serving_index_deferred`, 503, with the fault's word and `runs_without_index_after`) and tried again on later passes, for up to 24 hours from its first deferral, after which it runs without the index; an absent index, one of another commit, or one the recipe cannot use (`index_unusable`: not strict JSON, or not the shape the recipe reads) runs it at once without one; a 403 from S3 (the Worker's credentials lack `s3:ListBucket`, so a missing object answers 403) is an absent index unless the dataset row says the copy is `ready` with stores.
+  A staged run is handed `--serving-index /data/serving-index/index.json --source-commit <tag commit>`; the launcher fetches the copy with its job token from `POST /compute/jobs/<id>/serving-index` (a ten-minute presigned GET of the copy the recorded specification names), checks it, and binds it read-only (`dataset_fetch_failed`, `serving_index_mismatch` otherwise).
+  The derivative key reads the recorded digest (`sha256:<hex>`), so `serving_index_unattested` now applies only to a run whose arguments do not match what was recorded.
+  nemar-ica is still a placeholder that no path dispatches.
+- **A run's quality, for administrators (ADR 0137 decision 7, epic #2324 phase B3).**
+  `GET /admin/compute/pipeline/runs/:stamp/quality` says where the run's derivative stands in one word (`run_in_progress` for a dispatched stamp, `run_not_succeeded`, `not_keyed` with the store's skip word, `awaiting_derivative`, `failed`, `expired`, `copying`, `canary`, `current`, `superseded` or `not_current`), with its retention, `stored_at` and `expires_at`, and `dataset_public` (the quality route's gate now: a `current` row is what public pages read only while it is true); a canary past its date is `expired` before the sync marks it, and no state is a 500.
+  When the derivative's files stand, it lists the recordings that succeeded, 100 a page in path order (`after` continues; a cursor that is not a recording path is `invalid_query`), from the recordings table stored under the derivative's key: read once, at most 32 MiB, and kept in the edge cache under that key, so a later page reads no store. Every answer is `no-store`.
+  `nemar admin compute pipeline quality <stamp-id> [--after <path>]` prints it.
+- **A run's quality record and files, for administrators (ADR 0137 decision 7, epic #2324 phase B3b).**
+  `GET /admin/compute/pipeline/runs/:stamp/quality/record/<recording>` and `.../quality/file/<sha256>/<recording>` answer what the public quality route answers, of the run's own derivative: canary, catalog or published, superseded included, while it is `stored` and not past `expires_at`.
+  Otherwise the answer is one word with no store read: `stamp_not_found`, `derivative_not_keyed`, `derivative_copying`, `derivative_failed` or `views_expired`.
+  The record and file checks are the public route's own code (`services/quality-serve.ts`): the whole schema, recording scope, the record's own dataset and recording, the row's `quality_plugins`, declared files only, the size bounds and a re-hash.
+  There is no dataset gate, so the mount never reads or writes the edge cache; every answer the handler gives is `no-store`, with no `Cache-Tag` and no `ETag` (a refusal from the router's middleware or the rate limiter is the website proxy's to make `no-store`).
+  The path must be `record/<recording>` or `file/<64 hex>/<recording>`, with no `.` or `..` segment, no encoded `/`, `\` or `.`, a decoded recording that passes the one shared recording rule (`isQualityRecordingPath`, which the public route and the run-quality listing now use too), and no `?` anywhere, and the method must be GET.
+  The website's proxy builds its upstream path with `qualityAdminForwardPath(stamp, rest)` in `shared/contract/quality-route.ts`, whose docblock lists the proxy's obligations; every log line of the mount leads with `stamp=<id>`.
+
+### Changed
+
+- **`nemar admin compute pipeline status` is the grid; the stamp list it printed is now `nemar admin compute pipeline stamps`**, with the same options.
+  The route it read, `GET /admin/compute/pipeline/status`, is unchanged, so a released CLI keeps working.
+- **neuroschema 0.6.0 is vendored with a record root and the view files** (`NEUROSCHEMA_VERSION` 0.6.0, a minor bump over the deployed 0.4.1; ADR 0134 and 0137, epic #2324).
+  The epic's earlier 0.5.0 step was never deployed. The live `schema_version` checks also accept 0.4.x, not 0.5.x, until the backend that serves 0.6.0 is deployed.
+  neuroschema's view registry, parity vectors, montages (with their provenance) and example product are copied byte for byte into `shared/contract/neuroschema/views/`, each held to `views/SHA256SUMS.json` by the contract tests.
+  Two rules narrow to 0.6.0's: a live progress failure's path and a signalJourney link's `location` follow `relativeLocation` (no `.` segment, no empty segment, no leading or trailing space, none of `%`, `?` or `#`): a progress report that carries such a path is refused, the failure lists built from a recordings table leave its row out, and such a link is not written; and a `data_papers` DOI must be printable ASCII (`^10\.[0-9]{4,9}/[!-~]+$`): the sync refuses a list that holds any other DOI, and `metadata.json` serves no `data_papers` for a stored list that holds one.
+  `compute-progress.schema.json` and `compute-results-report.schema.json` change with the path rule; nemar-process re-copies them.
+  Until nemar-process adopts the narrowed rule (its phase P2), a recording path with `%`, `?`, `#` or a leading or trailing space passes nemar-process's filter but is refused by the backend.
+- **`nemar-floor` and `nemar-ica` move to `1.0.0-b2` (epic #2324, nemarOrg/nemar-process#81).**
+  nemar-process `v0.1.1`, a source release, already carries `1.0.0-b1` with the old decisions; `1.0.0-b2` names full ICA preprocessing, typed channel rows, the ASR burst fraction and the AMICA settings.
+  The engine and the checkpoint maps are unchanged and the progress vectors are regenerated; the deploy order and the effects on existing rows are the same as for `1.0.0-b1` above.
+- **Plugins write views, not figures; plugin metrics are `<plugin>:<name>` (ADR 0137, epic #2324 N1b).**
+  `nemar.plugin-manifest.v1` is edited in place (never published or pinned outside the epic): `outputs.views` replaces `outputs.figures`, a view being a neuroschema kind and `kind_version`, a caption and one to eight roles, each produced by the plugin (a format, at most 4,194,304 bytes, at most two dimension names, optional columns) or provided by the host recipe (`{"from": "recipe"}`), at most 16 views.
+  A plugin's checkpoint is `quality` only; its name follows neuroschema 0.6.0 `plugin.name` (a letter, then letters, digits, `_` and `-`, at most 64), and a metric name its `metricName`.
+  The rule words are `bounds_reversed`, `plugin_without_output` (a plugin declares at least one metric or view) and `metric_not_prefixed` (every metric is `<plugin>:<name>` with its own name), checked in that order; `quality_without_metric` and `figures_without_figure` are gone, and so are the figure formats and caps.
+  The standard checkpoints lose `figures`, and `nemar-ica` runs `nemar-quality` then `nemar-spectrum` at `quality`; the progress and manifest vectors are regenerated.
+  `shared/compute-naming.ts` ports nemar-process `naming.py` (product and dataset file names), with `shared/contract/compute-naming-vectors.json` for nemar-process to replay.
+  nemar-process re-copies the manifest schema and the vectors at this commit (its phase P2); until then its loader still reads the 0.5-era manifest.
+- **A produced view role may state its value `unit` (#2358, epic #2324).**
+  `ViewProducedRole` in `nemar.plugin-manifest.v1` gains an optional `unit`, with the grammar and cap of a neuroschema 0.6.0 column `unit` (1 to 32 code points), so a role without `columns` still has a unit; a column's own `unit` overrides it for that column, and a `{"from": "recipe"}` role never carries one.
+  Whether a generic kind's role must carry a unit (a role `unit` or `columns` with units) is the nemar-process loader's check per kind, not the schema's.
+  Six manifest vectors are added and none changes; nemar-process re-copies the manifest schema and the vectors at its next pin (its phase P3).
+- **CI: until nemar-process's epic reaches its `dev`, the test workflow checks out nemar-process at `a5125c7b` (the head of `feature/issue-65-epic-pipeline-progress`), not `dev`.**
+  This epic's recipe registry (`1.0.0-b2`, the quality plugins) is ahead of nemar-process `dev`, so the recipe drift test fails against `dev`; set the checkout back to `ref: dev` once nemar-process's epic merges there, and keep that epic branch until the pin is gone from nemar-cli `main`.
+  The observation-schema and fixtures comparison and the queue comparison read the same checkout, so they are frozen at that commit too until the pin is removed (#2411).
+
+## 0.10.40 - 2026-11-26
+
 ### Admin command tree (epic #2307, ADR 0135)
 
 **Release note.**
@@ -124,88 +226,31 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
 - Plain `nemar admin --help` lists all fourteen groups with their descriptions; the "More commands" fold it needed for about fifty commands is gone.
 - Backend mail and refusal text, and the weekly summary drift issue, name the new paths. No workflow, script or cron runs a moved command unattended.
 
-### Added
+### Request for Comments program (epic #2239, ADR 0130)
 
-- **Live progress of NEMAR's pipeline runs (ADR 0134, epic #2324 phase 2).**
-  A pipeline job reports a closed `nemar.progress.v1` object (counts per checkpoint and up to ten recent failures) at most once a minute: a runner in its heartbeat, a job on the supercomputer on the new job-token route `POST /compute/jobs/:id/progress`.
-  A report sooner than 50 seconds after the last is refused `report_too_soon` (429) and stores nothing; a heartbeat's progress never costs its lease.
-  Migration 0150 adds `compute_pipeline_progress_runs`, `compute_pipeline_progress` and `compute_pipeline_documents`.
-  When a run ends, the stamp sync reconciles its counts from the recordings table it uploaded (a disagreement with the live counts is recorded), resolves `stored` from the derivative store with the checkpoint order the run recorded, and writes the final dataset-level neuroschema `processing` and `signalJourney` entries, which `/<id>/metadata.json` now serves for public datasets.
-  Only final entries are stored: a reporting run's `in_progress` link is worked out when the document is read, so it never outlives its run or replaces the last completed link.
-  A `tuple_mismatch` hold stamp, which shares its run's job, is never reconciled.
-  `stalled` (no report for three minutes while `submitted`, `queued` or `running`, or `unreported`) is worked out on read; no schedule is added and no switch.
-  The pipeline dispatcher's log line reports reconciliation that could not decide or threw.
-- **The quality plugin manifest contract `nemar.plugin-manifest.v1`** and the recipe registry's step-to-checkpoint maps.
-- **The standalone launcher's contracts (ADR 0134 decision 8, epic #2324 phase 6):** the local launch specification `nemar.local-launch.v1` (the launch specification's members for what runs, plus a format word and dataset names; no job id, token, API address or limits), the recipe progress file `nemar.recipe-progress.v1` a job writes for the launcher to read, and the results report `nemar.results-report.v1` the launcher writes on a person's own machine.
-  Each is a closed zod schema with a JSON Schema that nemar-process copies byte for byte; the recipe progress schema is held to the verdicts of nemar-process's own reader on files its recipe layer wrote.
-- **The admin pipeline grid (ADR 0134 decision 5, epic #2324 phase 4a).**
-  `GET /admin/compute/pipeline/grid` shows one recipe's runs over the eligible datasets, a row per dataset and a column per checkpoint, each cell `passed/total` with a mark, filtered by status, recipe version, executor, runner or dataset and paged by dataset id, with the counts over the whole filtered set.
-  `GET /admin/compute/pipeline/coverage` gives each recipe's coverage (a succeeded run at the dataset's newest version with the registry's current recipe version; complete; at any recipe version) and a daily failure trend from the stamps (30 days by default, 90 at most).
-  `GET /admin/compute/pipeline/runs/:stamp` lists one run's failures per checkpoint (at most ten each, from D1; `stamp_not_found` for none).
-  All three are admin-only and read only: the grid syncs the open stamps first only with `sync=1`.
-  `nemar admin compute pipeline status` now shows the grid (it syncs first unless `--no-sync`), and `nemar admin compute pipeline failures <stamp-id>` the drill-down.
-  Follow-ups: a coverage history in the observability snapshot (#2333) and paging the full recordings table (#2334).
-- **`nemar-ica` declares its quality plugin's checkpoint (ADR 0134 decisions 6 and 7, epic #2324 phase 5 N1).**
-  Its map gains `quality` (`nemar-quality`) after `iclabel`, so the step `record` now counts at `quality`; `RECIPE_PLUGIN_STEPS` names the plugin steps, and only `nemar-ica` runs plugins. Figure plugins wait for the live-rendering design.
-  A plugin that fails is absorbed and named in the recordings table's existing `skipped_steps` column (`step:reason`, comma-joined): a succeeded recording that skipped a plugin counts `skipped` at that plugin's checkpoint and passed elsewhere, and is listed among that checkpoint's failures; a table without the column reads as before, and a malformed plugin pair is refused `bad_skipped_steps`.
-  The progress vectors are regenerated, and `shared/contract/plugin-manifest-vectors.json` gives the manifest verdicts (schema and rule word) for nemar-process to replay.
-  The recipe drift test reads nemar-process's `PLUGINS` literal once a `steps.py` declares it, leaves the plugin steps out of the comparison until then, and fails on a `PLUGINS` assignment it cannot read.
-- **A pipeline job is held to its recipe's own result limit (owner decision of 2026-11-23).**
-  A registry entry may declare `resultLimits.maxFiles` (never above 100,000); the outputs route, its body cap and the launcher-document bound let it raise the limit (never lower it) for a NEMAR pipeline job a stamp names, and every other job keeps the owner's policy.
-  `nemar-floor` and `nemar-ica` declare 25,000: about 6 and 17 files per recording, so the policy's 5,000 stopped at about 830 and 294 recordings.
-  The launcher still caps its outputs request at 1 MiB (about 8,000 entries), so raising its cap is a nemar-process change before a job lists more.
-- **Dataset quality summaries in D1 and `metadata.json` (ADR 0137 decision 8, epic #2324 phase B1).**
-  When a succeeded run is reconciled, the backend reads its dataset `dataQuality` document (`product/desc-<label>_dataquality.json`, at most 65,536 bytes) and keeps the recipe's entry for the run's stamp (migration 0151, `compute_quality_documents`) once it has checked it.
-  The checks: UTF-8 I-JSON (no duplicate member, lone surrogate, noncharacter or nesting past 64); the zod mirror of neuroschema 0.6.0 (`level` and `recipes` only, every integer at most 2^53 - 1); the writer's rules run again (counts that add up, the listed and left-out recordings, each histogram's `n`, the `observed_range`); the stamp's recipe, recipe version, dataset version and input; the digest of the dataset record the run wrote; the recordings table's counts; metric names that are the recipe's own or a plugin's it runs; and an entry, written again, of at most 65,536 characters (`entry_too_large`, since a number such as `1000e17` prints longer than it was written).
-  The counts rule (owner ruling of 2026-11-25): `passed` is the recordings that succeeded, so a recording whose plugin was skipped still counts as passed, as nemar-process writes it; neuroschema's `processing-extensions.md`, which ties `passed` to the last checkpoint's, is to change in 0.6.1.
-  A refused document is logged with a fixed word (`quality_not_written reason=...`) and never holds the run back; the dataset a summary belongs to is the stamp's, never the document's.
-  `/<id>/metadata.json` serves `extensions.dataQuality` (`level: dataset`) with the summary of each recipe's current public derivative only: stored, `catalog` or `published`, not a superseded `catalog` row (a `published` row stays public, superseded or not) and not past its date, the newest by `stored_at`.
-  A `canary` run shows nothing until an administrator promotes it, a superseded `catalog` run is replaced by the one that superseded it, and a concealed deposit or a withdrawn dataset gets none.
-  `/<id>/page-bundle.json` now carries `processing`, `signalJourney` and `dataQuality` by the same read (#2331); when that read fails, the bundle keeps its metadata without them, says so in `pipeline_degraded`, and is not `complete` (so `no-store`).
-  `shared/contract/view-digest.ts` holds the I-JSON reader and `nemar.view-digest.v1` (RFC 8785), replaying neuroschema's nine cases and fourteen refusals; `shared/contract/data-quality.ts` holds `nemar.record-checks.v1`.
-  The projection of a recording's entry (served by phase B2) takes the recipe's metrics from `extensions.nemar.metrics` and each plugin's from its step's `qualityMetrics`, and admits nemar-process's own `views_skipped` words.
-- **The public quality view route (ADR 0137 decisions 6 and 7, epic #2324 phase B2).**
-  `GET /<id>/quality/v1/<recipe>/record/<recording>` serves a recording's `dataQuality` document (`level: record`) from the recipe's current public derivative, with the derivative's key and dataset version and each view's `nemar.view-digest.v1`; `GET /<id>/quality/v1/<recipe>/file/<key>/<sha256>/<recording>` serves one file a view of that recording declares.
-  A dataset that is not active, public, first published, unconcealed (ADR 0065), unwithdrawn and untombstoned answers as an unknown one (`quality_not_found`), checked in D1 before any cache; a public derivative that expired answers `views_expired` (410).
-  The record (at most 512 KiB) is checked whole before anything of it is served: the vendored neuroschema schema over every view, an integer literal past 2^53 - 1 anywhere in it (`integer_unsafe`), each plugin view's plugin against the `quality` plugins the derivative row recorded for its recipe version when it was keyed (so a derivative of a version the registry has moved past is still served; a row without them serves nothing), recording scope, and the record's own dataset and recording.
-  A file is served only when a validated view declares its digest, at its declared size, hashed again (`view_data_corrupt` otherwise, 502); an unlisted format is an `application/octet-stream` attachment, and every file carries `nosniff`.
-  Public answers carry `Cache-Control: public, max-age=300`, `Cache-Tag: nemar-dq-<id>` and a strong `ETag` (the SHA-256 of the body), and sit in the edge cache under the dataset's epoch (migration 0152, `dataset_quality_epochs`, advanced by a trigger on every change of a gate column; the table has no CHECK, so it never refuses a gate-column update); no refusal is cached.
-  An unpublish, a withdrawal or a concealment purges the tag `nemar-dq-<id>` from Cloudflare's cache after its D1 write, best effort (`purgeQualityCache`, a failure is logged and never blocks the write); a copy already in a browser or a shared cache outside Cloudflare may still be served for up to 300 seconds.
-  The dataset summary on `metadata.json` and the page bundle now uses the route's own gate (`QUALITY_DATASET_GATE_SQL`), so a tombstoned or never-published dataset shows no `dataQuality` either.
-  The Worker checks JSON Schema with `shared/contract/schema-check.ts`, an interpreter of the vendored schemas held to python-jsonschema's verdicts and to Ajv.
-  A page on a NEMAR web origin can read the route's `ETag`: its answers add `ETag` to `Access-Control-Expose-Headers`, on this route only, so the website can check the body's digest before it parses it (nemarOrg/website#596); the shared CORS list, the origin and credentials policy and the admin quality views are unchanged.
-- **nemar-ica's archive runs are keyed by the serving index they were given (ADR 0140, owner ruling of 2026-11-25).**
-  A recipe that reads the serving index on the archive input has a version 2 derivative key, `nemar.derivative-key.v2`, whose ninth line is `serving_index` (`none`, or the SHA-256 of the index file), so runs with and without an index never share a key; every other key stays version 1, byte for byte (migration 0153 keeps the field on the row, with the recipe version's `quality` plugins).
-  Until the dispatcher stages the index, a run handed `--serving-index` is not keyed (`serving_index_unattested`).
-- **The dispatcher stages the serving index for nemar-ica's archive runs, and the launch specification is version 2 (ADR 0141, epic #2324 phase B2b).**
-  `nemar.launch-spec.v2` is version 1 and one optional member, `serving_index: {sha256, size}`; every version 1 document keeps its bytes, and the member is written only for a recipe that keys the serving index on the archive input, which runs on Tapis only.
-  At dispatch the Worker reads `<id>/zarr/index.json` and the tag's commit, and stages the index only when its `source_commit` is exactly that commit (never under the Zarr input's `metadata_only` allowance); the bytes are kept under `serving-index/<sha256>.json` in the records bucket before the job exists, and the job's specification records the digest and size, or a fixed word for why none was staged.
-  When GitHub or the index cannot be read, or the copy cannot be kept, the run is deferred (a `refused` stamp, and the dispatch answers `serving_index_deferred`, 503, with the fault's word and `runs_without_index_after`) and tried again on later passes, for up to 24 hours from its first deferral, after which it runs without the index; an absent index, one of another commit, or one the recipe cannot use (`index_unusable`: not strict JSON, or not the shape the recipe reads) runs it at once without one; a 403 from S3 (the Worker's credentials lack `s3:ListBucket`, so a missing object answers 403) is an absent index unless the dataset row says the copy is `ready` with stores.
-  A staged run is handed `--serving-index /data/serving-index/index.json --source-commit <tag commit>`; the launcher fetches the copy with its job token from `POST /compute/jobs/<id>/serving-index` (a ten-minute presigned GET of the copy the recorded specification names), checks it, and binds it read-only (`dataset_fetch_failed`, `serving_index_mismatch` otherwise).
-  The derivative key reads the recorded digest (`sha256:<hex>`), so `serving_index_unattested` now applies only to a run whose arguments do not match what was recorded.
-  nemar-ica is still a placeholder that no path dispatches.
-- **A run's quality, for administrators (ADR 0137 decision 7, epic #2324 phase B3).**
-  `GET /admin/compute/pipeline/runs/:stamp/quality` says where the run's derivative stands in one word (`run_in_progress` for a dispatched stamp, `run_not_succeeded`, `not_keyed` with the store's skip word, `awaiting_derivative`, `failed`, `expired`, `copying`, `canary`, `current`, `superseded` or `not_current`), with its retention, `stored_at` and `expires_at`, and `dataset_public` (the quality route's gate now: a `current` row is what public pages read only while it is true); a canary past its date is `expired` before the sync marks it, and no state is a 500.
-  When the derivative's files stand, it lists the recordings that succeeded, 100 a page in path order (`after` continues; a cursor that is not a recording path is `invalid_query`), from the recordings table stored under the derivative's key: read once, at most 32 MiB, and kept in the edge cache under that key, so a later page reads no store. Every answer is `no-store`.
-  `nemar admin compute pipeline quality <stamp-id> [--after <path>]` prints it.
-- **A run's quality record and files, for administrators (ADR 0137 decision 7, epic #2324 phase B3b).**
-  `GET /admin/compute/pipeline/runs/:stamp/quality/record/<recording>` and `.../quality/file/<sha256>/<recording>` answer what the public quality route answers, of the run's own derivative: canary, catalog or published, superseded included, while it is `stored` and not past `expires_at`.
-  Otherwise the answer is one word with no store read: `stamp_not_found`, `derivative_not_keyed`, `derivative_copying`, `derivative_failed` or `views_expired`.
-  The record and file checks are the public route's own code (`services/quality-serve.ts`): the whole schema, recording scope, the record's own dataset and recording, the row's `quality_plugins`, declared files only, the size bounds and a re-hash.
-  There is no dataset gate, so the mount never reads or writes the edge cache; every answer the handler gives is `no-store`, with no `Cache-Tag` and no `ETag` (a refusal from the router's middleware or the rate limiter is the website proxy's to make `no-store`).
-  The path must be `record/<recording>` or `file/<64 hex>/<recording>`, with no `.` or `..` segment, no encoded `/`, `\` or `.`, a decoded recording that passes the one shared recording rule (`isQualityRecordingPath`, which the public route and the run-quality listing now use too), and no `?` anywhere, and the method must be GET.
-  The website's proxy builds its upstream path with `qualityAdminForwardPath(stamp, rest)` in `shared/contract/quality-route.ts`, whose docblock lists the proxy's obligations; every log line of the mount leads with `stamp=<id>`.
+- **The weekly report shows the Request for Comments (RFC) clock (#2278).**
+  The Monday report gains an `## RFC clock` section, and `nemar admin import weekly` prints an `rfcs:` line (`listed`, `closed_awaiting_decision`, `clock`, `last_run`), both read from `nemarOrg/rfcs` through the public GitHub API.
+  The command exits 1 when the clock workflow is stopped, an RFC is past its decision date, or the backend sends no `rfcs` field, and exits 2 when the field could not be read (`rfcs=unknown`).
+  Deploy order: the backend first. A new CLI against an older backend exits 1, the same way it does for the re-pull section.
+  No secret, binding, cron or migration.
+- **New decision records:** ADR 0130 (community input goes through a time-boxed RFC in `nemarOrg/rfcs`), ADR 0131 (biosig-zarr has its own home and packing rules; partly supersedes ADR 0128) and ADR 0133 (format conformance vectors are canonical in biosig-zarr and nemar-cli vendors them by digest; partly supersedes ADR 0124 decision 3).
+
+### Tickets: the legal-process queue (#2304, ADR 0112 amendment of 2026-11-22)
+
+- **Mail to `legal-process@` lands in a restricted queue whose tickets are kept seven years.**
+  Migration 0149 seeds the `legal-process` queue (`INSERT OR IGNORE`, so a queue an owner already made keeps its settings); it is restricted to owners and starts as a pool with no assignee.
+  The purge keeps a ticket until both `MAIL_RETENTION_DAYS` and its queue's own period have passed; `legal-process` is kept 2557 days (`QUEUE_RETENTION_DAYS`).
+  A legal-process message never joins a ticket of another queue: ingest refuses it as `retention_mismatch`.
+  The restriction and the period are declared in code, not in the row, so once a legal-process ticket exists do not roll the Worker back below 0.10.40: an older Worker purges it at the general period.
+
+### Decision records
+
+- **ADR 0138 (accepted): rootless Podman is supported through one path (#2355).**
+  Site and user container configuration and OCI hooks are shut out, the container's `config.json` is checked against the declared binds before it starts, and anything else is refused as `runtime_unusable`.
+  It supersedes only ADR 0122 decision 6's Podman clause; the runtime is built in nemar-process#85, and no nemar-cli code changes.
 
 ### Changed
 
-- **`nemar admin compute pipeline status` is the grid; the stamp list it printed is now `nemar admin compute pipeline stamps`**, with the same options.
-  The route it read, `GET /admin/compute/pipeline/status`, is unchanged, so a released CLI keeps working.
-- **neuroschema 0.6.0 is vendored with a record root and the view files** (`NEUROSCHEMA_VERSION` 0.6.0, a minor bump over the deployed 0.4.1; ADR 0134 and 0137, epic #2324).
-  The epic's earlier 0.5.0 step was never deployed. The live `schema_version` checks also accept 0.4.x, not 0.5.x, until the backend that serves 0.6.0 is deployed.
-  neuroschema's view registry, parity vectors, montages (with their provenance) and example product are copied byte for byte into `shared/contract/neuroschema/views/`, each held to `views/SHA256SUMS.json` by the contract tests.
-  Two rules narrow to 0.6.0's: a live progress failure's path and a signalJourney link's `location` follow `relativeLocation` (no `.` segment, no empty segment, no leading or trailing space, none of `%`, `?` or `#`): a progress report that carries such a path is refused, the failure lists built from a recordings table leave its row out, and such a link is not written; and a `data_papers` DOI must be printable ASCII (`^10\.[0-9]{4,9}/[!-~]+$`): the sync refuses a list that holds any other DOI, and `metadata.json` serves no `data_papers` for a stored list that holds one.
-  `compute-progress.schema.json` and `compute-results-report.schema.json` change with the path rule; nemar-process re-copies them.
-  Until nemar-process adopts the narrowed rule (its phase P2), a recording path with `%`, `?`, `#` or a leading or trailing space passes nemar-process's filter but is refused by the backend.
 - **The compute recipe registry declares `nemar-floor` and `nemar-ica` `1.0.0-b1`, engine `eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8` (#2329).**
   These are the values the nemar-process images report once its release carries them (the pre-release recipe version, and eegprep with the commit the image installs it from); before, the registry said `1.0.0` and `eegprep@0.5.0`.
   Deploy order: release nemar-process, publish the runtime image from its `main`, repin `COMPUTE_RUNTIME_IMAGE` wherever compute is or will be on, check the pinned digest's tuple with `nemar-recipe version`, and only then deploy this, at a moment with no open `nemar-floor` stamps.
@@ -213,20 +258,6 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
   Effects on existing rows: succeeded stamps on the old tuple stop blocking re-dispatch; failures on the old tuple stop counting toward the retry cooldown and cap; holds on the old tuple stop applying; an in-flight stamp on the old tuple does not block a claim of the new one, so a dataset can run twice, the second ending `tuple_already_stamped`.
   No derivative key, migration or DOI changes.
   CI now compares the registry with nemar-process `dev` (`test/compute-recipes-process-drift.unit.test.ts`).
-- **`nemar-floor` and `nemar-ica` move to `1.0.0-b2` (epic #2324, nemarOrg/nemar-process#81).**
-  nemar-process `v0.1.1`, a source release, already carries `1.0.0-b1` with the old decisions; `1.0.0-b2` names full ICA preprocessing, typed channel rows, the ASR burst fraction and the AMICA settings.
-  The engine and the checkpoint maps are unchanged and the progress vectors are regenerated; the deploy order and the effects on existing rows are the same as for `1.0.0-b1` above.
-- **Plugins write views, not figures; plugin metrics are `<plugin>:<name>` (ADR 0137, epic #2324 N1b).**
-  `nemar.plugin-manifest.v1` is edited in place (never published or pinned outside the epic): `outputs.views` replaces `outputs.figures`, a view being a neuroschema kind and `kind_version`, a caption and one to eight roles, each produced by the plugin (a format, at most 4,194,304 bytes, at most two dimension names, optional columns) or provided by the host recipe (`{"from": "recipe"}`), at most 16 views.
-  A plugin's checkpoint is `quality` only; its name follows neuroschema 0.6.0 `plugin.name` (a letter, then letters, digits, `_` and `-`, at most 64), and a metric name its `metricName`.
-  The rule words are `bounds_reversed`, `plugin_without_output` (a plugin declares at least one metric or view) and `metric_not_prefixed` (every metric is `<plugin>:<name>` with its own name), checked in that order; `quality_without_metric` and `figures_without_figure` are gone, and so are the figure formats and caps.
-  The standard checkpoints lose `figures`, and `nemar-ica` runs `nemar-quality` then `nemar-spectrum` at `quality`; the progress and manifest vectors are regenerated.
-  `shared/compute-naming.ts` ports nemar-process `naming.py` (product and dataset file names), with `shared/contract/compute-naming-vectors.json` for nemar-process to replay.
-  nemar-process re-copies the manifest schema and the vectors at this commit (its phase P2); until then its loader still reads the 0.5-era manifest.
-- **A produced view role may state its value `unit` (#2358, epic #2324).**
-  `ViewProducedRole` in `nemar.plugin-manifest.v1` gains an optional `unit`, with the grammar and cap of a neuroschema 0.6.0 column `unit` (1 to 32 code points), so a role without `columns` still has a unit; a column's own `unit` overrides it for that column, and a `{"from": "recipe"}` role never carries one.
-  Whether a generic kind's role must carry a unit (a role `unit` or `columns` with units) is the nemar-process loader's check per kind, not the schema's.
-  Six manifest vectors are added and none changes; nemar-process re-copies the manifest schema and the vectors at its next pin (its phase P3).
 - **CI: the test workflow checks out `nemarOrg/nemar-process` at `dev`, not its epic branch.**
   `dev` rather than `main`, because nemar-process's `main` moves only at its releases and lags every merged pull request.
   The epic branch `feature/issue-1-epic-process` must not be deleted until this change is on nemar-cli `main`: until then, `main`'s copy of the workflow still names it.

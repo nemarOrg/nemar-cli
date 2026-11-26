@@ -1,0 +1,209 @@
+{
+ "all_stores": {
+  "days_to_reconvert": {
+   "mean_30_day": 54.94,
+   "median_active_days": 242.41,
+   "p90_all_days": 21.64
+  },
+  "stores": 231259
+ },
+ "not_measured": {
+  "bv_vmrk_not_in_listing": 148,
+  "bv_vmrk_unreadable": 47,
+  "fif_gz_datasets": 9,
+  "fif_gz_files": 1136,
+  "fif_measured": 952,
+  "fif_unreadable": 37,
+  "fif_without_usable_directory_unmeasured": 11175,
+  "meaning": "FIF, and BrainVision to a small extent, are LOWER BOUNDS; every scope above is measured only",
+  "other_formats_not_scanned_files": {
+   "cnt": 840,
+   "gdf": 2066,
+   "set": 66724,
+   "xdf": 366
+  }
+ },
+ "rates_stores_per_day": {
+  "mean_30_day": 4209.6,
+  "median_active_days": 954,
+  "p90_all_days": 10687.5
+ },
+ "scopes": {
+  "can_be_discontinuous_all": {
+   "all_stores_of_those_datasets": 6929,
+   "classes": {
+    "bv_multi_segment": {
+     "datasets": 50,
+     "recordings": 1527,
+     "stores_in_serving_index": 1413
+    },
+    "edfd_header": {
+     "datasets": 11,
+     "recordings": 1728,
+     "stores_in_serving_index": 1605
+    },
+    "fif_skip": {
+     "datasets": 7,
+     "recordings": 254,
+     "stores_in_serving_index": 199
+    }
+   },
+   "datasets": 68,
+   "days_to_reconvert_all_stores_of_those_datasets": {
+    "mean_30_day": 1.65,
+    "median_active_days": 7.26,
+    "p90_all_days": 0.65
+   },
+   "days_to_reconvert_stores_in_serving_index": {
+    "mean_30_day": 0.76,
+    "median_active_days": 3.37,
+    "p90_all_days": 0.3
+   },
+   "licenses": {
+    "CC-BY-4.0": 11,
+    "CC-BY-NC-4.0": 1,
+    "CC-BY-NC-SA-4.0": 1,
+    "CC-BY-SA-4.0": 1,
+    "CC0": 48,
+    "CC0-1.0": 6
+   },
+   "measured_only": true,
+   "note": "includes 1,626 EDF+D files measured gapless, 3 dated-contiguous and 86 epoched (MARKERBASED) BrainVision recordings, and the 528 undated multi-segment recordings, which cannot be tested from the markers",
+   "recordings": 3509,
+   "stores_in_serving_index": 3217
+  },
+  "can_be_discontinuous_without_known_non_gaps": {
+   "all_stores_of_those_datasets": 5166,
+   "classes": {
+    "bv_multi_dated-with-gap": {
+     "datasets": 29,
+     "recordings": 909,
+     "stores_in_serving_index": 796
+    },
+    "bv_multi_partly-dated": {
+     "datasets": 1,
+     "recordings": 1,
+     "stores_in_serving_index": 0
+    },
+    "bv_multi_undated": {
+     "datasets": 19,
+     "recordings": 528,
+     "stores_in_serving_index": 528
+    },
+    "edfd_real_gap": {
+     "datasets": 1,
+     "recordings": 102,
+     "stores_in_serving_index": 2
+    },
+    "fif_skip": {
+     "datasets": 7,
+     "recordings": 254,
+     "stores_in_serving_index": 199
+    }
+   },
+   "datasets": 56,
+   "days_to_reconvert_all_stores_of_those_datasets": {
+    "mean_30_day": 1.23,
+    "median_active_days": 5.42,
+    "p90_all_days": 0.48
+   },
+   "days_to_reconvert_stores_in_serving_index": {
+    "mean_30_day": 0.36,
+    "median_active_days": 1.6,
+    "p90_all_days": 0.14
+   },
+   "licenses": {
+    "CC-BY-4.0": 10,
+    "CC-BY-NC-4.0": 1,
+    "CC-BY-NC-SA-4.0": 1,
+    "CC-BY-SA-4.0": 1,
+    "CC0": 37,
+    "CC0-1.0": 6
+   },
+   "measured_only": true,
+   "note": "drops the 1,626 gapless EDF+D files and the 3 dated-contiguous and 86 epoched BrainVision recordings; keeps the 528 undated and 1 partly dated (not testable)",
+   "recordings": 1794,
+   "stores_in_serving_index": 1525
+  },
+  "real_discontinuity_all": {
+   "all_stores_of_those_datasets": 4286,
+   "classes": {
+    "bv_multi_dated-with-gap": {
+     "datasets": 29,
+     "recordings": 909,
+     "stores_in_serving_index": 796
+    },
+    "edfd_real_gap": {
+     "datasets": 1,
+     "recordings": 102,
+     "stores_in_serving_index": 2
+    },
+    "fif_skip": {
+     "datasets": 7,
+     "recordings": 254,
+     "stores_in_serving_index": 199
+    }
+   },
+   "datasets": 37,
+   "days_to_reconvert_all_stores_of_those_datasets": {
+    "mean_30_day": 1.02,
+    "median_active_days": 4.49,
+    "p90_all_days": 0.4
+   },
+   "days_to_reconvert_stores_in_serving_index": {
+    "mean_30_day": 0.24,
+    "median_active_days": 1.05,
+    "p90_all_days": 0.09
+   },
+   "licenses": {
+    "CC-BY-4.0": 4,
+    "CC-BY-NC-SA-4.0": 1,
+    "CC0": 32
+   },
+   "measured_only": true,
+   "note": "EDF+D with gap_count above 0, BrainVision dated with a gap (includes 36 recordings whose total is negative), FIF with a skip",
+   "recordings": 1265,
+   "stores_in_serving_index": 997
+  },
+  "real_discontinuity_positive_total_only": {
+   "all_stores_of_those_datasets": 4244,
+   "classes": {
+    "bv_gap_positive_total": {
+     "datasets": 28,
+     "recordings": 873,
+     "stores_in_serving_index": 777
+    },
+    "edfd_real_gap": {
+     "datasets": 1,
+     "recordings": 102,
+     "stores_in_serving_index": 2
+    },
+    "fif_skip": {
+     "datasets": 7,
+     "recordings": 254,
+     "stores_in_serving_index": 199
+    }
+   },
+   "datasets": 36,
+   "days_to_reconvert_all_stores_of_those_datasets": {
+    "mean_30_day": 1.01,
+    "median_active_days": 4.45,
+    "p90_all_days": 0.4
+   },
+   "days_to_reconvert_stores_in_serving_index": {
+    "mean_30_day": 0.23,
+    "median_active_days": 1.03,
+    "p90_all_days": 0.09
+   },
+   "licenses": {
+    "CC-BY-4.0": 4,
+    "CC-BY-NC-SA-4.0": 1,
+    "CC0": 31
+   },
+   "measured_only": true,
+   "note": "as above without the 36 BrainVision recordings whose total gap is negative (overlap or out of order)",
+   "recordings": 1229,
+   "stores_in_serving_index": 978
+  }
+ }
+}

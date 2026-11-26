@@ -1,0 +1,4655 @@
+{
+ "on002712/sub-01/meg/sub-01_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000450478,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1381,
+  "n_tags": 2120,
+  "path": "sub-01/meg/sub-01_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   73
+  ],
+  "skipped_buffers": 73,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-01/meg/sub-01_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 1944287327,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1543,
+  "n_tags": 2230,
+  "path": "sub-01/meg/sub-01_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   40
+  ],
+  "skipped_buffers": 40,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-02/meg/sub-02_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 1958151776,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1564,
+  "n_tags": 2260,
+  "path": "sub-02/meg/sub-02_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   526
+  ],
+  "skipped_buffers": 526,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-02/meg/sub-02_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000588908,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2299,
+  "path": "sub-02/meg/sub-02_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   28
+  ],
+  "skipped_buffers": 28,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-04/meg/sub-04_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 1941925716,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1551,
+  "n_tags": 2200,
+  "path": "sub-04/meg/sub-04_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   151
+  ],
+  "skipped_buffers": 151,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-04/meg/sub-04_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000584960,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2252,
+  "path": "sub-04/meg/sub-04_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   59
+  ],
+  "skipped_buffers": 59,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-05/meg/sub-05_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000587999,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2272,
+  "path": "sub-05/meg/sub-05_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   97
+  ],
+  "skipped_buffers": 97,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-05/meg/sub-05_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000585083,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2272,
+  "path": "sub-05/meg/sub-05_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   82
+  ],
+  "skipped_buffers": 82,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-06/meg/sub-06_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 1955654011,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1562,
+  "n_tags": 2214,
+  "path": "sub-06/meg/sub-06_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   101
+  ],
+  "skipped_buffers": 101,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-06/meg/sub-06_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000584983,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2255,
+  "path": "sub-06/meg/sub-06_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   77
+  ],
+  "skipped_buffers": 77,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-07/meg/sub-07_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000585205,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2260,
+  "path": "sub-07/meg/sub-07_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   118
+  ],
+  "skipped_buffers": 118,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-07/meg/sub-07_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000587509,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2260,
+  "path": "sub-07/meg/sub-07_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   25
+  ],
+  "skipped_buffers": 25,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-08/meg/sub-08_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000587761,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2256,
+  "path": "sub-08/meg/sub-08_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   45
+  ],
+  "skipped_buffers": 45,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-08/meg/sub-08_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 1953158645,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1560,
+  "n_tags": 2213,
+  "path": "sub-08/meg/sub-08_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   73
+  ],
+  "skipped_buffers": 73,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-09/meg/sub-09_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000586577,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2263,
+  "path": "sub-09/meg/sub-09_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   86
+  ],
+  "skipped_buffers": 86,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-09/meg/sub-09_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 1916966833,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1531,
+  "n_tags": 2191,
+  "path": "sub-09/meg/sub-09_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   37
+  ],
+  "skipped_buffers": 37,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-10/meg/sub-10_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000588456,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2289,
+  "path": "sub-10/meg/sub-10_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   45
+  ],
+  "skipped_buffers": 45,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-10/meg/sub-10_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000586236,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2289,
+  "path": "sub-10/meg/sub-10_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   30
+  ],
+  "skipped_buffers": 30,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-11/meg/sub-11_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000590529,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2263,
+  "path": "sub-11/meg/sub-11_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   49
+  ],
+  "skipped_buffers": 49,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-11/meg/sub-11_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000590289,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2263,
+  "path": "sub-11/meg/sub-11_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   35
+  ],
+  "skipped_buffers": 35,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-13/meg/sub-13_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000585214,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2259,
+  "path": "sub-13/meg/sub-13_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   37
+  ],
+  "skipped_buffers": 37,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-13/meg/sub-13_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 1894501482,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1513,
+  "n_tags": 2169,
+  "path": "sub-13/meg/sub-13_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   50
+  ],
+  "skipped_buffers": 50,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-14/meg/sub-14_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000591138,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2278,
+  "path": "sub-14/meg/sub-14_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   34
+  ],
+  "skipped_buffers": 34,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-14/meg/sub-14_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000587858,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2278,
+  "path": "sub-14/meg/sub-14_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   34
+  ],
+  "skipped_buffers": 34,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-16/meg/sub-16_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 1882021922,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1503,
+  "n_tags": 2181,
+  "path": "sub-16/meg/sub-16_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   37
+  ],
+  "skipped_buffers": 37,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-16/meg/sub-16_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000585838,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2281,
+  "path": "sub-16/meg/sub-16_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   34
+  ],
+  "skipped_buffers": 34,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-17/meg/sub-17_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 1904489566,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1521,
+  "n_tags": 2175,
+  "path": "sub-17/meg/sub-17_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   33
+  ],
+  "skipped_buffers": 33,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-17/meg/sub-17_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000595098,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2257,
+  "path": "sub-17/meg/sub-17_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   25
+  ],
+  "skipped_buffers": 25,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-18/meg/sub-18_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000587873,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2265,
+  "path": "sub-18/meg/sub-18_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   31
+  ],
+  "skipped_buffers": 31,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-18/meg/sub-18_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 1885766681,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1506,
+  "n_tags": 2168,
+  "path": "sub-18/meg/sub-18_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   28
+  ],
+  "skipped_buffers": 28,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-19/meg/sub-19_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000585370,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2263,
+  "path": "sub-19/meg/sub-19_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   41
+  ],
+  "skipped_buffers": 41,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-19/meg/sub-19_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000583214,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2258,
+  "path": "sub-19/meg/sub-19_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   46
+  ],
+  "skipped_buffers": 46,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-20/meg/sub-20_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000587778,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2263,
+  "path": "sub-20/meg/sub-20_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   54
+  ],
+  "skipped_buffers": 54,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-20/meg/sub-20_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 1908229714,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1524,
+  "n_tags": 2184,
+  "path": "sub-20/meg/sub-20_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   73
+  ],
+  "skipped_buffers": 73,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-21/meg/sub-21_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000589572,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2267,
+  "path": "sub-21/meg/sub-21_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   461
+  ],
+  "skipped_buffers": 461,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-21/meg/sub-21_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000593596,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2267,
+  "path": "sub-21/meg/sub-21_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   67
+  ],
+  "skipped_buffers": 67,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-22/meg/sub-22_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 1887013942,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1507,
+  "n_tags": 2180,
+  "path": "sub-22/meg/sub-22_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   56
+  ],
+  "skipped_buffers": 56,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-22/meg/sub-22_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000588062,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2276,
+  "path": "sub-22/meg/sub-22_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   206
+  ],
+  "skipped_buffers": 206,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-23/meg/sub-23_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 1965640914,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1570,
+  "n_tags": 2293,
+  "path": "sub-23/meg/sub-23_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   30
+  ],
+  "skipped_buffers": 30,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-23/meg/sub-23_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000590078,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2326,
+  "path": "sub-23/meg/sub-23_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   99
+  ],
+  "skipped_buffers": 99,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-24/meg/sub-24_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000576711,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2294,
+  "path": "sub-24/meg/sub-24_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   44
+  ],
+  "skipped_buffers": 44,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-24/meg/sub-24_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 1879513491,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1501,
+  "n_tags": 2192,
+  "path": "sub-24/meg/sub-24_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   30
+  ],
+  "skipped_buffers": 30,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-25/meg/sub-25_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000572844,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2314,
+  "path": "sub-25/meg/sub-25_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   41
+  ],
+  "skipped_buffers": 41,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-25/meg/sub-25_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 1928185536,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1540,
+  "n_tags": 2254,
+  "path": "sub-25/meg/sub-25_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 2,
+  "skip_values": [
+   34,
+   12
+  ],
+  "skipped_buffers": 46,
+  "skips_nonzero": 2,
+  "status": "ok"
+ },
+ "on002712/sub-26/meg/sub-26_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000577087,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2289,
+  "path": "sub-26/meg/sub-26_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   46
+  ],
+  "skipped_buffers": 46,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-26/meg/sub-26_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 2000575695,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2289,
+  "path": "sub-26/meg/sub-26_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   24
+  ],
+  "skipped_buffers": 24,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-27/meg/sub-27_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000572771,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2270,
+  "path": "sub-27/meg/sub-27_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   74
+  ],
+  "skipped_buffers": 74,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-27/meg/sub-27_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 1955642219,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1562,
+  "n_tags": 2229,
+  "path": "sub-27/meg/sub-27_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   24
+  ],
+  "skipped_buffers": 24,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-28/meg/sub-28_task-numbersletters_run-1_meg.fif": {
+  "dirpos": 2000573868,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1598,
+  "n_tags": 2281,
+  "path": "sub-28/meg/sub-28_task-numbersletters_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   38
+  ],
+  "skipped_buffers": 38,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002712/sub-28/meg/sub-28_task-numbersletters_run-2_meg.fif": {
+  "dirpos": 1965623088,
+  "ds": "on002712",
+  "first_tag_is_skip": false,
+  "n_buffers": 1570,
+  "n_tags": 2248,
+  "path": "sub-28/meg/sub-28_task-numbersletters_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   30
+  ],
+  "skipped_buffers": 30,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002885/sub-01/meg/sub-01_task-DSMW_meg.fif": {
+  "directory_status": "directory-beyond-end",
+  "dirpos": 911773376,
+  "ds": "on002885",
+  "path": "sub-01/meg/sub-01_task-DSMW_meg.fif",
+  "status": "directory-beyond-end-unmeasured"
+ },
+ "on002885/sub-01/meg/sub-01_task-EmptyRoom_meg.fif": {
+  "dirpos": 450189452,
+  "ds": "on002885",
+  "first_tag_is_skip": false,
+  "n_buffers": 235,
+  "n_tags": 772,
+  "path": "sub-01/meg/sub-01_task-EmptyRoom_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   16
+  ],
+  "skipped_buffers": 16,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on002885/sub-01/meg/sub-01_task-Reference_meg.fif": {
+  "dirpos": 463377564,
+  "ds": "on002885",
+  "first_tag_is_skip": false,
+  "n_buffers": 242,
+  "n_tags": 779,
+  "path": "sub-01/meg/sub-01_task-Reference_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   110
+  ],
+  "skipped_buffers": 110,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003352/sub-16/ses-01/meg/sub-16_ses-01_task-ColorSpirals_run-02_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on003352",
+  "method": "tag-chain-walk",
+  "n_buffers": 1426,
+  "path": "sub-16/ses-01/meg/sub-16_ses-01_task-ColorSpirals_run-02_meg.fif",
+  "reads": 2053,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on003483/sub-009/ses-1/meg/sub-009_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 770581327,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1196,
+  "n_tags": 2077,
+  "path": "sub-009/ses-1/meg/sub-009_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   60
+  ],
+  "skipped_buffers": 60,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-009/ses-1/meg/sub-009_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 729620423,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1132,
+  "n_tags": 2013,
+  "path": "sub-009/ses-1/meg/sub-009_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   10
+  ],
+  "skipped_buffers": 10,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-012/ses-1/meg/sub-012_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 534412639,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 827,
+  "n_tags": 1634,
+  "path": "sub-012/ses-1/meg/sub-012_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   53
+  ],
+  "skipped_buffers": 53,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-012/ses-1/meg/sub-012_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 592654235,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 918,
+  "n_tags": 1725,
+  "path": "sub-012/ses-1/meg/sub-012_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   24
+  ],
+  "skipped_buffers": 24,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-013/ses-1/meg/sub-013_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 599056019,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 928,
+  "n_tags": 1784,
+  "path": "sub-013/ses-1/meg/sub-013_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   66
+  ],
+  "skipped_buffers": 66,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-013/ses-1/meg/sub-013_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 812821507,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1262,
+  "n_tags": 2118,
+  "path": "sub-013/ses-1/meg/sub-013_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   10
+  ],
+  "skipped_buffers": 10,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-014/ses-1/meg/sub-014_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 590094447,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 914,
+  "n_tags": 1742,
+  "path": "sub-014/ses-1/meg/sub-014_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   15
+  ],
+  "skipped_buffers": 15,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-014/ses-1/meg/sub-014_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 611855663,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 948,
+  "n_tags": 1776,
+  "path": "sub-014/ses-1/meg/sub-014_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   89
+  ],
+  "skipped_buffers": 89,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-015/ses-1/meg/sub-015_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 520334471,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 805,
+  "n_tags": 1670,
+  "path": "sub-015/ses-1/meg/sub-015_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   176
+  ],
+  "skipped_buffers": 176,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-015/ses-1/meg/sub-015_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 615696903,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 954,
+  "n_tags": 1819,
+  "path": "sub-015/ses-1/meg/sub-015_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   12
+  ],
+  "skipped_buffers": 12,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-016/ses-1/meg/sub-016_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 638097699,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 989,
+  "n_tags": 1874,
+  "path": "sub-016/ses-1/meg/sub-016_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   33
+  ],
+  "skipped_buffers": 33,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-016/ses-1/meg/sub-016_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 595217299,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 922,
+  "n_tags": 1807,
+  "path": "sub-016/ses-1/meg/sub-016_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   154
+  ],
+  "skipped_buffers": 154,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-017/ses-1/meg/sub-017_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 498572739,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 771,
+  "n_tags": 1615,
+  "path": "sub-017/ses-1/meg/sub-017_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   12
+  ],
+  "skipped_buffers": 12,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-017/ses-1/meg/sub-017_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 615056131,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 953,
+  "n_tags": 1797,
+  "path": "sub-017/ses-1/meg/sub-017_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   13
+  ],
+  "skipped_buffers": 13,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-018/ses-1/meg/sub-018_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 453133187,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 700,
+  "n_tags": 1576,
+  "path": "sub-018/ses-1/meg/sub-018_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   132
+  ],
+  "skipped_buffers": 132,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-018/ses-1/meg/sub-018_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 541455611,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 838,
+  "n_tags": 1714,
+  "path": "sub-018/ses-1/meg/sub-018_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   73
+  ],
+  "skipped_buffers": 73,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-019/ses-1/meg/sub-019_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 646421435,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1002,
+  "n_tags": 1973,
+  "path": "sub-019/ses-1/meg/sub-019_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   230
+  ],
+  "skipped_buffers": 230,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-019/ses-1/meg/sub-019_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 684822443,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1062,
+  "n_tags": 2033,
+  "path": "sub-019/ses-1/meg/sub-019_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   13
+  ],
+  "skipped_buffers": 13,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-020/ses-1/meg/sub-020_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 568336607,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 880,
+  "n_tags": 1771,
+  "path": "sub-020/ses-1/meg/sub-020_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   137
+  ],
+  "skipped_buffers": 137,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-020/ses-1/meg/sub-020_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 536975871,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 831,
+  "n_tags": 1722,
+  "path": "sub-020/ses-1/meg/sub-020_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   15
+  ],
+  "skipped_buffers": 15,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-021/ses-1/meg/sub-021_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 834583391,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1296,
+  "n_tags": 2198,
+  "path": "sub-021/ses-1/meg/sub-021_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   35
+  ],
+  "skipped_buffers": 35,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-021/ses-1/meg/sub-021_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 666259567,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1033,
+  "n_tags": 1935,
+  "path": "sub-021/ses-1/meg/sub-021_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   29
+  ],
+  "skipped_buffers": 29,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-022/ses-1/meg/sub-022_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 1055391755,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1641,
+  "n_tags": 2611,
+  "path": "sub-022/ses-1/meg/sub-022_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   261
+  ],
+  "skipped_buffers": 261,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-022/ses-1/meg/sub-022_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 867866923,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1348,
+  "n_tags": 2313,
+  "path": "sub-022/ses-1/meg/sub-022_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   25
+  ],
+  "skipped_buffers": 25,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-023/ses-1/meg/sub-023_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 734101783,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1139,
+  "n_tags": 2068,
+  "path": "sub-023/ses-1/meg/sub-023_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   51
+  ],
+  "skipped_buffers": 51,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-023/ses-1/meg/sub-023_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 613779251,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 951,
+  "n_tags": 1880,
+  "path": "sub-023/ses-1/meg/sub-023_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   15
+  ],
+  "skipped_buffers": 15,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-024/ses-1/meg/sub-024_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 473613335,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 732,
+  "n_tags": 1610,
+  "path": "sub-024/ses-1/meg/sub-024_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   82
+  ],
+  "skipped_buffers": 82,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-024/ses-1/meg/sub-024_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 595857063,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 923,
+  "n_tags": 1801,
+  "path": "sub-024/ses-1/meg/sub-024_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   119
+  ],
+  "skipped_buffers": 119,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-025/ses-1/meg/sub-025_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 677782067,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1051,
+  "n_tags": 2027,
+  "path": "sub-025/ses-1/meg/sub-025_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   10
+  ],
+  "skipped_buffers": 10,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-025/ses-1/meg/sub-025_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 758424559,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1177,
+  "n_tags": 2153,
+  "path": "sub-025/ses-1/meg/sub-025_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   17
+  ],
+  "skipped_buffers": 17,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-026/ses-1/meg/sub-026_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 861466299,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1338,
+  "n_tags": 2302,
+  "path": "sub-026/ses-1/meg/sub-026_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   57
+  ],
+  "skipped_buffers": 57,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-026/ses-1/meg/sub-026_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 843546159,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1310,
+  "n_tags": 2274,
+  "path": "sub-026/ses-1/meg/sub-026_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   16
+  ],
+  "skipped_buffers": 16,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-027/ses-1/meg/sub-027_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 450574503,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 696,
+  "n_tags": 1621,
+  "path": "sub-027/ses-1/meg/sub-027_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   11
+  ],
+  "skipped_buffers": 11,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-027/ses-1/meg/sub-027_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 566417887,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 877,
+  "n_tags": 1802,
+  "path": "sub-027/ses-1/meg/sub-027_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   28
+  ],
+  "skipped_buffers": 28,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-028/ses-1/meg/sub-028_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 458891455,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 709,
+  "n_tags": 1543,
+  "path": "sub-028/ses-1/meg/sub-028_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   8
+  ],
+  "skipped_buffers": 8,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-028/ses-1/meg/sub-028_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 576014863,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 892,
+  "n_tags": 1726,
+  "path": "sub-028/ses-1/meg/sub-028_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   26
+  ],
+  "skipped_buffers": 26,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-029/ses-1/meg/sub-029_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 558095775,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 864,
+  "n_tags": 1751,
+  "path": "sub-029/ses-1/meg/sub-029_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   9
+  ],
+  "skipped_buffers": 9,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-030/ses-1/meg/sub-030_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 611216887,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 947,
+  "n_tags": 1828,
+  "path": "sub-030/ses-1/meg/sub-030_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   23
+  ],
+  "skipped_buffers": 23,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-030/ses-1/meg/sub-030_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 603537175,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 935,
+  "n_tags": 1816,
+  "path": "sub-030/ses-1/meg/sub-030_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   14
+  ],
+  "skipped_buffers": 14,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-031/ses-1/meg/sub-031_ses-1_task-deduction_run-1_meg.fif": {
+  "dirpos": 639371471,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 991,
+  "n_tags": 1702,
+  "path": "sub-031/ses-1/meg/sub-031_ses-1_task-deduction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   59
+  ],
+  "skipped_buffers": 59,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003483/sub-031/ses-1/meg/sub-031_ses-1_task-induction_run-1_meg.fif": {
+  "dirpos": 681613007,
+  "ds": "on003483",
+  "first_tag_is_skip": false,
+  "n_buffers": 1057,
+  "n_tags": 1768,
+  "path": "sub-031/ses-1/meg/sub-031_ses-1_task-induction_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   12
+  ],
+  "skipped_buffers": 12,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-002/meg/sub-002_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 860221216,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 491,
+  "n_tags": 1216,
+  "path": "sub-002/meg/sub-002_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   226
+  ],
+  "skipped_buffers": 226,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-002/meg/sub-002_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 870648378,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1222,
+  "path": "sub-002/meg/sub-002_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   62
+  ],
+  "skipped_buffers": 62,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-002/meg/sub-002_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 884552818,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 505,
+  "n_tags": 1230,
+  "path": "sub-002/meg/sub-002_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   58
+  ],
+  "skipped_buffers": 58,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-002/meg/sub-002_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 863696746,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1218,
+  "path": "sub-002/meg/sub-002_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   43
+  ],
+  "skipped_buffers": 43,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-002/meg/sub-002_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 884553226,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 505,
+  "n_tags": 1230,
+  "path": "sub-002/meg/sub-002_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   70
+  ],
+  "skipped_buffers": 70,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-002/meg/sub-002_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 875863818,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 500,
+  "n_tags": 1225,
+  "path": "sub-002/meg/sub-002_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   49
+  ],
+  "skipped_buffers": 49,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-003/meg/sub-003_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 865437544,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1215,
+  "path": "sub-003/meg/sub-003_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   202
+  ],
+  "skipped_buffers": 202,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-003/meg/sub-003_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 863697974,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1214,
+  "path": "sub-003/meg/sub-003_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   43
+  ],
+  "skipped_buffers": 43,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-003/meg/sub-003_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 861959874,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 492,
+  "n_tags": 1213,
+  "path": "sub-003/meg/sub-003_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   32
+  ],
+  "skipped_buffers": 32,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-003/meg/sub-003_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 881078002,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 503,
+  "n_tags": 1224,
+  "path": "sub-003/meg/sub-003_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   72
+  ],
+  "skipped_buffers": 72,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-003/meg/sub-003_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 865435718,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1215,
+  "path": "sub-003/meg/sub-003_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   61
+  ],
+  "skipped_buffers": 61,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-003/meg/sub-003_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 858483902,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 490,
+  "n_tags": 1211,
+  "path": "sub-003/meg/sub-003_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   26
+  ],
+  "skipped_buffers": 26,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-004/meg/sub-004_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 886293673,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 506,
+  "n_tags": 1221,
+  "path": "sub-004/meg/sub-004_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   385
+  ],
+  "skipped_buffers": 385,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-004/meg/sub-004_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 865435361,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1209,
+  "path": "sub-004/meg/sub-004_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   64
+  ],
+  "skipped_buffers": 64,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-004/meg/sub-004_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 882815273,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 504,
+  "n_tags": 1219,
+  "path": "sub-004/meg/sub-004_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   40
+  ],
+  "skipped_buffers": 40,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-004/meg/sub-004_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 870649293,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1212,
+  "path": "sub-004/meg/sub-004_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   75
+  ],
+  "skipped_buffers": 75,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-004/meg/sub-004_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 865435733,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1209,
+  "path": "sub-004/meg/sub-004_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   75
+  ],
+  "skipped_buffers": 75,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-004/meg/sub-004_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 877601905,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 501,
+  "n_tags": 1216,
+  "path": "sub-004/meg/sub-004_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   67
+  ],
+  "skipped_buffers": 67,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-005/meg/sub-005_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 868911520,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 496,
+  "n_tags": 1215,
+  "path": "sub-005/meg/sub-005_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   140
+  ],
+  "skipped_buffers": 140,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-005/meg/sub-005_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 858483729,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 490,
+  "n_tags": 1209,
+  "path": "sub-005/meg/sub-005_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   83
+  ],
+  "skipped_buffers": 83,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-005/meg/sub-005_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 879339949,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 502,
+  "n_tags": 1221,
+  "path": "sub-005/meg/sub-005_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   51
+  ],
+  "skipped_buffers": 51,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-005/meg/sub-005_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 865435946,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1213,
+  "path": "sub-005/meg/sub-005_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   58
+  ],
+  "skipped_buffers": 58,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-005/meg/sub-005_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 867173912,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 495,
+  "n_tags": 1214,
+  "path": "sub-005/meg/sub-005_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   94
+  ],
+  "skipped_buffers": 94,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-005/meg/sub-005_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 874125808,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 499,
+  "n_tags": 1218,
+  "path": "sub-005/meg/sub-005_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   71
+  ],
+  "skipped_buffers": 71,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-006/meg/sub-006_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 860222892,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 491,
+  "n_tags": 1210,
+  "path": "sub-006/meg/sub-006_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   129
+  ],
+  "skipped_buffers": 129,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-006/meg/sub-006_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 882816185,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 504,
+  "n_tags": 1223,
+  "path": "sub-006/meg/sub-006_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   104
+  ],
+  "skipped_buffers": 104,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-006/meg/sub-006_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 870649984,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1216,
+  "path": "sub-006/meg/sub-006_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   37
+  ],
+  "skipped_buffers": 37,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-006/meg/sub-006_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 853269762,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 487,
+  "n_tags": 1206,
+  "path": "sub-006/meg/sub-006_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   66
+  ],
+  "skipped_buffers": 66,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-006/meg/sub-006_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 875864074,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 500,
+  "n_tags": 1219,
+  "path": "sub-006/meg/sub-006_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   38
+  ],
+  "skipped_buffers": 38,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-006/meg/sub-006_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 855007810,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 488,
+  "n_tags": 1207,
+  "path": "sub-006/meg/sub-006_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   50
+  ],
+  "skipped_buffers": 50,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-007/meg/sub-007_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 856746404,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 489,
+  "n_tags": 1206,
+  "path": "sub-007/meg/sub-007_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   120
+  ],
+  "skipped_buffers": 120,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-007/meg/sub-007_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 853269737,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 487,
+  "n_tags": 1204,
+  "path": "sub-007/meg/sub-007_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   44
+  ],
+  "skipped_buffers": 44,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-007/meg/sub-007_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 872388029,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 498,
+  "n_tags": 1215,
+  "path": "sub-007/meg/sub-007_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   41
+  ],
+  "skipped_buffers": 41,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-007/meg/sub-007_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 863697901,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1210,
+  "path": "sub-007/meg/sub-007_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   33
+  ],
+  "skipped_buffers": 33,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-007/meg/sub-007_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 863697916,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1210,
+  "path": "sub-007/meg/sub-007_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   36
+  ],
+  "skipped_buffers": 36,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-007/meg/sub-007_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 863697908,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1210,
+  "path": "sub-007/meg/sub-007_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   24
+  ],
+  "skipped_buffers": 24,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-008/meg/sub-008_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 863698608,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1230,
+  "path": "sub-008/meg/sub-008_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   134
+  ],
+  "skipped_buffers": 134,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-008/meg/sub-008_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 861960605,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 492,
+  "n_tags": 1229,
+  "path": "sub-008/meg/sub-008_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   68
+  ],
+  "skipped_buffers": 68,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-008/meg/sub-008_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 875864723,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 500,
+  "n_tags": 1237,
+  "path": "sub-008/meg/sub-008_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   61
+  ],
+  "skipped_buffers": 61,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-008/meg/sub-008_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 851532429,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 486,
+  "n_tags": 1223,
+  "path": "sub-008/meg/sub-008_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   219
+  ],
+  "skipped_buffers": 219,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-008/meg/sub-008_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 858484419,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 490,
+  "n_tags": 1227,
+  "path": "sub-008/meg/sub-008_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   53
+  ],
+  "skipped_buffers": 53,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-008/meg/sub-008_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 865436601,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1231,
+  "path": "sub-008/meg/sub-008_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   49
+  ],
+  "skipped_buffers": 49,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-009/meg/sub-009_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 875866080,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 500,
+  "n_tags": 1243,
+  "path": "sub-009/meg/sub-009_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   235
+  ],
+  "skipped_buffers": 235,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-009/meg/sub-009_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 863698877,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1236,
+  "path": "sub-009/meg/sub-009_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   93
+  ],
+  "skipped_buffers": 93,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-009/meg/sub-009_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 870650980,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1240,
+  "path": "sub-009/meg/sub-009_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   28
+  ],
+  "skipped_buffers": 28,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-009/meg/sub-009_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 863698868,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1236,
+  "path": "sub-009/meg/sub-009_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   158
+  ],
+  "skipped_buffers": 158,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-009/meg/sub-009_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 868912964,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 496,
+  "n_tags": 1239,
+  "path": "sub-009/meg/sub-009_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   80
+  ],
+  "skipped_buffers": 80,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-009/meg/sub-009_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 860222828,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 491,
+  "n_tags": 1234,
+  "path": "sub-009/meg/sub-009_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   115
+  ],
+  "skipped_buffers": 115,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-010/meg/sub-010_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 860223164,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 491,
+  "n_tags": 1222,
+  "path": "sub-010/meg/sub-010_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   128
+  ],
+  "skipped_buffers": 128,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-010/meg/sub-010_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 867174444,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 495,
+  "n_tags": 1226,
+  "path": "sub-010/meg/sub-010_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   47
+  ],
+  "skipped_buffers": 47,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-010/meg/sub-010_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 867174498,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 495,
+  "n_tags": 1226,
+  "path": "sub-010/meg/sub-010_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   62
+  ],
+  "skipped_buffers": 62,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-010/meg/sub-010_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 861960324,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 492,
+  "n_tags": 1223,
+  "path": "sub-010/meg/sub-010_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   135
+  ],
+  "skipped_buffers": 135,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-010/meg/sub-010_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 860222348,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 491,
+  "n_tags": 1222,
+  "path": "sub-010/meg/sub-010_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   33
+  ],
+  "skipped_buffers": 33,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-010/meg/sub-010_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 865436384,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1225,
+  "path": "sub-010/meg/sub-010_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   93
+  ],
+  "skipped_buffers": 93,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-011/meg/sub-011_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 870649812,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1213,
+  "path": "sub-011/meg/sub-011_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   22
+  ],
+  "skipped_buffers": 22,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-011/meg/sub-011_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 855007920,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 488,
+  "n_tags": 1204,
+  "path": "sub-011/meg/sub-011_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   167
+  ],
+  "skipped_buffers": 167,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-011/meg/sub-011_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 870650068,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1213,
+  "path": "sub-011/meg/sub-011_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   36
+  ],
+  "skipped_buffers": 36,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-011/meg/sub-011_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 865435920,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1210,
+  "path": "sub-011/meg/sub-011_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   46
+  ],
+  "skipped_buffers": 46,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-011/meg/sub-011_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 874125956,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 499,
+  "n_tags": 1215,
+  "path": "sub-011/meg/sub-011_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   58
+  ],
+  "skipped_buffers": 58,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-011/meg/sub-011_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 870650196,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1213,
+  "path": "sub-011/meg/sub-011_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   38
+  ],
+  "skipped_buffers": 38,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-012/meg/sub-012_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 875865936,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 500,
+  "n_tags": 1229,
+  "path": "sub-012/meg/sub-012_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   214
+  ],
+  "skipped_buffers": 214,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-012/meg/sub-012_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 860222312,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 491,
+  "n_tags": 1220,
+  "path": "sub-012/meg/sub-012_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   80
+  ],
+  "skipped_buffers": 80,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-012/meg/sub-012_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 867174412,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 495,
+  "n_tags": 1224,
+  "path": "sub-012/meg/sub-012_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   33
+  ],
+  "skipped_buffers": 33,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-012/meg/sub-012_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 867174352,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 495,
+  "n_tags": 1224,
+  "path": "sub-012/meg/sub-012_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   46
+  ],
+  "skipped_buffers": 46,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-012/meg/sub-012_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 898458580,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 513,
+  "n_tags": 1242,
+  "path": "sub-012/meg/sub-012_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   95
+  ],
+  "skipped_buffers": 95,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-012/meg/sub-012_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 865436348,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1223,
+  "path": "sub-012/meg/sub-012_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   43
+  ],
+  "skipped_buffers": 43,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-013/meg/sub-013_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 858484692,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 490,
+  "n_tags": 1206,
+  "path": "sub-013/meg/sub-013_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   158
+  ],
+  "skipped_buffers": 158,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-013/meg/sub-013_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 868911920,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 496,
+  "n_tags": 1212,
+  "path": "sub-013/meg/sub-013_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   31
+  ],
+  "skipped_buffers": 31,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-013/meg/sub-013_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 867173916,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 495,
+  "n_tags": 1211,
+  "path": "sub-013/meg/sub-013_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   44
+  ],
+  "skipped_buffers": 44,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-013/meg/sub-013_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 856745736,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 489,
+  "n_tags": 1205,
+  "path": "sub-013/meg/sub-013_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   61
+  ],
+  "skipped_buffers": 61,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-013/meg/sub-013_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 856745696,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 489,
+  "n_tags": 1205,
+  "path": "sub-013/meg/sub-013_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   42
+  ],
+  "skipped_buffers": 42,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-013/meg/sub-013_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 855007640,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 488,
+  "n_tags": 1204,
+  "path": "sub-013/meg/sub-013_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   30
+  ],
+  "skipped_buffers": 30,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-014/meg/sub-014_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 861961032,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 492,
+  "n_tags": 1214,
+  "path": "sub-014/meg/sub-014_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   172
+  ],
+  "skipped_buffers": 172,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-014/meg/sub-014_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 865436108,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1216,
+  "path": "sub-014/meg/sub-014_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   112
+  ],
+  "skipped_buffers": 112,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-014/meg/sub-014_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 867174176,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 495,
+  "n_tags": 1217,
+  "path": "sub-014/meg/sub-014_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   25
+  ],
+  "skipped_buffers": 25,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-014/meg/sub-014_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 875864200,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 500,
+  "n_tags": 1222,
+  "path": "sub-014/meg/sub-014_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   53
+  ],
+  "skipped_buffers": 53,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-014/meg/sub-014_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 870650068,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1219,
+  "path": "sub-014/meg/sub-014_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   151
+  ],
+  "skipped_buffers": 151,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-014/meg/sub-014_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 861960096,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 492,
+  "n_tags": 1214,
+  "path": "sub-014/meg/sub-014_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   54
+  ],
+  "skipped_buffers": 54,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-015/meg/sub-015_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 858484940,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 490,
+  "n_tags": 1221,
+  "path": "sub-015/meg/sub-015_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   286
+  ],
+  "skipped_buffers": 286,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-015/meg/sub-015_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 865436370,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1225,
+  "path": "sub-015/meg/sub-015_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   150
+  ],
+  "skipped_buffers": 150,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-015/meg/sub-015_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 858484240,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 490,
+  "n_tags": 1221,
+  "path": "sub-015/meg/sub-015_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   71
+  ],
+  "skipped_buffers": 71,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-015/meg/sub-015_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 856746278,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 489,
+  "n_tags": 1220,
+  "path": "sub-015/meg/sub-015_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   32
+  ],
+  "skipped_buffers": 32,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-015/meg/sub-015_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 855008250,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 488,
+  "n_tags": 1219,
+  "path": "sub-015/meg/sub-015_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   81
+  ],
+  "skipped_buffers": 81,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-015/meg/sub-015_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 891506528,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 509,
+  "n_tags": 1240,
+  "path": "sub-015/meg/sub-015_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   86
+  ],
+  "skipped_buffers": 86,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-016/meg/sub-016_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 868913496,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 496,
+  "n_tags": 1230,
+  "path": "sub-016/meg/sub-016_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   195
+  ],
+  "skipped_buffers": 195,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-016/meg/sub-016_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 863698524,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1227,
+  "path": "sub-016/meg/sub-016_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   45
+  ],
+  "skipped_buffers": 45,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-016/meg/sub-016_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 856746412,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 489,
+  "n_tags": 1223,
+  "path": "sub-016/meg/sub-016_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   55
+  ],
+  "skipped_buffers": 55,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-016/meg/sub-016_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 865436532,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 494,
+  "n_tags": 1228,
+  "path": "sub-016/meg/sub-016_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   125
+  ],
+  "skipped_buffers": 125,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-016/meg/sub-016_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 861960472,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 492,
+  "n_tags": 1226,
+  "path": "sub-016/meg/sub-016_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   254
+  ],
+  "skipped_buffers": 254,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-016/meg/sub-016_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 860222516,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 491,
+  "n_tags": 1225,
+  "path": "sub-016/meg/sub-016_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   128
+  ],
+  "skipped_buffers": 128,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-017/meg/sub-017_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 861960788,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 492,
+  "n_tags": 1206,
+  "path": "sub-017/meg/sub-017_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   346
+  ],
+  "skipped_buffers": 346,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-017/meg/sub-017_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 875863882,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 500,
+  "n_tags": 1214,
+  "path": "sub-017/meg/sub-017_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   75
+  ],
+  "skipped_buffers": 75,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-017/meg/sub-017_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 908886214,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 519,
+  "n_tags": 1233,
+  "path": "sub-017/meg/sub-017_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   56
+  ],
+  "skipped_buffers": 56,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-017/meg/sub-017_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 858483682,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 490,
+  "n_tags": 1204,
+  "path": "sub-017/meg/sub-017_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   65
+  ],
+  "skipped_buffers": 65,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-017/meg/sub-017_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 872387826,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 498,
+  "n_tags": 1212,
+  "path": "sub-017/meg/sub-017_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   45
+  ],
+  "skipped_buffers": 45,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-017/meg/sub-017_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 870649774,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1211,
+  "path": "sub-017/meg/sub-017_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   95
+  ],
+  "skipped_buffers": 95,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-018/meg/sub-018_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 860221600,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 491,
+  "n_tags": 1203,
+  "path": "sub-018/meg/sub-018_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   46
+  ],
+  "skipped_buffers": 46,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-018/meg/sub-018_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 856745602,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 489,
+  "n_tags": 1201,
+  "path": "sub-018/meg/sub-018_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   44
+  ],
+  "skipped_buffers": 44,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-018/meg/sub-018_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 861959670,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 492,
+  "n_tags": 1204,
+  "path": "sub-018/meg/sub-018_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   32
+  ],
+  "skipped_buffers": 32,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-018/meg/sub-018_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 870649802,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1209,
+  "path": "sub-018/meg/sub-018_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   22
+  ],
+  "skipped_buffers": 22,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-018/meg/sub-018_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 856745526,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 489,
+  "n_tags": 1201,
+  "path": "sub-018/meg/sub-018_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   70
+  ],
+  "skipped_buffers": 70,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-018/meg/sub-018_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 855007524,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 488,
+  "n_tags": 1200,
+  "path": "sub-018/meg/sub-018_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   45
+  ],
+  "skipped_buffers": 45,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-019/meg/sub-019_task-FacePerception_run-1_meg.fif": {
+  "dirpos": 863697736,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1209,
+  "path": "sub-019/meg/sub-019_task-FacePerception_run-1_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   22
+  ],
+  "skipped_buffers": 22,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-019/meg/sub-019_task-FacePerception_run-2_meg.fif": {
+  "dirpos": 875863838,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 500,
+  "n_tags": 1216,
+  "path": "sub-019/meg/sub-019_task-FacePerception_run-2_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   29
+  ],
+  "skipped_buffers": 29,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-019/meg/sub-019_task-FacePerception_run-3_meg.fif": {
+  "dirpos": 872387938,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 498,
+  "n_tags": 1214,
+  "path": "sub-019/meg/sub-019_task-FacePerception_run-3_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   37
+  ],
+  "skipped_buffers": 37,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-019/meg/sub-019_task-FacePerception_run-4_meg.fif": {
+  "dirpos": 870649910,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 497,
+  "n_tags": 1213,
+  "path": "sub-019/meg/sub-019_task-FacePerception_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   33
+  ],
+  "skipped_buffers": 33,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-019/meg/sub-019_task-FacePerception_run-5_meg.fif": {
+  "dirpos": 863697738,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 493,
+  "n_tags": 1209,
+  "path": "sub-019/meg/sub-019_task-FacePerception_run-5_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   55
+  ],
+  "skipped_buffers": 55,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-019/meg/sub-019_task-FacePerception_run-6_meg.fif": {
+  "dirpos": 861959806,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 492,
+  "n_tags": 1208,
+  "path": "sub-019/meg/sub-019_task-FacePerception_run-6_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   25
+  ],
+  "skipped_buffers": 25,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-emptyroom/ses-20090409/meg/sub-emptyroom_ses-20090409_task-noise_meg.fif": {
+  "dirpos": 78091239,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 60,
+  "n_tags": 502,
+  "path": "sub-emptyroom/ses-20090409/meg/sub-emptyroom_ses-20090409_task-noise_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   22
+  ],
+  "skipped_buffers": 22,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-emptyroom/ses-20090506/meg/sub-emptyroom_ses-20090506_task-noise_meg.fif": {
+  "dirpos": 196392695,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 151,
+  "n_tags": 593,
+  "path": "sub-emptyroom/ses-20090506/meg/sub-emptyroom_ses-20090506_task-noise_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   41
+  ],
+  "skipped_buffers": 41,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-emptyroom/ses-20090511/meg/sub-emptyroom_ses-20090511_task-noise_meg.fif": {
+  "dirpos": 394282903,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 307,
+  "n_tags": 752,
+  "path": "sub-emptyroom/ses-20090511/meg/sub-emptyroom_ses-20090511_task-noise_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   95
+  ],
+  "skipped_buffers": 95,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-emptyroom/ses-20090515/meg/sub-emptyroom_ses-20090515_task-noise_meg.fif": {
+  "dirpos": 239293223,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 184,
+  "n_tags": 626,
+  "path": "sub-emptyroom/ses-20090515/meg/sub-emptyroom_ses-20090515_task-noise_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   40
+  ],
+  "skipped_buffers": 40,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-emptyroom/ses-20090518/meg/sub-emptyroom_ses-20090518_task-noise_meg.fif": {
+  "dirpos": 241893255,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 186,
+  "n_tags": 628,
+  "path": "sub-emptyroom/ses-20090518/meg/sub-emptyroom_ses-20090518_task-noise_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   81
+  ],
+  "skipped_buffers": 81,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-emptyroom/ses-20090601/meg/sub-emptyroom_ses-20090601_task-noise_meg.fif": {
+  "dirpos": 155455927,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 121,
+  "n_tags": 566,
+  "path": "sub-emptyroom/ses-20090601/meg/sub-emptyroom_ses-20090601_task-noise_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   12
+  ],
+  "skipped_buffers": 12,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-emptyroom/ses-20091126/meg/sub-emptyroom_ses-20091126_task-noise_meg.fif": {
+  "dirpos": 423815106,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 330,
+  "n_tags": 768,
+  "path": "sub-emptyroom/ses-20091126/meg/sub-emptyroom_ses-20091126_task-noise_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   33
+  ],
+  "skipped_buffers": 33,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003645/sub-emptyroom/ses-20091208/meg/sub-emptyroom_ses-20091208_task-noise_meg.fif": {
+  "dirpos": 154171746,
+  "ds": "on003645",
+  "first_tag_is_skip": false,
+  "n_buffers": 120,
+  "n_tags": 558,
+  "path": "sub-emptyroom/ses-20091208/meg/sub-emptyroom_ses-20091208_task-noise_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   33
+  ],
+  "skipped_buffers": 33,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on003682/sub-003/ses-01/meg/sub-003_ses-01_task-AversiveLearningReplay_run-10_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on003682",
+  "method": "tag-chain-walk",
+  "n_buffers": 1,
+  "path": "sub-003/ses-01/meg/sub-003_ses-01_task-AversiveLearningReplay_run-10_meg.fif",
+  "reads": 502,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on003682/sub-016/ses-01/meg/sub-016_ses-01_task-AversiveLearningReplay_run-09_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on003682",
+  "method": "tag-chain-walk",
+  "n_buffers": 1,
+  "path": "sub-016/ses-01/meg/sub-016_ses-01_task-AversiveLearningReplay_run-09_meg.fif",
+  "reads": 502,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on003682/sub-017/ses-01/meg/sub-017_ses-01_task-AversiveLearningReplay_run-12_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on003682",
+  "method": "tag-chain-walk",
+  "n_buffers": 1,
+  "path": "sub-017/ses-01/meg/sub-017_ses-01_task-AversiveLearningReplay_run-12_meg.fif",
+  "reads": 502,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on004012/sub-08/meg/sub-08_task-stim02_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on004012",
+  "method": "tag-chain-walk",
+  "n_buffers": 181,
+  "path": "sub-08/meg/sub-08_task-stim02_meg.fif",
+  "reads": 1103,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on004078/derivatives/preprocessed_data/sub-02/MEG/sub-02_task-RDR_run-15_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on004078",
+  "method": "tag-chain-walk",
+  "n_buffers": 342,
+  "path": "derivatives/preprocessed_data/sub-02/MEG/sub-02_task-RDR_run-15_meg.fif",
+  "reads": 971,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on004078/derivatives/preprocessed_data/sub-04/MEG/sub-04_task-RDR_run-57_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on004078",
+  "method": "tag-chain-walk",
+  "n_buffers": 321,
+  "path": "derivatives/preprocessed_data/sub-04/MEG/sub-04_task-RDR_run-57_meg.fif",
+  "reads": 953,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on004078/derivatives/preprocessed_data/sub-07/MEG/sub-07_task-RDR_run-42_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on004078",
+  "method": "tag-chain-walk",
+  "n_buffers": 373,
+  "path": "derivatives/preprocessed_data/sub-07/MEG/sub-07_task-RDR_run-42_meg.fif",
+  "reads": 1031,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on004078/derivatives/preprocessed_data/sub-09/MEG/sub-09_task-RDR_run-48_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on004078",
+  "method": "tag-chain-walk",
+  "n_buffers": 325,
+  "path": "derivatives/preprocessed_data/sub-09/MEG/sub-09_task-RDR_run-48_meg.fif",
+  "reads": 991,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on004078/derivatives/preprocessed_data/sub-11/MEG/sub-11_task-RDR_run-15_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on004078",
+  "method": "tag-chain-walk",
+  "n_buffers": 347,
+  "path": "derivatives/preprocessed_data/sub-11/MEG/sub-11_task-RDR_run-15_meg.fif",
+  "reads": 1009,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on004078/sub-03/meg/sub-03_task-RDR_run-5_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on004078",
+  "method": "tag-chain-walk",
+  "n_buffers": 347,
+  "path": "sub-03/meg/sub-03_task-RDR_run-5_meg.fif",
+  "reads": 951,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on004483/sub-13/meg/sub-13_task-abseq_run-04_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on004483",
+  "method": "tag-chain-walk",
+  "n_buffers": 220,
+  "path": "sub-13/meg/sub-13_task-abseq_run-04_meg.fif",
+  "reads": 942,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on004483/sub-18/meg/sub-18_task-abseq_run-10_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on004483",
+  "method": "tag-chain-walk",
+  "n_buffers": 268,
+  "path": "sub-18/meg/sub-18_task-abseq_run-10_meg.fif",
+  "reads": 988,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on004738/sub-abtpc/ses-220616/meg/sub-abtpc_ses-220616_task-dip13_acq-StimOff_meg.fif": {
+  "dirpos": 404743025,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 205,
+  "n_tags": 835,
+  "path": "sub-abtpc/ses-220616/meg/sub-abtpc_ses-220616_task-dip13_acq-StimOff_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   41
+  ],
+  "skipped_buffers": 41,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-abtpc/ses-220616/meg/sub-abtpc_ses-220616_task-dip13_acq-StimOn_meg.fif": {
+  "dirpos": 400866993,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 203,
+  "n_tags": 833,
+  "path": "sub-abtpc/ses-220616/meg/sub-abtpc_ses-220616_task-dip13_acq-StimOn_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   40
+  ],
+  "skipped_buffers": 40,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-abtpc/ses-220616/meg/sub-abtpc_ses-220616_task-dip13mov_acq-StimOff_meg.fif": {
+  "dirpos": 420247153,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 213,
+  "n_tags": 843,
+  "path": "sub-abtpc/ses-220616/meg/sub-abtpc_ses-220616_task-dip13mov_acq-StimOff_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   8
+  ],
+  "skipped_buffers": 8,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-abtpc/ses-220616/meg/sub-abtpc_ses-220616_task-dip13mov_acq-StimOn_meg.fif": {
+  "dirpos": 402805009,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 204,
+  "n_tags": 834,
+  "path": "sub-abtpc/ses-220616/meg/sub-abtpc_ses-220616_task-dip13mov_acq-StimOn_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   48
+  ],
+  "skipped_buffers": 48,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-bscpc/ses-220616/meg/sub-bscpc_ses-220616_task-dip13_acq-StimOff_meg.fif": {
+  "dirpos": 400866989,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 203,
+  "n_tags": 833,
+  "path": "sub-bscpc/ses-220616/meg/sub-bscpc_ses-220616_task-dip13_acq-StimOff_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   17
+  ],
+  "skipped_buffers": 17,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-bscpc/ses-220616/meg/sub-bscpc_ses-220616_task-dip13_acq-StimOn_meg.fif": {
+  "dirpos": 437689293,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 222,
+  "n_tags": 852,
+  "path": "sub-bscpc/ses-220616/meg/sub-bscpc_ses-220616_task-dip13_acq-StimOn_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   114
+  ],
+  "skipped_buffers": 114,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-bscpc/ses-220616/meg/sub-bscpc_ses-220616_task-dip13mov_acq-StimOff_meg.fif": {
+  "dirpos": 528776045,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 269,
+  "n_tags": 899,
+  "path": "sub-bscpc/ses-220616/meg/sub-bscpc_ses-220616_task-dip13mov_acq-StimOff_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   97
+  ],
+  "skipped_buffers": 97,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-bscpc/ses-220616/meg/sub-bscpc_ses-220616_task-dip13mov_acq-StimOn_meg.fif": {
+  "dirpos": 464821517,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 236,
+  "n_tags": 866,
+  "path": "sub-bscpc/ses-220616/meg/sub-bscpc_ses-220616_task-dip13mov_acq-StimOn_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   76
+  ],
+  "skipped_buffers": 76,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-mdtpc/ses-220616/meg/sub-mdtpc_ses-220616_task-dip13_acq-StimOff_meg.fif": {
+  "dirpos": 400866989,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 203,
+  "n_tags": 833,
+  "path": "sub-mdtpc/ses-220616/meg/sub-mdtpc_ses-220616_task-dip13_acq-StimOff_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   31
+  ],
+  "skipped_buffers": 31,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-mdtpc/ses-220616/meg/sub-mdtpc_ses-220616_task-dip13_acq-StimOn_meg.fif": {
+  "dirpos": 400866989,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 203,
+  "n_tags": 833,
+  "path": "sub-mdtpc/ses-220616/meg/sub-mdtpc_ses-220616_task-dip13_acq-StimOn_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   50
+  ],
+  "skipped_buffers": 50,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-mdtpc/ses-220616/meg/sub-mdtpc_ses-220616_task-dip13mov_acq-StimOff_meg.fif": {
+  "dirpos": 398928973,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 202,
+  "n_tags": 832,
+  "path": "sub-mdtpc/ses-220616/meg/sub-mdtpc_ses-220616_task-dip13mov_acq-StimOff_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   1054
+  ],
+  "skipped_buffers": 1054,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-mdtpc/ses-220616/meg/sub-mdtpc_ses-220616_task-dip13mov_acq-StimOn_meg.fif": {
+  "dirpos": 474511597,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 241,
+  "n_tags": 871,
+  "path": "sub-mdtpc/ses-220616/meg/sub-mdtpc_ses-220616_task-dip13mov_acq-StimOn_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   69
+  ],
+  "skipped_buffers": 69,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004738/sub-noIPG/ses-220616/meg/sub-noIPG_ses-220616_task-dip13_acq-StimOn_meg.fif": {
+  "dirpos": 424123181,
+  "ds": "on004738",
+  "first_tag_is_skip": false,
+  "n_buffers": 215,
+  "n_tags": 845,
+  "path": "sub-noIPG/ses-220616/meg/sub-noIPG_ses-220616_task-dip13_acq-StimOn_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   45
+  ],
+  "skipped_buffers": 45,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2218A/ses-0001/meg/sub-2218A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 796639903,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 514,
+  "n_tags": 1265,
+  "path": "sub-2218A/ses-0001/meg/sub-2218A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   18
+  ],
+  "skipped_buffers": 18,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2221A/ses-0001/meg/sub-2221A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 810495102,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 523,
+  "n_tags": 1237,
+  "path": "sub-2221A/ses-0001/meg/sub-2221A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   24
+  ],
+  "skipped_buffers": 24,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2227A/ses-0001/meg/sub-2227A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 795093428,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 513,
+  "n_tags": 1222,
+  "path": "sub-2227A/ses-0001/meg/sub-2227A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   16
+  ],
+  "skipped_buffers": 16,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2242A/ses-0001/meg/sub-2242A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 776615154,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 501,
+  "n_tags": 1226,
+  "path": "sub-2242A/ses-0001/meg/sub-2242A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   30
+  ],
+  "skipped_buffers": 30,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2246A/ses-0001/meg/sub-2246A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 787398880,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 508,
+  "n_tags": 1233,
+  "path": "sub-2246A/ses-0001/meg/sub-2246A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   122
+  ],
+  "skipped_buffers": 122,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2247A/ses-0001/meg/sub-2247A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 776614834,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 501,
+  "n_tags": 1217,
+  "path": "sub-2247A/ses-0001/meg/sub-2247A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   58
+  ],
+  "skipped_buffers": 58,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2252A/ses-0001/meg/sub-2252A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049568099,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1608,
+  "path": "sub-2252A/ses-0001/meg/sub-2252A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   44
+  ],
+  "skipped_buffers": 44,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2253A/ses-0001/meg/sub-2253A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049572901,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1612,
+  "path": "sub-2253A/ses-0001/meg/sub-2253A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   94
+  ],
+  "skipped_buffers": 94,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2269A/ses-0001/meg/sub-2269A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569217,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1609,
+  "path": "sub-2269A/ses-0001/meg/sub-2269A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   89
+  ],
+  "skipped_buffers": 89,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2286A/ses-0001/meg/sub-2286A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2013735060,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 1032,
+  "n_tags": 1760,
+  "path": "sub-2286A/ses-0001/meg/sub-2286A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   50
+  ],
+  "skipped_buffers": 50,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2289A/ses-0001/meg/sub-2289A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569046,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1604,
+  "path": "sub-2289A/ses-0001/meg/sub-2289A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   274
+  ],
+  "skipped_buffers": 274,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2295A/ses-0001/meg/sub-2295A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 1976798624,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 1013,
+  "n_tags": 1737,
+  "path": "sub-2295A/ses-0001/meg/sub-2295A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   156
+  ],
+  "skipped_buffers": 156,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2296A/ses-0001/meg/sub-2296A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 1976799711,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 1013,
+  "n_tags": 1768,
+  "path": "sub-2296A/ses-0001/meg/sub-2296A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   88
+  ],
+  "skipped_buffers": 88,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2318A/ses-0001/meg/sub-2318A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569149,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1607,
+  "path": "sub-2318A/ses-0001/meg/sub-2318A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   71
+  ],
+  "skipped_buffers": 71,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2320A/ses-0001/meg/sub-2320A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569380,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1614,
+  "path": "sub-2320A/ses-0001/meg/sub-2320A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   40
+  ],
+  "skipped_buffers": 40,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2326A/ses-0001/meg/sub-2326A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569253,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1610,
+  "path": "sub-2326A/ses-0001/meg/sub-2326A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   32
+  ],
+  "skipped_buffers": 32,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2328A/ses-0001/meg/sub-2328A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 1961426914,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 1002,
+  "n_tags": 1737,
+  "path": "sub-2328A/ses-0001/meg/sub-2328A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   67
+  ],
+  "skipped_buffers": 67,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2336A/ses-0001/meg/sub-2336A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569370,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1613,
+  "path": "sub-2336A/ses-0001/meg/sub-2336A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   38
+  ],
+  "skipped_buffers": 38,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2342A/ses-0001/meg/sub-2342A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049573227,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1621,
+  "path": "sub-2342A/ses-0001/meg/sub-2342A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   35
+  ],
+  "skipped_buffers": 35,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2343A/ses-0001/meg/sub-2343A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049572817,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1609,
+  "path": "sub-2343A/ses-0001/meg/sub-2343A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   34
+  ],
+  "skipped_buffers": 34,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2350A/ses-0001/meg/sub-2350A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569361,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1613,
+  "path": "sub-2350A/ses-0001/meg/sub-2350A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   40
+  ],
+  "skipped_buffers": 40,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2351A/ses-0001/meg/sub-2351A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049570018,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1631,
+  "path": "sub-2351A/ses-0001/meg/sub-2351A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   66
+  ],
+  "skipped_buffers": 66,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2355A/ses-0001/meg/sub-2355A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569596,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1620,
+  "path": "sub-2355A/ses-0001/meg/sub-2355A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   49
+  ],
+  "skipped_buffers": 49,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2365A/ses-0001/meg/sub-2365A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2000127788,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 1025,
+  "n_tags": 1776,
+  "path": "sub-2365A/ses-0001/meg/sub-2365A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   54
+  ],
+  "skipped_buffers": 54,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2367A/ses-0001/meg/sub-2367A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569344,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1613,
+  "path": "sub-2367A/ses-0001/meg/sub-2367A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   31
+  ],
+  "skipped_buffers": 31,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2379A/ses-0001/meg/sub-2379A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569672,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1622,
+  "path": "sub-2379A/ses-0001/meg/sub-2379A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   105
+  ],
+  "skipped_buffers": 105,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2477A/ses-0001/meg/sub-2477A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569492,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1617,
+  "path": "sub-2477A/ses-0001/meg/sub-2477A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   128
+  ],
+  "skipped_buffers": 128,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2480A/ses-0001/meg/sub-2480A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569020,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1604,
+  "path": "sub-2480A/ses-0001/meg/sub-2480A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   118
+  ],
+  "skipped_buffers": 118,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2496A/ses-0001/meg/sub-2496A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569168,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1608,
+  "path": "sub-2496A/ses-0001/meg/sub-2496A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   128
+  ],
+  "skipped_buffers": 128,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2503A/ses-0001/meg/sub-2503A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569010,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1603,
+  "path": "sub-2503A/ses-0001/meg/sub-2503A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   109
+  ],
+  "skipped_buffers": 109,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004837/sub-2514A/ses-0001/meg/sub-2514A_ses-0001_task-attnmod_run-01_meg.fif": {
+  "dirpos": 2049569041,
+  "ds": "on004837",
+  "first_tag_is_skip": false,
+  "n_buffers": 884,
+  "n_tags": 1604,
+  "path": "sub-2514A/ses-0001/meg/sub-2514A_ses-0001_task-attnmod_run-01_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   145
+  ],
+  "skipped_buffers": 145,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on004998/sub-PuPVlx/ses-PeriOp/meg/sub-PuPVlx_ses-PeriOp_task-HoldL_acq-MedOn_run-1_split-01_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on004998",
+  "method": "tag-chain-walk",
+  "n_buffers": 1103,
+  "path": "sub-PuPVlx/ses-PeriOp/meg/sub-PuPVlx_ses-PeriOp_task-HoldL_acq-MedOn_run-1_split-01_meg.fif",
+  "reads": 1635,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005107/sub-07/ses-02/meg/sub-07_ses-02_task-face_run-06_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005107",
+  "method": "tag-chain-walk",
+  "n_buffers": 322,
+  "path": "sub-07/ses-02/meg/sub-07_ses-02_task-face_run-06_meg.fif",
+  "reads": 415,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005261/derivatives/analysis_preliminary/sub-06/meg/sub-06_task-gloups_run-04_Filt_0p5_30_sFreq_250-meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005261",
+  "method": "tag-chain-walk",
+  "n_buffers": 1473,
+  "path": "derivatives/analysis_preliminary/sub-06/meg/sub-06_task-gloups_run-04_Filt_0p5_30_sFreq_250-meg.fif",
+  "reads": 1910,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005261/derivatives/analysis_preliminary/sub-16/meg/sub-16_task-gloups_Legal_Correct-epo.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005261",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/analysis_preliminary/sub-16/meg/sub-16_task-gloups_Legal_Correct-epo.fif",
+  "reads": 483,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005261/derivatives/analysis_preliminary/sub-16/meg/sub-16_task-gloups_run-03_Filt_0p5_30_sFreq_250-meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005261",
+  "method": "tag-chain-walk",
+  "n_buffers": 824,
+  "path": "derivatives/analysis_preliminary/sub-16/meg/sub-16_task-gloups_run-03_Filt_0p5_30_sFreq_250-meg.fif",
+  "reads": 1248,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005261/sub-18/meg/sub-18_task-gloups_run-03_split-02_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005261",
+  "method": "tag-chain-walk",
+  "n_buffers": 101,
+  "path": "sub-18/meg/sub-18_task-gloups_run-03_split-02_meg.fif",
+  "reads": 630,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005345/derivatives/sub-17/eeg/sub-17_task-multitalker_run-2_eeg_preprocessed.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005345",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/sub-17/eeg/sub-17_task-multitalker_run-2_eeg_preprocessed.fif",
+  "reads": 170,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005345/derivatives/sub-21/eeg/sub-21_task-multitalker_run-1_eeg_preprocessed.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005345",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/sub-21/eeg/sub-21_task-multitalker_run-1_eeg_preprocessed.fif",
+  "reads": 170,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005356/sub-M87139600/ses-01/meg/sub-M87139600_ses-01_task-pst_run-1_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005356",
+  "method": "tag-chain-walk",
+  "n_buffers": 1207,
+  "path": "sub-M87139600/ses-01/meg/sub-M87139600_ses-01_task-pst_run-1_meg.fif",
+  "reads": 1868,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005810/derivatives/ica/sub-08_ses-ImageNet02_task-ImageNet_run-02_meg_ica.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005810",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/ica/sub-08_ses-ImageNet02_task-ImageNet_run-02_meg_ica.fif",
+  "reads": 322,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005810/derivatives/ica/sub-26_ses-ImageNet01_task-ImageNet_run-02_meg_ica.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005810",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/ica/sub-26_ses-ImageNet01_task-ImageNet_run-02_meg_ica.fif",
+  "reads": 322,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005810/derivatives/preprocessed/raw/sub-09_ses-ImageNet04_task-ImageNet_run-03_meg_clean.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005810",
+  "method": "tag-chain-walk",
+  "n_buffers": 320,
+  "path": "derivatives/preprocessed/raw/sub-09_ses-ImageNet04_task-ImageNet_run-03_meg_clean.fif",
+  "reads": 640,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005810/derivatives/preprocessed/raw/sub-09_ses-ImageNet04_task-ImageNet_run-07_meg_clean.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005810",
+  "method": "tag-chain-walk",
+  "n_buffers": 320,
+  "path": "derivatives/preprocessed/raw/sub-09_ses-ImageNet04_task-ImageNet_run-07_meg_clean.fif",
+  "reads": 640,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005810/derivatives/preprocessed/raw/sub-10_ses-ImageNet01_task-ImageNet_run-01_meg_clean.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005810",
+  "method": "tag-chain-walk",
+  "n_buffers": 320,
+  "path": "derivatives/preprocessed/raw/sub-10_ses-ImageNet01_task-ImageNet_run-01_meg_clean.fif",
+  "reads": 640,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005810/derivatives/preprocessed/raw/sub-13_ses-ImageNet01_task-ImageNet_run-04_meg_clean.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005810",
+  "method": "tag-chain-walk",
+  "n_buffers": 320,
+  "path": "derivatives/preprocessed/raw/sub-13_ses-ImageNet01_task-ImageNet_run-04_meg_clean.fif",
+  "reads": 640,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005810/derivatives/preprocessed/raw/sub-14_ses-ImageNet01_task-ImageNet_run-01_meg_clean.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005810",
+  "method": "tag-chain-walk",
+  "n_buffers": 320,
+  "path": "derivatives/preprocessed/raw/sub-14_ses-ImageNet01_task-ImageNet_run-01_meg_clean.fif",
+  "reads": 640,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005810/sub-04/ses-ImageNet04/meg/sub-04_ses-ImageNet04_task-ImageNet_run-08_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005810",
+  "method": "tag-chain-walk",
+  "n_buffers": 1,
+  "path": "sub-04/ses-ImageNet04/meg/sub-04_ses-ImageNet04_task-ImageNet_run-08_meg.fif",
+  "reads": 510,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005810/sub-15/ses-ImageNet01/meg/sub-15_ses-ImageNet01_task-ImageNet_run-05_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005810",
+  "method": "tag-chain-walk",
+  "n_buffers": 1,
+  "path": "sub-15/ses-ImageNet01/meg/sub-15_ses-ImageNet01_task-ImageNet_run-05_meg.fif",
+  "reads": 510,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005811/derivatives/ica/sub-05_ses-ImageNet03_task-ImageNet_run-04_eeg_ica.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005811",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/ica/sub-05_ses-ImageNet03_task-ImageNet_run-04_eeg_ica.fif",
+  "reads": 166,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005811/derivatives/ica/sub-26_ses-ImageNet02_task-ImageNet_run-04_eeg_ica.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005811",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/ica/sub-26_ses-ImageNet02_task-ImageNet_run-04_eeg_ica.fif",
+  "reads": 166,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005811/derivatives/preprocessed/epochs/sub-14_eeg_epo.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005811",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/preprocessed/epochs/sub-14_eeg_epo.fif",
+  "reads": 174,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005811/derivatives/preprocessed/raw/sub-02_ses-ImageNet02_task-ImageNet_run-02_eeg_clean.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005811",
+  "method": "tag-chain-walk",
+  "n_buffers": 191,
+  "path": "derivatives/preprocessed/raw/sub-02_ses-ImageNet02_task-ImageNet_run-02_eeg_clean.fif",
+  "reads": 355,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005811/derivatives/preprocessed/raw/sub-06_ses-ImageNet03_task-ImageNet_run-07_eeg_clean.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005811",
+  "method": "tag-chain-walk",
+  "n_buffers": 192,
+  "path": "derivatives/preprocessed/raw/sub-06_ses-ImageNet03_task-ImageNet_run-07_eeg_clean.fif",
+  "reads": 356,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on005811/derivatives/preprocessed/raw/sub-14_ses-ImageNet01_task-ImageNet_run-02_eeg_clean.fif": {
+  "directory_status": "no-directory",
+  "ds": "on005811",
+  "method": "tag-chain-walk",
+  "n_buffers": 191,
+  "path": "derivatives/preprocessed/raw/sub-14_ses-ImageNet01_task-ImageNet_run-02_eeg_clean.fif",
+  "reads": 355,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1002/ses-01/eeg/sub-1002_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1002/ses-01/eeg/sub-1002_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1003/ses-01/eeg/sub-1003_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1003/ses-01/eeg/sub-1003_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1004/ses-01/eeg/sub-1004_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1004/ses-01/eeg/sub-1004_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1005/ses-01/eeg/sub-1005_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1005/ses-01/eeg/sub-1005_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1007/ses-01/eeg/sub-1007_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1007/ses-01/eeg/sub-1007_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1009/ses-01/eeg/sub-1009_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1009/ses-01/eeg/sub-1009_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1010/ses-01/eeg/sub-1010_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1010/ses-01/eeg/sub-1010_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1011/ses-01/eeg/sub-1011_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1011/ses-01/eeg/sub-1011_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1016/ses-01/eeg/sub-1016_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1016/ses-01/eeg/sub-1016_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1017/ses-01/eeg/sub-1017_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1017/ses-01/eeg/sub-1017_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1018/ses-01/eeg/sub-1018_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1018/ses-01/eeg/sub-1018_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1019/ses-01/eeg/sub-1019_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1019/ses-01/eeg/sub-1019_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1020/ses-01/eeg/sub-1020_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1020/ses-01/eeg/sub-1020_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1021/ses-01/eeg/sub-1021_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1021/ses-01/eeg/sub-1021_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1026/ses-01/eeg/sub-1026_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1026/ses-01/eeg/sub-1026_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1027/ses-01/eeg/sub-1027_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1027/ses-01/eeg/sub-1027_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1028/ses-01/eeg/sub-1028_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1028/ses-01/eeg/sub-1028_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1029/ses-01/eeg/sub-1029_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1029/ses-01/eeg/sub-1029_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1031/ses-01/eeg/sub-1031_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1031/ses-01/eeg/sub-1031_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1032/ses-01/eeg/sub-1032_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1032/ses-01/eeg/sub-1032_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1033/ses-01/eeg/sub-1033_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1033/ses-01/eeg/sub-1033_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1034/ses-01/eeg/sub-1034_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1034/ses-01/eeg/sub-1034_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1035/ses-01/eeg/sub-1035_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1035/ses-01/eeg/sub-1035_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1036/ses-01/eeg/sub-1036_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1036/ses-01/eeg/sub-1036_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1038/ses-01/eeg/sub-1038_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1038/ses-01/eeg/sub-1038_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1042/ses-01/eeg/sub-1042_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1042/ses-01/eeg/sub-1042_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1043/ses-01/eeg/sub-1043_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1043/ses-01/eeg/sub-1043_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1044/ses-01/eeg/sub-1044_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1044/ses-01/eeg/sub-1044_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1050/ses-01/eeg/sub-1050_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1050/ses-01/eeg/sub-1050_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1051/ses-01/eeg/sub-1051_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1051/ses-01/eeg/sub-1051_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1056/ses-01/eeg/sub-1056_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1056/ses-01/eeg/sub-1056_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1058/ses-01/eeg/sub-1058_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1058/ses-01/eeg/sub-1058_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1060/ses-01/eeg/sub-1060_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1060/ses-01/eeg/sub-1060_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1066/ses-01/eeg/sub-1066_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1066/ses-01/eeg/sub-1066_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1068/ses-01/eeg/sub-1068_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1068/ses-01/eeg/sub-1068_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1072/ses-01/eeg/sub-1072_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1072/ses-01/eeg/sub-1072_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006159/derivatives/cleaned/filt/sub-1074/ses-01/eeg/sub-1074_task-implicitlearn_desc-filtered_eeg.fif": {
+  "ds": "on006159",
+  "path": "derivatives/cleaned/filt/sub-1074/ses-01/eeg/sub-1074_task-implicitlearn_desc-filtered_eeg.fif",
+  "status": "FAILED RuntimeError: HTTP 502 after S3 403/404"
+ },
+ "on006334/sub-26/meg/sub-26_task-AVspeech_run-4_meg.fif": {
+  "dirpos": 1785815341,
+  "ds": "on006334",
+  "first_tag_is_skip": false,
+  "n_buffers": 1345,
+  "n_tags": 2109,
+  "path": "sub-26/meg/sub-26_task-AVspeech_run-4_meg.fif",
+  "skip_tags": 1,
+  "skip_values": [
+   5
+  ],
+  "skipped_buffers": 5,
+  "skips_nonzero": 1,
+  "status": "ok"
+ },
+ "on006374/derivatives/sub-es26/eeg/sub-es26_woAborts_hpfilter_manReject_muscleCleaned_ICsRejected_autoReject50_manReject_lpfilter_ref-average_epo.fif": {
+  "directory_status": "no-directory",
+  "ds": "on006374",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/sub-es26/eeg/sub-es26_woAborts_hpfilter_manReject_muscleCleaned_ICsRejected_autoReject50_manReject_lpfilter_ref-average_epo.fif",
+  "reads": 83,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on006468/sub-24/meg/sub-24_task-audiobook1_run-02_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on006468",
+  "method": "tag-chain-walk",
+  "n_buffers": 613,
+  "path": "sub-24/meg/sub-24_task-audiobook1_run-02_meg.fif",
+  "reads": 1316,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007353/derivatives/preproc/sub-01/sub-01_ses-eeg_task-action_run-06_preproc_eeg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007353",
+  "method": "tag-chain-walk",
+  "n_buffers": 331,
+  "path": "derivatives/preproc/sub-01/sub-01_ses-eeg_task-action_run-06_preproc_eeg.fif",
+  "reads": 495,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007353/derivatives/preproc/sub-01/sub-01_ses-meg_task-action_run-05_desc-ica_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007353",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/preproc/sub-01/sub-01_ses-meg_task-action_run-05_desc-ica_meg.fif",
+  "reads": 323,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007353/derivatives/preproc/sub-03/sub-03_ses-meg_task-action_run-07_desc-ica_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007353",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/preproc/sub-03/sub-03_ses-meg_task-action_run-07_desc-ica_meg.fif",
+  "reads": 323,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007353/derivatives/preproc/sub-16/sub-16_ses-meg_task-action_run-03_desc-ica_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007353",
+  "method": "tag-chain-walk",
+  "n_buffers": 0,
+  "path": "derivatives/preproc/sub-16/sub-16_ses-meg_task-action_run-03_desc-ica_meg.fif",
+  "reads": 323,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007353/derivatives/preproc/sub-17/sub-17_ses-eeg_task-action_run-01_preproc_eeg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007353",
+  "method": "tag-chain-walk",
+  "n_buffers": 326,
+  "path": "derivatives/preproc/sub-17/sub-17_ses-eeg_task-action_run-01_preproc_eeg.fif",
+  "reads": 490,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007353/sub-04/ses-meg/meg/sub-04_ses-meg_task-action_run-01_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007353",
+  "method": "tag-chain-walk",
+  "n_buffers": 1,
+  "path": "sub-04/ses-meg/meg/sub-04_ses-meg_task-action_run-01_meg.fif",
+  "reads": 513,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007353/sub-17/ses-meg/meg/sub-17_ses-meg_task-action_run-01_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007353",
+  "method": "tag-chain-walk",
+  "n_buffers": 1,
+  "path": "sub-17/ses-meg/meg/sub-17_ses-meg_task-action_run-01_meg.fif",
+  "reads": 513,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007353/sub-21/ses-meg/meg/sub-21_ses-meg_task-action_run-02_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007353",
+  "method": "tag-chain-walk",
+  "n_buffers": 1,
+  "path": "sub-21/ses-meg/meg/sub-21_ses-meg_task-action_run-02_meg.fif",
+  "reads": 513,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007353/sub-29/ses-meg/meg/sub-29_ses-meg_task-action_run-07_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007353",
+  "method": "tag-chain-walk",
+  "n_buffers": 1,
+  "path": "sub-29/ses-meg/meg/sub-29_ses-meg_task-action_run-07_meg.fif",
+  "reads": 513,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007523/sub-22/ses-01/meg/sub-22_ses-01_task-listen_run-06_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007523",
+  "method": "tag-chain-walk",
+  "n_buffers": 763,
+  "path": "sub-22/ses-01/meg/sub-22_ses-01_task-listen_run-06_meg.fif",
+  "reads": 1440,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ },
+ "on007524/sub-45/ses-01/meg/sub-45_ses-01_task-read_run-06_meg.fif": {
+  "directory_status": "no-directory",
+  "ds": "on007524",
+  "method": "tag-chain-walk",
+  "n_buffers": 569,
+  "path": "sub-45/ses-01/meg/sub-45_ses-01_task-read_run-06_meg.fif",
+  "reads": 1201,
+  "skip_tags": 0,
+  "skip_values": [],
+  "skipped_buffers": 0,
+  "skips_nonzero": 0,
+  "status": "ok-walk"
+ }
+}

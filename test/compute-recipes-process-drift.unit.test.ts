@@ -8,9 +8,10 @@
  * `eegprep@<version>` when eegprep comes from an index; nemar-process `common/versions.py`). This test reads a nemar-process checkout and compares.
  *
  * The checkout is named in `NEMAR_PROCESS_DIR`. Without it the comparison SKIPS VISIBLY on a developer
- * machine; `NEMAR_REQUIRE_PROCESS_RECIPES=1` (set by the CI workflow, which checks out nemar-process `dev`
- * with these files in its sparse list) makes a missing checkout or file FAIL, so a broken checkout cannot
- * quietly disable the comparison.
+ * machine; `NEMAR_REQUIRE_PROCESS_RECIPES=1` (set by the CI workflow, which checks out nemar-process `dev`,
+ * or while epic #2324's recipes are ahead of it a pinned commit of nemar-process's epic branch, with these
+ * files in its sparse list) makes a missing checkout or file FAIL, so a broken checkout cannot quietly
+ * disable the comparison.
  *
  * The same checkout holds each recipe's `STEP_ORDER`, `PRE_CHECKS` and `CHECKPOINTS`, which the registry's
  * step-to-checkpoint map copies (ADR 0134 decision 2). The map's steps are `STEP_ORDER` plus `PRE_CHECKS`:

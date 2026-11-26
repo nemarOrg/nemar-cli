@@ -1,0 +1,12 @@
+on006910 stores 384 discovered 384 errors 0 failure_count 0 format_version 3 engine 3
+on006914 stores 353 discovered 353 errors 0 failure_count 0 format_version 3 engine 3
+on006233 stores 347 discovered 347 errors 0 failure_count 0 format_version 3 engine 3
+on005545 stores 336 discovered 336 errors 0 failure_count 0 format_version 3 engine 3
+on004551 stores 121 discovered 125 errors 3 failure_count 4 format_version 3 engine 3
+nm000456 stores 17 discovered 69 errors 52 failure_count 52 format_version 3 engine 3
+on005007 stores 40 discovered 42 errors 2 failure_count 2 format_version 3 engine 3
+on005931 stores 16 discovered 16 errors 0 failure_count 0 format_version 3 engine 3
+nm000411 HTTP 404
+on003876 stores 49 discovered 54 errors 5 failure_count 5 format_version 3 engine 3
+on005670 stores 2 discovered 2 errors 0 failure_count 0 format_version 3 engine 3
+requests 11 {'429': 0, '5xx': 0, 'other_fail': 0}

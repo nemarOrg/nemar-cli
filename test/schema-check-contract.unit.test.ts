@@ -253,7 +253,7 @@ describe("Ajv agrees on every document of the corpus and every one-edit mutation
     }
     expect(disagreements).toEqual([]);
     expect(checked).toBeGreaterThan(50_000);
-    // Over 50,000 documents, each judged twice: about 3 s on an idle machine, but past bun's 5 s default
+    // Over 50,000 documents, each judged twice: about 1.4 s on an idle machine, but past bun's 5 s default
     // on a loaded CI runner (5,026 ms on #2388, 6 s on #2386). The corpus is the point of the test, so it
     // keeps its size and gets an explicit bound instead.
   }, 60_000);

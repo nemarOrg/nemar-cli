@@ -1,0 +1,35 @@
+{
+ "by_dataset": {
+  "nm000201": 1,
+  "on003944": 82,
+  "on003947": 61,
+  "on004067": 1,
+  "on005273": 3
+ },
+ "largest_gapped_edfd_files": [
+  {
+   "gap_count": 12,
+   "gap_total_s": 18803.449218,
+   "path": "sourcedata/pennsieve/files/raw_data/edf/PennEPI02197/PennEPI02197_day02.edf"
+  },
+  {
+   "gap_count": 12,
+   "gap_total_s": 18803.449218,
+   "path": "sub-PennEPI02197/eeg/sub-PennEPI02197_task-monitoring_run-02_eeg.edf"
+  },
+  {
+   "gap_count": 3,
+   "gap_total_s": 5626.460938,
+   "path": "sourcedata/pennsieve/files/raw_data/edf/PennEPI02152/PennEPI02152_day01.edf"
+  },
+  {
+   "gap_count": 3,
+   "gap_total_s": 5626.460938,
+   "path": "sub-PennEPI02152/eeg/sub-PennEPI02152_task-monitoring_run-01_eeg.edf"
+  }
+ ],
+ "note": "the MarkerFile= line of each .vhdr was not read (needs a network read), so a marker file kept in another directory cannot be excluded",
+ "vhdr_without_matching_vmrk_in_listing": 148,
+ "with_any_vmrk_in_same_directory": 1,
+ "with_case_insensitive_name_match": 0
+}
