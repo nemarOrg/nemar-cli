@@ -249,8 +249,10 @@ export async function applyDatasetVisibility(
       console.error(`CRITICAL: Exception updating database visibility for ${datasetId}:`, msg);
       return await revertAfterDbFailure(msg);
     }
-    // The row is private now (an unpublish or a withdrawal): drop its quality views from Cloudflare's
-    // cache. After the write, best effort, never throws (ADR 0137 decision 7).
+    // The row is private now: drop its quality views from Cloudflare's cache. After the write, best
+    // effort, never throws (ADR 0137 decision 7). This is the purge of an unpublish and of a withdrawal,
+    // both of which flip the row here first; a resumed withdrawal finds the row private and was purged
+    // by the flip of its first attempt.
     if (visibility === "private") await purgeQualityCache(env, datasetId, "private");
   }
 
