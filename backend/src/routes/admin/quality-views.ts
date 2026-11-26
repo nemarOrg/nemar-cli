@@ -15,9 +15,10 @@
  *
  * THE ORDER, on every request:
  *  1. The method (GET only; Hono hands a HEAD to a GET route, and it is refused) and the path, before
- *     anything is read: no query string, the stamp an id, and `rest` inside the grammar
- *     (`qualityAdminRest`: `record/<recording>` or `file/<64 hex>/<recording>`, no `.` or `..` segment, no
- *     encoded `/`, `\` or `.`), and the recording one the public route takes (`isRecordingPath`).
+ *     anything is read: no `?` anywhere in the URL, the stamp an id, and `rest`, raw from the pathname,
+ *     inside the grammar (`qualityAdminRest`: `record/<recording>` or `file/<64 hex>/<recording>`, no `.`
+ *     or `..` segment, no encoded `/`, `\` or `.`, and the decoded recording one the public route takes,
+ *     by the same shared rule, `isQualityRecordingPath`).
  *  2. ONE D1 statement: the stamp and its derivative (bound to the stamp's dataset). Only a row that is
  *     `stored` and whose `expires_at` has not passed is read, of any retention (canary, catalog or
  *     published, superseded included): a copying row's files are partial and an expired row's are deleted
@@ -29,9 +30,16 @@
  *
  * NOTHING HERE IS PUBLIC. There is no dataset gate, because an administrator reads private datasets and
  * concealed deposits (ADR 0065) too; so nothing here may reach a public page or cache. The edge cache is
- * never consulted or written (`cache.match` or `cache.put`), every answer, a refusal included, is
- * `Cache-Control: no-store`, and no answer carries a `Cache-Tag`, an `ETag` or a public address. A log
- * line carries the stamp, the first twelve digits of a key and a fixed word, never a path.
+ * never consulted or written (`cache.match` or `cache.put`), every answer this handler gives, a refusal
+ * included, is `Cache-Control: no-store`, and none carries a `Cache-Tag`, an `ETag` or a public address.
+ * A refusal from the router's middleware or the rate limiter is not this handler's answer: the website's
+ * proxy makes every answer it relays `no-store` (`shared/contract/quality-route.ts`, the proxy's
+ * obligations).
+ *
+ * LOGS. Every line is tagged `[quality-admin]` and leads with `stamp=<id>`; a line about the record or a
+ * file then carries the derivative's dataset, the first twelve digits of its key, a fixed word and a
+ * reason word (`quality-serve.ts`); a line before the row is read carries the stamp and the word alone.
+ * None carries a path.
  */
 
 import { COMPUTE_PIPELINE_STAMP_ID_RE } from "../../../../shared/contract/compute-admin.js";
@@ -42,7 +50,6 @@ import {
   qualityAdminRest,
 } from "../../../../shared/contract/quality-route.js";
 import { derivativesBound } from "../../services/compute-derivatives.js";
-import { isRecordingPath } from "../../services/quality-admin.js";
 import { type ServedDerivative, serveRecordingViews } from "../../services/quality-serve.js";
 import type { AdminRouter } from "./shared.js";
 
@@ -98,17 +105,16 @@ export function registerQualityViewAdminRoutes(admin: AdminRouter): void {
   admin.get(`/compute/pipeline/runs/:stamp/${QUALITY_ADMIN_SEGMENT}/*`, async (c) => {
     // 1. The method and the path, before anything is read.
     if (c.req.method !== "GET") return refuse("method_not_allowed");
+    // Any `?`, a bare one included (which `URL.search` reads as empty), is outside the grammar.
+    if (c.req.url.includes("?")) return refuse("recording_path_invalid");
     const url = new URL(c.req.url);
-    if (url.search !== "") return refuse("recording_path_invalid");
     const stamp = c.req.param("stamp");
     if (!COMPUTE_PIPELINE_STAMP_ID_RE.test(stamp)) return refuse("stamp_not_found");
     const stampId = Number(stamp);
     if (!Number.isSafeInteger(stampId)) return refuse("stamp_not_found");
     const rest = rawRest(url.pathname, stamp);
     const asked = rest === null ? null : qualityAdminRest(rest);
-    if (asked === null || !isRecordingPath(asked.recording)) {
-      return refuse("recording_path_invalid");
-    }
+    if (asked === null) return refuse("recording_path_invalid");
 
     try {
       // 2. The stamp and its derivative, in one statement; only a stored, in-date row is read.
@@ -118,19 +124,22 @@ export function registerQualityViewAdminRoutes(admin: AdminRouter): void {
       if (word !== null || row.key === null) return refuse(word ?? "derivative_not_keyed");
       const bucket = c.env.COMPUTE_DERIVATIVES;
       if (!derivativesBound(c.env) || bucket === undefined) {
-        console.warn(`[quality-admin] store_unavailable stamp=${stampId}`);
+        console.warn(`[quality-admin] stamp=${stampId} store_unavailable`);
         return refuse("quality_unavailable");
       }
 
       // 3. The record and file steps of the public route, and no cache.
-      const served = await serveRecordingViews(bucket, row, asked, "quality-admin");
+      const served = await serveRecordingViews(bucket, row, asked, {
+        tag: "quality-admin",
+        context: `stamp=${stampId}`,
+      });
       if (!served.ok) return refuse(served.word);
       return new Response(served.bytes, {
         headers: { ...served.headers, "Cache-Control": "no-store" },
       });
     } catch (err) {
       console.error(
-        `[quality-admin] quality_unavailable stamp=${stampId} error=${err instanceof Error ? err.name : typeof err}`,
+        `[quality-admin] stamp=${stampId} quality_unavailable error=${err instanceof Error ? err.name : typeof err}`,
       );
       return refuse("quality_unavailable");
     }

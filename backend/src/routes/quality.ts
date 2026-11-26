@@ -225,7 +225,7 @@ export async function qualityHandler(
 
   // 4 and 5. The record, checked whole, and a declared file, read again and hashed (`quality-serve.ts`,
   // the steps the admin mount runs too).
-  const served = await serveRecordingViews(bucket, row, asked, "quality");
+  const served = await serveRecordingViews(bucket, row, asked, { tag: "quality" });
   if (!served.ok) return refuse(served.word);
   const response = new Response(served.bytes, {
     headers: { ...served.headers, ...publicHeaders(datasetId, served.sha256) },

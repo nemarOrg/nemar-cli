@@ -18,7 +18,8 @@
  *     `nosniff`, and as an attachment unless its format is one the registry lists.
  *
  * What a caller adds is caching: the answer carries only its content headers, so the public route adds its
- * cache headers and the admin route `no-store`. A log line carries the dataset id, the first twelve digits
+ * cache headers and the admin route `no-store`. A log line carries the caller's context (the admin mount's
+ * stamp), the dataset id, the first twelve digits
  * of a key and a fixed word, never a path.
  */
 
@@ -93,23 +94,27 @@ const refused = (word: QualityRouteWord): Served => ({ ok: false, word });
 
 /**
  * Steps 4 and 5 over a derivative a route has decided may be read. `log` is the log line's tag
- * (`quality` or `quality-admin`).
+ * (`quality` or `quality-admin`) and the context it leads with (the admin mount's `stamp=<id>`, or none).
  */
 export async function serveRecordingViews(
   bucket: R2Bucket,
   row: ServedDerivative,
   asked: ViewAsk,
-  log: string,
+  log: { tag: string; context?: string },
 ): Promise<Served> {
   // 4. The record, checked whole.
   const short = row.key.slice(0, 12);
   const datasetId = row.dataset_id;
+  const lead = log.context === undefined ? `[${log.tag}]` : `[${log.tag}] ${log.context}`;
+  /** One log line: the tag, the context, a fixed word, the dataset and the key's first twelve digits. */
+  const line = (word: string, reason?: string): string =>
+    `${lead} ${word} dataset=${datasetId} key=${short}${reason === undefined ? "" : ` reason=${reason}`}`;
   const recipe = findRecipe(row.recipe);
   // The recipe version's quality plugins as the row recorded them when it was made, so a derivative of a
   // version the registry has moved past is checked against its own version's plugins.
   const plugins = pluginsOf(row.quality_plugins);
   if (recipe === null || plugins === null) {
-    console.warn(`[${log}] quality_plugins_unknown dataset=${datasetId} key=${short}`);
+    console.warn(line("quality_plugins_unknown"));
     return refused("quality_not_found");
   }
   const recordPath = productPath(asked.recording, label(recipe.name), "signalJourney", "json");
@@ -120,9 +125,7 @@ export async function serveRecordingViews(
   );
   if (record.kind === "missing") return refused("quality_not_found");
   if (record.kind === "too_large") {
-    console.warn(
-      `[${log}] record_unreadable dataset=${datasetId} key=${short} reason=record_too_large`,
-    );
+    console.warn(line("record_unreadable", "record_too_large"));
     return refused("record_unreadable");
   }
   const views = await recordingViews(
@@ -136,9 +139,7 @@ export async function serveRecordingViews(
     { datasetId, recording: asked.recording },
   );
   if (!views.ok) {
-    console.warn(
-      `[${log}] record_unreadable dataset=${datasetId} key=${short} reason=${views.reason}`,
-    );
+    console.warn(line("record_unreadable", views.reason));
     return refused("record_unreadable");
   }
 
@@ -177,11 +178,11 @@ export async function serveRecordingViews(
   );
   if (file.kind === "missing") return refused("view_data_missing");
   if (file.kind === "too_large" || file.bytes.byteLength !== declared.size) {
-    console.error(`[${log}] view_data_corrupt dataset=${datasetId} key=${short} reason=size`);
+    console.error(line("view_data_corrupt", "size"));
     return refused("view_data_corrupt");
   }
   if ((await sha256HexOfBytes(file.bytes)) !== asked.sha256) {
-    console.error(`[${log}] view_data_corrupt dataset=${datasetId} key=${short} reason=digest`);
+    console.error(line("view_data_corrupt", "digest"));
     return refused("view_data_corrupt");
   }
   return {
