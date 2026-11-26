@@ -26,7 +26,8 @@
 --     `sent` (at least one recipient took it and none failed), `failed` (a provider refused or did
 --     not answer a send), `fenced` (the dev Worker's DEV_EMAIL_ALLOWLIST held every recipient).
 --     NULL when no denial mail was due. `denial_mail_attempts` counts the tries: the daily tick
---     retries a `failed` mail once.
+--     retries a `failed` mail once. `denial_mail_listed_at` is when a digest that reached an
+--     administrator listed the mail as not delivered, so each one is listed exactly once.
 --   * `auto_deny_at`: when that word was written; NULL for `none`. The daily cap counts `denied`,
 --     `would_deny` and `restored` by it, and the administrators' digest reads every word but `none` by it.
 --
@@ -84,6 +85,7 @@ CREATE TABLE publication_reviews_new (
   denial_mail_state TEXT CHECK (denial_mail_state IS NULL
     OR denial_mail_state IN ('sent', 'failed', 'fenced')),
   denial_mail_attempts INTEGER NOT NULL DEFAULT 0 CHECK (denial_mail_attempts >= 0),
+  denial_mail_listed_at TEXT,
   -- A verdict, and a stored report, exist exactly when the review reported.
   CHECK ((state = 'reported') = (verdict IS NOT NULL)),
   CHECK ((state = 'reported') = (report IS NOT NULL)),

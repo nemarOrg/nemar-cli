@@ -1115,6 +1115,53 @@ describe("the denial mail is never silent", () => {
       expect(text).toContain("Denial mail not delivered (1)");
       expect(text).toContain(`${PROD_DATASET} request ${requestId}`);
     });
+    expect(
+      h.db
+        .query("SELECT denial_mail_listed_at AS at FROM publication_reviews WHERE id = ?")
+        .get(firstId),
+    ).not.toEqual({ at: null });
+
+    // Listed once: the next digest, whose window no longer holds the denial either way, does not
+    // list it again.
+    nextDigestDay();
+    await withFakeResend(async (calls) => {
+      const r = await sendAutoDenyDigest(h.env());
+      expect(r).toMatchObject({ claimed: true, undelivered: 0 });
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(0);
+    });
+  });
+
+  test("an undelivered mail is listed by its state, not its window, even long after the denial", async () => {
+    await accounts();
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    let firstId = 0;
+    let requestId = 0;
+    await withFakeResend(
+      async () => {
+        const run = await firstRun();
+        firstId = run.firstId;
+        requestId = run.requestId;
+        await confirmRun(firstId, confirmingBody());
+      },
+      { status: 500 },
+    );
+    // Failed twice, and denied a week before the last digest that was sent.
+    h.db.run(
+      `UPDATE publication_reviews SET denial_mail_attempts = 2,
+              auto_deny_at = datetime('now', '-7 days') WHERE id = ?`,
+      [firstId],
+    );
+    h.db.run(
+      `INSERT INTO publication_auto_deny_digests (day, window_end, sent_at)
+       VALUES ('2000-01-01', datetime('now', '-1 hour'), datetime('now', '-1 hour'))`,
+    );
+    await withFakeResend(async (calls) => {
+      const r = await sendAutoDenyDigest(h.env());
+      expect(r).toMatchObject({ claimed: true, rows: 0, undelivered: 1 });
+      expect(textOf(sendsTo(calls, ADMIN_EMAIL)[0]?.html ?? "")).toContain(
+        `${PROD_DATASET} request ${requestId}`,
+      );
+    });
   });
 
   test("a failed mail that the retry delivers is sent, and not listed", async () => {

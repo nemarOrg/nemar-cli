@@ -225,8 +225,10 @@ export async function autoDenyStep(env: Bindings, reviewId: number): Promise<Aft
       await markFirst(db, row.id, "not_eligible");
       return "not_eligible";
     }
-    // Nothing will confirm this fail (the dispatch failed, the Worker could not hand it over, the
-    // platform's allowance declined it): the first run says so, and a person decides.
+    // Nothing will confirm this fail. EVERY other `started: false` reason lands here on purpose,
+    // `running` and `has_result` included (the dispatch failed, the Worker could not hand it over,
+    // the platform's allowance declined it, the review is off or not this Worker's, or anything a
+    // start may answer later): it fails closed, never toward a deny, and a person decides.
     await markFirst(db, row.id, "confirm_failed");
     return "confirm_failed";
   }
@@ -509,8 +511,10 @@ async function mailDepositor(
 }
 
 /**
- * Try once more each denial mail that failed (the daily tick, before the digest). Only a mail tried
- * once: a second failure stays `failed` and the digest lists it.
+ * Try once more each denial mail that failed. Only a mail tried once: a second failure stays
+ * `failed` and the digest lists it. It runs ONLY in the production digest tick
+ * ({@link sendAutoDenyDigest}, after its day claim and before it reads its rows), so a mail is retried
+ * at most once a day and never from the dev Worker, which shares real addresses.
  */
 export async function retryFailedDenialMails(env: Bindings): Promise<number> {
   const db = env.DB;
@@ -691,18 +695,24 @@ async function digestAfterClaim(
   }
   result.rows = rows.length;
   result.more = Math.max(0, total - rows.length);
-  // The denials whose mail failed at the denial and again on its retry, whatever their window.
-  const undelivered = (
+  // The denials whose mail failed at the denial and again on its retry, chosen by their mail state
+  // and never by the window: every one not yet listed, each listed once (marked below, only once
+  // a digest carrying it reached an administrator).
+  const undeliveredRows = (
     await db
       .prepare(
-        `SELECT dataset_id, request_id FROM publication_reviews
-          WHERE confirm_of IS NULL AND auto_deny_state = 'denied' AND denial_mail_state = 'failed'
-            AND denial_mail_attempts >= ? AND auto_deny_at > ?
+        `SELECT id, dataset_id, request_id FROM publication_reviews
+          WHERE confirm_of IS NULL AND denial_mail_state = 'failed'
+            AND denial_mail_attempts >= ? AND denial_mail_listed_at IS NULL
           ORDER BY auto_deny_at, id LIMIT ?`,
       )
-      .bind(DENIAL_MAIL_MAX_ATTEMPTS, since, DIGEST_ROW_LIMIT)
-      .all<{ dataset_id: string; request_id: number }>()
-  ).results.map((r) => ({ datasetId: String(r.dataset_id), requestId: Number(r.request_id) }));
+      .bind(DENIAL_MAIL_MAX_ATTEMPTS, DIGEST_ROW_LIMIT)
+      .all<{ id: number; dataset_id: string; request_id: number }>()
+  ).results;
+  const undelivered = undeliveredRows.map((r) => ({
+    datasetId: String(r.dataset_id),
+    requestId: Number(r.request_id),
+  }));
   result.undelivered = undelivered.length;
   await db
     .prepare("UPDATE publication_auto_deny_digests SET window_end = ? WHERE id = ?")
@@ -727,7 +737,18 @@ async function digestAfterClaim(
     env,
   );
   result.delivered = outcome.delivered;
-  if (outcome.delivered > 0) await markDigestSent(db, digestId);
+  if (outcome.delivered > 0) {
+    await markDigestSent(db, digestId);
+    for (const r of undeliveredRows) {
+      await db
+        .prepare(
+          `UPDATE publication_reviews SET denial_mail_listed_at = datetime('now')
+            WHERE id = ? AND denial_mail_listed_at IS NULL`,
+        )
+        .bind(r.id)
+        .run();
+    }
+  }
 }
 
 async function markDigestSent(db: Db, id: number): Promise<void> {
