@@ -110,7 +110,15 @@ describe("a configuration file that cannot be read", () => {
       const script = `import { zarrReadAction } from ${JSON.stringify(ZARR_COMMAND)};
         await zarrReadAction("nm099500", "a.edf", { start: "0", duration: "1" });
         process.exit(process.exitCode ?? 0);`;
-      const env = { ...process.env, NEMAR_CONFIG_DIR: dir, TEST_API_URL: "" };
+      // Built from nothing: the parent's environment carries the test API URL override and any
+      // ambient credential, and neither may reach the child.
+      const env: Record<string, string> = {
+        PATH: process.env.PATH ?? "",
+        HOME: dir,
+        NEMAR_CONFIG_DIR: dir,
+        NEMAR_NO_BROWSER: "1",
+        NEMAR_NO_UPDATE_CHECK: "1",
+      };
       const proc = Bun.spawn({
         cmd: [process.execPath, "-e", script],
         env,

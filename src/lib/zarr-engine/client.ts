@@ -28,6 +28,7 @@ import {
   MAX_HEADER_BYTES,
   encodeFrame,
 } from "../../../shared/zarr/protocol-frame.js";
+import { API_URL_OVERRIDE_ENV } from "../api/client.js";
 import { ZARR_ENGINE_COMMAND } from "./command.js";
 import { type FrameEvent, MAX_CLIENT_PAYLOAD_BYTES, readFrames } from "./frame-stream.js";
 
@@ -73,7 +74,7 @@ const ENGINE_ENV_NAMES = new Set([
   "NODE_EXTRA_CA_CERTS",
   "NEMAR_CONFIG_DIR",
   "NEMAR_NO_UPDATE_CHECK",
-  "TEST_API_URL",
+  API_URL_OVERRIDE_ENV,
 ]);
 /** Variables of these families pass too: the locale (`LC_*`), XDG directories, Bun's own settings,
  *  and every engine setting (`NEMAR_ZARR_*`). */

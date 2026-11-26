@@ -24,6 +24,7 @@ import {
   MAX_HEADER_BYTES,
   encodeFrame,
 } from "../shared/zarr/protocol-frame.js";
+import { API_URL_OVERRIDE_ENV } from "../src/lib/api/client.js";
 import {
   EngineClient,
   EngineClientError,
@@ -217,7 +218,7 @@ describe("the engine's environment", () => {
       XDG_CONFIG_HOME: "/x",
       NEMAR_ZARR_BASE: "http://127.0.0.1:1",
       NEMAR_CONFIG_DIR: "/c",
-      TEST_API_URL: "http://127.0.0.1:2",
+      [API_URL_OVERRIDE_ENV]: "http://127.0.0.1:2",
       HTTPS_PROXY: "http://proxy",
       NEMAR_API_KEY: "secret",
       GITHUB_TOKEN: "secret",
@@ -232,7 +233,7 @@ describe("the engine's environment", () => {
         "NEMAR_CONFIG_DIR",
         "NEMAR_ZARR_BASE",
         "PATH",
-        "TEST_API_URL",
+        API_URL_OVERRIDE_ENV,
         "XDG_CONFIG_HOME",
       ].sort(),
     );
