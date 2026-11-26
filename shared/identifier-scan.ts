@@ -64,6 +64,7 @@ export type FindingKind =
   | "brainvision-comment-name"
   | "brainvision-segment-date"
   | "nirx-subject-name"
+  | "nirx-subject-freetext"
   | "nirx-demographics"
   | "nirx-header-date"
   | "nirx-freetext"

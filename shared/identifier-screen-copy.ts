@@ -241,6 +241,12 @@ export const KIND_COPY: Record<FindingKind, Copy> = {
     "Blank the field or replace it with the subject's code (for the subject, the BIDS subject label), and upload again.",
     "nirx-subject-name",
   ),
+  "nirx-subject-freetext": kind(
+    "The subject's Name in a NIRx .inf holds text that is neither the BIDS subject label nor a short code, and may name someone.",
+    NIRX,
+    "Check that it names nobody; replace it with the BIDS subject label if in doubt.",
+    "nirx-subject-freetext",
+  ),
   "nirx-demographics": kind(
     "The demographics of a NIRx file hold a birth date: to the day it is an identifier; as a year or a year and month it is for review.",
     NIRX,
