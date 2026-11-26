@@ -691,6 +691,41 @@ describe("a git that fails is an error, never a screen without history", () => {
     expect(statusOf(await working(plain))).toBe("direct-identifiers");
   });
 
+  test("a plain directory inside a repository that git refuses as another user's is exit 2, not a screen", async () => {
+    // The parent is a repository whose owner is not this user (git's own switch stands in for a
+    // second account). The directory has no `.git`, yet git's refusal is not "no repository":
+    // a screen made without it would read less than the server does and look complete.
+    const parent = dataset(named(1));
+    const inside = join(parent.dir, "deposit");
+    mkdirSync(inside);
+    writeFileSync(join(inside, "dataset_description.json"), DESCRIPTION);
+    const before = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
+    try {
+      for (const committedMode of [false, true]) {
+        const error = await screenLocalDataset(inside, { committed: committedMode }).then(
+          () => null,
+          (e) => e,
+        );
+        expect(error).toBeInstanceOf(LocalScreenError);
+        expect(error.code).toBe("git-failed");
+        expect(error.failure).toBe("unsafe-directory");
+        expect(localErrorSentence(error)).toContain("unsafe-directory");
+        expect(localErrorSentence(error)).not.toContain(parent.dir);
+      }
+    } finally {
+      if (before === undefined) {
+        Reflect.deleteProperty(process.env, "GIT_TEST_ASSUME_DIFFERENT_OWNER");
+      } else {
+        process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = before;
+      }
+    }
+    // The same directory with the refusal off is a plain absence of history, and is screened.
+    const screen = await screenLocalDataset(inside, { committed: false });
+    expect(screen.history).toBe(false);
+    expect(screen.status).toBe("no-recordings");
+  });
+
   test("a repository with no commit yet is screened (git answers 'no HEAD', not a failure)", async () => {
     const empty = new Repo("unborn");
     empty.file(EDF, recording(named(1)));

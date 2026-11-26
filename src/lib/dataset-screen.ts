@@ -133,6 +133,11 @@ function gitEnv(): Record<string, string> {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_NO_LAZY_FETCH: "1",
     GIT_OPTIONAL_LOCKS: "0",
+    // Git's own switch for treating the repository as another user's. It lets a test reproduce the
+    // `safe.directory` refusal, which otherwise needs a second account; it is never set otherwise.
+    ...(process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER
+      ? { GIT_TEST_ASSUME_DIFFERENT_OWNER: process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER }
+      : {}),
   };
 }
 
