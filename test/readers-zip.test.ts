@@ -26,6 +26,7 @@ import {
   companionsOf,
   formatCoverage,
   limitsFor,
+  namedCompanionsMissing,
   readerFor,
   readerMatch,
 } from "../shared/identifier-readers";
@@ -64,6 +65,7 @@ const kitWith = (inner: readonly FormatReader[]): ZipKit => ({
   readerMatch,
   companionsOf,
   formatCoverage,
+  namedCompanionsMissing,
   limitExceeded: () => new LimitExceeded(),
   pageBytes: PAGE_BYTES,
 });
@@ -387,7 +389,7 @@ describe("which inner entries are read", () => {
         { name: "sub-Quintavius/a.txt" },
       ]).bytes,
     );
-    const path = result.findings.map((f) => [f.kind, f.entries]);
+    const path = result.findings.map((f) => [f.kind, f.count]);
     expect(path).toEqual([
       ["image-or-document-file", 6],
       ["tooling-debris", 2],
@@ -695,5 +697,26 @@ describe("through readRecordings", () => {
     const whole = await read(bytes);
     expect(whole.tallies.zip.read).toBe(1);
     expect(has(whole.findings, "edf-patient-name")).toBe(true);
+  });
+});
+
+describe("an EEGLAB .set inside an archive (card A5)", () => {
+  const SET = load(join(import.meta.dir, "fixtures", "mat"), "eeglab-data-edited.set");
+
+  test("is read by the EEGLAB reader, and its .fdt is looked for beside it in the archive", async () => {
+    const lacking = await scan(
+      buildZip([{ name: "eeg/eeglab_data.set", data: SET, method: 8 }]).bytes,
+    );
+    expect(kinds(lacking.result.findings)).toContain("eeglab-subject-name");
+    expect(lacking.result).toMatchObject({ coverage: "partial", incomplete: "companion-missing" });
+    // The twin with the .fdt beside it: read whole, the name still found.
+    const whole = await scan(
+      buildZip([
+        { name: "eeg/eeglab_data.set", data: SET, method: 8 },
+        { name: "eeg/eeglab_data.fdt", data: new Uint8Array(64), method: 0 },
+      ]).bytes,
+    );
+    expect(whole.result.coverage).toBe("complete");
+    expect(kinds(whole.result.findings)).toContain("eeglab-subject-name");
   });
 });

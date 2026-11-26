@@ -8,7 +8,8 @@
  * Which field names are a person's, read word by word ({@link fieldTokens}): a `person` word not
  * qualified by a `thing` word before it, in a name with no `describing` word (a field that
  * describes the person, such as `Subject_Type` or `SubjectInfo`, has its own rules), that is not
- * one of the `own` names. A field called just `name` names its own object (a stimulus, an aux
+ * one of the `own` names, and whose person word is not a `name` qualified by another word
+ * (`LongName`). A field called just `name` names its own object (a stimulus, an aux
  * channel, a group), as SNIRF's `stim{k}/name` and many HDF5 layouts use it. `ExperimenterName`,
  * `PatientProfile` and `SubjectTask` are a person's; `ManufacturerName`, `AppName`, `SubjectInfo`
  * and `name` are not. Words match whole, never inside another word (`cap` is not in `landscape`).
@@ -50,6 +51,7 @@ export const PERSON_FIELDS = {
     "remarks",
     "date",
     "contact",
+    "description",
   ],
   own: ["name"],
 } as const;
@@ -65,6 +67,14 @@ export function fieldTokens(name: string): string[] {
     .split(/[^\p{L}]+/u)
     .filter((t) => t !== "")
     .map((t) => t.toLowerCase());
+}
+
+/** Whether a word before `name` makes it a thing's name: neither a person nor a describing word. */
+function namesAThing(before: string): boolean {
+  return !(
+    (PERSON_FIELDS.person as readonly string[]).includes(before) ||
+    (PERSON_FIELDS.describing as readonly string[]).includes(before)
+  );
 }
 
 /**
@@ -84,9 +94,53 @@ export function isPersonField(
   if (tokens.some((t) => has(PERSON_FIELDS.describing, t))) return false;
   // A thing word suppresses a person word only when it comes before it, as its qualifier:
   // `ManufacturerName` is a manufacturer's; `PatientProfile` and `SubjectTask` are a person's.
+  // `name` after any word that is neither a person word nor a describing word is that thing's
+  // name (`LongName`, `DepartmentName`, `LayoutName`, `trialName`); after a person word it is
+  // the person's (`ExperimenterName`, `SubjectName`, `ParticipantName`). Lead ruling, card A5.
   return tokens.some(
     (t, i) =>
       has(PERSON_FIELDS.person, t) &&
-      !tokens.slice(0, i).some((before) => has(PERSON_FIELDS.thing, before)),
+      !tokens.slice(0, i).some((before) => has(PERSON_FIELDS.thing, before)) &&
+      !(t === "name" && i > 0 && namesAThing(tokens[i - 1] as string)),
   );
 }
+
+/** The last name words of a field that holds where a file is kept (lead ruling on card A5). */
+const LOCATION_WORDS: ReadonlySet<string> = new Set([
+  "pwd",
+  "cwd",
+  "path",
+  "filepath",
+  "file",
+  "filename",
+  "dir",
+  "folder",
+]);
+
+/**
+ * Is this field a location field: one that records where the researcher kept a file, so the
+ * screen does not read it (EEGLAB's `filepath` ruling, card A5)? Its last name word is `path`,
+ * `filepath`, `file`, `filename`, `dir`, `folder`, `pwd` or `cwd`, run together with the words before it or
+ * not (`SDfilepath`, `chanfile`, `data_dir`), or it starts with `original_` (`original_mff`).
+ * The one definition for every MATLAB reader (EEGLAB, Homer `.nirs`, `.mat`).
+ */
+export function isLocationField(name: string): boolean {
+  if (/^original_/i.test(name)) return true;
+  const tokens = fieldTokens(name);
+  const last = tokens[tokens.length - 1];
+  if (last === undefined) return false;
+  if (LOCATION_WORDS.has(last)) return true;
+  // Words run together: `SDfilepath`, `hdmfile`, `chanfile`, `datadir`.
+  return ["filepath", "filename", "file", "path", "dir", "folder"].some(
+    (w) => last.endsWith(w) && last.length > w.length && !NOT_LOCATIONS.has(last),
+  );
+}
+
+/** Words that end like a location word and are not one. */
+const NOT_LOCATIONS: ReadonlySet<string> = new Set([
+  "profile",
+  "profiles",
+  "redir",
+  // EEGLAB `chaninfo.nosedir`: the nose's direction (`+X`), not a directory.
+  "nosedir",
+]);

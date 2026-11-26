@@ -48,12 +48,12 @@ const kindsOf = (e: Hdf5Entry) =>
   scanEntryText(e, "hdf5.attribute").map((f) => `${f.kind}/${f.severity}`);
 
 describe("registration", () => {
-  test(".h5 and .hdf5 are read by the hdf5 reader; .snirf stays SNIRF's; .nwb and .mat by neither", () => {
+  test(".h5 and .hdf5 are read by the hdf5 reader; .snirf stays SNIRF's; .nwb by neither; .mat by the MATLAB reader", () => {
     expect(readerFor("sourcedata/run1.h5")?.id).toBe("hdf5");
     expect(readerFor("sub-01/eeg/sub-01_eeg.HDF5")?.id).toBe("hdf5");
     expect(readerFor("a.snirf")?.id).toBe("snirf");
     expect(readerFor("a.nwb")).toBeNull();
-    expect(readerFor("a.mat")).toBeNull();
+    expect(readerFor("a.mat")?.id).toBe("mat");
   });
 
   test("the new kinds have copy, and the direct ones are direct", () => {
@@ -111,7 +111,8 @@ describe("person fields", () => {
     for (const w of PERSON_FIELDS.person) {
       // Alone, except a bare `name` (an object's own name, tested below).
       if (w !== "name") expect(isPersonField(w)).toBe(true);
-      expect(isPersonField(`Lead_${w.toUpperCase()}`)).toBe(true);
+      // A qualified `name` is a thing's (card A5 ruling): `Lead_NAME` is not a person field.
+      expect(isPersonField(`Lead_${w.toUpperCase()}`)).toBe(w !== "name");
     }
   });
 
@@ -129,9 +130,9 @@ describe("person fields", () => {
     expect(fieldTokens("PATIENTName_2b")).toEqual(["patient", "name", "b"]);
     expect(fieldTokens("experimenter-name")).toEqual(["experimenter", "name"]);
     // A thing word inside a longer word qualifies nothing.
-    expect(isPersonField("LandscapeName")).toBe(true);
-    expect(isPersonField("CommunityName")).toBe(true);
-    expect(isPersonField("HappyName")).toBe(true);
+    expect(isPersonField("LandscapeOperator")).toBe(true);
+    expect(isPersonField("CommunitySubject")).toBe(true);
+    expect(isPersonField("HappyPatient")).toBe(true);
     expect(isPersonField("CapName")).toBe(false);
     expect(isPersonField("UnitName")).toBe(false);
     expect(isPersonField("AppName")).toBe(false);

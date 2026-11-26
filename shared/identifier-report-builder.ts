@@ -24,6 +24,7 @@ import {
   cachedSource,
   companionsOf,
   limitsFor,
+  namedCompanionsMissing,
   readerFor,
   readerMatch,
 } from "./identifier-readers";
@@ -230,7 +231,9 @@ export async function readRecordings<E extends RecordingEntry>(
   const readers = options.readers ?? READERS;
   const superseded = new Set<E>(options.superseded ?? []);
   const all = [...options.entries, ...superseded];
-  const { missing } = companionsOf(options.paths ?? options.entries.map((e) => e.path), readers);
+  const allPaths = options.paths ?? options.entries.map((e) => e.path);
+  const { missing } = companionsOf(allPaths, readers);
+  const pathSet: ReadonlySet<string> = new Set(allPaths);
 
   // One entry per reader id, written out: a `Record` literal, so an id added to the union and
   // missing here fails the typecheck.
@@ -293,7 +296,7 @@ export async function readRecordings<E extends RecordingEntry>(
       return;
     }
     // History keeps headers only: a superseded recording's companions are not looked for.
-    const lacking = superseded.has(entry) ? 0 : (missing.get(entry.path) ?? 0);
+    const pairedLacking = superseded.has(entry) ? 0 : (missing.get(entry.path) ?? 0);
     let source: ReturnType<typeof cachedSource>;
     let result: Awaited<ReturnType<FormatReader["scan"]>>;
     // EDF/BDF statistics, from the header the reader already read (a cache hit, no new read).
@@ -311,8 +314,8 @@ export async function readRecordings<E extends RecordingEntry>(
       if (error instanceof LimitExceeded || error instanceof ReadTimedOut) {
         t.partial++;
         out.reasons.add(error instanceof LimitExceeded ? "limit" : "time");
-        out.companionMissing += lacking;
-        if (lacking > 0) out.reasons.add("companion-missing");
+        out.companionMissing += pairedLacking;
+        if (pairedLacking > 0) out.reasons.add("companion-missing");
         return;
       }
       if (superseded.has(entry) && options.isAbsent?.(error)) {
@@ -338,6 +341,10 @@ export async function readRecordings<E extends RecordingEntry>(
       out.notApplicable[key] = (out.notApplicable[key] ?? 0) + n;
     }
     if (result.notes?.includes("companion-name-mismatch")) out.companionNameMismatch++;
+    // Companions the content names (an EEGLAB `.set`'s `.fdt`), checked against the same paths.
+    const lacking =
+      pairedLacking +
+      (superseded.has(entry) ? 0 : namedCompanionsMissing(entry.path, result.needs, pathSet));
     if (reader.id === "edf") {
       const e = out.edf;
       if (patient !== null && !result.findings.some((f) => f.kind === "edf-unreadable")) {
