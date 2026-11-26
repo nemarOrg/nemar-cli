@@ -19,7 +19,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Miniflare } from "miniflare";
 import { findRecipe, recipeRequiredOutputs } from "../../shared/compute-recipes";
-import { resultsLauncherKey, resultsOutputKey } from "../../shared/contract/compute-launch";
+import {
+  SERVING_INDEX_CONTAINER_PATH,
+  resultsLauncherKey,
+  resultsOutputKey,
+} from "../../shared/contract/compute-launch";
 import {
   CANARY_DAYS,
   SERVING_PROFILE_SENTENCE,
@@ -2275,7 +2279,13 @@ describe("a dataset that is no longer eligible after its job finished", () => {
  * stamp's recipe, version and engine, and the record and table at nemar-ica's paths, in the results bucket and
  * in the launcher's manifest. `servingIndex` adds `--serving-index` to the recorded specification.
  */
-async function icaBidsJob(o: { servingIndex?: "flag" | "equals" } = {}): Promise<Made> {
+async function icaBidsJob(
+  o: {
+    servingIndex?: "flag" | "equals";
+    /** What the dispatcher recorded of the serving index (ADR 0141), and the arguments it added. */
+    recorded?: { serving_index: unknown; args: string[] };
+  } = {},
+): Promise<Made> {
   const made = await bidsJob();
   const env = envOf();
   const floor = findRecipe("nemar-floor") as NonNullable<ReturnType<typeof findRecipe>>;
@@ -2309,13 +2319,18 @@ async function icaBidsJob(o: { servingIndex?: "flag" | "equals" } = {}): Promise
     if (f.path === from.table) f.path = to.table;
   }
   await fx.harness.results.put(manifestKey, enc(JSON.stringify(manifest)));
-  if (o.servingIndex !== undefined) {
+  if (o.servingIndex !== undefined || o.recorded !== undefined) {
     const key = recordKey(made.jobId, "spec.json");
     const spec = JSON.parse((await (await fx.harness.records.get(key))?.text()) as string);
-    spec.args =
-      o.servingIndex === "flag"
-        ? [...spec.args, "--serving-index", "/data/serving/index.json"]
-        : [...spec.args, "--serving-index=/data/serving/index.json"];
+    if (o.recorded !== undefined) {
+      spec.serving_index = o.recorded.serving_index;
+      spec.args = [...spec.args, ...o.recorded.args];
+    } else {
+      spec.args =
+        o.servingIndex === "flag"
+          ? [...spec.args, "--serving-index", "/data/serving/index.json"]
+          : [...spec.args, "--serving-index=/data/serving/index.json"];
+    }
     const bytes = enc(JSON.stringify(spec));
     await fx.harness.records.put(key, bytes);
     await sql(
@@ -2381,6 +2396,97 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
         .first<{ word: string }>();
       expect(skip?.word).toBe("serving_index_unattested");
       expect(UNKEYABLE_WORDS).toContain("serving_index_unattested");
+    });
+  }
+
+  // ADR 0141: the dispatcher stages the index and records its digest; the key reads the RECORD of that, never
+  // the run's own claim.
+  const STAGED_HEX = "5".repeat(64);
+  const COMMIT40 = "6".repeat(40);
+  const STAGED_ARGS = [
+    "--serving-index",
+    SERVING_INDEX_CONTAINER_PATH,
+    "--source-commit",
+    COMMIT40,
+  ];
+  const skipWord = async (env: Bindings, stampId: number) =>
+    (
+      await env.DB.prepare("SELECT word FROM compute_derivative_skips WHERE stamp_id = ?1")
+        .bind(stampId)
+        .first<{ word: string }>()
+    )?.word;
+
+  test("a run the dispatcher staged an index for is keyed by the recorded digest (MUTATION: key it none; read the digest from anything but the specification)", async () => {
+    const env = envOf();
+    const made = await icaBidsJob({
+      recorded: { serving_index: { sha256: STAGED_HEX, size: 812 }, args: STAGED_ARGS },
+    });
+    expect(await syncAll(env)).toMatchObject({ created: 1, stored: 1, errored: 0 });
+    const row = (await one(env)) as Der & { serving_index: string | null };
+    expect(row.serving_index).toBe(`sha256:${STAGED_HEX}`);
+    const stamp = await env.DB.prepare(
+      "SELECT dataset_id, version, recipe_version, engine, input_digest FROM compute_pipeline_stamps WHERE id = ?1",
+    )
+      .bind(made.stampId)
+      .first<Record<string, string>>();
+    const fields = {
+      dataset: stamp?.dataset_id as string,
+      version: stamp?.version as string,
+      recipe: "nemar-ica",
+      recipe_version: stamp?.recipe_version as string,
+      engine: stamp?.engine as string,
+      input: "bids",
+      profile: "archive",
+      input_digest: stamp?.input_digest as string,
+    };
+    expect(row.key).toBe(await derivativeKey({ ...fields, serving_index: `sha256:${STAGED_HEX}` }));
+    expect(row.key).not.toBe(await derivativeKey({ ...fields, serving_index: "none" }));
+  });
+
+  test("a run recorded with no index staged is keyed none, and the word does not reach the key", async () => {
+    const env = envOf();
+    await icaBidsJob({
+      recorded: { serving_index: { reason: "source_commit_differs" }, args: [] },
+    });
+    expect(await syncAll(env)).toMatchObject({ created: 1, errored: 0 });
+    expect(((await one(env)) as Der & { serving_index: string | null }).serving_index).toBe("none");
+  });
+
+  for (const [label, recorded] of [
+    [
+      "a staged index the arguments never hand the run",
+      { serving_index: { sha256: STAGED_HEX, size: 812 }, args: [] },
+    ],
+    [
+      "a staged index handed at another path",
+      {
+        serving_index: { sha256: STAGED_HEX, size: 812 },
+        args: ["--serving-index", "/data/other/index.json"],
+      },
+    ],
+    [
+      "a staged index handed twice",
+      {
+        serving_index: { sha256: STAGED_HEX, size: 812 },
+        args: [...STAGED_ARGS, `--serving-index=${SERVING_INDEX_CONTAINER_PATH}`],
+      },
+    ],
+    [
+      "an index named although none was staged",
+      {
+        serving_index: { reason: "no_index" },
+        args: ["--serving-index", SERVING_INDEX_CONTAINER_PATH],
+      },
+    ],
+  ] as const) {
+    test(`${label} is not keyed (serving_index_unattested)`, async () => {
+      const env = envOf();
+      const made = await icaBidsJob({
+        recorded: recorded as { serving_index: unknown; args: string[] },
+      });
+      expect(await syncAll(env)).toMatchObject({ created: 0, errored: 0 });
+      expect(await all(env)).toHaveLength(0);
+      expect(await skipWord(env, made.stampId)).toBe("serving_index_unattested");
     });
   }
 
