@@ -24,10 +24,18 @@
  *   `zip:.zip`. An encrypted recording entry is counted so too, and makes the archive `partial`
  *   (`encrypted`).
  * - **Complete** only when the directory was read in full (no directory bytes past the declared
- *   entries, no directory entry past the declared size) and every inner entry that was read was
+ *   entries, and the directory ends exactly where its end record, or ZIP64 end record, begins,
+ *   with only a digital-signature record between them) and every inner entry that was read was
  *   read completely. CRC-32 is not checked: the bytes are scanned as they inflate, and a size that
  *   disagrees with the directory gives `corrupt`. An entry whose sizes or offset do not resolve (a
  *   `0xFFFFFFFF` field with no ZIP64 field, or one too short, or past 2^53) is `corrupt`.
+ *
+ * Out of scope, by design:
+ * - Local entries the central directory does not list. Standard extractors read the central
+ *   directory, as this reader does; checking every local header would push most large archives
+ *   to `partial` for bytes no extractor shows.
+ * - A local file name that differs from the central one. Extractors use the central name, and
+ *   that is the name screened.
  *
  * What is an inner recording entry is decided by the registry's own coverage rule, as if the
  * archive's content were raw material under `sourcedata/`: an archive is raw material by nature,
@@ -78,6 +86,9 @@ const SIG_CENTRAL = 0x02014b50;
 const SIG_END = 0x06054b50;
 const SIG_ZIP64_LOCATOR = 0x07064b50;
 const SIG_ZIP64_END = 0x06064b50;
+const SIG_DIGITAL_SIGNATURE = 0x05054b50;
+/** The digital-signature record's fixed part: signature and a 2-byte data length. */
+const DIGITAL_SIGNATURE_BYTES = 6;
 const END_BYTES = 22;
 const ZIP64_LOCATOR_BYTES = 20;
 const ZIP64_END_BYTES = 56;
@@ -171,6 +182,22 @@ function findEnd(tail: Uint8Array, tailStart: number, size: number): number | nu
 }
 
 /**
+ * Does the directory, ending at `at`, meet its end record at `end`? Exactly, or across one
+ * digital-signature record whose declared length spans the gap.
+ */
+async function directoryMeetsEnd(src: RangeSource, at: number, end: number): Promise<boolean> {
+  if (at === end) return true;
+  const gap = end - at;
+  if (gap < DIGITAL_SIGNATURE_BYTES || gap > DIGITAL_SIGNATURE_BYTES + 0xffff) return false;
+  const head = await src.read(at, DIGITAL_SIGNATURE_BYTES);
+  return (
+    head.length === DIGITAL_SIGNATURE_BYTES &&
+    u32(head, 0) === SIG_DIGITAL_SIGNATURE &&
+    DIGITAL_SIGNATURE_BYTES + u16(head, 4) === gap
+  );
+}
+
+/**
  * Read the central directory: the end record from the tail (the last page first, the rest of the
  * last 64 KiB and a comment's length only when the record is not in it), the ZIP64 records when
  * the end record says so, then the directory itself, up to its caps.
@@ -235,6 +262,10 @@ export async function readZipDirectory(src: RangeSource, pageBytes: number): Pro
       }
       const record = await src.read(recordAt, ZIP64_END_BYTES);
       if (record.length < ZIP64_END_BYTES || u32(record, 0) !== SIG_ZIP64_END) {
+        return { entries: [], declared: 0, incomplete: "corrupt" };
+      }
+      // The record, with its extensible data sector by its declared size, ends at the locator.
+      if (recordAt + 12 + u64(record, 4) !== endAt - ZIP64_LOCATOR_BYTES) {
         return { entries: [], declared: 0, incomplete: "corrupt" };
       }
       disk = u32(record, 16);
@@ -329,12 +360,14 @@ export async function readZipDirectory(src: RangeSource, pageBytes: number): Pro
     p = next;
   }
   if (incomplete === undefined) {
-    // Directory bytes past the declared entries, or a directory entry right after the declared
-    // directory, are entries the end record hides: never a complete read.
-    if (p < dir.length) incomplete = "corrupt";
-    else if (directoryOffset + directorySize + 4 <= directoryEnd) {
-      const after = await src.read(directoryOffset + directorySize, 4);
-      if (after.length === 4 && u32(after, 0) === SIG_CENTRAL) incomplete = "corrupt";
+    // Directory bytes past the declared entries are entries the end record hides; and the
+    // directory must end where its end record begins, with only a digital-signature record (by
+    // its declared length) between them. A gap, junk or a mismatch is never a complete read.
+    if (
+      p < dir.length ||
+      !(await directoryMeetsEnd(src, directoryOffset + directorySize, directoryEnd))
+    ) {
+      incomplete = "corrupt";
     }
   }
   return incomplete === undefined ? { entries, declared } : { entries, declared, incomplete };

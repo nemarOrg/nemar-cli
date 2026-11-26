@@ -103,6 +103,10 @@ function buildZip(
     onDisk?: number;
     /** The end record's directory size, when it is not the real size. */
     size?: number;
+    /** Bytes between the directory and the end record. */
+    gap?: Uint8Array;
+    /** Added to the directory offset the end record declares. */
+    shift?: number;
   } = {},
 ): { bytes: Uint8Array; directoryOffset: number; directorySize: number } {
   const parts: Uint8Array[] = [];
@@ -159,8 +163,8 @@ function buildZip(
   e.setUint16(8, options.onDisk ?? options.count ?? specs.length, true);
   e.setUint16(10, options.count ?? specs.length, true);
   e.setUint32(12, options.size ?? directorySize, true);
-  e.setUint32(16, directoryOffset, true);
-  const all = [...parts, ...central, end];
+  e.setUint32(16, directoryOffset + (options.shift ?? 0), true);
+  const all = [...parts, ...central, options.gap ?? new Uint8Array(0), end];
   const bytes = new Uint8Array(all.reduce((n, p) => n + p.length, 0));
   let at = 0;
   for (const p of all) {
@@ -577,6 +581,28 @@ describe("the central directory", () => {
     const shrunk = await scan(buildZip(hidden, { count: 1, size: first }).bytes);
     expect(shrunk.result.coverage).toBe("partial");
     expect(shrunk.result.incomplete).toBe("corrupt");
+  });
+
+  // Review round 2 of #2392: the directory must end where its end record begins.
+  test("the directory meets its end record exactly, or across a digital-signature record", async () => {
+    const specs: Spec[] = [{ name: "sourcedata/a.edf", data: FLAGGED, method: 8 }];
+    const junk = new Uint8Array(16).fill(0xab);
+    const gapped = await scan(buildZip(specs, { gap: junk }).bytes);
+    expect(gapped.result.coverage).toBe("partial");
+    expect(gapped.result.incomplete).toBe("corrupt");
+    // A directory placed before its declared offset (the end record points past its start).
+    const size = buildZip(specs).directorySize;
+    const before = await scan(buildZip(specs, { gap: junk, shift: junk.length, size }).bytes);
+    expect(before.result.coverage).toBe("partial");
+    expect(before.result.incomplete).toBe("corrupt");
+    // Twin: a digital-signature record of its declared length is tolerated.
+    const signature = new Uint8Array([0x50, 0x4b, 0x05, 0x05, 4, 0, 1, 2, 3, 4]);
+    const signed = await scan(buildZip(specs, { gap: signature }).bytes);
+    expect(signed.result.coverage).toBe("complete");
+    expect(has(signed.result.findings, "edf-patient-name")).toBe(true);
+    // A signature record whose declared length does not span the gap is junk.
+    const short = new Uint8Array([0x50, 0x4b, 0x05, 0x05, 2, 0, 1, 2, 3, 4]);
+    expect((await scan(buildZip(specs, { gap: short }).bytes)).result.incomplete).toBe("corrupt");
   });
 
   test("an end record whose entries-on-this-disk differs from the total is a split archive", async () => {
