@@ -77,6 +77,7 @@ ADR 0102 §2's ban on data content, header values, `.tsv` files, identifier find
 7. **License lineage.**
    `needs_permission`, `share_alike_mismatch` and `unresolved` are `action_required` reasons; they never trigger an automatic denial.
    A depositor clears them with recorded permission or a corrected license.
+   See the amendment of 2026-11-25 below for the outcomes this decision also covers.
 8. **Ready to approve.**
    A `pass` verdict on a request whose screen gate is `clear` changes the administrators' mail headline to "Ready to approve".
    A `pass` with an `acknowledge` gate says "Review passed; the identifier screen still needs an acknowledgment", and quotes the screen's status line.
@@ -116,3 +117,4 @@ ADR 0102 §2's ban on data content, header values, `.tsv` files, identifier find
 ## Amendment 2026-11-25 (lead, epic #2182)
 
 Decision 7 also covers the lineage outcomes `redistribution_prohibited` and `source_is_publication`, which the license-lineage resolver added after this ADR was written; each needs action and never denies automatically.
+The previous-denial input of decision 5 carries closed reason codes only, never a screen code (ADR 0102 §2 stays): the codes the model may see are the allowlist `PREVIOUS_DENIAL_SENDABLE`.
