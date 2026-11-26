@@ -803,8 +803,8 @@ jobs:
   # deploy-backend.yml's `test-gate` also runs, so the PR gate and the deploy gate
   # assert the same set.
   #
-  # The suite is about 650 files and 17,000 tests. In one process it took about 31
-  # minutes and grew toward its limit, so it runs as a matrix of shards.
+  # The suite is 1,012 files and about 28,500 tests (run 45907601198). In one process it
+  # took about 31 minutes and grew toward its limit, so it runs as a matrix of shards.
   #
   # THE CHECK NAME. `unit-pure-shard` is the matrix; `unit-pure` is a gate that needs it
   # and keeps the name this REQUIRED check always had. The gate is skipped exactly when
@@ -1192,8 +1192,8 @@ jobs:
             summary=$(grep -E '^Ran [0-9]+ tests? across [0-9]+ files?' <<<"$plain" | tail -1 || true)
             passline=$(grep -E '^ *[0-9]+ pass$' <<<"$plain" | tail -1 || true)
             if [ -z "$header" ] || [ -z "$summary" ] || [ -z "$passline" ]; then
-              echo "::error::bun printed no shard header, run summary or pass count for part $part/$parts, so what this shard ran is unknown"
               # Recorded, not fatal here, so the next part still runs; the step fails below.
+              echo "::error::bun printed no shard header, run summary or pass count for part $part/$parts, so what this shard ran is unknown"
               failed=1
               continue
             fi
