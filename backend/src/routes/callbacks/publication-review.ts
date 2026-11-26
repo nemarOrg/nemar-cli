@@ -42,7 +42,7 @@ import { CONFIRMING_MODELS } from "../../../../shared/publication-auto-deny.js";
 import { parsePublicationCallbackOutcome } from "../../../../shared/publication-review.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyPublicationReviewCallbackToken } from "../../services/github/callback-tokens.js";
-import { licenseNoticeAfterStore } from "../../services/license-permission.js";
+import { licenseNoticeAfterStore } from "../../services/license-notice.js";
 import { afterPublicationReviewStored } from "../../services/publication-auto-deny.js";
 import { publicationReviewInputs } from "../../services/publication-review-inputs.js";
 import { errorWords } from "../../services/publication-review-log.js";
