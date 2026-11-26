@@ -568,6 +568,19 @@ export function qualityPluginsOf(recipe: string, recipeVersion: string): string 
   return map === null ? null : JSON.stringify(recipeQualityPlugins({ checkpoints: map }));
 }
 
+/**
+ * A recipe version's checkpoint map, `[{checkpoint, steps}]` in the registry's order without `stored`, as
+ * the JSON the row keeps (migration 0154), or null when the registry does not hold that version. A
+ * recording's outcomes are read through it (`quality-processing.ts`), so a derivative made by a version the
+ * registry has since moved past is still read with its own version's map.
+ */
+export function checkpointMapOf(recipe: string, recipeVersion: string): string | null {
+  const map = recipeCheckpointMap(recipe, recipeVersion);
+  return map === null
+    ? null
+    : JSON.stringify(map.map((c) => ({ checkpoint: c.checkpoint, steps: [...c.steps] })));
+}
+
 // --- Statements ---------------------------------------------------------------------------------------------------
 
 /**
@@ -594,14 +607,15 @@ export const CANDIDATE_STAMPS_SQL = candidateStampsSql(PIPELINE_ELIGIBLE_SQL);
  * Make a derivative's row: `?1` key, `?2` dataset, `?3` version, `?4` recipe, `?5` recipe version, `?6` engine,
  * `?7` input, `?8` profile, `?9` input digest, `?10` image digest, `?11` job, `?12` stamp, `?13` file count,
  * `?14` bytes, `?15` the serving index of a version 2 key (null for a version 1 key), `?16` the recipe version's
- * quality plugins as a JSON array (null when the registry does not hold that version). A second job with the same key adds nothing: the first derivative stands. And nothing is made
+ * quality plugins as a JSON array and `?17` its checkpoint map (each null when the registry does not hold that
+ * version). A second job with the same key adds nothing: the first derivative stands. And nothing is made
  * for a dataset that is gone or no longer eligible (a deletion or an unpublish between the scan and the insert): a derivative of a deleted dataset
  * must not outlive the deletion's dating of its rows.
  */
 const insertDerivativeSql = (eligible: string): string => `INSERT INTO compute_derivatives
   (key, dataset_id, version, recipe, recipe_version, engine, input, profile, input_digest, image_digest,
-   job_id, stamp_id, object_count, bytes, serving_index, quality_plugins)
-  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+   job_id, stamp_id, object_count, bytes, serving_index, quality_plugins, checkpoint_map)
+  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
    WHERE EXISTS (SELECT 1 FROM datasets d WHERE d.dataset_id = ?2 AND ${eligible})
   ON CONFLICT(key) DO NOTHING`;
 
@@ -922,6 +936,7 @@ async function keyNewStamps(
             decision.bytes,
             f.serving_index ?? null,
             qualityPluginsOf(f.recipe, f.recipe_version),
+            checkpointMapOf(f.recipe, f.recipe_version),
           )
           .run();
       } catch (err) {

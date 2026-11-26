@@ -2208,6 +2208,7 @@ describe("a dataset that is no longer eligible after its job finished", () => {
           1,
           row.serving_index,
           row.quality_plugins,
+          row.checkpoint_map,
         )
         .run();
     expect((await insert("a".repeat(64))).meta.changes).toBe(0);
@@ -2344,17 +2345,23 @@ async function icaBidsJob(
 }
 
 describe("nemar-ica on the archive input: the key names the serving index (ADR 0140)", () => {
-  test("a run given no serving index is keyed under version 2 with serving_index none, never the eight-line key, and its quality plugins recorded (MUTATION: leave serving_index out of the key; record no plugins)", async () => {
+  test("a run given no serving index is keyed under version 2 with serving_index none, never the eight-line key, and its quality plugins and checkpoint map recorded (MUTATION: leave serving_index out of the key; record no plugins; record no map)", async () => {
     const env = envOf();
     const made = await icaBidsJob();
     expect(await syncAll(env)).toMatchObject({ created: 1, stored: 1, errored: 0 });
     const row = (await one(env)) as Der & {
       serving_index: string | null;
       quality_plugins: string | null;
+      checkpoint_map: string | null;
     };
     expect(row.serving_index).toBe("none");
     // The recipe version's quality plugins are recorded with the row, for the quality route (review of #2383).
     expect(JSON.parse(row.quality_plugins as string)).toEqual(["nemar-quality", "nemar-spectrum"]);
+    // Its checkpoint map too, for a recording's outcomes (migration 0154).
+    const ica = findRecipe("nemar-ica");
+    expect(JSON.parse(row.checkpoint_map as string)).toEqual(
+      ica?.checkpoints.map((c) => ({ checkpoint: c.checkpoint, steps: [...c.steps] })),
+    );
     const eight = await keyOfStamp(env, made.stampId);
     const stamp = await env.DB.prepare(
       "SELECT dataset_id, version, recipe_version, engine, input_digest FROM compute_pipeline_stamps WHERE id = ?1",
@@ -2497,9 +2504,13 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     const row = (await one(env)) as Der & {
       serving_index: string | null;
       quality_plugins: string | null;
+      checkpoint_map: string | null;
     };
     expect(row.serving_index).toBeNull();
     expect(row.quality_plugins).toBe("[]");
+    expect(
+      JSON.parse(row.checkpoint_map as string).map((c: { checkpoint: string }) => c.checkpoint),
+    ).toEqual(["import", "preprocess", "quality"]);
     expect(row.key).toBe(await keyOfStamp(env, made.stampId));
   });
 
