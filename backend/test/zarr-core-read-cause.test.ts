@@ -141,10 +141,12 @@ describe("readLevel0Window failure cause", () => {
 
   test("chunks that decode to another length than the channel count says are decode", async () => {
     behaviour = "good";
-    // The shards hold 4 channels; claiming 3 makes every decoded chunk 1000 values too long.
+    // The shards hold 4 channels; claiming 3 makes every chunk 1000 values too long, which the
+    // decoder sees in the blosc header before it allocates or decompresses anything.
     const r = await read(0, 1000, 3);
     expect(r).toMatchObject({ ok: false, stage: "chunk", cause: "decode" });
-    expect(r.ok ? "" : r.detail).toContain("decoded to 4000 values, expected 3000");
+    expect(r.ok ? "" : r.detail).toContain("expected 3000 values: 3 channels x 1000 chunk_samples");
+    expect(r.ok ? "" : r.detail).toContain("header nbytes 8000 is not the 6000 bytes");
   });
 
   // `cause: "plan"` (read.ts) has no real path to test: the footer is always read as exactly

@@ -99,21 +99,18 @@ async function fetchAndDecodeRangeRead(opts: {
     }
     const relStart = entry.offset - runStart;
     const chunkBytes = buf.subarray(relStart, relStart + entry.nbytes);
+    // The decoder refuses, before allocating, a chunk whose header does not say it decodes
+    // to exactly this many bytes, so the host's bytes cannot choose the allocation.
+    const expectedLen = nChannelsInStore * chunkSamples;
     let decoded: Int16Array;
     try {
-      decoded = decodeBloscZstdInt16(chunkBytes);
+      decoded = decodeBloscZstdInt16(chunkBytes, expectedLen * 2);
     } catch (err) {
       return {
-        error: `shard ${shardIndex} chunk ${localIndex} failed to decode: ${err instanceof Error ? err.message : String(err)}`,
-        cause: "decode",
-      };
-    }
-    const expectedLen = nChannelsInStore * chunkSamples;
-    if (decoded.length !== expectedLen) {
-      return {
         error:
-          `shard ${shardIndex} chunk ${localIndex} decoded to ${decoded.length} values, expected ` +
-          `${expectedLen} (${nChannelsInStore} channels x ${chunkSamples} chunk_samples)`,
+          `shard ${shardIndex} chunk ${localIndex} failed to decode ` +
+          `(expected ${expectedLen} values: ${nChannelsInStore} channels x ${chunkSamples} chunk_samples): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
         cause: "decode",
       };
     }

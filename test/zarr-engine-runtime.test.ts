@@ -1059,7 +1059,7 @@ describe("a store that disagrees with its index", () => {
       const h = await e.ready("nm099506");
       const r = await e.read(h, { start_s: 0, duration_s: 1 });
       expect(code(r), JSON.stringify(r.header)).toBe("decode_error");
-      expect(String(r.header.message)).toContain("decoded to");
+      expect(String(r.header.message)).toContain("header nbytes 8000 is not the 6000 bytes");
       expect(r.payload.length).toBe(0);
     });
   });

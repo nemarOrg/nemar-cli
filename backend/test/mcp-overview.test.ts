@@ -215,9 +215,10 @@ describe("renderOverviewPng on the real decoded level-5 chunk", () => {
   const chunkBytes = new Uint8Array(
     readFileSync(new URL("./fixtures/mcp/nm000329-view5-c-0-0-0.bin", import.meta.url)),
   );
-  const decoded = decodeBloscZstdInt16(chunkBytes);
   const N_CHANNELS = 63;
   const TOTAL_COLUMNS = 135;
+  // A view chunk is [2, channels, columns] int16.
+  const decoded = decodeBloscZstdInt16(chunkBytes, 2 * N_CHANNELS * TOTAL_COLUMNS * 2);
 
   test("the decoded chunk has the expected [2, 63, 135] length", () => {
     expect(decoded.length).toBe(2 * N_CHANNELS * TOTAL_COLUMNS);

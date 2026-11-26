@@ -247,7 +247,8 @@ export async function renderOverviewTool(
           }
           const buf = new Uint8Array(await response.arrayBuffer());
           bytesRead += buf.byteLength;
-          return decodeBloscZstdInt16(buf);
+          // A view chunk holds 2 rows (min, max) per channel, each chunkColumns wide.
+          return decodeBloscZstdInt16(buf, 2 * nChannels * chunkPlan.chunkColumns * 2);
         }),
       );
     } catch (err) {
