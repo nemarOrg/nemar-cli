@@ -15,3 +15,4 @@
 | R11: New readers raise findings across about 900 published datasets in the ADR 0088 weekly re-screen | The first weekly report after Release E | Release E + 7 days | Lead diagnosis card per top kind | lead |
 | R12: Mass denial of one depositor (our group's batch) | Shadow would-deny count in C1 | C1 | The owner decides a per-depositor daily cap | owner |
 | R13: Approval throughput: each approval runs the orchestrator, mints a DOI (EZID) and writes to GitHub | Time per approval in the D0 batch | D0 | Pace the approvals; the owner decides batch sizes | owner |
+| R14: SNIRF reads time out on large files (37 of 296 files hit the 180 s time limit from a home connection) | Count of `partial`/`time` SNIRF files in the first production re-screen | Release E + 1 day | Raise the time cap or the fetch concurrency; the files stay partial, never clean | lead |
