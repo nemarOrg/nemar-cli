@@ -22,9 +22,9 @@
  *    D1 statement and one cache match, and no store read.
  *
  * A succeeded path that is not a recording path the quality route takes (its `relativeLocation` pattern and
- * a recording's name), and every repeat of a path the table lists more than once, is left out and counted
- * as `unlisted`, so every listed path is one the drill-down can
- * ask the route for. The cursor (`after`) is a path of that shape, checked by the route before anything is
+ * a recording's name) is left out and counted as `unlisted`, so every listed path is one the drill-down can
+ * ask the route for; a table that lists one path twice is refused whole (`parseRecordingsTable`'s
+ * `duplicate_path`, answered `table_unreadable`), as reconciliation refuses it. The cursor (`after`) is a path of that shape, checked by the route before anything is
  * read; one the list does not hold still pages from where it would sort.
  *
  * The route answers `Cache-Control: no-store` (ADR 0137 decision 7: no administrator answer is cached);
@@ -223,14 +223,12 @@ async function succeededList(
   }
   const paths: string[] = [];
   let unlisted = 0;
-  const seen = new Set<string>();
   for (const row of table.rows) {
     if (row.status !== "succeeded") continue;
-    if (!isRecordingPath(row.path) || seen.has(row.path)) {
+    if (!isRecordingPath(row.path)) {
       unlisted++;
       continue;
     }
-    seen.add(row.path);
     paths.push(row.path);
   }
   paths.sort(compareCodeUnits);

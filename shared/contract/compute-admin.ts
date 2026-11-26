@@ -1131,8 +1131,8 @@ export const ComputeRunQualityResponseSchema = z
         /** Succeeded recordings the table lists, or null when it was not read. */
         succeeded: z.number().int().nullable(),
         /**
-         * Succeeded rows left out: a path that is not a recording path the quality route takes, or a path
-         * the table lists more than once (each repeat after the first).
+         * Succeeded rows left out: a path that is not a recording path the quality route takes. A table that
+         * lists one path twice is refused whole (`table_unreadable`).
          */
         unlisted: z.number().int(),
         items: z.array(z.object({ path: z.string() }).passthrough()),

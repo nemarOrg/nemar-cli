@@ -467,7 +467,6 @@ describe("the recordings that succeeded", () => {
         "sub-d/eeg/sub-d_task-x_eeg.edf\tskipped\tno_data\tn/a",
         "../sub-e/eeg/sub-e_task-x_eeg.edf\tsucceeded\tn/a\tn/a",
         "sub-f/eeg/sub-f_task-x_events.tsv\tsucceeded\tn/a\tn/a",
-        "sub-a/eeg/sub-a_task-x_eeg.edf\tsucceeded\tn/a\tn/a",
         "",
       ].join("\n"),
     );
@@ -475,13 +474,30 @@ describe("the recordings that succeeded", () => {
     expect(r.body.recordings).toEqual({
       state: "listed",
       succeeded: 2,
-      unlisted: 3,
+      unlisted: 2,
       items: [
         { path: "sub-a/eeg/sub-a_task-x_eeg.edf" },
         { path: "sub-b/eeg/sub-b_task-x_eeg.set" },
       ],
       next_after: null,
     });
+  });
+
+  test("a table that lists one path twice is refused whole, as reconciliation refuses it (MUTATION: accept a repeated path)", async () => {
+    const d = await derivative(
+      { retention: "canary" },
+      [
+        "path\tstatus\tcode\tstep",
+        "sub-a/eeg/sub-a_task-x_eeg.edf\tsucceeded\tn/a\tn/a",
+        "sub-a/eeg/sub-a_task-x_eeg.edf\tsucceeded\tn/a\tn/a",
+        "",
+      ].join("\n"),
+    );
+    const lines = await logged(async () => {
+      const r = await quality(d.stampId);
+      expect(r.body.recordings.state).toBe("table_unreadable");
+    });
+    expect(lines.join("\n")).toContain("reason=duplicate_path");
   });
 
   test("an empty page: a table with no succeeded row lists none, and is not an error", async () => {
