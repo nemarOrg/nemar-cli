@@ -31,7 +31,7 @@ import { join } from "node:path";
 
 const MODULE_EXPORTS: Record<string, string[]> = {
   errors: ["ApiError", "MaintenanceError", "errorDetail", "isRouteNotFound"],
-  client: ["IS_DEV_BUILD", "checkHealth", "getApiUrl", "request"],
+  client: ["API_URL_OVERRIDE_ENV", "IS_DEV_BUILD", "checkHealth", "getApiUrl", "request"],
   auth: [
     "checkGitHubUsername",
     "checkOrcidName",
@@ -490,6 +490,7 @@ const POST_SPLIT_ADDITIONS = [
   "listOidcLogoutDeliveries", // epic #2014 phase #2019: GET /admin/oidc/logout-deliveries
   "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list
   "OBJECTS_PER_EXPLICIT_LOCK", // #1912 phase 6f: the explicit lock's batch size
+  "API_URL_OVERRIDE_ENV", // #2144: the API URL override variable, named once for the Zarr engine's allowlist
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */
