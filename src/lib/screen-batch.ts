@@ -1,5 +1,5 @@
 /**
- * The rules of `nemar admin repo publish screen-batch` that do not need a terminal: how a selection
+ * The rules of `nemar admin dataset publish screen-batch` that do not need a terminal: how a selection
  * is read, how fast screens are dispatched, and the loop that dispatches them (ADR 0086, amendment
  * of 2026-11-25). The command (`commands/admin-publish-screen-batch.ts`) is the terminal around it.
  *

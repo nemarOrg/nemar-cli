@@ -1,8 +1,8 @@
 /**
- * `nemar admin repo publish screen-batch`: re-screen many publication requests in one paced batch
+ * `nemar admin dataset publish screen-batch`: re-screen many publication requests in one paced batch
  * (epic #2182, card D4; ADR 0086, amendment of 2026-11-25).
  *
- *   nemar admin repo publish screen-batch [--ids <file> | --status <requested|blocked> | --all-active]
+ *   nemar admin dataset publish screen-batch [--ids <file> | --status <requested|blocked> | --all-active]
  *                                         [--per-minute <n>] [--apply]
  *
  * A dry run by default: it prints the selection and sends nothing. With `--apply` it creates the
@@ -188,8 +188,8 @@ Description:
   last dispatch, whichever comes first. A batch holds at most ${SCREEN_BATCH_MAX_SIZE} requests.
 
 Examples:
-  $ nemar admin repo publish screen-batch --status requested
-  $ nemar admin repo publish screen-batch --ids stale.txt --per-minute 6 --apply`,
+  $ nemar admin dataset publish screen-batch --status requested
+  $ nemar admin dataset publish screen-batch --ids stale.txt --per-minute 6 --apply`,
     )
     .action(async (options: Options) => {
       if (!requireSignedIn()) return;

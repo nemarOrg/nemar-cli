@@ -1060,7 +1060,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                             SCREEN_REPORT_DEADLINE_MINUTES ago has not reported
    *
    * The body is optional (none, or an empty one, is a single screen): `{ batch_id }` makes this one screen of a paced re-screen
-   * (`services/screen-batch.ts`, `nemar admin repo publish screen-batch`). The dispatch, the stored
+   * (`services/screen-batch.ts`, `nemar admin dataset publish screen-batch`). The dispatch, the stored
    * result, the gate and the review are the same; what differs is the mail: no per-request mail to
    * the administrators and none to the depositor, because the batch sends one digest that names it.
    * Every answer that means this request will never report (a refusal, a screen that could not

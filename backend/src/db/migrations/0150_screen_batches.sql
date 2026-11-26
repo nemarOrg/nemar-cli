@@ -1,6 +1,6 @@
 -- A paced re-screen of many publication requests, mailed as one digest (epic #2182, card D4).
 --
--- `nemar admin repo publish screen-batch` re-screens a selection of requests one dispatch at a
+-- `nemar admin dataset publish screen-batch` re-screens a selection of requests one dispatch at a
 -- time. Each screen stores exactly the result a single `screen` would, but the batch sends no
 -- per-request administrator mail and no depositor mail; when the batch ends the administrators
 -- get one digest that names every request it did not mail about (ADR 0086, amendment of

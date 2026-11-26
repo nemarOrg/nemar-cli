@@ -1,5 +1,5 @@
 /**
- * `nemar admin repo publish screen-batch` (epic #2182, card D4; ADR 0086, amendment of 2026-11-25),
+ * `nemar admin dataset publish screen-batch` (epic #2182, card D4; ADR 0086, amendment of 2026-11-25),
  * driven through the real entry point against the REAL routes: the Worker's admin and webhook
  * routers behind their real authentication, over real SQLite carrying every migration, served on a
  * loopback port and reached through TEST_API_URL. GitHub is a loopback stand-in that records each
