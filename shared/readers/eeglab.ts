@@ -21,6 +21,8 @@
  * - `datfile` (or `data` as text): the `.fdt` file holding the signal, which must sit beside the
  *   `.set` ({@link ReaderResult.needs}); a miss is a missing companion, not a finding. The
  *   `.fdt` is never read.
+ * - `BIDS` (the BIDS plugin's copy of the sidecars): the free-text rules without the
+ *   person-field rule, since its keys are BIDS's own words (`LongName`).
  * - Everything else (`setname`, `comments`, `etc`, `group`, `condition`, `session`, ...): the
  *   free-text rules (`scanMatText`).
  *
@@ -200,7 +202,9 @@ export function scanEeglabEntries(entries: readonly MatEntry[], path: string): F
     }
     const word =
       top === "#refs#" ? "eeglab.cell" : NAMED_FIELDS.has(top) ? `eeglab.${top}` : "eeglab.field";
-    out.push(...scanMatText(entry, word));
+    // EEG.BIDS mirrors the dataset's BIDS sidecars and tables, whose keys are BIDS's own words:
+    // the identifier-key, path and contact rules, not the person-field rule (lead ruling 5).
+    out.push(...scanMatText(entry, word, { personFields: top !== "BIDS" }));
   }
   return out;
 }

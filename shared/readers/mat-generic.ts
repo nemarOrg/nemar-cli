@@ -274,6 +274,9 @@ export function fromHdf5(entries: readonly Hdf5Entry[]): MatEntry[] {
   return out;
 }
 
+/** A field name no rule reads as an identifier key or a person's. */
+const NEUTRAL_FIELD = "value";
+
 /** The HDF5 free-text kinds, as their MATLAB twins. */
 const MAT_KIND: Partial<Record<FindingKind, FindingKind>> = {
   "hdf5-freetext": "mat-freetext",
@@ -284,10 +287,19 @@ const MAT_KIND: Partial<Record<FindingKind, FindingKind>> = {
 /**
  * The free-text rules over one array, under the field word `field` (a fixed word such as
  * `eeglab.comments` or `mat.variable`). Character arrays are read line by line
- * ({@link linesOf}); a numeric array is read only under an identifier-key name.
+ * ({@link linesOf}); a numeric array is read only under an identifier-key name. With
+ * `personFields` false the person-field rule does not apply (EEGLAB's copy of the BIDS sidecars).
  */
-export function scanMatText(entry: MatEntry, field: string): Finding[] {
-  const name = leafName(entry);
+export function scanMatText(
+  entry: MatEntry,
+  field: string,
+  options: { personFields?: boolean } = {},
+): Finding[] {
+  const leaf = leafName(entry);
+  // The name the rules see: the field's own, unless the person-field rule must not apply to it,
+  // when a neutral one leaves the identifier-key, path and contact rules.
+  const personRule = options.personFields !== false;
+  const name = personRule || identifierKeySeverity(canonical(leaf)) !== null ? leaf : NEUTRAL_FIELD;
   let value: Hdf5Entry["value"];
   if (entry.class === "char") {
     const lines = linesOf(entry).filter((l) => l.trim() !== "");
