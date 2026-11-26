@@ -209,6 +209,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /publish/:id/deny": 2,
   // ADR 0139, decision 4: restore a denied request; a validated body (a validator and a handler).
   "POST /publish/:id/restore": 2,
+  // ADR 0139, decision 7 (amendment of 2026-11-25): record license permission evidence; a
+  // validated body (a validator and a handler).
+  "POST /publish/:id/license-permission": 2,
   "POST /publish/:id/approve": 2,
   // ADR 0080: launch an approval from the web by dispatching it to an executor.
   "POST /publish/:id/approve-dispatch": 1,
@@ -412,7 +415,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(277);
+    expect(adminRoutes.routes.length).toBe(279);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

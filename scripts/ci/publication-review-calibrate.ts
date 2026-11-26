@@ -175,6 +175,7 @@ function neutralLiveFacts(head: string): LiveFacts {
     screen: { gate: "clear", head, acknowledged_by: null, head_current: null },
     versions: { version_row_exists: false, prior_anonymous_request: false, first_published: false },
     doi: { concept_doi_present: false, concept_ezid_status: null },
+    license_permission: null,
   };
 }
 

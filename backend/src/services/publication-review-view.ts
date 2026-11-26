@@ -63,6 +63,7 @@ import type {
   ReasonView,
 } from "../../../shared/contract/publication-review-admin.js";
 import { type ScreenGate, screenGate } from "../../../shared/identifier-screen-report.js";
+import { licensePermissionRecordedLine } from "../../../shared/license-permission.js";
 import { isOneOf } from "../../../shared/pr-review.js";
 import {
   AUTO_DENY_STATES,
@@ -112,6 +113,7 @@ import {
   reproducibilityOf,
   shownBlockReason,
   startOffered,
+  storedVerdictWithPermission,
   stricterOf,
   verdictOf,
 } from "../../../shared/publication-review.js";
@@ -126,6 +128,7 @@ import {
   readStoredState,
   screenView,
 } from "./identifier-screen-stored.js";
+import { type CoveringPermission, permissionFactOf } from "./license-permission.js";
 import { SHA40, errorWords } from "./publication-review-log.js";
 import {
   MAX_KEYS_PER_READ,
@@ -251,6 +254,11 @@ export interface DerivedPublicationReview {
   row: PublicationReviewRow | null;
   rowView: ReviewRowView;
   live: LiveFacts;
+  /**
+   * The recorded license permission that covers the review in force's lineage, or null; the same
+   * fact as `live.license_permission`, with the permission's id.
+   */
+  permission: CoveringPermission | null;
   reasons: Reason[];
   /**
    * The stricter of the stored verdict and the re-derived one. Null when the request is not
@@ -406,6 +414,12 @@ export async function derivePublicationReview(
     versionRowExists || conceptDoiPresent
       ? await exists(db, EARLIER_ANONYMOUS_REQUEST_SQL, request.dataset_id, request.id)
       : false;
+  // A recorded license permission (ADR 0139, decision 7, amendment of 2026-11-25): read only for a
+  // reviewed request whose report names a lineage that needs action, so no other row asks.
+  const permission =
+    applies && assessed && row !== null && report !== null
+      ? await permissionFactOf(db, request, row, report)
+      : null;
 
   const live: LiveFacts = {
     request: { status: request.status, block_reason: request.block_reason, anonymous },
@@ -424,6 +438,14 @@ export async function derivePublicationReview(
       concept_doi_present: conceptDoiPresent,
       concept_ezid_status: readFacts ? (dataset?.ezid_status ?? null) : null,
     },
+    license_permission:
+      permission === null
+        ? null
+        : {
+            recorded_at: permission.recorded_at,
+            recorded_by: permission.recorded_by,
+            ticket_id: permission.ticket_id,
+          },
   };
 
   if (!applies) {
@@ -434,6 +456,7 @@ export async function derivePublicationReview(
       row: null,
       rowView,
       live,
+      permission: null,
       reasons: [],
       outcome: null,
       startable,
@@ -461,6 +484,7 @@ export async function derivePublicationReview(
       row: null,
       rowView,
       live,
+      permission: null,
       reasons: [],
       outcome: null,
       startable,
@@ -485,8 +509,16 @@ export async function derivePublicationReview(
   // The stricter of the stored verdict and the outcome of the reasons just derived. `reasonsOf`
   // already says why a stored verdict is stricter than its report, so the two agree in practice;
   // taking the stricter keeps it true whatever a later rule change does to an old report.
+  // A covering license permission derives the stored verdict again without the lineage reason
+  // (`storedVerdictWithPermission`), so the review "continues": it never raises a verdict the
+  // report's other reasons do not explain.
   let outcome = verdictOf(reasons);
-  if (rowView.kind === "reported") outcome = stricterOf(rowView.stored, outcome);
+  if (rowView.kind === "reported") {
+    outcome = stricterOf(
+      storedVerdictWithPermission(rowView.stored, rowView.report, permission !== null),
+      outcome,
+    );
+  }
   return {
     applies,
     enabled,
@@ -494,6 +526,7 @@ export async function derivePublicationReview(
     row,
     rowView,
     live,
+    permission,
     reasons,
     outcome,
     startable,
@@ -936,6 +969,16 @@ export async function publicationReviewDetail(
     reasons: reasonViewsOf(d.reasons, ctx.request.dataset_id, d.startable, reportOf(d.rowView)),
     description: d.description,
     review: d.row === null ? null : recordOf(d.row, d.rowView),
+    // Who and when, never the evidence: the summary an administrator recorded stays in its row.
+    license_permission:
+      d.permission === null
+        ? null
+        : {
+            recorded_at: d.permission.recorded_at,
+            recorded_by: d.permission.recorded_by,
+            ticket_id: d.permission.ticket_id,
+            line: licensePermissionRecordedLine(d.permission),
+          },
     history: past.slice(0, HISTORY_LIMIT).map(historyEntryOf),
     history_truncated: past.length > HISTORY_LIMIT,
   };
@@ -960,8 +1003,11 @@ function passedSection(
   d: DerivedPublicationReview,
   screenStatusLine: string | null,
 ): PublicationReviewSection | null {
-  if (!d.enabled || d.rowView.kind !== "reported" || d.rowView.stored !== "pass") return null;
+  if (!d.enabled || d.rowView.kind !== "reported") return null;
   const report = d.rowView.report;
+  if (storedVerdictWithPermission(d.rowView.stored, report, d.permission !== null) !== "pass") {
+    return null;
+  }
   if (report === null || report.evidence.minimums !== "met") return null;
   const gate = d.live.screen.gate;
   const others = d.reasons.filter((r) => r.code !== "identifier_screen_needs_acknowledgment");
@@ -974,6 +1020,7 @@ function passedSection(
       report.evidence.lineage?.credited ?? false,
       id,
     ),
+    ...(d.permission === null ? [] : [licensePermissionRecordedLine(d.permission)]),
     ...passAnswerLines(report),
     NOT_ASSESSED_LINE,
   ];
@@ -1054,9 +1101,16 @@ export async function publicationReviewEmailSection(
     };
     // What the automatic denial made of this review (ADR 0139): "automated review disagreed",
     // "recommended: deny", and the rest of its words, first, from the one copy table.
+    // A recorded license permission, said where it is not already among the passed lines.
+    const withPermission =
+      d.permission === null || passed !== null
+        ? section
+        : { ...section, lines: [licensePermissionRecordedLine(d.permission), ...section.lines] };
     const state = d.row?.autoDenyState ?? "none";
     const line = isOneOf(AUTO_DENY_STATES, state) ? autoDenyStateLine(state) : null;
-    return line === null ? section : { ...section, lines: [line, ...section.lines] };
+    return line === null
+      ? withPermission
+      : { ...withPermission, lines: [line, ...withPermission.lines] };
   } catch (err) {
     console.error(
       `[publication-review] could not read the review of request ${requestId} for the admin email (${errorWords(err)})`,
@@ -1073,6 +1127,7 @@ export async function publicationReviewEmailSection(
       tone: unreadable.tone,
       lines: unreadable.lines,
       next: unreadable.next ?? undefined,
+      unreadable: true,
     };
   }
 }

@@ -25,6 +25,7 @@
  */
 
 import { resolveLicenseLineage } from "../../../shared/license-lineage.js";
+import { permissionBasisOf } from "../../../shared/license-permission.js";
 import { CONFIRMING_EFFORT, CONFIRMING_MODEL } from "../../../shared/publication-auto-deny.js";
 import {
   COVERAGE_KEY,
@@ -446,14 +447,18 @@ export async function publicationReviewInputs(
   // The job now holds its inputs and may call the model: stamped once, on the claimed row still
   // waiting, so a later `inputs_unavailable` from it is stored as `workflow_failed` (it counts).
   // A stamp that cannot be written serves nothing, so no run is left able to make a call free.
+  // The same statement keeps the lineage just served as the review's permission basis (migration
+  // 0154): what a recorded license permission must match to clear the lineage reason. The latest
+  // serve is the one the job read, so each serve writes it.
   try {
     const stamped = await db
       .prepare(
-        `UPDATE publication_reviews SET inputs_served_at = COALESCE(inputs_served_at, datetime('now'))
+        `UPDATE publication_reviews
+            SET inputs_served_at = COALESCE(inputs_served_at, datetime('now')), lineage_basis = ?
           WHERE id = ? AND dataset_id = ? AND claimed_at IS NOT NULL
             AND state IN ('dispatched', 'unreported')`,
       )
-      .bind(reviewId, datasetId)
+      .bind(JSON.stringify(permissionBasisOf(lineage)), reviewId, datasetId)
       .run();
     if ((stamped.meta.changes ?? 0) !== 1) return { kind: "not_claimed" };
   } catch (err) {

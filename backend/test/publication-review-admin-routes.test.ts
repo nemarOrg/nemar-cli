@@ -1158,6 +1158,7 @@ describe("GET /admin/publish/:id/review", () => {
         "reasons",
         "description",
         "review",
+        "license_permission",
         "history",
         "history_truncated",
       ].sort(),

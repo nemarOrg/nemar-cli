@@ -89,6 +89,11 @@ export interface PublicationReviewRow {
   autoDenyState: string;
   /** When `autoDenyState` was written; null for `none`. */
   autoDenyAt: string | null;
+  /**
+   * The lineage the Worker served the review's job, as the license permission rule reads it
+   * (migration 0154; `parsePermissionBasis`), unparsed; null when none was stored.
+   */
+  lineageBasis: string | null;
 }
 
 /** Every column but `nonce`, which never leaves the callback module. */
@@ -96,7 +101,8 @@ export const ROW_COLUMNS =
   "id, request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, verdict, " +
   "detail, report, claimed_at, attempts, override_by, override_at, override_reasons, " +
   "created_at, decided_at, scanner_id, reader_versions, resolver_version, models, " +
-  "prompt_version, input_digest, enrichment_source, confirm_of, auto_deny_state, auto_deny_at";
+  "prompt_version, input_digest, enrichment_source, confirm_of, auto_deny_state, auto_deny_at, " +
+  "lineage_basis";
 
 const num = (v: unknown): number => Number(v);
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
@@ -133,6 +139,7 @@ export function toRow(raw: Record<string, unknown>): PublicationReviewRow {
     confirmOf: numOrNull(raw.confirm_of),
     autoDenyState: typeof raw.auto_deny_state === "string" ? raw.auto_deny_state : "none",
     autoDenyAt: strOrNull(raw.auto_deny_at),
+    lineageBasis: strOrNull(raw.lineage_basis),
   };
 }
 

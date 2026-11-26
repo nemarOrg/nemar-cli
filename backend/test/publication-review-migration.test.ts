@@ -112,6 +112,8 @@ describe("0098 publication_reviews: columns", () => {
     denial_mail_state: { type: "TEXT", notnull: 0, dflt: null },
     denial_mail_attempts: { type: "INTEGER", notnull: 1, dflt: "0" },
     denial_mail_listed_at: { type: "TEXT", notnull: 0, dflt: null },
+    // Migration 0154: the lineage the review was served, for a license permission (card B6).
+    lineage_basis: { type: "TEXT", notnull: 0, dflt: null },
   };
 
   test("exactly the declared columns, types, NOT NULLs and defaults", () => {
@@ -592,6 +594,7 @@ describe("the row module", () => {
         "confirmOf",
         "autoDenyState",
         "autoDenyAt",
+        "lineageBasis",
       ].sort(),
     );
     expect(row).toMatchObject({

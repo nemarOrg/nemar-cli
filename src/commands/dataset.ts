@@ -4882,6 +4882,14 @@ Examples:
         for (const line of screenLines) console.log(line);
       }
 
+      // ADR 0139, decision 7 (amendment of 2026-11-25): what license evidence to send, and where,
+      // or that it was recorded; in the server's words.
+      const licenseLines = result.license_permission_lines ?? [];
+      if (licenseLines.length > 0) {
+        console.log(`\n  ${chalk.yellow("License evidence:")}`);
+        for (const line of licenseLines) console.log(`    ${plain(line)}`);
+      }
+
       // ADR 0139, decision 9: the record of the newest automated review, in the server's words.
       const recordLines = result.review_record_lines ?? [];
       if (recordLines.length > 0) {

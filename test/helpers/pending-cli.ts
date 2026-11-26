@@ -160,6 +160,8 @@ export function statusBody(over: Record<string, unknown> = {}) {
     // No review has reported for this request, so there is no record (ADR 0139, decision 9).
     review_record: null,
     review_record_lines: [],
+    // No review reported a lineage that needs action (ADR 0139, decision 7, amendment 2026-11-25).
+    license_permission_lines: [],
     ...over,
   };
 }

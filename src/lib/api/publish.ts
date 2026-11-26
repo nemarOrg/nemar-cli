@@ -19,6 +19,8 @@ import {
   type StartedPublicationReview,
 } from "../../../shared/contract/publication-review-admin.js";
 import { APPROVAL_DISPATCH_TOKEN_HEADER } from "../../../shared/contract/publication.js";
+import type { ActionRequiredOutcome } from "../../../shared/license-lineage.js";
+import type { RecordedMail } from "../../../shared/license-permission.js";
 import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import { isExactIdMatch, matchesListSearch } from "../../../shared/publish-list-search.js";
@@ -96,6 +98,12 @@ export interface PublishStatusResponse {
    */
   review_record?: unknown;
   review_record_lines?: string[];
+  /**
+   * What the depositor is asked to send when the review's license lineage needs action, or that an
+   * administrator recorded the evidence (ADR 0139, decision 7, amendment of 2026-11-25). Absent
+   * from an older server.
+   */
+  license_permission_lines?: string[];
 }
 
 export interface PublishRequestsResponse {
@@ -386,6 +394,63 @@ export async function restorePublication(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(requestId !== undefined ? { request_id: requestId } : {}),
+    },
+    true,
+  );
+}
+
+/** One source behind a lineage outcome, as `POST /admin/publish/:id/license-permission` lists it. */
+export interface LicensePermissionSource {
+  id: string;
+  license: string | null;
+  license_version: string | null;
+  outcome: string;
+}
+
+/** The answer of `POST /admin/publish/:id/license-permission`, a dry run or a recorded permission. */
+export interface LicensePermissionAnswer {
+  applied: boolean;
+  message: string;
+  dataset_id: string;
+  request_id: number;
+  review_id: number;
+  outcome: ActionRequiredOutcome;
+  target_license: string | null;
+  sources: LicensePermissionSource[];
+  ticket_id: number;
+  /** The ticket's subject and sender, shown so the administrator confirms it holds the evidence. */
+  ticket_subject: string;
+  ticket_sender: string;
+  ticket_sender_is_depositor: boolean;
+  ticket_warning: string | null;
+  request_line: string;
+  permission_id?: number;
+  line?: string | null;
+  /** What the record sent: the administrators' "Ready to approve" mail and the depositor's mail. */
+  mail?: RecordedMail;
+}
+
+/**
+ * Record license permission evidence against a dataset's active publication request (admin; ADR
+ * 0139 decision 7, amendment of 2026-11-25). A dry run unless `apply`; `requestId` names the
+ * request the administrator read, refused when it is not the active one. The evidence is the
+ * administrator's own summary of what the support ticket holds; the API never echoes it.
+ */
+export async function recordLicensePermission(
+  datasetId: string,
+  body: { ticketId: number; evidence: string; requestId?: number; apply: boolean },
+): Promise<LicensePermissionAnswer> {
+  return request<LicensePermissionAnswer>(
+    `/admin/publish/${datasetId}/license-permission`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ticket_id: body.ticketId,
+        evidence: body.evidence,
+        ...(body.requestId !== undefined ? { request_id: body.requestId } : {}),
+        ...(body.apply ? { apply: true } : {}),
+      }),
     },
     true,
   );
