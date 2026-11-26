@@ -586,9 +586,9 @@ export const INCOMPLETE_COPY: Record<IncompleteReason, Copy> = {
     "external-link",
   ),
   "content-absent": reason(
-    "A recording's content is not in storage, so it could not be read.",
-    "the file's storage object",
-    "Upload the file's content again.",
+    "A recording's content was not there to read (missing from storage, or not on this machine when the screen runs here), so the recording was not read.",
+    "where the content is kept: its storage object, or this machine's copy for a local run",
+    "On this machine, fetch the file's content (nemar dataset get) and run the screen again; for a deposit, upload the file's content again.",
     "content-absent",
   ),
 };
