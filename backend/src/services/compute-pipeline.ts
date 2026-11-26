@@ -127,6 +127,7 @@ import { isNonProductionEnv } from "./environment.js";
 import {
   SERVING_INDEX_DEFER_MINUTES,
   type StagedServingIndex,
+  ZARR_COPY_SQL,
   isServingIndexFault,
   stageServingIndex,
 } from "./serving-index-staging.js";
@@ -227,6 +228,7 @@ export type PipelineRefusal =
   | "zarr_copy_not_ready"
   | "zarr_source_mismatch"
   | "zarr_source_unverifiable"
+  | "serving_index_deferred"
   | "recipe_not_automatic"
   | "recipe_placeholder"
   | "runners_disabled"
@@ -293,8 +295,13 @@ export type DispatchResult =
       stampId?: number;
       /** The field of the specification that was invalid, for `invalid_spec`. */
       field?: string;
-      /** For a Zarr source refusal: one of `ZARR_SOURCE_REASONS`, a fixed word that says what was not shown. */
+      /**
+       * For a Zarr source refusal: one of `ZARR_SOURCE_REASONS`, a fixed word that says what was not shown; for
+       * `serving_index_deferred`, the fault's word.
+       */
       reason?: string;
+      /** `serving_index_deferred` only: when the run goes ahead without the index (ISO 8601, UTC). */
+      runsWithoutIndexAfter?: string;
     };
 
 // --- Rows -------------------------------------------------------------------------------------------
@@ -551,13 +558,7 @@ export type ResolvedRun =
       extra: { version?: string; blockedBy?: PipelineTermId[]; reason?: string };
     };
 
-/**
- * What the dataset row says of its Zarr serving copy (`zarr-ready` writes it): the conversion's state and its
- * store count. Every consumer of the copy reads it only while `zarr_status = 'ready'` and there is a store (as
- * `zarr-catalog.ts` does). The commit the copy was built from is NOT read from the row (it can be left over
- * from a conversion that has since failed): it is the serving index's own, read by `checkZarrSource`.
- */
-const ZARR_COPY_SQL = "SELECT zarr_status, zarr_store_count FROM datasets WHERE dataset_id = ?1";
+// `ZARR_COPY_SQL` is declared beside the serving index's 403 rule, which reads the same row.
 
 /**
  * The part of a run that is decided from the dataset's own rows, in one place so the dry run and the
@@ -701,12 +702,12 @@ export async function tupleHeld(
 export const SERVING_INDEX_DEFERRED_WORD = "serving_index_deferred";
 
 /**
- * Minutes since the FIRST deferral of a tuple's current run (`?1` dataset, `?2` version, `?3` recipe, `?4`
+ * Whole minutes (whole seconds divided by 60, so the 24-hour boundary is exact) since the FIRST deferral of a tuple's current run (`?1` dataset, `?2` version, `?3` recipe, `?4`
  * recipe version, `?5` engine, `?6` input), on SQLite's clock: the oldest deferred stamp newer than the
  * tuple's newest stamp of any other kind, so an earlier run's deferrals never shorten a later run's wait.
  * NULL when the run was never deferred.
  */
-export const SERVING_INDEX_DEFERRAL_AGE_SQL = `SELECT (julianday('now') - julianday(MIN(d.created_at))) * 1440 AS minutes
+export const SERVING_INDEX_DEFERRAL_AGE_SQL = `SELECT (CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', MIN(d.created_at)) AS INTEGER)) / 60 AS minutes
   FROM compute_pipeline_stamps d
  WHERE d.dataset_id = ?1 AND d.version = ?2 AND d.recipe = ?3 AND d.recipe_version = ?4
    AND d.engine = ?5 AND d.input = ?6
@@ -719,30 +720,35 @@ export const SERVING_INDEX_DEFERRAL_AGE_SQL = `SELECT (julianday('now') - julian
 
 export type ServingIndexDecision =
   | { kind: "run"; servingIndex: StagedServingIndex }
-  | { kind: "deferred"; reason: ServingIndexAbsentReason; stampId: number }
+  | {
+      kind: "deferred";
+      reason: ServingIndexAbsentReason;
+      stampId: number;
+      /** When the run goes ahead without the index: 24 hours after its first deferral. */
+      runsWithoutIndexAfter: string;
+    }
   | { kind: "live_attempt_exists" };
 
 /**
  * The dispatch's answer to a serving index decision that does not run (ADR 0141, amended): a deferral is
- * `zarr_source_unverifiable` (503, try again later) with the fault's word and the stamp that records it, and a
- * live stamp is `live_attempt_exists`; a decision to run is null.
+ * `serving_index_deferred` (503) with the fault's word, the stamp that records it and when the run goes ahead
+ * without the index, and a live stamp is `live_attempt_exists`. Typed to take only those two, so the call site
+ * must narrow first and cannot read a run's index without having returned the refusal.
  */
 export function servingIndexRefusal(
-  decided: ServingIndexDecision,
+  decided: Exclude<ServingIndexDecision, { kind: "run" }>,
   datasetId: string,
   tag: string,
-): DispatchResult | null {
+): DispatchResult {
   if (decided.kind === "live_attempt_exists") {
     return fail("live_attempt_exists", datasetId, { version: tag });
   }
-  if (decided.kind === "deferred") {
-    return fail("zarr_source_unverifiable", datasetId, {
-      version: tag,
-      reason: decided.reason,
-      stampId: decided.stampId,
-    });
-  }
-  return null;
+  return fail("serving_index_deferred", datasetId, {
+    version: tag,
+    reason: decided.reason,
+    stampId: decided.stampId,
+    runsWithoutIndexAfter: decided.runsWithoutIndexAfter,
+  });
 }
 
 /**
@@ -750,7 +756,7 @@ export function servingIndexRefusal(
  *  - a staged index, or a word that is not a fault (no index, another commit, too large, unusable): run now;
  *  - a fault (GitHub or the index could not be read, the copy could not be kept): the run is DEFERRED, recorded
  *    as a `refused` stamp with {@link SERVING_INDEX_DEFERRED_WORD}, and the dispatch refuses with
- *    `zarr_source_unverifiable` and the fault's word, so a later pass tries again;
+ *    `serving_index_deferred` and the fault's word, so a later pass tries again;
  *  - a fault {@link SERVING_INDEX_DEFER_MINUTES} or more after the run's first deferral: run without the index,
  *    and the specification records the fault's word.
  * A live or succeeded stamp of the tuple makes the deferral's claim fail: `live_attempt_exists`, as the claim
@@ -798,7 +804,12 @@ export async function servingIndexForRun(
   console.error(
     `[compute-pipeline] serving_index_deferred dataset=${datasetId} reason=${staged.reason} stamp=${stampId}`,
   );
-  return { kind: "deferred", reason: staged.reason, stampId };
+  // The first deferral is this one when there was none, else `minutes` ago, on the same clock.
+  const firstMs = Date.now() - (minutes ?? 0) * 60_000;
+  const runsWithoutIndexAfter = new Date(
+    firstMs + SERVING_INDEX_DEFER_MINUTES * 60_000,
+  ).toISOString();
+  return { kind: "deferred", reason: staged.reason, stampId, runsWithoutIndexAfter };
 }
 
 // --- dispatchPipelineJob ----------------------------------------------------------------------------
@@ -883,9 +894,8 @@ export async function dispatchPipelineJob(
   let servingIndex: StagedServingIndex | undefined;
   if (recipeKeysServingIndex(recipe, recipeInput)) {
     const decided = await servingIndexForRun(env, recipe, recipeInput, datasetId, tag);
-    const refusal = servingIndexRefusal(decided, datasetId, tag);
-    if (refusal !== null) return refusal;
-    servingIndex = (decided as Extract<ServingIndexDecision, { kind: "run" }>).servingIndex;
+    if (decided.kind !== "run") return servingIndexRefusal(decided, datasetId, tag);
+    servingIndex = decided.servingIndex;
   }
 
   // The specification, BEFORE the claim: a registry entry or an image the job schema refuses is a word

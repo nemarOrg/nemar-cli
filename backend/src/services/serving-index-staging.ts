@@ -95,10 +95,45 @@ async function readBytesBounded(res: Response, max: number): Promise<Uint8Array 
   return bytes;
 }
 
+/**
+ * What the dataset row says of its Zarr serving copy (`zarr-ready` writes it): the conversion's state and its
+ * store count. Every consumer of the copy reads it only while `zarr_status = 'ready'` and there is a store (as
+ * `zarr-catalog.ts` does). The commit the copy was built from is NOT read from the row (it can be left over
+ * from a conversion that has since failed): it is the serving index's own. `resolveRun` reads it for a run of
+ * the Zarr input, and the serving index's 403 rule for a run of the archive.
+ */
+export const ZARR_COPY_SQL =
+  "SELECT zarr_status, zarr_store_count FROM datasets WHERE dataset_id = ?1";
+
+/**
+ * What a 403 on the index means. The Worker's S3 credentials lack `s3:ListBucket`, so a MISSING object
+ * answers 403 too, and a 403 alone cannot tell an absent index from a refused read. The dataset row decides:
+ * a copy that is not `ready`, or has no store, has no index to stage (`no_index`, the run goes ahead at once);
+ * a `ready` copy with stores should have one, so the 403 is a fault (`index_unreadable`, the run is deferred).
+ * A row that cannot be read is a fault too. Granting the credentials `s3:ListBucket` would make S3 answer 404
+ * for a missing object; that is the owner's infrastructure change, not this code's.
+ */
+async function forbiddenReason(
+  env: Bindings,
+  datasetId: string,
+): Promise<"no_index" | "index_unreadable"> {
+  try {
+    const copy = await env.DB.prepare(ZARR_COPY_SQL).bind(datasetId).first<{
+      zarr_status: string | null;
+      zarr_store_count: number | null;
+    }>();
+    return copy?.zarr_status === "ready" && (copy.zarr_store_count ?? 0) > 0
+      ? "index_unreadable"
+      : "no_index";
+  } catch {
+    return "index_unreadable";
+  }
+}
+
 /** The exact bytes of `<id>/zarr/index.json`: over HTTP through the test seam, otherwise from the bucket. */
 async function readIndexBytes(env: Bindings, datasetId: string): Promise<IndexRead> {
   const signal = AbortSignal.timeout(ZARR_SOURCE_INDEX_TIMEOUT_MS);
-  let res: Response | null;
+  let res: Response | null | "forbidden";
   try {
     const seam = (globalThis as { NEMAR_ZARR_INDEX_BASE?: string }).NEMAR_ZARR_INDEX_BASE;
     if (seam && isNonProductionEnv(env)) {
@@ -114,6 +149,10 @@ async function readIndexBytes(env: Bindings, datasetId: string): Promise<IndexRe
       if (res.status === 404) {
         await res.body?.cancel().catch(() => {});
         return { ok: false, reason: "no_index" };
+      }
+      if (res.status === 403) {
+        await res.body?.cancel().catch(() => {});
+        return { ok: false, reason: await forbiddenReason(env, datasetId) };
       }
       if (!res.ok) {
         await res.body?.cancel().catch(() => {});
@@ -139,6 +178,7 @@ async function readIndexBytes(env: Bindings, datasetId: string): Promise<IndexRe
         signal,
       );
       if (res === null) return { ok: false, reason: "no_index" };
+      if (res === "forbidden") return { ok: false, reason: await forbiddenReason(env, datasetId) };
     }
     const bytes = await readBytesBounded(res, COMPUTE_SERVING_INDEX_MAX_BYTES);
     if (bytes === null) return { ok: false, reason: "index_too_large" };
@@ -184,6 +224,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
  * an object with a relative `path` and `zarr` and a list of `groups`; each group an object with a `name`, a
  * text `modality`, a positive finite `rate` and whole `n_channels` and `n_samples` within their bounds. An index
  * the recipe would refuse is never staged (`index_unusable`), so a run is never handed one.
+ *
+ * One difference remains: JSON has one number type, so an integer-valued float (`3.0`) reads here as the whole
+ * number 3 and is accepted, where the recipe's Python reader sees a float and refuses it. The Worker then stages
+ * an index the recipe cannot use; the recipe does not end the run over it, and skips the views of the serving
+ * copy with `serving_index_unusable`.
  */
 export function servingIndexShapeOk(document: unknown): boolean {
   if (!isRecord(document)) return false;

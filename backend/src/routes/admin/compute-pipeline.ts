@@ -128,6 +128,8 @@ const SENTENCES = {
     "That dataset's Zarr copy could not be shown to be the tagged version's data; the reason says what was not shown.",
   zarr_source_unverifiable:
     "The Zarr copy or the tagged version could not be read, so nothing was checked; try again shortly.",
+  serving_index_deferred:
+    "The serving index could not be staged because of a temporary fault, so the run is deferred, not failed: its stamp records the deferral, a later dispatch tries again, and 24 hours after the first deferral the run goes ahead without the index (runs_without_index_after says when).",
   runtime_unavailable: "NEMAR's runtime image is not configured.",
   pipelines_account_missing: "The pipelines account is not set up.",
   compute_disabled: COMPUTE_ROUTE_SENTENCES.compute_disabled,
@@ -313,6 +315,9 @@ function resultView(r: DispatchResult): ComputePipelineResult {
     ...(r.version === undefined ? {} : { version: r.version }),
     ...(r.blockedBy === undefined ? {} : { blocked_by: r.blockedBy }),
     ...(r.reason === undefined ? {} : { reason: r.reason }),
+    ...(r.runsWithoutIndexAfter === undefined
+      ? {}
+      : { runs_without_index_after: r.runsWithoutIndexAfter }),
     ...(r.stampId === undefined ? {} : { stamp_id: r.stampId }),
   };
 }

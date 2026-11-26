@@ -30,6 +30,7 @@ import {
   COMPUTE_SERVING_INDEX_MAX_BYTES,
   PIPELINES_TAPIS_OWNER,
 } from "../../shared/contract/compute";
+import { COMPUTE_PIPELINE_REFUSAL_STATUS } from "../../shared/contract/compute-admin";
 import {
   SERVING_INDEX_CONTAINER_PATH,
   decodeLaunchSpecEnv,
@@ -449,14 +450,6 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
       },
       "index_unreadable",
     ],
-    [
-      "the index answers 403",
-      () => {
-        github.tag(ID, TAG, T);
-        github.index(ID, { http: 403 });
-      },
-      "index_unreadable",
-    ],
   ] as Array<[string, () => void, string]>) {
     test(`${label}: deferred, a refused stamp records it, and nothing is dispatched (MUTATION: run on a fault)`, async () => {
       const env = devEnv();
@@ -574,33 +567,56 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
     expect(await run(env)).toEqual({ kind: "live_attempt_exists" });
   });
 
-  test("the dispatch answers a deferral with zarr_source_unverifiable, the word and the stamp, and runs anything else (MUTATION: dispatch through a deferral)", async () => {
+  test("the dispatch answers a deferral with serving_index_deferred, the word, the stamp and when it runs without the index (MUTATION: dispatch through a deferral)", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
     github.tag(ID, TAG, { http: 502 });
+    const before = Date.now();
     const deferred = await run(env);
-    const stampId = (deferred as { stampId: number }).stampId;
-    expect(servingIndexRefusal(deferred, ID, TAG)).toEqual({
+    if (deferred.kind !== "deferred") throw new Error("not deferred");
+    const refusal = servingIndexRefusal(deferred, ID, TAG);
+    expect(refusal).toEqual({
       ok: false,
-      code: "zarr_source_unverifiable",
+      code: "serving_index_deferred",
       datasetId: ID,
       version: TAG,
       reason: "github_unreadable",
-      stampId,
+      stampId: deferred.stampId,
+      runsWithoutIndexAfter: deferred.runsWithoutIndexAfter,
     });
+    // The first deferral is this one: 24 hours from now.
+    const after = Date.parse(deferred.runsWithoutIndexAfter);
+    expect(after - before).toBeGreaterThanOrEqual(SERVING_INDEX_DEFER_MINUTES * 60_000 - 1000);
+    expect(after - Date.now()).toBeLessThanOrEqual(SERVING_INDEX_DEFER_MINUTES * 60_000);
+    // A later deferral names the same time, measured from the first (to the clock's second).
+    await backdate(env, 10);
+    const again = await run(env);
+    if (again.kind !== "deferred") throw new Error("not deferred");
+    expect(
+      Math.abs(Date.parse(again.runsWithoutIndexAfter) - (after - 10 * 3_600_000)),
+    ).toBeLessThan(5_000);
     expect(servingIndexRefusal({ kind: "live_attempt_exists" }, ID, TAG)).toEqual({
       ok: false,
       code: "live_attempt_exists",
       datasetId: ID,
       version: TAG,
     });
-    expect(
-      servingIndexRefusal(
-        { kind: "run", servingIndex: { staged: false, reason: "no_index" } },
-        ID,
-        TAG,
-      ),
-    ).toBeNull();
+    expect(COMPUTE_PIPELINE_REFUSAL_STATUS.serving_index_deferred).toBe(503);
+  });
+
+  test("exactly 1,440 minutes after the first deferral the run goes ahead; a minute short it is deferred", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, { http: 502 });
+    expect((await run(env)).kind).toBe("deferred");
+    const setAge = (minutes: number) =>
+      env.DB.prepare(
+        `UPDATE compute_pipeline_stamps SET created_at = datetime('now', '-${minutes} minutes') WHERE id = (SELECT MIN(id) FROM compute_pipeline_stamps)`,
+      ).run();
+    await setAge(SERVING_INDEX_DEFER_MINUTES - 1);
+    expect((await run(env)).kind).toBe("deferred");
+    await setAge(SERVING_INDEX_DEFER_MINUTES);
+    expect((await run(env)).kind).toBe("run");
   });
 
   test("the fault words and the wait are the ruling's", () => {
@@ -617,7 +633,66 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
   });
 });
 
-describe("the S3 read of the index: a 403 is a fault, never an absent index", () => {
+describe("a 403 is read with the dataset row: an absent index runs at once, a ready copy's 403 defers", () => {
+  const run = (env: Bindings) => servingIndexForRun(env, ica, "bids", ID, TAG);
+  const S3 = {
+    S3_BUCKET: "example-bucket",
+    AWS_REGION: "us-east-2",
+    AWS_ACCESS_KEY_ID: "AKIAEXAMPLE",
+    AWS_SECRET_ACCESS_KEY: "secret",
+  };
+  const setCopy = (env: Bindings, status: string | null, stores: number | null) =>
+    env.DB.prepare(
+      "UPDATE datasets SET zarr_status = ?1, zarr_store_count = ?2 WHERE dataset_id = ?3",
+    )
+      .bind(status, stores, ID)
+      .run();
+
+  /** The object store as a stand-in that answers 403 for the index; GitHub stays the loopback stand-in. */
+  async function withS3Answering403<T>(work: () => Promise<T>): Promise<T> {
+    const real = globalThis.fetch;
+    const seam = seams.NEMAR_ZARR_INDEX_BASE;
+    seams.NEMAR_ZARR_INDEX_BASE = undefined;
+    // An HTTP response fixture for the object store: the 403 a missing object answers without ListBucket.
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.includes(".amazonaws.com/")) return new Response("", { status: 403 });
+      return real(input as RequestInfo, init);
+    }) as typeof fetch;
+    try {
+      return await work();
+    } finally {
+      globalThis.fetch = real;
+      seams.NEMAR_ZARR_INDEX_BASE = seam;
+    }
+  }
+
+  for (const [label, status, stores, expected] of [
+    ["a copy that is not converted", null, null, "no_index"],
+    ["a pending conversion", "pending", 3, "no_index"],
+    ["a ready copy with no store", "ready", 0, "no_index"],
+    ["a ready copy with stores", "ready", 3, "index_unreadable"],
+  ] as Array<[string, string | null, number | null, string]>) {
+    for (const via of ["S3", "the index seam"] as const) {
+      test(`${label}, through ${via}: ${expected} (MUTATION: read every 403 as a fault; as absent)`, async () => {
+        const env = devEnv(via === "S3" ? S3 : {});
+        await seedEegDataset(env, ID);
+        await setCopy(env, status, stores);
+        github.tag(ID, TAG, T);
+        github.index(ID, { http: 403 });
+        const decided = via === "S3" ? await withS3Answering403(() => run(env)) : await run(env);
+        if (expected === "no_index") {
+          expect(decided).toEqual({
+            kind: "run",
+            servingIndex: { staged: false, reason: "no_index" },
+          });
+        } else {
+          expect(decided).toMatchObject({ kind: "deferred", reason: "index_unreadable" });
+        }
+      });
+    }
+  }
+
   const options = {
     bucket: "example-bucket",
     region: "us-east-2",
@@ -626,11 +701,11 @@ describe("the S3 read of the index: a 403 is a fault, never an absent index", ()
   };
   for (const [status, expected] of [
     [404, "null"],
-    [403, "throws"],
+    [403, "forbidden"],
     [500, "throws"],
     [200, "response"],
   ] as Array<[number, string]>) {
-    test(`a ${status} answer: ${expected} (MUTATION: read a 403 as absent)`, async () => {
+    test(`getZarrIndexResponse on a ${status}: ${expected}`, async () => {
       const real = globalThis.fetch;
       // An HTTP response fixture for the object store's answer, the error path under test.
       globalThis.fetch = (async () =>
@@ -639,7 +714,8 @@ describe("the S3 read of the index: a 403 is a fault, never an absent index", ()
         const got = getZarrIndexResponse(options, ID);
         if (expected === "throws") await expect(got).rejects.toThrow();
         else if (expected === "null") expect(await got).toBeNull();
-        else expect((await got)?.status).toBe(200);
+        else if (expected === "forbidden") expect(await got).toBe("forbidden");
+        else expect(((await got) as Response).status).toBe(200);
       } finally {
         globalThis.fetch = real;
       }
