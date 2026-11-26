@@ -44,7 +44,7 @@ import {
   type ComputeRunQualityResponse,
   type ComputeRunQualityState,
 } from "../../../shared/contract/compute-admin.js";
-import { QUALITY_RECORDING_PATH_MAX } from "../../../shared/contract/quality-route.js";
+import { isQualityRecordingPath } from "../../../shared/contract/quality-route.js";
 import type { Bindings } from "../types/bindings.js";
 import {
   DERIVATIVE_OBJECT_PREFIX,
@@ -120,15 +120,8 @@ const STORED_WORDS: readonly ComputeRunQualityState[] = [
   "not_current",
 ];
 
-/** Whether a path is a recording path the quality route takes: its pattern, its bound, a recording's name. */
-export function isRecordingPath(path: string): boolean {
-  return (
-    path.length > 0 &&
-    path.length <= QUALITY_RECORDING_PATH_MAX &&
-    QUALITY_PATTERNS.relativeLocation.test(path) &&
-    matchRecording(path.slice(path.lastIndexOf("/") + 1)) !== null
-  );
-}
+/** Whether a path is a recording path the quality route takes: the shared rule (`isQualityRecordingPath`). */
+export const isRecordingPath = isQualityRecordingPath;
 
 /** Where the recordings table of a recipe's run sits under a derivative's key. */
 export function storedTablePath(recipe: string): string {

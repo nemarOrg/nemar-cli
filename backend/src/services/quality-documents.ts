@@ -38,6 +38,7 @@ import {
   metricPlugin,
   recordChecks,
 } from "../../../shared/contract/data-quality.js";
+import { QUALITY_RELATIVE_LOCATION_SOURCE } from "../../../shared/contract/quality-route.js";
 import { readIJson, sha256HexOfBytes } from "../../../shared/contract/view-digest.js";
 import { PIPELINE_TERMS, type PipelineTermId } from "./compute-pipeline-eligibility.js";
 
@@ -56,9 +57,7 @@ export const QUALITY_PATTERNS = Object.freeze({
   sha256: unicode(String.raw`^[0-9a-f]{64}$(?!\n)`),
   failureCode: unicode(String.raw`^[a-z][a-z0-9_]{0,63}$(?!\n)`),
   metricName: unicode(String.raw`^[A-Za-z][A-Za-z0-9_-]*(:[A-Za-z][A-Za-z0-9_-]*)?$(?!\n)`),
-  relativeLocation: unicode(
-    String.raw`^(?! )(?![\s\S]* $)(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!(?:[\s\S]*/)?\.\.?(?:/|$))(?![\s\S]*//)(?![\s\S]*/$)[^\\%?#\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]+$(?!\n)`,
-  ),
+  relativeLocation: unicode(QUALITY_RELATIVE_LOCATION_SOURCE),
   viewKey: unicode(String.raw`^[a-z][a-z0-9_]{0,63}$(?!\n)`),
   kindName: unicode(String.raw`^[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+$(?!\n)`),
   pluginName: unicode(String.raw`^[A-Za-z][A-Za-z0-9_-]{0,63}$(?!\n)`),

@@ -51,6 +51,7 @@ import {
   QUALITY_ROUTE_VERSION,
   QUALITY_ROUTE_WORDS,
   type QualityRouteWord,
+  isQualityRecordingPath,
   qualityCacheTag,
 } from "../../../shared/contract/quality-route.js";
 import { derivativesBound } from "../services/compute-derivatives.js";
@@ -135,10 +136,7 @@ export function recordingOf(segments: readonly string[]): string | null {
   } catch {
     return null;
   }
-  if (path.length > QUALITY_RECORDING_PATH_MAX) return null;
-  if (!QUALITY_PATTERNS.relativeLocation.test(path)) return null;
-  if (matchRecording(path.slice(path.lastIndexOf("/") + 1)) === null) return null;
-  return path;
+  return isQualityRecordingPath(path) ? path : null;
 }
 
 type QualityRequest =
