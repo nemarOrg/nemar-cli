@@ -952,7 +952,7 @@ markLocalOnly(
       [
         "Screen a dataset for identifying information with the same scan NEMAR runs when publication is requested, and print the same report. Sends nothing and changes nothing.",
         "Read: the files in the directory (--committed: the tree of HEAD), plus the git history when this is a repository.",
-        "Not read: the server's own copy, the contents of sidecars and tables in earlier commits, and annexed content that is not on this machine (reported as 'content-absent').",
+        "Not read: the server's own copy, the contents of sidecars and tables in earlier commits, and annexed content that is not on this machine, in the tree or in earlier commits (reported as 'content-absent': the screen is then incomplete, never clean).",
       ].join("\n\n"),
     )
     .argument("[path]", "Path to the dataset directory", ".")
@@ -980,9 +980,11 @@ What is read:
   ('content-absent'); fetch it with 'nemar dataset get' and run again.
 
 What is not read:
-  The server's own copy (its storage and version manifest), the contents of
-  sidecars and tables in earlier commits, and recordings of earlier commits
-  whose content is not on this machine. The report says so under the verdict.
+  The server's own copy (its storage and version manifest) and the contents of
+  sidecars and tables in earlier commits. A recording whose content is not on
+  this machine, in the tree or in an earlier commit, is not read either: the
+  screen is then incomplete ('content-absent'), never clean. The report says so
+  under the verdict.
 
 Exit status:
   0  clean, dates-only or no-recordings

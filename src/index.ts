@@ -40,7 +40,7 @@ import {
 } from "./lib/argv-shadowing.js";
 import { runComplete } from "./lib/completion/run.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
-import { isLocalOnlyCommand } from "./lib/dataset-screen.js";
+import { isLocalOnlyCommand, isLocalOnlyInvocation } from "./lib/dataset-screen.js";
 import {
   enableDebug,
   getLastWriteFailureReason,
@@ -376,7 +376,10 @@ async function main() {
     await primeEnvironmentSnapshot();
   }
 
-  const pendingUpdate = isCredentialHelper ? null : await initUpdateCheck();
+  // A command that reads this machine only (`nemar dataset screen`) neither asks the registry nor
+  // writes the update cache: no request, no file.
+  const pendingUpdate =
+    isCredentialHelper || isLocalOnlyInvocation(program, rawArgs) ? null : await initUpdateCheck();
 
   if (pendingUpdate) {
     // postAction fires after commands; exit handler covers --help/--version

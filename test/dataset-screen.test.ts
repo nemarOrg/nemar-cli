@@ -19,7 +19,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -32,10 +32,11 @@ import { LOCAL_COPY } from "../shared/identifier-screen-copy";
 import { DATASET_STATUSES, parseScreenReport } from "../shared/identifier-screen-report";
 import {
   LOCAL_DATASET_ID,
-  LOCAL_ERRORS,
   LocalScreenError,
   absenceAware,
+  classifyGitFailure,
   exitCodeFor,
+  localErrorSentence,
   localScannerId,
   renderLocalScreen,
   screenLocalDataset,
@@ -83,6 +84,16 @@ describe("the same report as the publication screen", () => {
   const cases: [string, () => Repo][] = [
     ["EDF and one format nobody reads", () => dataset(CLEAN, { unscreened: true })],
     ["a direct identifier in a header", () => dataset(named(1), { unscreened: true })],
+    [
+      "a superseded recording whose content is present (read from history)",
+      () => {
+        const repo = new Repo();
+        repo.file("dataset_description.json", DESCRIPTION).file(EDF, recording(named(1)));
+        repo.commit("before");
+        repo.file(EDF, recording(CLEAN)).commit("fixed");
+        return repo;
+      },
+    ],
     [
       "tables, a sidecar and a date",
       () => {
@@ -244,7 +255,9 @@ describe("a directory that is not a repository", () => {
     expect(await code(screenLocalDataset(join(file, "nope"), { committed: false }))).toBe(
       "not-a-directory",
     );
-    for (const sentence of Object.values(LOCAL_ERRORS)) expect(sentence).not.toContain(file);
+    for (const sentence of Object.values(LOCAL_COPY.errors)) {
+      expect(typeof sentence === "function" ? sentence("exit-1") : sentence).not.toContain(file);
+    }
   });
 
   test("a subdirectory of a repository is not the repository (no history is claimed for it)", async () => {
@@ -403,9 +416,21 @@ describe("earlier commits", () => {
     expect(here.supersededNotRead).toBe(0);
 
     const gone = await committed(make(false));
-    // Not read, so not claimed: the verdict is the tree's, and the line says what was not read.
-    expect(statusOf(gone)).toBe("clean");
+    // Not read, so not claimed: the server reads it from storage, so a local "clean" would
+    // contradict it. The screen is incomplete (exit 2), with the reason a missing tree
+    // recording has.
+    expect(statusOf(gone)).toBe("unchecked");
+    expect(exitCodeFor(gone.status)).toBe(2);
+    expect(gone.report.scan?.incomplete).toBe(true);
+    expect(gone.report.scan?.incomplete_reasons).toContain("content-absent");
     expect(gone.supersededNotRead).toBe(1);
+    // The tree itself was read in full: the incompleteness is the history's alone.
+    expect(gone.report.scan?.read_by_format?.edf).toEqual({
+      files: 1,
+      read: 1,
+      partial: 0,
+      failed: 0,
+    });
     const text = renderLocalScreen(gone).body.join("\n");
     expect(text).toContain(LOCAL_COPY.supersededAbsent(1).statement);
     expect(text).toContain("git annex get --all");
@@ -414,6 +439,8 @@ describe("earlier commits", () => {
     expect(renderLocalScreen(none).body.join("\n")).not.toContain(
       "earlier commits have no content",
     );
+    expect(none.report.scan?.incomplete_reasons).not.toContain("content-absent");
+    expect(none.status).toBe("direct-identifiers");
   });
 
   test("a path that ever existed goes through the path rules", async () => {
@@ -606,7 +633,12 @@ describe("the scanner id says which kind it is", () => {
     const screen = await committed(dataset(CLEAN));
     const asRelease = { ...screen.report, scanner: scanner.id };
     expect(parseScreenReport(JSON.parse(JSON.stringify(asRelease))).scanner).toBe(scanner.id);
-    const text = renderLocalScreen({ ...screen, report: asRelease, scannerKind: "release" });
+    const text = renderLocalScreen({
+      ...screen,
+      report: asRelease,
+      scannerId: scanner.id,
+      scannerKind: "release",
+    });
     expect(text.body.join("\n")).toContain("release tag of this nemar-cli build");
     // The door still refuses anything that is neither a revision nor a release tag.
     for (const bad of [
@@ -618,4 +650,123 @@ describe("the scanner id says which kind it is", () => {
       expect(() => parseScreenReport({ ...asRelease, scanner: bad })).toThrow();
     }
   });
+});
+
+describe("a git that fails is an error, never a screen without history", () => {
+  test("only git's own 'no repository' is an absence; every other failure is classed by its cause", () => {
+    expect(
+      classifyGitFailure(128, "fatal: not a git repository (or any parent up to mount point /)"),
+    ).toMatchObject({ kind: "not-a-repository" });
+    expect(
+      classifyGitFailure(128, "fatal: detected dubious ownership in repository at '/x'"),
+    ).toMatchObject({ kind: "failed", cause: "unsafe-directory" });
+    expect(classifyGitFailure(null, "")).toMatchObject({ kind: "failed", cause: "spawn-failed" });
+    expect(classifyGitFailure(128, "fatal: something else")).toMatchObject({
+      kind: "failed",
+      cause: "exit-128",
+    });
+    expect(classifyGitFailure(1, "")).toMatchObject({ kind: "failed", cause: "exit-1" });
+    // The same words with another exit code are not "no repository".
+    expect(classifyGitFailure(1, "not a git repository")).toMatchObject({ kind: "failed" });
+  });
+
+  test("a repository whose HEAD is corrupt raises git-failed in both modes, with the cause and no path", async () => {
+    const repo = dataset(named(1));
+    writeFileSync(join(repo.dir, ".git", "HEAD"), "not a ref\n");
+    for (const mode of [working, committed]) {
+      const error = await mode(repo).then(
+        () => null,
+        (e) => e,
+      );
+      expect(error).toBeInstanceOf(LocalScreenError);
+      expect(error.code).toBe("git-failed");
+      expect(error.failure).toBe("git-dir-unusable");
+      const sentence = localErrorSentence(error);
+      expect(sentence).toContain("git-dir-unusable");
+      expect(sentence).not.toContain(repo.dir);
+    }
+    // Its twin, a directory with no `.git` at all, is a plain absence and is screened.
+    const plain = new Repo("plain", { git: false });
+    plain.file(EDF, recording(named(1)));
+    expect(statusOf(await working(plain))).toBe("direct-identifiers");
+  });
+
+  test("a repository with no commit yet is screened (git answers 'no HEAD', not a failure)", async () => {
+    const empty = new Repo("unborn");
+    empty.file(EDF, recording(named(1)));
+    const screen = await working(empty);
+    expect(screen.status).toBe("direct-identifiers");
+    expect(screen.commit).toBeNull();
+  });
+});
+
+describe("unreadable is not absent", () => {
+  const owner = process.getuid?.() !== 0;
+  const recordingPath = "sub-01/eeg/sub-01_task-rest_eeg.edf";
+  const failed = { files: 1, read: 0, partial: 0, failed: 1 };
+
+  test.skipIf(!owner)(
+    "a store the machine will not list fails the read, in both modes",
+    async () => {
+      const repo = new Repo();
+      repo.annexLink(recordingPath, recording(named(1)));
+      repo.commit();
+      const store = join(repo.dir, ".git", "annex", "objects", "Xz");
+      chmodSync(store, 0o000);
+      try {
+        for (const mode of [committed, working]) {
+          const scan = (await mode(repo)).report.scan;
+          expect(scan?.read_by_format?.edf).toEqual(failed);
+          expect(scan?.read_failures).toEqual({ "edf/unreadable-entry": 1 });
+          expect(scan?.incomplete_reasons).not.toContain("content-absent");
+        }
+      } finally {
+        chmodSync(store, 0o755);
+      }
+      // Its twin: the store is readable and the object is gone, which is absent.
+      const gone = new Repo();
+      gone.annexLink(recordingPath, recording(named(1)), { content: false });
+      gone.commit();
+      const scan = (await committed(gone)).report.scan;
+      expect(scan?.read_by_format?.edf).toEqual({ files: 1, read: 0, partial: 1, failed: 0 });
+      expect(scan?.incomplete_reasons).toContain("content-absent");
+    },
+  );
+
+  test.skipIf(!owner)("an object the machine will not open fails the read", async () => {
+    const repo = new Repo();
+    const key = repo.annexLink(recordingPath, recording(named(1)));
+    repo.commit();
+    const object = join(repo.dir, ".git", "annex", "objects", "Xz", "Qk", key, key);
+    chmodSync(object, 0o000);
+    try {
+      for (const mode of [committed, working]) {
+        const scan = (await mode(repo)).report.scan;
+        expect(scan?.read_by_format?.edf).toEqual(failed);
+        expect(scan?.incomplete_reasons).not.toContain("content-absent");
+      }
+    } finally {
+      chmodSync(object, 0o644);
+    }
+  });
+
+  test.skipIf(!owner)(
+    "a pointer file the machine will not open is a failed read, not an absent one",
+    async () => {
+      const repo = new Repo();
+      repo.annexPointer(recordingPath, recording(named(1)));
+      repo.commit();
+      const pointer = join(repo.dir, recordingPath);
+      chmodSync(pointer, 0o000);
+      try {
+        const scan = (await working(repo)).report.scan;
+        expect(scan?.read_by_format?.edf).toEqual(failed);
+        expect(scan?.incomplete_reasons).not.toContain("content-absent");
+      } finally {
+        chmodSync(pointer, 0o644);
+      }
+      // The twin, readable: the same pointer is followed to its content.
+      expect((await working(repo)).report.scan?.read_by_format?.edf?.read).toBe(1);
+    },
+  );
 });

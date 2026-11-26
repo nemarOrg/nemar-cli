@@ -16,11 +16,14 @@
  * through the path rules, and a recording an earlier commit held that the tree no longer does is
  * read when its content is on this machine.
  *
- * WHAT IT DOES NOT READ, AND SAYS SO. The server's own copy (storage, its version manifest,
- * branches pushed there), the content of annexed files that are not on this machine (a recording
- * is then `partial` with reason `content-absent`), recordings of earlier commits whose content is
- * not here (counted and named, never read as clean), and, in the working-tree mode, the committed
- * tree. `LOCAL_COPY` holds those sentences.
+ * WHAT IT DOES NOT READ, AND SAYS SO (the help text lists the same). The server's own copy
+ * (storage, its version manifest, branches pushed there); the contents of sidecars and tables in
+ * earlier commits (the server's own "Not read" line); annexed content that is not on this machine
+ * (a recording is then `partial` with reason `content-absent`, in the tree or in an earlier
+ * commit, so the screen is incomplete and never clean); and, in the working-tree mode, the
+ * committed tree. `LOCAL_COPY` holds those sentences. Anything the machine refuses to show
+ * (permission, I/O) is a failed read, not an absent one, and a git that fails is an error, never a
+ * screen without history.
  *
  * NON-MUTATING. No network, no git write, no file write. Every git command is a read (`rev-parse`,
  * `ls-tree`, `log`, `cat-file`) run with no user or system configuration, no optional lock and no
@@ -81,31 +84,29 @@ import { createLocalReader, walkDatasetTree } from "./upload/identifier-prefligh
 import { version } from "./version.js";
 
 // ---------------------------------------------------------------------------------------
-// Words
-// ---------------------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------------------
 // Errors and exit codes
 // ---------------------------------------------------------------------------------------
 
-/** Why no screen could be made, as a fixed word with its sentence. Never a path. */
-export const LOCAL_ERRORS = {
-  "not-a-directory": "The path is not a directory.",
-  "not-a-repository": "--committed needs the top level of a git repository, and this is not one.",
-  "no-commit": "--committed needs a commit, and this repository has none yet.",
-  "git-failed": "git could not list the commit's files.",
-  "report-refused":
-    "The scan did not fit the report contract, so no verdict was made. Please report this: https://github.com/nemarOrg/nemar-cli/issues",
-} as const;
-export type LocalErrorCode = keyof typeof LOCAL_ERRORS;
+/** The words of a run that could not be made; their sentences are `LOCAL_COPY.errors`. */
+export type LocalErrorCode = keyof typeof LOCAL_COPY.errors;
 
 export class LocalScreenError extends Error {
   readonly code: LocalErrorCode;
-  constructor(code: LocalErrorCode) {
+  /** For `git-failed`: the class of the failure, a fixed word. */
+  readonly failure: string | undefined;
+  constructor(code: LocalErrorCode, cause?: string) {
     super(code);
     this.name = "LocalScreenError";
     this.code = code;
+    this.failure = cause;
   }
+}
+
+/** The sentence for a run that could not be made. Never a path. */
+export function localErrorSentence(error: unknown): string {
+  if (!(error instanceof LocalScreenError)) return LOCAL_COPY.fallbackError;
+  const sentence = LOCAL_COPY.errors[error.code];
+  return typeof sentence === "function" ? sentence(error.failure ?? "unknown") : sentence;
 }
 
 /** 0 for a clear verdict, 3 for a direct identifier, 2 for every other state (a person must look). */
@@ -135,20 +136,59 @@ function gitEnv(): Record<string, string> {
   };
 }
 
-/** The stdout of a git read, or null when git failed or could not start. stderr is discarded. */
-async function gitText(root: string, args: readonly string[]): Promise<string | null> {
+export type GitResult =
+  | { ok: true; text: string }
+  | {
+      ok: false;
+      /** git's own answer that this is no repository; every other failure is `failed`. */
+      kind: "not-a-repository" | "failed";
+      /** The exit code, or null when git could not be started. */
+      code: number | null;
+      /** A fixed word for the failure's class. */
+      cause: string;
+    };
+
+/**
+ * What kind of failure a git exit was, from its exit code and message. The message is read here
+ * and never kept or printed: it can name a path. Only "this is no repository" (exit 128 with that
+ * message) is a plain absence; a refusal of ownership, a corrupt directory or any other exit is
+ * a failure to read.
+ */
+export function classifyGitFailure(code: number | null, stderr: string): GitResult & { ok: false } {
+  if (code === null) return { ok: false, kind: "failed", code, cause: "spawn-failed" };
+  if (code === 128 && /not a git repository/i.test(stderr)) {
+    return { ok: false, kind: "not-a-repository", code, cause: "not-a-repository" };
+  }
+  if (/dubious ownership|safe\.directory/i.test(stderr)) {
+    return { ok: false, kind: "failed", code, cause: "unsafe-directory" };
+  }
+  return { ok: false, kind: "failed", code, cause: `exit-${code}` };
+}
+
+/** One git read, with its failure classed. stderr is read for the class and never kept. */
+export async function gitRun(root: string, args: readonly string[]): Promise<GitResult> {
   try {
     const proc = Bun.spawn(["git", "-C", root, ...args], {
       env: gitEnv(),
       stdin: "ignore",
       stdout: "pipe",
-      stderr: "ignore",
+      stderr: "pipe",
     });
-    const [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-    return code === 0 ? text.trim() : null;
+    const [text, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return code === 0 ? { ok: true, text: text.trim() } : classifyGitFailure(code, stderr);
   } catch {
-    return null;
+    return classifyGitFailure(null, "");
   }
+}
+
+/** The stdout of a git read, or null when it failed for any reason. */
+async function gitText(root: string, args: readonly string[]): Promise<string | null> {
+  const result = await gitRun(root, args);
+  return result.ok ? result.text : null;
 }
 
 interface Repository {
@@ -158,21 +198,36 @@ interface Repository {
   head: string | null;
 }
 
-/** The repository whose top level is `root`, or null when `root` is not one. */
+/**
+ * The repository whose top level is `root`, or null when `root` is plainly not one (git says so
+ * and there is no `.git` here). A directory that has a `.git` but that git cannot read (a corrupt
+ * HEAD, a refused ownership, a spawn error) is a {@link LocalScreenError} `git-failed`: a screen
+ * without the history would read less than the server does and still look complete.
+ */
 async function repositoryAt(root: string): Promise<Repository | null> {
-  const top = await gitText(root, ["rev-parse", "--show-toplevel"]);
-  if (top === null || top === "") return null;
-  try {
-    if (realpathSync(top) !== realpathSync(root)) return null;
-  } catch {
-    return null;
+  const top = await gitRun(root, ["rev-parse", "--show-toplevel"]);
+  if (!top.ok) {
+    if (top.kind === "not-a-repository" && !existsSync(join(root, ".git"))) return null;
+    throw new LocalScreenError(
+      "git-failed",
+      top.kind === "not-a-repository" ? "git-dir-unusable" : top.cause,
+    );
   }
-  const common = await gitText(root, ["rev-parse", "--git-common-dir"]);
-  if (common === null || common === "") return null;
-  const head = await gitText(root, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+  try {
+    // A subdirectory of a repository is not the repository: no history is claimed for it.
+    if (realpathSync(top.text) !== realpathSync(root)) return null;
+  } catch {
+    throw new LocalScreenError("git-failed", "path-unreadable");
+  }
+  const common = await gitRun(root, ["rev-parse", "--git-common-dir"]);
+  if (!common.ok) throw new LocalScreenError("git-failed", common.cause);
+  // `--quiet` answers an unborn HEAD (no commit yet) with exit 1 and nothing; any other failure
+  // is git failing.
+  const head = await gitRun(root, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+  if (!head.ok && head.code !== 1) throw new LocalScreenError("git-failed", head.cause);
   return {
-    commonDir: resolve(root, common),
-    head: head !== null && /^[0-9a-f]{40}$/.test(head) ? head : null,
+    commonDir: resolve(root, common.text),
+    head: head.ok && /^[0-9a-f]{40}$/.test(head.text) ? head.text : null,
   };
 }
 
@@ -185,8 +240,23 @@ async function repositoryAt(root: string): Promise<Repository | null> {
  * `annex/objects/<xx>/<yy>/<key>/`, so no hash-directory layout is assumed (it differs with the
  * repository's tuning) and git-annex is never run.
  */
+export type AnnexLookup =
+  | { kind: "found"; path: string }
+  /** The store is readable and holds no such object: the content is not on this machine. */
+  | { kind: "absent" }
+  /** The machine refused to show the store or the object (permission, I/O): not the same as absent. */
+  | { kind: "unreadable" };
+
+/** An error that means "there is nothing there", as opposed to "the machine would not say". */
+const isNothingThere = (error: unknown): boolean => {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+};
+
 export class AnnexObjects {
   private index: Map<string, string> | null = null;
+  /** Some directory of the store could not be listed, so an object missing from the index may exist. */
+  private partial = false;
   constructor(private readonly gitDir: string | null) {}
 
   private build(): Map<string, string> {
@@ -196,7 +266,8 @@ export class AnnexObjects {
     const list = (dir: string): string[] => {
       try {
         return readdirSync(dir);
-      } catch {
+      } catch (error) {
+        if (!isNothingThere(error)) this.partial = true;
         return [];
       }
     };
@@ -208,15 +279,15 @@ export class AnnexObjects {
     return index;
   }
 
-  /** The content file of `key`, when it is on this machine. */
-  find(key: string): string | null {
+  /** The content file of `key`: found, absent from a store that could be read, or unreadable. */
+  find(key: string): AnnexLookup {
     this.index ??= this.build();
     const path = this.index.get(key);
-    if (!path) return null;
+    if (!path) return this.partial ? { kind: "unreadable" } : { kind: "absent" };
     try {
-      return statSync(path).isFile() ? path : null;
-    } catch {
-      return null;
+      return statSync(path).isFile() ? { kind: "found", path } : { kind: "absent" };
+    } catch (error) {
+      return isNothingThere(error) ? { kind: "absent" } : { kind: "unreadable" };
     }
   }
 }
@@ -230,6 +301,22 @@ function hintFor(key: string): Pick<ManifestEntry, "edf" | "reader"> {
   const reader = readerFor(key);
   if (!reader) return {};
   return reader.id === "edf" ? { edf: true } : { reader: reader.id };
+}
+
+/**
+ * Where the content of an `annex:<key>` entry is: into `readable` when it is on this machine,
+ * into `unreadable` when the machine would not show the store. Neither: it is absent.
+ */
+function locate(
+  objects: AnnexObjects,
+  url: string,
+  readable: Map<string, string>,
+  unreadable: Set<string>,
+): AnnexLookup {
+  const found = objects.find(url.slice(6));
+  if (found.kind === "found") readable.set(url, found.path);
+  else if (found.kind === "unreadable") unreadable.add(url);
+  return found;
 }
 
 /** Pointer files and symlink targets are tiny; anything bigger is content. */
@@ -272,15 +359,15 @@ async function workingTreeEntries(
   root: string,
   objects: AnnexObjects,
   readable: Map<string, string>,
+  unreadable: Set<string>,
 ): Promise<{ entries: ManifestEntry[]; unlisted: number }> {
   const walked = walkDatasetTree(root);
   const annexed = (entry: ManifestEntry, key: string, size: number): void => {
-    const found = objects.find(key);
     const url = `annex:${key}`;
     entry.url = url;
     entry.size = declaredSize({ key, size });
     Object.assign(entry, hintFor(key));
-    if (found) readable.set(url, found);
+    locate(objects, url, readable, unreadable);
   };
   for (const [url, path] of walked.readable) readable.set(url, path);
   await mapPool(walked.entries, 16, async (entry) => {
@@ -289,6 +376,8 @@ async function workingTreeEntries(
     try {
       symlink = lstatSync(absolute).isSymbolicLink();
     } catch {
+      // Left as the walk listed it: a file that cannot be examined is never opened, and the scan
+      // counts it a failed read (`unreadable-entry`), not an absent one.
       return;
     }
     if (symlink) {
@@ -296,6 +385,7 @@ async function workingTreeEntries(
       try {
         target = readlinkSync(absolute);
       } catch {
+        // A link whose target cannot be read stays as listed: a failed read, never `content-absent`.
         return;
       }
       const pointed = parseAnnexPointer(target, true);
@@ -307,6 +397,8 @@ async function workingTreeEntries(
       return;
     }
     if (entry.size === null || entry.size > POINTER_MAX_BYTES || !readable.has(entry.url)) return;
+    // A small file that cannot be read (`smallText` is null) stays a plain local entry, so the
+    // scan opens it, fails, and counts a failed read: an unreadable pointer is not an absent one.
     const text = await smallText(absolute);
     const pointed = text === null ? null : parseAnnexPointer(text, false);
     if (pointed) {
@@ -379,6 +471,10 @@ export async function localScannerId(
 
 export interface LocalScreen {
   report: ScreenReport;
+  /** The verdict, from the report's scan. */
+  status: DatasetStatus;
+  /** The scanner's id, as the report carries it. */
+  scannerId: string;
   source: "working-tree" | "committed";
   /** The commit named: `HEAD` of a repository, null with no repository. */
   commit: string | null;
@@ -405,6 +501,7 @@ export async function screenLocalDataset(
     if (error instanceof LocalScreenError) throw error;
     throw new LocalScreenError("not-a-directory");
   }
+  // Throws `git-failed` for a directory git cannot read, never a screen without history.
   const repository = await repositoryAt(root);
   if (options.committed && !repository) throw new LocalScreenError("not-a-repository");
   if (options.committed && !repository?.head) throw new LocalScreenError("no-commit");
@@ -414,6 +511,7 @@ export async function screenLocalDataset(
   const readers = (options.readers ?? READERS).map(absenceAware);
   const objects = new AnnexObjects(repository?.commonDir ?? null);
   const readable = new Map<string, string>();
+  const unreadable = new Set<string>();
   let blobs: GitBlobReader | null = null;
   try {
     // HEAD's tree: the committed mode's entries, and in both modes what "superseded" is measured
@@ -423,10 +521,10 @@ export async function screenLocalDataset(
     let treeOids = new Set<string>();
     if (head) {
       tree = await listTree(root, head);
-      if (!tree) throw new LocalScreenError("git-failed");
+      if (!tree) throw new LocalScreenError("git-failed", "ls-tree");
       treeOids = new Set(tree.entries.map((t) => t.oid));
       const sizes = await objectSizes(root, [...treeOids]);
-      if (!sizes) throw new LocalScreenError("git-failed");
+      if (!sizes) throw new LocalScreenError("git-failed", "cat-file");
       blobs = new GitBlobReader(root);
       headTree = await resolveEntries(tree.entries, sizes, blobs);
     }
@@ -436,12 +534,11 @@ export async function screenLocalDataset(
     if (options.committed) {
       entries = (headTree as ResolvedTree).entries;
     } else {
-      ({ entries, unlisted } = await workingTreeEntries(root, objects, readable));
+      ({ entries, unlisted } = await workingTreeEntries(root, objects, readable, unreadable));
     }
     for (const entry of entries) {
       if (!entry.url.startsWith("annex:") || readable.has(entry.url)) continue;
-      const found = objects.find(entry.url.slice(6));
-      if (found) readable.set(entry.url, found);
+      locate(objects, entry.url, readable, unreadable);
     }
 
     // History: every path that ever existed, and the recordings an earlier commit held that the
@@ -462,9 +559,9 @@ export async function screenLocalDataset(
       const present: ManifestEntry[] = [];
       for (const entry of superseded.entries) {
         if (entry.url.startsWith("annex:")) {
-          const found = objects.find(entry.url.slice(6));
-          if (found) {
-            readable.set(entry.url, found);
+          // Unreadable is read and fails (a failed read); only a store that was read and holds no
+          // such object is "not here".
+          if (locate(objects, entry.url, readable, unreadable).kind !== "absent") {
             present.push(entry);
           }
         } else if (superseded.sizes.get(entry.url.slice(4)) !== null) {
@@ -479,6 +576,14 @@ export async function screenLocalDataset(
         extras.extraIncompleteReasons = [
           ...(extras.extraIncompleteReasons ?? []),
           "history-unread",
+        ];
+      }
+      // The server reads these from storage, so a local "clean" would contradict it: the screen
+      // is incomplete, with the same reason as a recording of the tree that is not here.
+      if (supersededNotRead > 0) {
+        extras.extraIncompleteReasons = [
+          ...(extras.extraIncompleteReasons ?? []),
+          "content-absent",
         ];
       }
     }
@@ -502,6 +607,7 @@ export async function screenLocalDataset(
           return fromGit(entry, n, readOptions);
         }
         if (readable.has(entry.url)) return fromDisk(entry, n, readOptions);
+        if (unreadable.has(entry.url)) throw new ReadFailure("unreadable-entry");
         if (entry.url.startsWith("annex:")) {
           // A recording is `content-absent`; any other file is one that could not be opened.
           throw new ReadFailure(
@@ -524,9 +630,12 @@ export async function screenLocalDataset(
       scanner.id,
       head ?? NULL_OID,
     );
-    if (!report.scan) throw new LocalScreenError("report-refused");
+    const scan = report.scan;
+    if (!scan || report.scanner === null) throw new LocalScreenError("report-refused");
     return {
       report,
+      status: scan.status,
+      scannerId: report.scanner,
       source: options.committed ? "committed" : "working-tree",
       commit: head,
       history: head !== null,
@@ -557,13 +666,11 @@ export function localNotRead(result: LocalScreen): { banner: string; copies: Cop
 
 /** The terminal text of a local screen: the report as the server words it, then what was not read. */
 export function renderLocalScreen(result: LocalScreen): { head: string[]; body: string[] } {
-  const scan = result.report.scan;
-  if (!scan) throw new LocalScreenError("report-refused");
-  const description = describeScreen(scan.status, result.report);
+  const description = describeScreen(result.status, result.report);
   // With no commit the report carries the null object id: its "commit" line would say nothing.
   const noCommit = result.commit === null;
   const lines = noCommit
-    ? description.lines.filter((l) => !l.startsWith(`Scanner ${result.report.scanner};`))
+    ? description.lines.filter((l) => !l.startsWith(`Scanner ${result.scannerId};`))
     : description.lines;
   const { banner, copies } = localNotRead(result);
   const own = copies.flatMap((copy) => [copy.statement, ...remedyLines(copy)]);
@@ -571,13 +678,9 @@ export function renderLocalScreen(result: LocalScreen): { head: string[]; body: 
     head: [banner],
     body: identifierScreenLines(
       {
-        state: scan.status,
+        state: result.status,
         ...description,
-        lines: [
-          ...lines,
-          LOCAL_COPY.scannerKind(result.scannerKind, result.report.scanner ?? ""),
-          ...own,
-        ],
+        lines: [...lines, LOCAL_COPY.scannerKind(result.scannerKind, result.scannerId), ...own],
       },
       0,
     ),
@@ -596,17 +699,11 @@ export async function runDatasetScreen(
   try {
     result = await screenLocalDataset(path, { committed: options.committed === true });
   } catch (error) {
-    const code = error instanceof LocalScreenError ? error.code : null;
-    console.error(
-      code
-        ? LOCAL_ERRORS[code]
-        : "The screen could not be made. Please report this: https://github.com/nemarOrg/nemar-cli/issues",
-    );
+    console.error(localErrorSentence(error));
     markReportedExit();
     process.exitCode = 2;
     return;
   }
-  const status = (result.report.scan as { status: DatasetStatus }).status;
   const { head, body } = renderLocalScreen(result);
   if (options.json) {
     // The report alone on stdout, for a script; what this run could not see goes to stderr.
@@ -615,7 +712,7 @@ export async function runDatasetScreen(
   } else {
     for (const line of [...head, ...body]) console.log(line);
   }
-  const code = exitCodeFor(status);
+  const code = exitCodeFor(result.status);
   if (code !== 0) markReportedExit();
   process.exitCode = code;
 }
@@ -635,4 +732,24 @@ export function markLocalOnly(command: Command): Command {
 /** True for a command marked by {@link markLocalOnly}. */
 export function isLocalOnlyCommand(command: Command): boolean {
   return localOnly.has(command);
+}
+
+/**
+ * True when `argv` (user arguments) addresses a command marked by {@link markLocalOnly}. The CLI
+ * asks it before Commander parses anything, because the update check (a blocking fetch, a cache
+ * write and a background refresh) runs before any command does. The walk is the moved-command
+ * walk: it skips every "-" token and descends while a word names a subcommand (or an alias), and
+ * stops at "--" or at a command with no subcommands, where the rest are its arguments.
+ */
+export function isLocalOnlyInvocation(program: Command, argv: readonly string[]): boolean {
+  let current = program;
+  const end = argv.indexOf("--") < 0 ? argv.length : argv.indexOf("--");
+  for (let i = 0; i < end && current.commands.length > 0; i++) {
+    const word = argv[i] as string;
+    if (word.startsWith("-")) continue;
+    const next = current.commands.find((c) => c.name() === word || c.aliases().includes(word));
+    if (!next) return false;
+    current = next;
+  }
+  return localOnly.has(current);
 }

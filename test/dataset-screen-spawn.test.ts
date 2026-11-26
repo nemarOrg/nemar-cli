@@ -17,6 +17,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseScreenReport } from "../shared/identifier-screen-report";
 import {
@@ -53,21 +54,31 @@ afterAll(() => {
  * The child's environment, built from nothing: a PATH (git must be found), an empty home and
  * config directory, no account, no update check, and the spy as every proxy.
  */
-function childEnv(): Record<string, string> {
-  return {
-    PATH: process.env.PATH ?? "",
+function childEnv(options: ChildOptions = {}): Record<string, string> {
+  const env: Record<string, string> = {
+    PATH: options.path ?? process.env.PATH ?? "",
     HOME: tempDir("home"),
-    NEMAR_CONFIG_DIR: tempDir("config"),
-    NEMAR_NO_UPDATE_CHECK: "1",
+    NEMAR_CONFIG_DIR: options.configDir ?? tempDir("config"),
     NO_COLOR: "1",
     ...spy.env,
   };
+  if (options.updateCheck !== true) env.NEMAR_NO_UPDATE_CHECK = "1";
+  return env;
 }
 
-async function nemar(args: string[], cwd = REPO_ROOT) {
+interface ChildOptions {
+  /** Leave the update check on (the child's default), as a person's machine has it. */
+  updateCheck?: boolean;
+  /** The config directory the child gets; a fresh empty one when absent. */
+  configDir?: string;
+  /** The child's PATH; this process's when absent. */
+  path?: string;
+}
+
+async function nemar(args: string[], cwd = REPO_ROOT, options: ChildOptions = {}) {
   const proc = Bun.spawn([process.execPath, "run", CLI_ENTRY, ...args], {
     cwd,
-    env: childEnv(),
+    env: childEnv(options),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -143,6 +154,28 @@ describe("exit status through the real entry point", () => {
     expect(result.out).not.toContain(plain);
   });
 
+  test("a git that cannot start is an error with its cause, never a screen without history", async () => {
+    const repo = dataset(named(1));
+    const result = await nemar(["dataset", "screen", repo.dir], REPO_ROOT, {
+      path: tempDir("nopath"),
+    });
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("spawn-failed");
+    expect(result.out).not.toContain("Identifier screen");
+    expect(result.out).not.toContain(repo.dir);
+  });
+
+  test("the same holds for a plain directory: a git that fails is not 'no repository'", async () => {
+    const plain = new Repo("plain", { git: false });
+    plain.file(EDF, recording(named(1)));
+    const result = await nemar(["dataset", "screen", plain.dir], REPO_ROOT, {
+      path: tempDir("nopath"),
+    });
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("spawn-failed");
+    expect(result.out).not.toContain("Identifier screen");
+  });
+
   test("the path is optional: it defaults to the current directory", async () => {
     const repo = dataset(named(1));
     const result = await nemar(["dataset", "screen"], repo.dir);
@@ -202,6 +235,29 @@ describe("it changes nothing and sends nothing", () => {
     expect(result.code).toBe(3);
     expect(digestTree(plain.dir)).toBe(before);
     expect(spy.seen).toEqual([]);
+  });
+
+  test("with the update check ON and an empty config directory: no connection, and nothing written", async () => {
+    const repo = dataset(named(1), { unscreened: true });
+    for (const args of [
+      ["dataset", "screen", repo.dir],
+      ["dataset", "screen", repo.dir, "--committed", "--json"],
+      ["dataset", "screen", "--help"],
+    ]) {
+      const configDir = tempDir("config-empty");
+      const result = await nemar(args, REPO_ROOT, { updateCheck: true, configDir });
+      expect([0, 2, 3]).toContain(result.code);
+      // The update check's request, its cache and its background refresh would each show here.
+      expect(spy.seen).toEqual([]);
+      expect(readdirSync(configDir)).toEqual([]);
+    }
+  });
+
+  test("positive control: with the update check on, a command that is not local-only reaches the counter", async () => {
+    // Without this, the test above could pass because the update check never runs in a child.
+    const result = await nemar(["dataset", "validate", "--help"], REPO_ROOT, { updateCheck: true });
+    expect(result.code).toBe(0);
+    expect(spy.seen.length).toBeGreaterThan(0);
   });
 
   test("positive control: a command that does use the network reaches the counter", async () => {

@@ -837,6 +837,23 @@ export const LOCAL_COPY = {
   /** The first line: which tree was read, the commit it names, and who read it. */
   banner: (source: "working-tree" | "committed", commit: string | null, cliVersion: string) =>
     `Local identifier screen of ${source === "committed" ? "the committed tree (HEAD)" : "the working tree, as the files are now"}; commit ${commit ? commit.slice(0, 12) : "none (no git history here)"}. Nothing was sent and nothing was changed (nemar-cli ${cliVersion}).`,
+  /**
+   * Why no screen could be made, as a fixed word with its sentence. Never a path or a value.
+   * `git-failed` names the class of the failure (a fixed word), because a screen made with a git
+   * that failed would claim less than the server reads.
+   */
+  errors: {
+    "not-a-directory": "The path is not a directory.",
+    "not-a-repository": "--committed needs the top level of a git repository, and this is not one.",
+    "no-commit": "--committed needs a commit, and this repository has none yet.",
+    "git-failed": (cause: string) =>
+      `git could not be read here (${cause}), so no screen was made: a screen without git's history would say less than the server's. If this is a repository, check that git runs in it ('git status') and that you own the directory.`,
+    "report-refused":
+      "The scan did not fit the report contract, so no verdict was made. Please report this: https://github.com/nemarOrg/nemar-cli/issues",
+  },
+  /** The sentence for a failure with no word of its own. */
+  fallbackError:
+    "The screen could not be made. Please report this: https://github.com/nemarOrg/nemar-cli/issues",
   /** What kind of id the scanner line carries. */
   scannerKind: (kind: LocalScannerKind, id: string) =>
     kind === "checkout"
@@ -869,7 +886,7 @@ export const LOCAL_COPY = {
   /** Recordings of earlier commits whose content is not on this machine. */
   supersededAbsent: (count: number) =>
     local(
-      `${count} recording${count === 1 ? "" : "s"} from earlier commits ${count === 1 ? "has" : "have"} no content on this machine, so ${count === 1 ? "it was" : "they were"} not read; the server reads ${count === 1 ? "it" : "them"} from storage.`,
+      `${count} recording${count === 1 ? "" : "s"} from earlier commits ${count === 1 ? "has" : "have"} no content on this machine, so ${count === 1 ? "it was" : "they were"} not read and the screen is incomplete (content-absent); the server reads ${count === 1 ? "it" : "them"} from storage.`,
       "the paths of earlier commits only",
       "Fetch the old content (git annex get --all) and run the screen again, or leave it to the server's screen.",
     ),
