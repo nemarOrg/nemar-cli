@@ -99,6 +99,7 @@ import {
   resolveArchiveKey,
 } from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
+import { qualityHandler } from "./quality";
 
 export const dataRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -2135,6 +2136,25 @@ dataRoutes.get("/:datasetId/qa/*", (c) => {
   const rawPath = bidsPathAfterMount(new URL(c.req.url).pathname, [datasetId, "qa"]);
   if (rawPath === null) return notFound("Not found");
   return qaHandler(c.env, c.req.raw, datasetId, rawPath);
+});
+
+// ===========================================================================
+// Quality view route: /<id>/quality/v1/...  (ADR 0137 decision 7, epic #2324 B2)
+//
+// A recording's quality views and the files they declare, from a recipe's
+// current public derivative; `routes/quality.ts` holds the order of checks.
+// Registered BEFORE `/:datasetId/:version` so `quality` is never read as a
+// version, and `/<id>/quality` itself answers the route's own 404.
+// ===========================================================================
+dataRoutes.get("/:datasetId/quality", (c) =>
+  qualityHandler(c.env, c.req.raw, c.req.param("datasetId"), [], deferOf(c)),
+);
+
+dataRoutes.get("/:datasetId/quality/*", (c) => {
+  const datasetId = c.req.param("datasetId");
+  const segments = new URL(c.req.url).pathname.split("/");
+  const at = segments.findIndex((s, i) => s === datasetId && segments[i + 1] === "quality");
+  return qualityHandler(c.env, c.req.raw, datasetId, segments.slice(at + 2), deferOf(c));
 });
 
 // Redirect /<id>/<version> -> /<id>/<version>/ so the relative `../` link in

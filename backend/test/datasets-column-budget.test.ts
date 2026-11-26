@@ -99,7 +99,7 @@ describe("datasets column budget", () => {
     ]);
   });
 
-  test("trigger set is exactly the 7 after 0145", () => {
+  test("trigger set is exactly the 8 after 0152", () => {
     const names = (
       db
         .query(
@@ -119,6 +119,8 @@ describe("datasets column budget", () => {
       "datasets_fts_ad",
       "datasets_fts_ai",
       "datasets_fts_au",
+      // 0152: a change to a column the quality route's gate reads advances the dataset's cache epoch.
+      "datasets_quality_epoch_au",
     ]);
   });
 });

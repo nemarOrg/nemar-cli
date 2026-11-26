@@ -410,6 +410,24 @@ export function recipeQualityPlugins(recipe: Pick<ComputeRecipe, "checkpoints">)
 }
 
 /**
+ * The recipes whose run of the archive (`bids`) input can be handed the serving copy's index
+ * (`--serving-index`, nemar-process P7) to declare the views of the serving copy: their derivative key on
+ * that input names the index (ADR 0140, owner ruling of 2026-11-25, nemar-cli #2341).
+ */
+export const RECIPES_KEYING_SERVING_INDEX: readonly string[] = Object.freeze(["nemar-ica"]);
+
+/** The flag a run of the archive is handed the serving index with (nemar-process `nemar_ica/options.py`). */
+export const RECIPE_SERVING_INDEX_FLAG = "--serving-index";
+
+/** Whether a recipe's derivative key on this input carries `serving_index` (a version 2 key, ADR 0140). */
+export function recipeKeysServingIndex(
+  recipe: Pick<ComputeRecipe, "name">,
+  input: RecipeInput,
+): boolean {
+  return input === "bids" && RECIPES_KEYING_SERVING_INDEX.includes(recipe.name);
+}
+
+/**
  * The command a recipe job runs; the arguments follow it. A BIDS run, the recipe's default input, is
  * `nemar-recipe run <name>`, byte for byte what it was before a recipe had two inputs; any other input adds
  * `--input <input>` after the name (`nemar-recipe run nemar-floor --input zarr`). The input is in the command

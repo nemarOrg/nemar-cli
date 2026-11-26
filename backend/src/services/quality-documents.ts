@@ -39,6 +39,7 @@ import {
   recordChecks,
 } from "../../../shared/contract/data-quality.js";
 import { readIJson, sha256HexOfBytes } from "../../../shared/contract/view-digest.js";
+import { PIPELINE_TERMS, type PipelineTermId } from "./compute-pipeline-eligibility.js";
 
 // --- Patterns ----------------------------------------------------------------------------------------
 
@@ -356,19 +357,42 @@ export const CURRENT_PUBLIC_DERIVATIVE_SQL = (d: string): string =>
        AND (n.stored_at > ${d}.stored_at OR (n.stored_at = ${d}.stored_at AND n.key > ${d}.key)))`;
 
 /**
+ * The terms of the dataset gate, the pipeline eligibility's own (`compute-pipeline-eligibility.ts`) so the
+ * two never drift: what a public page may show of a dataset's pipeline: the quality route's gate and the dataset summary's on
+ * `metadata.json` and the page bundle, one predicate for both. Not `eeg`, `has_version` or
+ * `real_dataset`, which decide what is RUN, not what is SHOWN.
+ */
+export const QUALITY_GATE_TERMS: readonly PipelineTermId[] = Object.freeze([
+  "active",
+  "public",
+  "not_anonymous",
+  "first_published",
+  "not_withdrawn",
+  "not_tombstoned",
+]);
+
+/** The gate over `datasets d`: every term of {@link QUALITY_GATE_TERMS}, ANDed. */
+export const QUALITY_DATASET_GATE_SQL = QUALITY_GATE_TERMS.map((id) => {
+  const term = PIPELINE_TERMS.find((t) => t.id === id);
+  if (term === undefined) throw new Error(`no pipeline term ${id}`);
+  return `(${term.sql})`;
+}).join("\n     AND ");
+
+/**
  * The dataset summary of each recipe's current public derivative of a dataset (`?1`): the derivative is
  * picked first and its run's summary joined, so a current derivative without a summary shows none rather
- * than an older run's. The dataset is bound on both rows; nothing is read from the entry. A withdrawn
- * dataset (`withdrawn_at` set, whatever its visibility) shows none, as the view route refuses it (owner
- * ruling of 2026-11-25).
+ * than an older run's. The dataset is bound on both rows; nothing is read from the entry. The dataset must
+ * pass `QUALITY_DATASET_GATE_SQL`, the quality route's own gate, so a withdrawn, tombstoned, never published
+ * or concealed dataset shows none, exactly as the route refuses it (owner ruling of 2026-11-25, review of
+ * #2383).
  */
-export const CURRENT_QUALITY_DOCUMENTS_SQL = `SELECT d.recipe, q.entry
-  FROM compute_derivatives d
+export const CURRENT_QUALITY_DOCUMENTS_SQL = `SELECT cd.recipe, q.entry
+  FROM compute_derivatives cd
   JOIN compute_quality_documents q
-    ON q.stamp_id = d.stamp_id AND q.dataset_id = d.dataset_id AND q.recipe = d.recipe
-  JOIN datasets ds ON ds.dataset_id = d.dataset_id AND ds.withdrawn_at IS NULL
-  WHERE d.dataset_id = ?1 AND ${CURRENT_PUBLIC_DERIVATIVE_SQL("d")}
-  ORDER BY d.recipe`;
+    ON q.stamp_id = cd.stamp_id AND q.dataset_id = cd.dataset_id AND q.recipe = cd.recipe
+  JOIN datasets d ON d.dataset_id = cd.dataset_id AND ${QUALITY_DATASET_GATE_SQL}
+  WHERE cd.dataset_id = ?1 AND ${CURRENT_PUBLIC_DERIVATIVE_SQL("cd")}
+  ORDER BY cd.recipe`;
 
 /**
  * The `recipes` of a dataset's `dataQuality` at `level: dataset`: the summary of each recipe's current
@@ -479,26 +503,37 @@ export const RecordRecipeResultsSchema = z
   .refine(storesNameEntryProfile);
 
 /**
- * Why a recording's entry is not projected, a fixed word: the record is not UTF-8 I-JSON, or not in the
+ * Why a recording's entry is not projected, a fixed word: the record is not UTF-8 I-JSON, or holds an
+ * integer literal beyond 2^53 - 1 (`integer_unsafe`: every neuroschema integer is capped there, and the
+ * reader's flag covers the whole record, as it covers the whole dataset document), or is not in the
  * shape a recipe writes; it names another recipe or version than the stamp's; a recipe metric carries a
  * plugin's prefix, a plugin step's metric does not carry its plugin's, or a metric names a plugin the recipe
  * does not run; the entry breaks the schema (a metric name that is not a `metricName` is refused before it
- * is copied); or `nemar.record-checks.v1` finds something.
+ * is copied); a view's source names a plugin the recipe version does not run at its `quality` checkpoint
+ * (`view_unknown_plugin`: `nemar.record-checks.v1` leaves a plugin's view to its plugin, so the backend
+ * holds the plugin to the recipe); or `nemar.record-checks.v1` finds something.
  */
 export const RECORD_ENTRY_REFUSALS = [
   "record_unreadable",
+  "integer_unsafe",
   "record_shape",
   "identity_mismatch",
   "metric_not_bare",
   "metric_not_prefixed",
   "metric_unknown_plugin",
   "entry_invalid",
+  "view_unknown_plugin",
   "record_checks",
 ] as const;
 export type RecordEntryRefusal = (typeof RECORD_ENTRY_REFUSALS)[number];
 
 export type RecordEntry =
-  | { ok: true; entry: Record<string, unknown> }
+  | {
+      ok: true;
+      entry: Record<string, unknown>;
+      /** What the record says it is of: `extensions.nemar.dataset.id` and `.recording.path`, as written. */
+      of: { dataset: unknown; recording: unknown };
+    }
   | { ok: false; reason: RecordEntryRefusal; findings?: RecordFinding[] };
 
 const objectOf = (v: unknown): Record<string, unknown> | null =>
@@ -538,6 +573,7 @@ export async function recordQualityEntry(
   const textOf = utf8(bytes);
   const read = textOf === null ? null : readIJson(textOf);
   if (read === null || !read.ok) return refuse("record_unreadable");
+  if (read.unsafeInteger) return refuse("integer_unsafe");
   const record = objectOf(read.value);
   const nemar = objectOf(objectOf(record?.extensions)?.nemar);
   const recipe = objectOf(nemar?.recipe);
@@ -587,7 +623,17 @@ export async function recordQualityEntry(
     ...(nemar.views_skipped === undefined ? {} : { views_skipped: nemar.views_skipped }),
   };
   if (!RecordRecipeResultsSchema.safeParse(entry).success) return refuse("entry_invalid");
+  for (const view of entry.views as { source: { plugin?: { name: string } } }[]) {
+    const plugin = view.source.plugin;
+    if (plugin !== undefined && !stamp.plugins.includes(plugin.name)) {
+      return refuse("view_unknown_plugin");
+    }
+  }
   const findings = recordChecks(stamp.recipe, entry);
   if (findings.length > 0) return refuse("record_checks", findings);
-  return { ok: true, entry };
+  return {
+    ok: true,
+    entry,
+    of: { dataset: objectOf(nemar.dataset)?.id, recording: objectOf(nemar.recording)?.path },
+  };
 }

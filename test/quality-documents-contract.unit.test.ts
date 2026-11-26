@@ -786,6 +786,56 @@ const reasonOf = async (bytes: Uint8Array) => {
 };
 
 describe("recordQualityEntry over the fixture's recording", () => {
+  test("an integer literal beyond 2^53 - 1 anywhere in the record is integer_unsafe (MUTATION: ignore the reader's flag; B1 review, left to B2)", async () => {
+    const text = readFileSync(RECORDING_RECORD, "utf8");
+    expect(text).toContain('"clean_channels.ransac": 5489');
+    const enc = new TextEncoder();
+    expect(await reasonOf(enc.encode(text))).toBe("projected");
+    expect(
+      await reasonOf(
+        enc.encode(
+          text.replace(
+            '"clean_channels.ransac": 5489',
+            '"clean_channels.ransac": 9007199254740992',
+          ),
+        ),
+      ),
+    ).toBe("integer_unsafe");
+    // 2^53 - 1 is the cap, and is kept.
+    expect(
+      await reasonOf(
+        enc.encode(
+          text.replace(
+            '"clean_channels.ransac": 5489',
+            '"clean_channels.ransac": 9007199254740991',
+          ),
+        ),
+      ),
+    ).toBe("projected");
+  });
+
+  test("a plugin view's plugin must be one the recipe version runs at quality (MUTATION: drop the check; B1 review, left to B2)", async () => {
+    expect(STAMP.plugins).toEqual(["nemar-quality", "nemar-spectrum"]);
+    const spectrum = (r: Loose) =>
+      r.extensions.nemar.views.find((v: Loose) => v.key === "spectrum");
+    expect(
+      await reasonOf(
+        recordWith((r) => {
+          spectrum(r).source.plugin.name = "nemar-other";
+        }),
+      ),
+    ).toBe("view_unknown_plugin");
+    expect(
+      await recordQualityEntry(bytesOf(RECORDING_RECORD), { ...STAMP, plugins: ["nemar-quality"] }),
+    ).toMatchObject({ ok: false, reason: "view_unknown_plugin" });
+    // A recipe's own view is the record checks' to judge, not this rule's.
+    const got = await recordQualityEntry(bytesOf(RECORDING_RECORD), STAMP);
+    expect(got.ok && got.of).toEqual({
+      dataset: RECORD.extensions.nemar.dataset.id,
+      recording: RECORD.extensions.nemar.recording.path,
+    });
+  });
+
   test("is nemar-process's record_entry: the recipe's metrics, then each plugin step's, the views, the digest", async () => {
     const bytes = bytesOf(RECORDING_RECORD);
     const entry = await entryOf(bytes);

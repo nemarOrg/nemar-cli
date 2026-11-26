@@ -45,13 +45,33 @@ const ENTRY = fixtureEntry();
 
 function seedDataset(
   id: string,
-  over: { visibility?: string; anonymous?: number; withdrawnAt?: string } = {},
+  over: {
+    visibility?: string;
+    anonymous?: number;
+    withdrawnAt?: string;
+    firstPublishedAt?: string | null;
+    ezidStatus?: string | null;
+  } = {},
 ): void {
+  const anonymous = over.anonymous ?? 0;
   db.run(
     `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox, anonymous, modalities,
-                           withdrawn_at)
-     VALUES (?, ?, -1, 'active', ?, 0, ?, 'eeg', ?)`,
-    [id, id, over.visibility ?? "public", over.anonymous ?? 0, over.withdrawnAt ?? null],
+                           withdrawn_at, first_published_at, ezid_status)
+     VALUES (?, ?, -1, 'active', ?, 0, ?, 'eeg', ?, ?, ?)`,
+    [
+      id,
+      id,
+      over.visibility ?? "public",
+      anonymous,
+      over.withdrawnAt ?? null,
+      // An anonymous deposit is never published (migration 0085's trigger).
+      over.firstPublishedAt !== undefined
+        ? over.firstPublishedAt
+        : anonymous === 1
+          ? null
+          : "2026-01-01 00:00:00",
+      over.ezidStatus ?? null,
+    ],
   );
 }
 
@@ -312,6 +332,31 @@ describe("a withdrawn dataset (owner ruling of 2026-11-25)", () => {
     expect((await metadata("nm000923")).status).toBe(404);
     expect((await bundleMetadata("nm000923")).status).toBe(404);
   });
+});
+
+describe("the quality route's gate holds for the summaries (review of #2383)", () => {
+  const cases: Array<[string, Parameters<typeof seedDataset>[1]]> = [
+    ["a tombstoned dataset (MUTATION: drop the tombstone term)", { ezidStatus: "unavailable" }],
+    [
+      "a dataset never published (MUTATION: drop the first-publication term)",
+      { firstPublishedAt: null },
+    ],
+  ];
+  for (const [name, over] of cases) {
+    test(`${name} shows no dataQuality on metadata.json or the page bundle`, async () => {
+      seedDataset("nm000925");
+      await run("nm000925");
+      expect((await metadata("nm000925")).body?.extensions).toHaveProperty("dataQuality");
+      seedDataset("nm000926", over);
+      await run("nm000926");
+      const meta = await metadata("nm000926");
+      expect(meta.status).toBe(200);
+      expect(meta.body?.extensions).not.toHaveProperty("dataQuality");
+      const bundle = await bundleMetadata("nm000926");
+      expect(bundle.status).toBe(200);
+      expect(bundle.data?.extensions).not.toHaveProperty("dataQuality");
+    });
+  }
 });
 
 describe("the page bundle when the pipeline read fails (#2375 review)", () => {

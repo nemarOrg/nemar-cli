@@ -10,7 +10,7 @@
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { findRecipe } from "../../../shared/compute-recipes";
+import { findRecipe, recipeQualityPlugins } from "../../../shared/compute-recipes";
 
 export const QUALITY_FIXTURE = join(import.meta.dir, "../../../test/fixtures/quality/ica-views");
 export const QUALITY_PRODUCT = join(QUALITY_FIXTURE, "product");
@@ -98,6 +98,10 @@ export async function seedDerivative(
     supersededAt?: string | null;
     /** Its date; by default a canary's far future and none for any other class. */
     expiresAt?: string | null;
+    /** Its recipe version; the registry's by default. */
+    recipeVersion?: string;
+    /** The quality plugins the row recorded, as JSON; by default the registry's for nemar-ica. */
+    qualityPlugins?: string | null;
   },
 ): Promise<string> {
   const key = input.key ?? (++keySeq).toString(16).padStart(64, "0");
@@ -110,15 +114,15 @@ export async function seedDerivative(
       `INSERT INTO compute_derivatives
          (key, dataset_id, version, recipe, recipe_version, engine, input, profile, input_digest,
           image_digest, job_id, stamp_id, state, retention, failure, copied, object_count, bytes,
-          stored_at, expires_at, superseded_at)
+          stored_at, expires_at, superseded_at, quality_plugins)
        VALUES (?1, ?2, 'v1.0.0', ?3, ?4, ?5, 'bids', 'archive', ?6, ?7, ?8, ?9, ?10, ?11, ?12, 20, 20,
-               1000, ?13, ?14, ?15)`,
+               1000, ?13, ?14, ?15, ?16)`,
     )
     .bind(
       key,
       input.datasetId,
       input.recipe ?? "nemar-ica",
-      ICA.version,
+      input.recipeVersion ?? ICA.version,
       ICA.engine,
       `git:${"5".repeat(40)}`,
       `sha256:${"e".repeat(64)}`,
@@ -134,6 +138,9 @@ export async function seedDerivative(
           ? "2099-01-01 00:00:00"
           : null,
       input.supersededAt ?? null,
+      input.qualityPlugins !== undefined
+        ? input.qualityPlugins
+        : JSON.stringify(recipeQualityPlugins(ICA)),
     )
     .run();
   return key;
