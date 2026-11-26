@@ -30,7 +30,6 @@
  * NOTHING PRINTED NAMES ANYTHING: kinds, counts and fixed words only, as on the server.
  */
 
-import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
@@ -63,7 +62,12 @@ import {
   readerFor,
 } from "../../shared/identifier-readers.js";
 import { readerForEntry } from "../../shared/identifier-report-builder.js";
-import { type Copy, remedyLines } from "../../shared/identifier-screen-copy.js";
+import {
+  type Copy,
+  LOCAL_COPY,
+  type LocalScannerKind,
+  remedyLines,
+} from "../../shared/identifier-screen-copy.js";
 import {
   type DatasetStatus,
   type ScreenReport,
@@ -79,57 +83,6 @@ import { version } from "./version.js";
 // ---------------------------------------------------------------------------------------
 // Words
 // ---------------------------------------------------------------------------------------
-
-/** The docs section that explains what a local run does and does not read. */
-const LOCAL_ANCHOR = "local-run";
-
-const local = (statement: string, read: string, remedy: string): Copy => ({
-  statement,
-  read,
-  remedy,
-  anchor: LOCAL_ANCHOR,
-});
-
-/**
- * Every sentence only the local run says, declared once (ADR 0045). The statements name counts and
- * fixed words, never a path or a value.
- */
-export const LOCAL_COPY = {
-  /** The first line: which tree was read, the commit it names, and who read it. */
-  banner: (source: "working-tree" | "committed", commit: string | null, cliVersion: string) =>
-    `Local identifier screen of ${source === "committed" ? "the committed tree (HEAD)" : "the working tree, as the files are now"}; commit ${commit ? commit.slice(0, 12) : "none (no git history here)"}. Nothing was sent and nothing was changed (nemar-cli ${cliVersion}).`,
-  /** What the server's copy holds that this run cannot see. */
-  server: local(
-    "Not read here: the server's copy of the dataset (its stored files, its version manifest and the branches pushed there), so the screen run on the server can differ from this one.",
-    "this machine's files and git history only",
-    "Request publication, or run 'nemar dataset publish status <id>', to see the server's own screen.",
-  ),
-  /** The working-tree mode, in a repository. */
-  workingTree: local(
-    "This run read the working tree; the server reads the committed tree, so a change that is not committed is read here and not there.",
-    "the files in this directory as they are now",
-    "Run with --committed to read what the server reads.",
-  ),
-  /** The committed mode. */
-  committed: local(
-    "This run read the committed tree (HEAD); a change that is not committed was not read.",
-    "the tree of the HEAD commit",
-    "Commit the change, or run without --committed to read the files as they are now.",
-  ),
-  /** No repository, or not its top level: no history. */
-  noHistory: local(
-    "Earlier commits were not read: this directory is not the top level of a readable git repository, so there is no history here, and the server screens every earlier path and recording.",
-    "nothing of earlier commits",
-    "Run the command at the top level of the dataset's repository to read its history too.",
-  ),
-  /** Recordings of earlier commits whose content is not on this machine. */
-  supersededAbsent: (count: number) =>
-    local(
-      `${count} recording${count === 1 ? "" : "s"} from earlier commits ${count === 1 ? "has" : "have"} no content on this machine, so ${count === 1 ? "it was" : "they were"} not read; the server reads ${count === 1 ? "it" : "them"} from storage.`,
-      "the paths of earlier commits only",
-      "Fetch the old content (git annex get --all) and run the screen again, or leave it to the server's screen.",
-    ),
-} as const;
 
 // ---------------------------------------------------------------------------------------
 // Errors and exit codes
@@ -404,21 +357,24 @@ const LOCAL_DEADLINE_MS = 30 * 60 * 1000;
 export const LOCAL_DATASET_ID = "xx000000";
 
 /**
- * `identifier-scan@<revision>`: the revision of the checkout this code runs from, as the
- * publication screen names it. A packaged CLI has no checkout, so it is named by a digest of its
- * own version, which says which build ran and is never mistaken for a commit of the repository.
+ * The scanner's id. From a checkout it is `identifier-scan@<revision>`, the revision of the
+ * checkout this code runs from, exactly as the publication screen names it. A packaged CLI has no
+ * checkout, so it is `identifier-scan@nemar-cli-v<version>`: the release tag of the build, which
+ * names an exact commit. The kind is printed with the report.
  */
-export async function localScannerId(): Promise<string> {
-  const here = import.meta.dir;
+export async function localScannerId(
+  here: string = import.meta.dir,
+): Promise<{ id: string; kind: LocalScannerKind }> {
   if (basename(here) === "lib" && basename(dirname(here)) === "src") {
     const root = dirname(dirname(here));
     if (existsSync(join(root, ".git"))) {
       const rev = await gitText(root, ["rev-parse", "--short=7", "HEAD"]);
-      if (rev !== null && /^[0-9a-f]{7,40}$/.test(rev)) return `identifier-scan@${rev}`;
+      if (rev !== null && /^[0-9a-f]{7,40}$/.test(rev)) {
+        return { id: `identifier-scan@${rev}`, kind: "checkout" };
+      }
     }
   }
-  const digest = createHash("sha256").update(`nemar-cli@${version}`).digest("hex").slice(0, 12);
-  return `identifier-scan@${digest}`;
+  return { id: `identifier-scan@nemar-cli-v${version}`, kind: "release" };
 }
 
 export interface LocalScreen {
@@ -430,6 +386,8 @@ export interface LocalScreen {
   history: boolean;
   /** Recordings of earlier commits whose content is not on this machine. */
   supersededNotRead: number;
+  /** Which kind of id `report.scanner` is. */
+  scannerKind: LocalScannerKind;
 }
 
 /**
@@ -452,7 +410,7 @@ export async function screenLocalDataset(
   if (options.committed && !repository?.head) throw new LocalScreenError("no-commit");
   const head = repository?.head ?? null;
   const deadlineAt = Date.now() + LOCAL_DEADLINE_MS;
-  const scannerId = await localScannerId();
+  const scanner = await localScannerId();
   const readers = (options.readers ?? READERS).map(absenceAware);
   const objects = new AnnexObjects(repository?.commonDir ?? null);
   const readable = new Map<string, string>();
@@ -563,7 +521,7 @@ export async function screenLocalDataset(
     );
     const report = finalizeScanReport(
       foldOddFailures(foldOddFormats(record)),
-      scannerId,
+      scanner.id,
       head ?? NULL_OID,
     );
     if (!report.scan) throw new LocalScreenError("report-refused");
@@ -573,6 +531,7 @@ export async function screenLocalDataset(
       commit: head,
       history: head !== null,
       supersededNotRead,
+      scannerKind: scanner.kind,
     };
   } finally {
     await blobs?.close().catch(() => undefined);
@@ -611,7 +570,15 @@ export function renderLocalScreen(result: LocalScreen): { head: string[]; body: 
   return {
     head: [banner],
     body: identifierScreenLines(
-      { state: scan.status, ...description, lines: [...lines, ...own] },
+      {
+        state: scan.status,
+        ...description,
+        lines: [
+          ...lines,
+          LOCAL_COPY.scannerKind(result.scannerKind, result.report.scanner ?? ""),
+          ...own,
+        ],
+      },
       0,
     ),
   };

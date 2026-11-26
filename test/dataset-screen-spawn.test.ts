@@ -91,7 +91,8 @@ describe("help", () => {
   test("dataset --help lists the command, and its own help says what is and is not read", async () => {
     const list = await nemar(["dataset", "--help"]);
     expect(list.code).toBe(0);
-    expect(list.stdout).toMatch(/\bscreen\b/);
+    // One of the commands plain --help leads with, not folded into "More commands".
+    expect(list.stdout).toMatch(/\n\s+screen \[options\] \[path\]\s+Screen a dataset/);
     const all = await nemar(["dataset", "--help-all"]);
     expect(all.stdout).toMatch(/screen \[options\] \[path\]\s+Screen a dataset for identifying/);
 

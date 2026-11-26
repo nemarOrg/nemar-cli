@@ -19,7 +19,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,14 +28,15 @@ import {
   screenDataset,
 } from "../scripts/identifier-screen-ci-lib";
 import { EDF_READER, READERS, ReadFailure, bufferSource } from "../shared/identifier-readers";
+import { LOCAL_COPY } from "../shared/identifier-screen-copy";
 import { DATASET_STATUSES, parseScreenReport } from "../shared/identifier-screen-report";
 import {
-  LOCAL_COPY,
   LOCAL_DATASET_ID,
   LOCAL_ERRORS,
   LocalScreenError,
   absenceAware,
   exitCodeFor,
+  localScannerId,
   renderLocalScreen,
   screenLocalDataset,
 } from "../src/lib/dataset-screen";
@@ -578,5 +579,43 @@ describe("a repository laid out by git-annex itself", () => {
     await committed(repo);
     await working(repo);
     expect(digestTree(repo.dir)).toBe(before);
+  });
+});
+
+describe("the scanner id says which kind it is", () => {
+  test("from a checkout it is the git revision, the server's own kind of id", async () => {
+    const screen = await committed(dataset(CLEAN));
+    expect(screen.scannerKind).toBe("checkout");
+    expect(screen.report.scanner).toMatch(/^identifier-scan@[0-9a-f]{7,40}$/);
+    const text = renderLocalScreen(screen).body.join("\n");
+    expect(text).toContain(LOCAL_COPY.scannerKind("checkout", screen.report.scanner ?? ""));
+    expect(text).not.toContain("release tag");
+  });
+
+  test("a packaged CLI (no checkout) is named by its release tag, and the report still validates", async () => {
+    const { version } = await import("../src/lib/version");
+    // A `src/lib` directory outside any repository, as a bundled install has no `.git` above it.
+    const bare = join(tempDir("bundle"), "dist");
+    const scanner = await localScannerId(bare);
+    expect(scanner).toEqual({ id: `identifier-scan@nemar-cli-v${version}`, kind: "release" });
+    // The same directory shaped like a source tree but without `.git` is a release too.
+    const srcLib = join(tempDir("bundle2"), "src", "lib");
+    mkdirSync(srcLib, { recursive: true });
+    expect((await localScannerId(srcLib)).kind).toBe("release");
+
+    const screen = await committed(dataset(CLEAN));
+    const asRelease = { ...screen.report, scanner: scanner.id };
+    expect(parseScreenReport(JSON.parse(JSON.stringify(asRelease))).scanner).toBe(scanner.id);
+    const text = renderLocalScreen({ ...screen, report: asRelease, scannerKind: "release" });
+    expect(text.body.join("\n")).toContain("release tag of this nemar-cli build");
+    // The door still refuses anything that is neither a revision nor a release tag.
+    for (const bad of [
+      "identifier-scan@nemar-cli-v1.2",
+      "identifier-scan@nemar-cli-v1.2.3 x",
+      "identifier-scan@main",
+      "nemar-cli@1.2.3",
+    ]) {
+      expect(() => parseScreenReport({ ...asRelease, scanner: bad })).toThrow();
+    }
   });
 });
