@@ -54,17 +54,40 @@ let db: Database;
 let host: Miniflare;
 let bucket: R2Bucket;
 /** Store reads the route made, by method (the bucket is Miniflare's; this only counts the calls). */
-let reads: { get: number; head: number };
+let reads: { get: number; head: number; body: number };
 const handle = makeComputeApp();
 
-/** The derivatives bucket, counting the reads a request makes of it. */
+/** An object's body, counting each time it is read. */
+function countedBody(object: R2ObjectBody): R2ObjectBody {
+  return new Proxy(object, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (prop === "arrayBuffer" || prop === "text" || prop === "json" || prop === "body") {
+        reads.body += 1;
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+/** The derivatives bucket, counting the reads a request makes of it (the calls go to Miniflare's R2). */
 function counted(inner: R2Bucket): R2Bucket {
   return new Proxy(inner, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
-      if (prop === "get" || prop === "head") {
+      if (prop === "get") {
+        return async (...args: unknown[]) => {
+          reads.get += 1;
+          const object = (await (value as (...a: unknown[]) => Promise<R2ObjectBody | null>).apply(
+            target,
+            args,
+          )) as R2ObjectBody | null;
+          return object === null ? null : countedBody(object);
+        };
+      }
+      if (prop === "head") {
         return (...args: unknown[]) => {
-          reads[prop] += 1;
+          reads.head += 1;
           return (value as (...a: unknown[]) => unknown).apply(target, args);
         };
       }
@@ -114,7 +137,7 @@ beforeEach(async () => {
     [DATASET, DATASET],
   );
   await emptyBucket();
-  reads = { get: 0, head: 0 };
+  reads = { get: 0, head: 0, body: 0 };
   (globalThis as { caches?: unknown }).caches = undefined;
 });
 
@@ -271,7 +294,7 @@ describe("where a run's derivative stands, one word each", () => {
       items: [],
       next_after: null,
     });
-    expect(reads).toEqual({ get: 0, head: 0 });
+    expect(reads).toEqual({ get: 0, head: 0, body: 0 });
   });
 
   test("a succeeded stamp the store decided not to key is not_keyed with the skip word; one undecided is awaiting_derivative", async () => {
@@ -289,7 +312,7 @@ describe("where a run's derivative stands, one word each", () => {
       derivative: null,
     });
     expect(r.body.recordings.state).toBe("not_stored");
-    expect(reads).toEqual({ get: 0, head: 0 });
+    expect(reads).toEqual({ get: 0, head: 0, body: 0 });
   });
 
   test("copying, failed and expired rows are answered with their words and their tables are not read", async () => {
@@ -307,7 +330,7 @@ describe("where a run's derivative stands, one word each", () => {
       expect([word, r.body.recordings.state]).toEqual([word, "not_stored"]);
     }
     expect((await quality(failed.stampId)).body.derivative.failure).toBe("copy_failed");
-    expect(reads).toEqual({ get: 0, head: 0 });
+    expect(reads).toEqual({ get: 0, head: 0, body: 0 });
   });
 
   test("the missing canary: a canary past its date that the sync has not marked is expired, its table never read", async () => {
@@ -507,7 +530,7 @@ describe("the recordings that succeeded", () => {
     // Two cursors, or a key the route does not take, are refused too.
     expect((await quality(d.stampId, "?after=a_eeg.edf&after=b_eeg.edf")).status).toBe(400);
     expect((await quality(d.stampId, "?limit=500")).status).toBe(400);
-    expect(reads).toEqual({ get: 0, head: 0 });
+    expect(reads).toEqual({ get: 0, head: 0, body: 0 });
   });
 });
 
@@ -524,7 +547,8 @@ describe("the read is bounded and cached by key", () => {
       succeeded: null,
       items: [],
     });
-    expect(reads.get).toBe(1);
+    // One store call, and its body is never read: the stated size decides first.
+    expect(reads).toEqual({ get: 1, head: 0, body: 0 });
   }, 60_000);
 
   test("a stored derivative with no table is table_missing; a table that does not parse is table_unreadable, logged", async () => {
