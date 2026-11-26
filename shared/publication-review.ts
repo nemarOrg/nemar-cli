@@ -620,6 +620,13 @@ export interface ReviewInputsBody {
    */
   previous_denial: { automated: boolean; reasons: ReasonCode[] } | null;
   coverage: { source: CoverageSource; formats: Record<string, CoverageTally> };
+  /**
+   * Present only for a confirming run (ADR 0139, decision 1): the model and effort the job calls
+   * instead of the review's own. The Worker sets it for a row that confirms another, and stores a
+   * confirming row's report only when it was made on exactly that model and effort. It is not part
+   * of what the model reads, so it changes no input digest.
+   */
+  confirm?: { model: ReviewerModel; effort: RecordedEffort };
 }
 
 /** Why an inputs body was refused: one fixed word, never its content. */
@@ -646,17 +653,21 @@ const strOrNullIn = (v: unknown): string | null =>
 export function parseReviewInputs(raw: unknown): ReviewInputsBody {
   if (!isRecord(raw)) badInputs();
   const r = raw as Record<string, unknown>;
-  if (
-    !hasExactKeys(r, [
-      "v",
-      "enrichment",
-      "lineage",
-      "resubmission_note",
-      "coverage",
-      "previous_denial",
-    ])
-  ) {
-    badInputs();
+  const keys = ["v", "enrichment", "lineage", "resubmission_note", "coverage", "previous_denial"];
+  if (!hasExactKeys(r, keys) && !hasExactKeys(r, [...keys, "confirm"])) badInputs();
+  let confirm: ReviewInputsBody["confirm"];
+  if ("confirm" in r) {
+    const k = r.confirm;
+    if (
+      !isRecord(k) ||
+      !hasExactKeys(k, ["model", "effort"]) ||
+      !isOneOf(CALIBRATION_MODELS, k.model) ||
+      !isOneOf(RECORDED_EFFORTS, k.effort)
+    ) {
+      badInputs();
+    }
+    const c = k as Record<string, unknown>;
+    confirm = { model: c.model as ReviewerModel, effort: c.effort as RecordedEffort };
   }
   if (r.v !== REVIEW_INPUTS_VERSION) badInputs();
 
@@ -769,6 +780,7 @@ export function parseReviewInputs(raw: unknown): ReviewInputsBody {
     },
     resubmission_note: strOrNullIn(r.resubmission_note),
     coverage: { source: coverage.source as CoverageSource, formats },
+    ...(confirm === undefined ? {} : { confirm }),
   };
 }
 
@@ -2738,15 +2750,18 @@ export type PublicationCallbackOutcome =
  * through {@link parsePublicationReviewReport}; one it refuses is `report_invalid`, and `onRefused`
  * is told the parser's fixed word. An error word outside the vocabulary, or one only the Worker may
  * write ({@link WORKER_ONLY_RUN_ERRORS}), is `workflow_failed`, and so is anything else (a missing
- * or unknown `outcome`, `"pass"` included): it can never become a verdict.
+ * or unknown `outcome`, `"pass"` included): it can never become a verdict. `options.models` is the
+ * confirming run's model list, which the route passes for a row that confirms another (ADR 0139);
+ * every other report is held to the production list.
  */
 export function parsePublicationCallbackOutcome(
   body: { outcome: unknown; report: unknown; error: unknown },
   onRefused?: (code: PublicationReportErrorCode) => void,
+  options: { models?: readonly ReviewerModel[] } = {},
 ): PublicationCallbackOutcome {
   if (body.outcome === "reported") {
     try {
-      return { kind: "reported", report: parsePublicationReviewReport(body.report) };
+      return { kind: "reported", report: parsePublicationReviewReport(body.report, options) };
     } catch (err) {
       if (!(err instanceof PublicationReviewReportError)) throw err;
       onRefused?.(err.code);

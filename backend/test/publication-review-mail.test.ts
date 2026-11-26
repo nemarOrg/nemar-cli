@@ -19,6 +19,10 @@ import { beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import {
+  READY_TO_APPROVE_HEADLINE,
+  REVIEW_PASSED_NEEDS_ACK_HEADLINE,
+} from "../../shared/publication-auto-deny";
+import {
   NOT_ASSESSED_LINE,
   PLATFORM_DAILY_CAP,
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
@@ -179,11 +183,11 @@ describe("the mail waits for a review that is in flight", () => {
       const mail = sends(calls);
       expect(mail).toHaveLength(1);
       const text = textOf(mail[0].html);
-      expect(text).toContain("Publication review: pass");
+      expect(text).toContain("Ready to approve");
       expect(text).toContain(`nemar admin dataset publish approve ${datasetId}`);
       expect(text).toContain(NOT_ASSESSED_LINE);
       // The identifier screen's own section is still there, before the review's.
-      expect(text.indexOf("Identifier screen")).toBeLessThan(text.indexOf("Publication review"));
+      expect(text.indexOf("Identifier screen")).toBeLessThan(text.indexOf("Ready to approve"));
       // The subject is the screen's, unchanged.
       expect(mail[0].subject).toEndWith("IDENTIFIER SCREEN: clean");
     });
@@ -352,11 +356,15 @@ describe("the mail waits for a review that is in flight", () => {
       db.run("DELETE FROM publication_reviews WHERE id = ?", [reviewId]);
       seedPublicationReview(db, { requestId, datasetId, state: "reported" });
       expect(await notifyAdminsOfScreen(env(), requestId)).toBe("sent");
-      // A clean review does not clear the screen's own reason: the outcome still needs a person.
+      // A review that passed does not clear the screen's own reason: the headline says the
+      // acknowledgment is still needed, quotes the screen's status line, and the command carries
+      // the acknowledgment flag (ADR 0139, decision 8).
       const text = textOf(sends(calls)[0].html);
-      expect(text).toContain("Publication review: action required");
+      expect(text).toContain(REVIEW_PASSED_NEEDS_ACK_HEADLINE);
+      expect(text).not.toContain(READY_TO_APPROVE_HEADLINE);
+      expect(text).toContain('The identifier screen says: "Identifier screen:');
       expect(text).toContain(
-        REASONS.identifier_screen_needs_acknowledgment.sentence.replace(/\.$/, ""),
+        `nemar admin dataset publish approve ${datasetId} --acknowledge-identifier-screen`,
       );
     });
   });
@@ -382,7 +390,7 @@ describe("with the review off, the mail is what it was before the review existed
         expect(text).toContain("this review is advice and gates nothing");
         expect(text).toContain(NOT_ASSESSED_LINE);
         // Off is never green: nothing in the section reads as a pass.
-        expect(text).not.toContain("Publication review: pass");
+        expect(text).not.toMatch(/Publication review: pass|Ready to approve/);
       });
     }
   });
@@ -571,7 +579,7 @@ describe("the watchdog's unmailed pass", () => {
       seedPublicationReview(db, { requestId, datasetId, state: "reported" });
       const released = await sweepIdentifierScreens(env());
       expect(released.emailed).toBe(1);
-      expect(textOf(sends(calls)[0].html)).toContain("Publication review: pass");
+      expect(textOf(sends(calls)[0].html)).toContain("Ready to approve");
 
       // Mailed once: the next tick finds nothing.
       expect((await sweepIdentifierScreens(env())).emailed).toBe(0);
@@ -712,7 +720,7 @@ describe("a review that never reports is mailed once, and the mail says so", () 
     const broken = env({
       DB: interceptingD1(realD1(db), (sql) => {
         // The review watchdog's own query, and nothing else.
-        if (/^\s*SELECT id, request_id FROM publication_reviews/.test(sql)) {
+        if (/^\s*SELECT id, request_id, confirm_of FROM publication_reviews/.test(sql)) {
           throw new Error("D1_ERROR: simulated");
         }
       }),
@@ -789,7 +797,7 @@ describe("the depositor's resend carries the review's section", () => {
       expect(stored).toEqual({ stored: true, state: "reported" });
       const mails = sends(calls);
       expect(mails).toHaveLength(2);
-      expect(textOf(mails[1].html)).toContain("Publication review: pass");
+      expect(textOf(mails[1].html)).toContain("Ready to approve");
       expect(mailState(requestId).emailed).not.toBeNull();
     });
   });
@@ -836,7 +844,7 @@ describe("the depositor's resend carries the review's section", () => {
       ).toEqual({ stored: true, state: "reported" });
       const mails = sends(calls);
       expect(mails).toHaveLength(2);
-      expect(textOf(mails[1].html)).toContain("Publication review: pass");
+      expect(textOf(mails[1].html)).toContain("Ready to approve");
       expect(mailState(requestId).emailed).not.toBeNull();
     });
   });
@@ -848,7 +856,7 @@ describe("the depositor's resend carries the review's section", () => {
       expect((await resend(datasetId)).status).toBe(200);
       const mail = sends(calls);
       expect(mail).toHaveLength(1);
-      expect(textOf(mail[0].html)).toContain("Publication review: pass");
+      expect(textOf(mail[0].html)).toContain("Ready to approve");
       expect(textOf(mail[0].html)).toContain(`nemar admin dataset publish approve ${datasetId}`);
       // Nothing waits for a review any more, so the watchdog must not send it again.
       expect(mailState(requestId).emailed).not.toBeNull();
@@ -951,7 +959,7 @@ describe("what the mail may carry", () => {
       expect(text).toContain(
         "Anonymous release. Approving this publishes the data while withholding the depositor",
       );
-      expect(text).toContain("Publication review: pass");
+      expect(text).toContain("Ready to approve");
     });
   });
 
@@ -999,7 +1007,7 @@ describe("what the mail may carry", () => {
       expect(text).toContain("This is not a pass.");
       expect(text).toContain(`nemar admin dataset publish show ${datasetId}`);
       expect(text).toContain(NOT_ASSESSED_LINE);
-      expect(text).not.toContain("Publication review: pass");
+      expect(text).not.toMatch(/Publication review: pass|Ready to approve/);
     });
   });
 });
@@ -1053,7 +1061,7 @@ describe("through the real screen callback", () => {
       expect((await sweepIdentifierScreens(env())).emailed).toBe(1);
       const mail = sends(calls);
       expect(mail).toHaveLength(1);
-      expect(textOf(mail[0].html)).toContain("Publication review: pass");
+      expect(textOf(mail[0].html)).toContain("Ready to approve");
     });
   });
 });

@@ -35,6 +35,7 @@ import {
   denyPublication,
   listPublishRequests,
   rerunIdentifierScreen,
+  restorePublication,
 } from "../lib/api/publish.js";
 import {
   type ConfirmOptions,
@@ -438,6 +439,65 @@ Examples:
       }
     },
   );
+
+publishCommand
+  .command("restore")
+  .description("Restore a denied publication request to waiting for its decision")
+  .argument("<dataset-id>", "Dataset ID")
+  .option(
+    "--request-id <n>",
+    "The request this restore is for (default: the newest); refused if it is not the newest",
+  )
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Description:
+  Reverse a denial: the dataset's newest publication request, denied by an
+  administrator or by the automatic denial (ADR 0139), goes back to waiting
+  for its decision, and an audit row records who restored it. A request its
+  depositor withdrew, or one with a newer request after it, is refused.
+  Nobody is mailed; decide the request as usual afterwards.
+
+Examples:
+  $ nemar admin dataset publish restore nm099999
+  $ nemar admin dataset publish restore nm099999 --request-id 42 --yes`,
+  )
+  .action(async (datasetArg: string, options: ConfirmOptions & { requestId?: string }) => {
+    if (!requireSignedIn()) return;
+    const datasetId = checkedDatasetId(datasetArg);
+    if (datasetId === null) return;
+    const named = options.requestId === undefined ? undefined : requestNumber(options.requestId);
+    if (options.requestId !== undefined && named === undefined) {
+      console.log(
+        chalk.red(
+          `--request-id needs a request number (a positive whole number); "${plain(options.requestId)}" is not one.`,
+        ),
+      );
+      process.exitCode = 1;
+      markReportedExit();
+      return;
+    }
+    const confirmResult = await confirm(
+      `Restore the denied publication request of ${datasetId}${named === undefined ? "" : ` (request #${named})`}?`,
+      options,
+    );
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      process.exitCode = 1;
+      markReportedExit();
+      return;
+    }
+    const spinner = ora(`Restoring the request of ${datasetId}...`).start();
+    try {
+      const out = await restorePublication(datasetId, named);
+      spinner.succeed(`Request #${out.request_id} of ${datasetId} restored`);
+      console.log(chalk.dim(`  ${plain(out.message)}`));
+    } catch (error) {
+      failWith(error, spinner, "Failed to restore the request");
+    }
+  });
 
 /**
  * Whether a denial reason is short enough for the Worker (`DENIAL_REASON_MAX_LENGTH`), saying so

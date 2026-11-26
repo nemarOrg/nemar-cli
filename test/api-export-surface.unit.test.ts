@@ -101,6 +101,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "requestPublication",
     "rerunIdentifierScreen",
     "resendPublishNotification",
+    "restorePublication",
     "reviewErrorCode",
     "startPublicationReview",
     "stepIndexFor",
@@ -330,6 +331,7 @@ const INTERNAL_WIRING = ["request"];
  * protection every other symbol has.
  */
 const POST_SPLIT_ADDITIONS = [
+  "restorePublication", // epic #2182 card B5: POST /admin/publish/:id/restore (ADR 0139)
   "recordDepositAttestation", // epic #1610 phase 3, ADR 0087: PUT /datasets/:id/attestation
   "getApiUrl", // #1401: the data plane is this origin + /data (lib/http-download.ts)
   "mintDocsSession", // #1341, epic #1336 phase 3: POST /auth/docs/cli-session

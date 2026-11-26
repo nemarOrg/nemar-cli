@@ -315,19 +315,22 @@ export async function notifyAdminsOfScreen(
       .prepare("SELECT username FROM users WHERE id = ?")
       .bind(claim.requested_by)
       .first<{ username: string | null }>();
+    const screen = screenEmailSection(
+      claim.dataset_id,
+      claim.identifier_screen_status,
+      claim.identifier_screen_report,
+    );
     const outcome = await mailPublicationRequest(env, {
       requestId,
       datasetId: claim.dataset_id,
       username: user?.username ?? `user ${claim.requested_by}`,
       anonymous: claim.anonymous === 1,
-      screen: screenEmailSection(
-        claim.dataset_id,
-        claim.identifier_screen_status,
-        claim.identifier_screen_report,
-      ),
+      screen,
       // Never throws, and is null when the review is off and has no row: the mail is then what
-      // it was before the review existed.
-      review: await publicationReviewEmailSection(env, requestId),
+      // it was before the review existed. A passed review quotes the screen's status line.
+      review: await publicationReviewEmailSection(env, requestId, Date.now(), {
+        screenStatusLine: screen.headline,
+      }),
     });
     delivered = outcome.delivered;
   } catch (err) {

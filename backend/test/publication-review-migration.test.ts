@@ -105,6 +105,13 @@ describe("0098 publication_reviews: columns", () => {
     input_digest: { type: "TEXT", notnull: 0, dflt: null },
     enrichment_source: { type: "TEXT", notnull: 0, dflt: null },
     inputs_served_at: { type: "TEXT", notnull: 0, dflt: null },
+    // Migration 0153: the automatic denial (ADR 0139, decisions 1 to 3).
+    confirm_of: { type: "INTEGER", notnull: 0, dflt: null },
+    auto_deny_state: { type: "TEXT", notnull: 1, dflt: "'none'" },
+    auto_deny_at: { type: "TEXT", notnull: 0, dflt: null },
+    denial_mail_state: { type: "TEXT", notnull: 0, dflt: null },
+    denial_mail_attempts: { type: "INTEGER", notnull: 1, dflt: "0" },
+    denial_mail_listed_at: { type: "TEXT", notnull: 0, dflt: null },
   };
 
   test("exactly the declared columns, types, NOT NULLs and defaults", () => {
@@ -121,17 +128,23 @@ describe("0098 publication_reviews: columns", () => {
     expect(db.query("PRAGMA foreign_key_list(publication_reviews)").all()).toEqual([]);
   });
 
-  test("the depositor and state indexes exist beside the UNIQUE key's own", () => {
-    const names = (db.query("PRAGMA index_list(publication_reviews)").all() as { name: string }[])
-      .map((i) => i.name)
-      .sort();
+  test("the depositor and state indexes exist beside the key's own, which 0153 made partial", () => {
+    const list = db.query("PRAGMA index_list(publication_reviews)").all() as {
+      name: string;
+      unique: number;
+      partial: number;
+    }[];
+    const names = list.map((i) => i.name).sort();
     expect(names).toContain("idx_publication_reviews_depositor");
     expect(names).toContain("idx_publication_reviews_state");
-    const unique = names.filter((n) => n.startsWith("sqlite_autoindex_publication_reviews"));
-    expect(unique).toHaveLength(1);
-    const cols = (db.query(`PRAGMA index_info(${unique[0]})`).all() as { name: string }[]).map(
-      (c) => c.name,
-    );
+    // Migration 0153: the table's UNIQUE became a partial unique index over first runs, so a
+    // confirming row (ADR 0139) can share its first run's request, commit and kind.
+    expect(names.filter((n) => n.startsWith("sqlite_autoindex_publication_reviews"))).toEqual([]);
+    const key = list.find((i) => i.name === "idx_publication_reviews_key");
+    expect(key).toMatchObject({ unique: 1, partial: 1 });
+    const cols = (
+      db.query("PRAGMA index_info(idx_publication_reviews_key)").all() as { name: string }[]
+    ).map((c) => c.name);
     expect(cols).toEqual(["request_id", "head_sha", "anonymous"]);
   });
 });
@@ -576,6 +589,9 @@ describe("the row module", () => {
         "promptVersion",
         "inputDigest",
         "enrichmentSource",
+        "confirmOf",
+        "autoDenyState",
+        "autoDenyAt",
       ].sort(),
     );
     expect(row).toMatchObject({

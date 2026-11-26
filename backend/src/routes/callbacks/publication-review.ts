@@ -38,11 +38,14 @@
  * the global handler would print the whole error, whose text can carry SQL.
  */
 
+import { CONFIRMING_MODELS } from "../../../../shared/publication-auto-deny.js";
 import { parsePublicationCallbackOutcome } from "../../../../shared/publication-review.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyPublicationReviewCallbackToken } from "../../services/github/callback-tokens.js";
+import { afterPublicationReviewStored } from "../../services/publication-auto-deny.js";
 import { publicationReviewInputs } from "../../services/publication-review-inputs.js";
 import { errorWords } from "../../services/publication-review-log.js";
+import { readReview } from "../../services/publication-review-rows.js";
 import {
   claimPublicationReview,
   pendingPublicationReviewNonce,
@@ -169,6 +172,17 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
     const v = await verify(c, "publication-review-result");
     if (v instanceof Response) return v;
 
+    // A confirming row (ADR 0139, decision 1) is answered on the confirming model, which no other
+    // row may name; the store then checks the model and effort against the row once more.
+    let confirming = false;
+    try {
+      confirming = (await readReview(c.env.DB, v.reviewId))?.confirmOf != null;
+    } catch (err) {
+      console.error(
+        `[publication-review-result] review ${v.reviewId} (${v.datasetId}): read failed (${errorWords(err)})`,
+      );
+      return c.json({ error: "The result could not be stored; try again" }, 500);
+    }
     const outcome = parsePublicationCallbackOutcome(
       { outcome: v.body.outcome, report: v.body.report, error: v.body.error },
       // The parser's reason is a fixed word, so it is safe to log, and without it a contract that
@@ -178,6 +192,7 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
         console.warn(
           `[publication-review-result] review ${v.reviewId} (${v.datasetId}): report refused (${code})`,
         ),
+      confirming ? { models: CONFIRMING_MODELS } : {},
     );
     let stored: Awaited<ReturnType<typeof storePublicationReviewResult>>;
     try {
@@ -188,6 +203,7 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
         v.nonce,
         outcome,
         deferAfterAnswer(c),
+        afterPublicationReviewStored,
       );
     } catch (err) {
       // Nothing was stored and the token is not spent (the store is one transaction), so the job

@@ -45,11 +45,13 @@ import {
 } from "../../../shared/contract/publication-review-admin.js";
 import { screenGate } from "../../../shared/identifier-screen-report.js";
 import { isOneOf } from "../../../shared/pr-review.js";
+import { CONFIRMING_EFFORT, CONFIRMING_MODEL } from "../../../shared/publication-auto-deny.js";
 import {
   DEPOSITOR_DAILY_CAP,
   NEVER_REACHED_MODEL,
   PLATFORM_DAILY_CAP,
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
+  PUBLICATION_REVIEW_MODELS,
   type PublicationCallbackOutcome,
   type PublicationDeclineDetail,
   type PublicationReviewReport,
@@ -170,10 +172,13 @@ export const CAP_CALLS_SQL = `COALESCE(SUM(attempts), 0)
  * The depositor's tally includes calls an administrator started on the depositor's requests, and
  * it is intended: an administrator is not held by the depositor's allowance (it exists to stop a
  * depositor spending the platform's money), but the call still costs the platform, so it bounds
- * the depositor's own next request. See `capDecision`.
+ * the depositor's own next request. See `capDecision`. A confirming run (ADR 0139, `confirm_of`
+ * set) is the platform's own check, so it is left out of the depositor's tally; the platform's
+ * allowance still counts it.
  */
 export const DEPOSITOR_RANK_SQL = `SELECT ${CAP_CALLS_SQL} AS n FROM publication_reviews
-  WHERE requested_by = ? AND created_at >= datetime('now', '-1 day') AND id <= ?`;
+  WHERE requested_by = ? AND confirm_of IS NULL AND created_at >= datetime('now', '-1 day')
+    AND id <= ?`;
 export const PLATFORM_RANK_SQL = `SELECT ${CAP_CALLS_SQL} AS n FROM publication_reviews
   WHERE created_at >= datetime('now', '-1 day') AND id <= ?`;
 
@@ -452,7 +457,7 @@ export async function startPublicationReview(
           `INSERT INTO publication_reviews
              (request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, nonce)
            VALUES (?, ?, ?, ?, ?, ?, 'dispatched', ?)
-           ON CONFLICT (request_id, head_sha, anonymous) DO NOTHING`,
+           ON CONFLICT (request_id, head_sha, anonymous) WHERE confirm_of IS NULL DO NOTHING`,
         )
         .bind(
           request.id,
@@ -569,7 +574,7 @@ async function recordUnconfigured(
            (request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, detail,
             nonce, decided_at)
          VALUES (?, ?, ?, ?, ?, ?, 'errored', 'dispatch_unconfigured', NULL, datetime('now'))
-         ON CONFLICT (request_id, head_sha, anonymous) DO NOTHING`,
+         ON CONFLICT (request_id, head_sha, anonymous) WHERE confirm_of IS NULL DO NOTHING`,
       )
       .bind(
         request.id,
@@ -632,6 +637,84 @@ async function markDispatchFailed(db: Db, reviewId: number, nonce: string): Prom
     console.error(
       `[publication-review] review ${reviewId}: failure not recorded (${errorWords(inner)})`,
     );
+  }
+}
+
+/**
+ * Start the confirming run of a first run whose `fail` is eligible for an automatic denial (ADR
+ * 0139, decision 1): a row of its own (`confirm_of` = the first run), dispatched like any review
+ * with the same coordinates, which the job reviews on the confirming model over the same inputs
+ * (the inputs route tells it which model, so the workflow and its payload are unchanged).
+ *
+ * At most one per first run (the partial unique index of migration 0153). The platform's allowance
+ * holds it and the depositor's does not: the call is the platform's own check, not the depositor's
+ * spend, so it is left out of the depositor's tally too (`DEPOSITOR_RANK_SQL`). The
+ * request's mail is never tried here: the caller tries it next, and the live row holds it until the
+ * confirming run decides. Writes and dispatches nothing when the Worker cannot hand a review over.
+ */
+export async function startConfirmingReview(
+  env: Bindings,
+  first: PublicationReviewRow,
+): Promise<StartOutcome> {
+  const db = env.DB;
+  if (first.confirmOf !== null) return answer("not_applicable");
+  if (!reviewEnabled(env)) return answer("review_disabled");
+  if (!ownedHere(env, first.datasetId)) return answer("not_owned_here");
+  const request = await db
+    .prepare(
+      `SELECT pr.id, pr.dataset_id, pr.status, pr.anonymous, pr.requested_by,
+              pr.identifier_screen_status, pr.identifier_screen_report, d.source, d.is_exemplar
+         FROM publication_requests pr JOIN datasets d ON d.dataset_id = pr.dataset_id
+        WHERE pr.id = ? AND pr.dataset_id = ?`,
+    )
+    .bind(first.requestId, first.datasetId)
+    .first<RequestRow>();
+  if (!request || request.status !== "requested") return answer("request_not_requested");
+  const secret = env.PRESCREEN_CALLBACK_SECRET;
+  const missing = missingConfiguration(env);
+  if (missing.length > 0 || !secret) {
+    console.warn(
+      `[publication-review] review ${first.id}: confirming run not started (${missing.join(", ")})`,
+    );
+    return answer("dispatch_unconfigured");
+  }
+  const nonce = crypto.randomUUID();
+  const inserted = await db
+    .prepare(
+      `INSERT INTO publication_reviews
+         (request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, nonce,
+          confirm_of)
+       VALUES (?, ?, ?, ?, ?, NULL, 'dispatched', ?, ?)
+       ON CONFLICT (confirm_of) WHERE confirm_of IS NOT NULL DO NOTHING`,
+    )
+    .bind(
+      first.requestId,
+      first.datasetId,
+      first.headSha,
+      first.anonymous ? 1 : 0,
+      first.requestedBy,
+      nonce,
+      first.id,
+    )
+    .run();
+  if ((inserted.meta.changes ?? 0) !== 1) return answer("duplicate");
+  const reviewId = Number(inserted.meta.last_row_id);
+  try {
+    return await handOver(env, {
+      reviewId,
+      rankId: reviewId,
+      restarted: false,
+      request,
+      head: first.headSha,
+      anonymous: first.anonymous,
+      nonce,
+      secret,
+      admin: true,
+      mail: false,
+    });
+  } catch (err) {
+    await markDispatchFailed(db, reviewId, nonce);
+    throw err;
   }
 }
 
@@ -1048,6 +1131,7 @@ export async function storePublicationReviewResult(
   nonce: string,
   result: PublicationCallbackOutcome,
   defer?: Defer,
+  afterStore?: AfterStore,
 ): Promise<{
   stored: boolean;
   state: PublicationReviewState | null;
@@ -1065,6 +1149,15 @@ export async function storePublicationReviewResult(
   ) {
     console.warn(
       `[publication-review] review ${reviewId} (${datasetId}): report refused (evidence_mismatch)`,
+    );
+    outcomeToStore = { kind: "error", error: "report_invalid" };
+  }
+  // A first run answers on the review's model and a confirming run on the confirming model at its
+  // effort (ADR 0139, decision 1), and neither may stand in for the other: a report made on the
+  // wrong one is not the review this row is, so it is refused like any report about something else.
+  if (outcomeToStore.kind === "reported" && !reportFitsRow(outcomeToStore.report, row)) {
+    console.warn(
+      `[publication-review] review ${reviewId} (${datasetId}): report refused (model_mismatch)`,
     );
     outcomeToStore = { kind: "error", error: "report_invalid" };
   }
@@ -1131,8 +1224,45 @@ export async function storePublicationReviewResult(
       `[publication-review] review ${reviewId} (${datasetId}): request ${row.requestId} blocked (min_requirements_failed)`,
     );
   }
-  await tryMailAfterAnswer(env, row.requestId, defer);
+  // The automatic denial's step (ADR 0139) runs BEFORE the mail and in the same deferred task: a
+  // first run's eligible fail dispatches its confirming run, whose live row then holds the mail
+  // until it decides, and a confirming run's result decides before the mail says anything.
+  const after = afterStore;
+  if (after) {
+    const task = (async () => {
+      try {
+        await after(env, reviewId);
+      } catch (err) {
+        console.error(
+          `[publication-review] review ${reviewId} (${datasetId}): automatic denial step failed (${errorWords(err)})`,
+        );
+      }
+      await tryMail(env, row.requestId);
+    })();
+    if (!defer?.(task)) await task;
+  } else {
+    await tryMailAfterAnswer(env, row.requestId, defer);
+  }
   return { stored: true, state: reported ? "reported" : "errored" };
+}
+
+/** What runs after a result is stored and before the request's mail; it may throw, and is logged. */
+export type AfterStore = (env: Bindings, reviewId: number) => Promise<void>;
+
+/**
+ * Whether a report was made on the model and effort its row asks for: a first run on the review's
+ * model (the parser already allows no other for it), a confirming run on {@link CONFIRMING_MODEL}
+ * at {@link CONFIRMING_EFFORT}, recorded as its one call.
+ */
+function reportFitsRow(report: PublicationReviewReport, row: PublicationReviewRow): boolean {
+  if (row.confirmOf === null) return isOneOf(PUBLICATION_REVIEW_MODELS, report.model);
+  const calls = report.record?.models ?? [];
+  return (
+    report.model === CONFIRMING_MODEL &&
+    calls.length === 1 &&
+    calls[0]?.model === CONFIRMING_MODEL &&
+    calls[0]?.effort === CONFIRMING_EFFORT
+  );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1176,23 +1306,23 @@ export async function sweepPublicationReviews(
   const db = env.DB;
   const overdue = `created_at < datetime('now', '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes')`;
 
-  let rows: { id: number; request_id: number }[];
+  let rows: { id: number; request_id: number; confirm_of: number | null }[];
   try {
     rows = (
       await db
         .prepare(
-          `SELECT id, request_id FROM publication_reviews
+          `SELECT id, request_id, confirm_of FROM publication_reviews
             WHERE state = 'dispatched' AND ${overdue} ORDER BY id LIMIT ?`,
         )
         .bind(SWEEP_LIMIT)
-        .all<{ id: number; request_id: number }>()
+        .all<{ id: number; request_id: number; confirm_of: number | null }>()
     ).results;
   } catch (err) {
     result.errors++;
     console.error(`[publication-review-sweep] overdue query failed (${errorWords(err)})`);
     return result;
   }
-  for (const { id, request_id } of rows) {
+  for (const { id, request_id, confirm_of } of rows) {
     try {
       const moved = await db
         .prepare(
@@ -1204,6 +1334,18 @@ export async function sweepPublicationReviews(
       if ((moved.meta.changes ?? 0) !== 1) continue;
       result.timedOut++;
       console.warn(`[publication-review-sweep] review ${id} did not report in time`);
+      // A confirming run that never reported confirms nothing (ADR 0139): its first run says so,
+      // before the mail it was holding goes, and the digest lists it. Never a deny.
+      if (confirm_of !== null) {
+        await db
+          .prepare(
+            `UPDATE publication_reviews SET auto_deny_state = 'confirm_failed',
+                    auto_deny_at = datetime('now')
+              WHERE id = ? AND confirm_of IS NULL AND auto_deny_state = 'none'`,
+          )
+          .bind(confirm_of)
+          .run();
+      }
       if ((await tryMail(env, request_id)) === "sent") result.mailed++;
     } catch (err) {
       result.errors++;

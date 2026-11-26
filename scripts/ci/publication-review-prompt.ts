@@ -42,6 +42,7 @@ import {
   QUESTIONS,
   REVIEW_DOCUMENTS,
   REVIEW_INPUTS,
+  type RecordedEffort,
   type ReviewFacts,
   type ReviewerModel,
   parsePublicationReviewReport,
@@ -277,7 +278,13 @@ export function assemblePublicationReport(
   modelOutput: unknown,
   facts: ReviewFacts,
   model: ReviewerModel = PUBLICATION_REVIEW_MODEL,
-  run: { inputDigest: string; resolverVersion: string | null; enrichmentSource?: string | null } = {
+  run: {
+    inputDigest: string;
+    resolverVersion: string | null;
+    enrichmentSource?: string | null;
+    /** The effort the call was made at; the review's own unless a confirming run says otherwise. */
+    effort?: RecordedEffort;
+  } = {
     inputDigest: "0".repeat(64),
     resolverVersion: null,
   },
@@ -337,7 +344,7 @@ export function assemblePublicationReport(
         note_answer: m[NOTE_QUESTION] ?? "not_asked",
         record: {
           prompt_version: PUBLICATION_PROMPT_VERSION,
-          models: [{ model, effort: PUBLICATION_REVIEW_EFFORT }],
+          models: [{ model, effort: run.effort ?? PUBLICATION_REVIEW_EFFORT }],
           input_digest: run.inputDigest,
           resolver_version: run.resolverVersion,
           enrichment_source: run.enrichmentSource ?? null,
