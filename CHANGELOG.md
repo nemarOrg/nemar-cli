@@ -32,7 +32,7 @@ The MCP output is pinned by the `read_window` golden test (its result and reques
   A chunk whose header claims another decoded size than the store's geometry is refused before anything is allocated, and the engine reads a large reply in linear time.
 - **A disk cache, so a repeated read of a cached window sends no range request, even after a restart.**
   A window whose entries were evicted, or a disk error (reported as one stderr line, never a failed read), sends the read to the host again.
-  A window that fails to decode drops the cached entries it read, so the next read fetches them again.
+  A window that fails to decode drops the cached entries it read or stored, so the next read fetches them again.
   It holds public data only, at `<config dir>/zarr-cache/public/v1/` (made private, mode 0700), up to 2 GiB by default and evicting the least recently used entries.
   `NEMAR_ZARR_DISK_CACHE_DIR` moves it and `NEMAR_ZARR_DISK_CACHE_BYTES` sets the limit (`0` turns it off).
   A `NEMAR_ZARR_DISK_CACHE_DIR` that names an existing, non-empty directory the cache did not create is left untouched (no chmod, no writes): the cache is off, with one stderr line, and `nemar engine status` and `nemar doctor` say why.

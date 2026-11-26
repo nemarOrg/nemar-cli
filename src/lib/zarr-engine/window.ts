@@ -91,15 +91,20 @@ function recordingRanges(fetcher: Fetcher, reads: WindowReads): Fetcher {
   };
 }
 
-/** `cache`, noting in `reads` every key it answered with a value. */
-function recordingHits(cache: JsonCache, reads: WindowReads): JsonCache {
+/** `cache`, noting in `reads` every key it answered with a value and every key it was given:
+ *  a footer fetched on a miss and stored here is as much this window's as one served from the
+ *  cache, and must be dropped with it if the window does not decode. */
+function recordingKeys(cache: JsonCache, reads: WindowReads): JsonCache {
   return {
     async get(key: CacheKey) {
       const value = await cache.get(key);
       if (value !== undefined) reads.json.push(key);
       return value;
     },
-    put: (key, value) => cache.put(key, value),
+    put(key, value) {
+      reads.json.push(key);
+      return cache.put(key, value);
+    },
   };
 }
 
@@ -212,7 +217,7 @@ export async function readWindow(
   const reads: WindowReads = { ranges: [], json: [] };
   const read = await readLevel0Window({
     fetcher: recordingRanges(withRangeCeiling(binding.fetcher, ceiling, budget), reads),
-    cache: recordingHits(binding.jsonCache, reads),
+    cache: recordingKeys(binding.jsonCache, reads),
     key: binding.cacheKey,
     dataBase: binding.dataBase,
     zarr: binding.store.zarr,

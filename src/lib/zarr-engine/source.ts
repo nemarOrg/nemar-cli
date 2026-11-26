@@ -148,7 +148,7 @@ export interface StoreRef {
 }
 
 /** What one window read through a store's caches: every `Range` it asked for and every JSON
- *  cache entry that answered it. */
+ *  cache entry that answered it or that it stored. */
 export interface WindowReads {
   ranges: Array<{ url: string; range: string }>;
   json: CacheKey[];
@@ -165,7 +165,7 @@ export interface DataSource {
   /** The footer and array-metadata cache for one store (memory, then disk when there is one),
    *  keyed by the store's identity. */
   jsonCacheFor(store: StoreRef): JsonCache;
-  /** Drop every cached entry (memory and disk) a window read, after the window could not decode
+  /** Drop every cached entry (memory and disk) a window read or stored, after the window could not decode
    *  what it read: a corrupt entry on disk would otherwise fail every later read until the cache
    *  was cleared by hand. The next read fetches those bytes again. Optional: a source without
    *  caches of its own has nothing to drop. */

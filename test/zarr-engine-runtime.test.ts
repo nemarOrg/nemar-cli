@@ -88,6 +88,7 @@ type Mode =
   | "long206"
   | "streamed-long206"
   | "corrupt-chunk"
+  | "misplaced-footer"
   | "huge-footer"
   | "padded-chunks";
 let mode: Mode = "good";
@@ -183,6 +184,17 @@ function serveShard(req: Request, servedBody: Uint8Array, misbehave: boolean): R
       // The footer claims inner chunk 0 is 1 GiB long (offset stays real).
       const footer = body.slice(start, end + 1);
       new DataView(footer.buffer).setBigUint64(8, 1n << 30n, true);
+      return new Response(footer, { status: 206 });
+    }
+    if (mode === "misplaced-footer" && isFooter) {
+      // A footer that parses, but every present chunk's offset is one byte late: the chunk
+      // reads it leads to are good 206s of the wrong bytes, which only the decoder can tell.
+      const footer = body.slice(start, end + 1);
+      const view = new DataView(footer.buffer);
+      for (let at = 0; at + 16 <= footer.length - 4; at += 16) {
+        const offset = view.getBigUint64(at, true);
+        if (offset !== SHARD_ABSENT_MARKER) view.setBigUint64(at, offset + 1n, true);
+      }
       return new Response(footer, { status: 206 });
     }
     if (mode === "corrupt-chunk" && !isFooter) {
@@ -1051,6 +1063,31 @@ describe("a hostile shard footer", () => {
       const sent = rangeRequests.filter((q) => q.path === shard0).map((q) => q.range);
       expect(sent.length).toBeGreaterThan(0);
       for (const range of sent) expect(range).toMatch(/^bytes=-\d+$/);
+    });
+  });
+});
+
+describe("a footer fetched on a miss that leads to undecodable bytes", () => {
+  test("is dropped with the window, so the next read fetches the footer again and succeeds", async () => {
+    await withEngine(async (e) => {
+      const h = await e.ready();
+      const args = { start_s: 0, duration_s: 1 };
+      mode = "misplaced-footer";
+      rangeRequests = [];
+      const bad = await e.read(h, args);
+      expect(code(bad), JSON.stringify(bad.header)).toBe("decode_error");
+      expect(bad.payload.length).toBe(0);
+      // The footer was not in any cache: this window fetched it, then stored it.
+      const shard0 = shardPath("nm099500", "eeg_250hz", 0);
+      const footerReads = () =>
+        rangeRequests.filter((q) => q.path === shard0 && /^bytes=-\d+$/.test(q.range));
+      expect(footerReads().length).toBe(1);
+      mode = "good";
+      rangeRequests = [];
+      const ok = await e.read(h, args);
+      expect(ok.header.type, JSON.stringify(ok.header)).toBe("window");
+      // The stored footer went with the failed window, so this read asked the host for it again.
+      expect(footerReads().length).toBe(1);
     });
   });
 });
