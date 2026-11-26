@@ -6,7 +6,8 @@
  * What is pinned: a run row's `link` is a JSON object of a bounded length or nothing, and a derivative's
  * `checkpoint_map` a JSON array of a bounded length or nothing, each CHECK refusing by name;
  * `compute_pipeline_documents` is gone; the backfill copies a run's completed link from the last document
- * that holds it, and never a failed link, nor one of a stamp with no run row.
+ * that holds it, and never a failed link, one longer than the column takes, nor one of a stamp with no run
+ * row.
  */
 
 import { Database } from "bun:sqlite";
@@ -137,7 +138,7 @@ describe("compute_pipeline_documents", () => {
 });
 
 describe("the backfill", () => {
-  test("copies a run's completed link from the last document, never a failed one, nor one with no run row (MUTATION: drop the status term)", () => {
+  test("copies a run's completed link from the last document, never a failed one, a long one, nor one with no run row (MUTATION: drop the status term; drop the length term)", () => {
     const db = new Database(":memory:");
     for (const file of readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql") && f < FILE)
@@ -158,12 +159,16 @@ describe("the backfill", () => {
       "INSERT INTO compute_pipeline_progress_runs (stamp_id, job_id) VALUES (?, ?)",
     );
     // Stamp 11: the last completed link of nemar-floor, with a run row. Stamp 12: a failed link. Stamp 13: a
-    // completed link whose run row is gone. Stamp 14: a run row with no document.
+    // completed link whose run row is gone. Stamp 14: a run row with no document. Stamp 15: a completed link
+    // longer than the column takes (0150 took 65,536 characters), which is left out rather than failing the
+    // migration on the column's CHECK.
+    const long = JSON.stringify({ ...JSON.parse(LINK), note: "x".repeat(2100) });
     doc.run("nm000104", "signalJourney", "nemar-floor", 11, LINK);
     doc.run("nm000104", "processing", "nemar-floor", 11, '{"recipe_version":"1.0.0"}');
     doc.run("nm000104", "signalJourney", "nemar-ica", 12, failed);
     doc.run("nm000105", "signalJourney", "nemar-floor", 13, LINK);
-    for (const stamp of [11, 12, 14]) run.run(stamp, jobId());
+    doc.run("nm000106", "signalJourney", "nemar-floor", 15, long);
+    for (const stamp of [11, 12, 14, 15]) run.run(stamp, jobId());
     db.exec(SQL);
     const links = db
       .query("SELECT stamp_id, link FROM compute_pipeline_progress_runs ORDER BY stamp_id")
@@ -172,6 +177,7 @@ describe("the backfill", () => {
       { stamp_id: 11, link: LINK },
       { stamp_id: 12, link: null },
       { stamp_id: 14, link: null },
+      { stamp_id: 15, link: null },
     ]);
     expect(
       db
