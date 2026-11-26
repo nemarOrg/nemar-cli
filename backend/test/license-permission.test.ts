@@ -15,9 +15,11 @@
 import { describe, expect, test } from "bun:test";
 import { Miniflare } from "miniflare";
 import { LICENSE_PERMISSION_AUDIT_ACTION } from "../../shared/license-permission";
+import { READY_TO_APPROVE_HEADLINE } from "../../shared/publication-auto-deny";
 import { PUBLICATION_PROMPT_VERSION, REVIEW_INPUTS } from "../../shared/publication-review";
 import {
   derivePublicationReview,
+  publicationReviewEmailSection,
   readReviewContext,
 } from "../src/services/publication-review-view";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
@@ -517,6 +519,25 @@ describe("what a permission clears", () => {
     const d = await derivePublicationReview({ env, nowMs: Date.now(), ...ctx });
     expect(d.permission).toBeNull();
     expect(d.reasons.map((r) => r.code)).toContain("license_lineage_unconfirmed");
+  });
+
+  test("the administrators' mail says the permission was recorded, and when the review passes it is ready to approve", async () => {
+    await accounts();
+    const ticketId = ticket("amber-falcon-river");
+    const { requestId } = await withFakeResend(() => reviewed(basisOf([SOURCE])));
+    expect((await record({ ticket_id: ticketId, evidence: EVIDENCE, apply: true })).status).toBe(
+      200,
+    );
+    const section = await publicationReviewEmailSection(h.env(), requestId);
+    expect(section?.headline).toBe(READY_TO_APPROVE_HEADLINE);
+    expect(section?.lines).toContainEqual(
+      expect.stringMatching(
+        new RegExp(
+          `^License permission recorded on \\d{4}-\\d{2}-\\d{2} by licpermadmin, ticket ${ticketId}\\.$`,
+        ),
+      ),
+    );
+    expect(JSON.stringify(section)).not.toContain("EVIDENCE-SENTINEL");
   });
 
   test("it never clears another reason: a failed question still fails the request", async () => {
