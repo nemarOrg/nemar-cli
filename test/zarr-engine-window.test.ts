@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { rangeCeiling } from "../src/lib/zarr-engine/window.js";
+import { rangeCeiling, windowByteBudget } from "../src/lib/zarr-engine/window.js";
 
 /** The worst case for one stored chunk: the raw bytes plus at most 32 bytes of blosc2 overhead
  *  (BLOSC2_MAX_OVERHEAD), in a chunk that is still stored compressed (the decoder refuses a
@@ -56,6 +56,58 @@ describe("rangeCeiling", () => {
               if (!(ceiling >= worst)) {
                 violations.push(
                   `start ${start} ${where} (shard ${shardSamples}): ${ceiling} < ${worst}`,
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
+
+describe("windowByteBudget", () => {
+  test("exact value: the chunks the window can touch plus one footer per shard it touches", () => {
+    // 2 channels, 100-sample chunks, 10 per shard (1000-sample shards). A 100-sample window at
+    // 950 crosses the shard boundary: 2 chunks of 2 * 100 * 2 + 64 bytes and 2 footers of
+    // 10 * 16 + 4.
+    const geometry = { nChannels: 2, chunkSamples: 100, shardSamples: 1000, nInner: 10 };
+    expect(windowByteBudget({ ...geometry, startSample: 950, nSamples: 100 })).toBe(
+      2 * (400 + 64) + 2 * 164,
+    );
+    expect(windowByteBudget({ ...geometry, startSample: 0, nSamples: 100 })).toBe(
+      2 * (400 + 64) + 164,
+    );
+  });
+
+  test("every window, at every alignment, fits its incompressible chunks and every footer", () => {
+    // The legitimate side: a cold read of a window asks for every footer of the shards it
+    // touches and every chunk it touches, each chunk at worst its raw bytes plus 32.
+    const violations: string[] = [];
+    for (const nChannels of [1, 3, 129]) {
+      for (const chunkSamples of [1, 7, 100]) {
+        for (const nInner of [1, 4, 50]) {
+          const shardSamples = chunkSamples * nInner;
+          const footer = nInner * 16 + 4;
+          for (let nSamples = 1; nSamples <= 2 * shardSamples + 1; nSamples++) {
+            for (let start = 0; start < shardSamples + chunkSamples; start++) {
+              const end = start + nSamples - 1;
+              const chunks = Math.floor(end / chunkSamples) - Math.floor(start / chunkSamples) + 1;
+              const shards = Math.floor(end / shardSamples) - Math.floor(start / shardSamples) + 1;
+              const worst =
+                chunks * (nChannels * chunkSamples * 2 + BLOSC2_MAX_OVERHEAD) + shards * footer;
+              const budget = windowByteBudget({
+                nChannels,
+                chunkSamples,
+                shardSamples,
+                nInner,
+                startSample: start,
+                nSamples,
+              });
+              if (!(budget >= worst)) {
+                violations.push(
+                  `${JSON.stringify({ nChannels, chunkSamples, nInner, start, nSamples })}: ${budget} < ${worst}`,
                 );
               }
             }

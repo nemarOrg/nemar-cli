@@ -10,9 +10,9 @@
  * (`too_large`): the payload (`channels x samples x bytes per sample`) and the DECODE work
  * (every store channel x samples x 2 bytes, because a stored chunk holds every channel, so
  * naming one channel of a wide store does not make the read small) must each stay within
- * `maxPayloadBytes`. Each `Range` read is also capped by {@link rangeCeiling}, computed from the
- * store's geometry, so a hostile shard footer cannot make the engine fetch more than the window
- * can need. It reads with `readLevel0Window` and assembles with
+ * `maxPayloadBytes`. Each `Range` read is also capped by {@link rangeCeiling}, and all of a
+ * window's reads together by {@link windowByteBudget}, both computed from the store's geometry,
+ * so a hostile shard footer cannot make the engine fetch more than the window can need. It reads with `readLevel0Window` and assembles with
  * `assembleChannelMajor`, which writes the window straight into one channel-major array of
  * the wire dtype: `digital` is the stored int16 with no scale or offset and never passes
  * through float64, and on a little-endian host the payload is that array's bytes, uncopied.
@@ -57,6 +57,28 @@ export function rangeCeiling(geometry: {
   const chunkBytes = nChannels * chunkSamples * STORE_SAMPLE_BYTES + CHUNK_OVERHEAD_BYTES;
   const chunks = Math.ceil(nSamples / chunkSamples) + 1;
   return Math.max(chunks * chunkBytes, footerByteLength(nInner));
+}
+
+/** The most bytes all the `Range` reads of one window can legitimately ask for together: every
+ *  chunk the window can touch (`ceil(nSamples / chunkSamples) + 1`, each holding every store
+ *  channel, plus its compression overhead) and one footer per shard the window touches. A
+ *  hostile footer can make each read claim the whole {@link rangeCeiling}; this bounds their sum. */
+export function windowByteBudget(geometry: {
+  nChannels: number;
+  chunkSamples: number;
+  shardSamples: number;
+  nInner: number;
+  startSample: number;
+  nSamples: number;
+}): number {
+  const { nChannels, chunkSamples, shardSamples, nInner, startSample, nSamples } = geometry;
+  const chunkBytes = nChannels * chunkSamples * STORE_SAMPLE_BYTES + CHUNK_OVERHEAD_BYTES;
+  const chunks = Math.ceil(nSamples / chunkSamples) + 1;
+  const shards =
+    Math.floor((startSample + nSamples - 1) / shardSamples) -
+    Math.floor(startSample / shardSamples) +
+    1;
+  return chunks * chunkBytes + shards * footerByteLength(nInner);
 }
 
 export interface WindowPlan {
@@ -157,8 +179,16 @@ export async function readWindow(
   }
 
   const ceiling = rangeCeiling({ nChannels: storeChannels, chunkSamples, nInner, nSamples });
+  const budget = windowByteBudget({
+    nChannels: storeChannels,
+    chunkSamples,
+    shardSamples,
+    nInner,
+    startSample,
+    nSamples,
+  });
   const read = await readLevel0Window({
-    fetcher: withRangeCeiling(binding.fetcher, ceiling),
+    fetcher: withRangeCeiling(binding.fetcher, ceiling, budget),
     cache: binding.jsonCache,
     key: binding.cacheKey,
     dataBase: binding.dataBase,

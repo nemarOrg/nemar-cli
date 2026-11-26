@@ -42,8 +42,14 @@ import { loadLevel0ArrayMetadata } from "../shared/zarr/array-metadata.js";
 import { assembleWindow } from "../shared/zarr/assemble.js";
 import { FRAME_PREFIX_BYTES, encodeFrame } from "../shared/zarr/protocol-frame.js";
 import { readLevel0Window } from "../shared/zarr/read.js";
+import {
+  SHARD_ABSENT_MARKER,
+  footerByteLength,
+  parseShardFooter,
+} from "../shared/zarr/sharding.js";
 import { type FrameEvent, readFrames } from "../src/lib/zarr-engine/frame-stream.js";
 import { MemoryJsonCache, createPublicFetcher } from "../src/lib/zarr-engine/http.js";
+import { rangeCeiling } from "../src/lib/zarr-engine/window.js";
 import realRecords from "./fixtures/neuroschema-records/nm000103-sample.json";
 
 setDefaultTimeout(30_000);
@@ -82,7 +88,8 @@ type Mode =
   | "long206"
   | "streamed-long206"
   | "corrupt-chunk"
-  | "huge-footer";
+  | "huge-footer"
+  | "padded-chunks";
 let mode: Mode = "good";
 let rangeRequests: { path: string; range: string }[] = [];
 /** The path of EVERY request the stand-in received, Range or not. */
@@ -97,8 +104,46 @@ const base = () => `http://127.0.0.1:${server.port}`;
 const shardPath = (id: string, group: string, n: number) =>
   `/${id}/zarr/${ZARR}/${group}/0/c/0/${n}`;
 
+/** Shard 0 rewritten so every present chunk is a valid blosc2 frame of exactly `size` bytes (the
+ *  original frame, zero padding after it and its `cbytes` raised to match) with a one-byte gap
+ *  between chunks, so the reader cannot coalesce them: each chunk is one read that claims `size`.
+ *  The values decode exactly as before. */
+function paddedShard0(size: number): Uint8Array {
+  const nInner = expected.n_inner_per_shard as number;
+  const entries = parseShardFooter(
+    shard0.subarray(shard0.length - footerByteLength(nInner)),
+    nInner,
+  );
+  const out = new Uint8Array(entries.length * (size + 1) + footerByteLength(nInner));
+  const footer = new DataView(out.buffer, out.length - footerByteLength(nInner));
+  entries.forEach((entry, i) => {
+    if (!entry.present) {
+      footer.setBigUint64(i * 16, SHARD_ABSENT_MARKER, true);
+      footer.setBigUint64(i * 16 + 8, SHARD_ABSENT_MARKER, true);
+      return;
+    }
+    const at = i * (size + 1);
+    out.set(shard0.subarray(entry.offset, entry.offset + entry.nbytes), at);
+    new DataView(out.buffer, at).setUint32(12, size, true);
+    footer.setBigUint64(i * 16, BigInt(at), true);
+    footer.setBigUint64(i * 16 + 8, BigInt(size), true);
+  });
+  return out;
+}
+
 /** A Range response, or the misbehaviour `mode` asks for (shard 0 of nm099500's first group only). */
-function serveShard(req: Request, body: Uint8Array, misbehave: boolean): Response {
+function serveShard(req: Request, servedBody: Uint8Array, misbehave: boolean): Response {
+  const body =
+    misbehave && mode === "padded-chunks"
+      ? paddedShard0(
+          rangeCeiling({
+            nChannels: expected.n_channels,
+            chunkSamples: expected.chunk_samples,
+            nInner: expected.n_inner_per_shard,
+            nSamples: 4000,
+          }),
+        )
+      : servedBody;
   const range = req.headers.get("range") ?? "";
   const m = /^bytes=(?:(\d+)-(\d+)|-(\d+))$/.exec(range);
   if (!m) return new Response(body, { status: 200 });
@@ -963,6 +1008,47 @@ describe("a hostile shard footer", () => {
       const sent = rangeRequests.filter((q) => q.path === shard0).map((q) => q.range);
       expect(sent.length).toBeGreaterThan(0);
       for (const range of sent) expect(range).toMatch(/^bytes=-\d+$/);
+    });
+  });
+});
+
+describe("a footer that makes every read claim the ceiling", () => {
+  // shard 0 holds chunks 0, 1 and 3; a 4000-sample window reads all three, each padded to the
+  // per-read ceiling of that window (5 chunks of 4 x 1000 x 2 + 64 bytes = 40320). Each read is
+  // allowed on its own; together they are three times what the window can need.
+  const args = { start_s: 0, duration_s: 16 };
+
+  test("the control: the padded store decodes to the same values through the read core", async () => {
+    // So the refusal below is the budget, not bad bytes: with no ceiling or budget at all (the
+    // read core called directly), the padded chunks decode to exactly the unpadded values.
+    const plain = await coreWindow(0, 4000, [0, 1, 2, 3]);
+    mode = "padded-chunks";
+    rangeRequests = [];
+    const padded = await coreWindow(0, 4000, [0, 1, 2, 3]);
+    expect(padded.digital.values).toEqual(plain.digital.values);
+    const chunkReads = rangeRequests.filter((q) => !/^bytes=-\d+$/.test(q.range));
+    expect(chunkReads.map((q) => q.range)).toEqual([
+      "bytes=0-40319",
+      "bytes=40321-80640",
+      "bytes=120963-161282",
+    ]);
+  });
+
+  test("the window's reads are refused once their total passes the window's budget", async () => {
+    await withEngine(async (e) => {
+      const h = await e.ready();
+      mode = "padded-chunks";
+      rangeRequests = [];
+      const r = await e.read(h, args);
+      expect(code(r), JSON.stringify(r.header)).toBe("upstream_error");
+      expect(String(r.header.message)).toContain("the whole window can need");
+      expect(r.payload.length).toBe(0);
+      // The footer and the first chunk were sent; the second chunk read was refused unsent.
+      const shard0 = shardPath("nm099500", "eeg_250hz", 0);
+      const chunkReads = rangeRequests
+        .filter((q) => q.path === shard0)
+        .filter((q) => !/^bytes=-\d+$/.test(q.range));
+      expect(chunkReads.length).toBe(1);
     });
   });
 });

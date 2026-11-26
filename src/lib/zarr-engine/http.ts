@@ -335,15 +335,25 @@ export function withBodyCaps(fetcher: Fetcher, plainCap: number = MAX_PLAIN_BODY
 }
 
 /**
- * Wrap `fetcher` so a `Range` request asking for more than `ceiling` bytes is refused before
+ * Wrap `fetcher` so a `Range` request asking for more than `ceiling` bytes, or one that would
+ * take the reads made through this wrapper past `budget` bytes in total, is refused before
  * anything is sent (the fetcher throws, which the core reports as a fetch failure).
  *
  * {@link withBodyCaps} bounds a body by the length its `Range` asks for, but that length comes
  * from the shard footer, which the data host serves: a hostile footer could claim a chunk of
  * any size. The caller sets `ceiling` from the store's own geometry (the most bytes one read
- * of the window can legitimately need), so the footer cannot raise it.
+ * of the window can legitimately need), so the footer cannot raise it. One ceiling per read
+ * does not bound a window, though: a footer can make every read of the window claim the
+ * ceiling. `budget` is the most the whole window can need, and the wrapper counts what every
+ * `Range` asks for (cache hits included, since the count is of what was asked), so make one
+ * wrapper per window.
  */
-export function withRangeCeiling(fetcher: Fetcher, ceiling: number): Fetcher {
+export function withRangeCeiling(
+  fetcher: Fetcher,
+  ceiling: number,
+  budget: number = Number.POSITIVE_INFINITY,
+): Fetcher {
+  let asked = 0;
   return async (url, init) => {
     const range = init?.headers?.Range;
     if (range !== undefined) {
@@ -352,6 +362,14 @@ export function withRangeCeiling(fetcher: Fetcher, ceiling: number): Fetcher {
         throw new Error(
           `refused Range ${range} for ${url}: ${length} bytes is over the ${ceiling} one read of this window can need`,
         );
+      }
+      if (length !== null) {
+        if (asked + length > budget) {
+          throw new Error(
+            `refused Range ${range} for ${url}: the window's reads would total ${asked + length} bytes, over the ${budget} the whole window can need`,
+          );
+        }
+        asked += length;
       }
     }
     return fetcher(url, init);
