@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-opus |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-25T20:43-08:00 |
-| Next tick | 2026-11-25T21:13-08:00 |
+| Last tick | 2026-11-25T21:06-08:00 |
+| Next tick | 2026-11-25T22:06-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-25T11:07-08:00 |
 
@@ -48,7 +48,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 66 | 61 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 66 | 65 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -74,14 +74,14 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  | claude-worker | done | A1, A3 | 2385 | r1 panel: 2 important (unscanned strings, numeric id fields) + 5 fixed; seam fix (one person-field rule); r2 delta: all resolved, describing-field exclusion + token match + placeholder sent, lead verifies | 2026-11-25T15:23 | 1.5d | merged |
 | A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  | claude-worker | done | A1 | 2392 | r1 panel: 2 important (hidden entries, NaN hang) + 5 fixed; r2 delta: 1 important (directory end alignment) sent, 2 documented as out of scope; lead verifies | 2026-11-25T17:38 | 1d | merged |
 | A9 | [nemar dataset screen](cards/A9.md) |  | worker |  | claude-worker | done | A1 | 2389 | r1 panel: 4 important (update-check network, superseded honesty, git failure, copy) + 4 fixed; r2 delta clean, 1 sugg fixed, 1 rejected (fails closed) | 2026-11-25T17:38 | 1d | merged |
-| A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  | claude-worker | review | A1, A4 | 2395 |  | 2026-11-25T18:11 | 2d | r2 delta review (head e401e6a3) |
+| A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  | claude-worker | done | A1, A4 | 2395 | r1 panel code+tests+errors+comments+types: 1 critical + 5 important + 5 fixed; r2 delta: 1 important fixed, lead-verified (repro + mutation) | 2026-11-25T18:11 | 2d | lead verified 00161241 (repro 0 ms corrupt; mutation fails a test); CI then merge |
 | D3 | [Batch ack on public upstream](cards/D3.md) |  | worker-hard |  | claude-worker | done | D1, D2 | 2380 | r1 panel: 2 important (audit fail-open, item isolation) + 4 + lead (D1 batch txn, no JSON bundle) fixed; r2 delta clean, 2 sugg fixed | 2026-11-25T14:32 | 2d | merged |
 | B3 | [Resubmission note](cards/B3.md) |  | worker |  | claude-worker | done | B2 | 2379 | r1 panel: 1 important + 7 fixed; r2 delta clean; 1 sugg rejected | 2026-11-25T14:10 | 1d | merged |
 | B4 | [Review inputs and record](cards/B4.md) |  | worker-hard |  | claude-worker | done | D1, B2 | 2382 | r1 panel: 1 important (screen codes) + 5 fixed, lead cap-gap fix; r2 delta clean, 3 sugg fixed | 2026-11-25T14:54 | 2d | merged |
 | B5 | [Auto-deny and ready mail](cards/B5.md) |  | worker-hard |  | claude-worker | done | B2, B3, B4, D4 | 2387 | r1 panel: 3 important (silent mail failure, confirm_failed gaps, recipients) + 6 fixed; r2 delta clean, 3 sugg fixed | 2026-11-25T16:29 | 2.5d | merged |
 | CPD3 | Seam review; decide epic to dev; release D |  | lead |  | claude-opus | owner | D1, D3, D4, B3, B4, B5, B6 | 2397 | seam review ready-with-fixes; fixes merged in #2394 (r1 one reviewer, all fixed) | 2026-11-25T18:11-08:00 |  | owner: wait for full CI on #2397, merge into dev, release; then #2370 checklist and C1 shadow |
 | C1 | Calibration in prod shadow mode |  | owner |  |  | outline | CPD3, D0 |  |  |  |  | owner labels |
-| A10 | [Screen docs from copy tables](cards/A10.md) |  | worker |  |  | todo | A2, A4, A6, A9 |  |  |  | 1d | dispatch now (A5 docs added when it merges) |
+| A10 | [Screen docs from copy tables](cards/A10.md) |  | worker |  | claude-worker | owner | A2, A4, A6, A9 | 2398 | r1 2398 code+tests+comments + docs143 docs: 6 important fixed; r2 delta: 4 accuracy fixed, lead-verified (constants pinned by test) | 2026-11-25T20:45 | 1d | owner merges docs#143; then rerun 2398 CI and merge into evidence |
 | CPE2 | Seam review; evidence epic to dev; release E; O2 |  | lead |  |  | outline | A10 |  |  |  |  | CP-E2 |
 | O4 | Empty repos nm000589, nm000978 have publication requests |  | owner |  |  | owner |  |  |  |  |  | owner: nemar admin repo publish deny nm000589 / nm000978 (reason in checkpoints.md) |
 | O5 | SNIRF DateOfBirth may block queued conversions |  | owner |  |  | owner |  |  |  |  |  | FP gate: 29/296 public SNIRF files carry day-precision DOB (ds004514, ds004541, ds005963); queued conversions with DOB will block; owner: tell depositor to scrub, and consider notifying OpenNeuro |
@@ -165,4 +165,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-2394 | reviewer | claude-worker | Sonnet 5.5 | CPD3 | 2026-11-25T19:43 | done |
 | rev-2395a | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T19:53 | done |
 | rev-2395b | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T19:53 | done |
-| rev-2395-r2 | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T20:43 | running |
+| rev-2395-r2 | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T20:43 | done |
+| A10 | implementer | claude-worker | Sonnet 5.5 | A10 | 2026-11-25T20:45 | done |
+| rev-2398 | reviewer | claude-worker | Sonnet 5.5 | A10 | 2026-11-25T20:56 | done |
+| rev-docs143 | reviewer | claude-worker | Sonnet 5.5 | A10 | 2026-11-25T20:56 | done |
+| rev-a10-r2 | reviewer | claude-worker | Sonnet 5.5 | A10 | 2026-11-25T21:03 | done |
