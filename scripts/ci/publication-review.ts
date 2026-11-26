@@ -53,6 +53,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
+import { CONFIRMING_EFFORT, CONFIRMING_MODEL } from "../../shared/publication-auto-deny";
 import {
   PUBLICATION_REVIEW_EFFORT,
   type PublicationReviewReport,
@@ -96,6 +97,30 @@ const DATASET_ID = /^(nm|xx|on)\d{6}$/;
 
 /** Output budget. Adaptive thinking at high effort counts toward it. */
 export const MAX_TOKENS = 16_000;
+
+/**
+ * The confirming run's budget (ADR 0139, decision 1): effort `max` thinks as long as it needs, so
+ * it is given room the first run is not, and it streams (the SDK refuses a request this large that
+ * does not). The deadline keeps it inside the workflow's 20-minute limit with the steps before it;
+ * a run that reaches it ends `model_unavailable`, and a confirming run that does not report never
+ * confirms anything.
+ */
+export const CONFIRM_MAX_TOKENS = 64_000;
+export const CONFIRM_DEADLINE_MS = 12 * 60_000;
+
+/** How one call is made: the review's own effort and budget, or the confirming run's. */
+export interface ModelCallShape {
+  effort: "high" | "max";
+  maxTokens: number;
+  /** Set for a streamed call: abort it after this long. */
+  deadlineMs?: number;
+}
+
+/** The review's own call. */
+export const REVIEW_CALL: ModelCallShape = {
+  effort: PUBLICATION_REVIEW_EFFORT,
+  maxTokens: MAX_TOKENS,
+};
 
 /** The run errors this script may post: everything the Worker does not write itself. */
 export type JobRunError = Exclude<PublicationRunError, (typeof WORKER_ONLY_RUN_ERRORS)[number]>;
@@ -186,6 +211,7 @@ export async function callPublicationReviewModel(
   user: string,
   model: ReviewerModel = PUBLICATION_REVIEW_MODEL,
   onUsage?: (usage: ModelUsage) => void,
+  shape: ModelCallShape = REVIEW_CALL,
 ): Promise<unknown> {
   // The documents are bounded in characters, not tokens, and the estimate behind the daily caps
   // assumes four characters to a token. Rare characters can cost more, so an adversarial document
@@ -196,16 +222,22 @@ export async function callPublicationReviewModel(
   // (ANTHROPIC_FEDERATION_RULE_ID, _ORGANIZATION_ID, _SERVICE_ACCOUNT_ID, _WORKSPACE_ID and
   // ANTHROPIC_IDENTITY_TOKEN_FILE), exchanges the job's OIDC token, and refreshes it.
   const client = new Anthropic({ maxRetries: 2, timeout: 180_000 });
-  const res = await client.messages.create({
+  const params = {
     model,
-    max_tokens: MAX_TOKENS,
+    max_tokens: shape.maxTokens,
     system,
-    messages: [{ role: "user", content: user }],
+    messages: [{ role: "user" as const, content: user }],
     output_config: {
-      effort: PUBLICATION_REVIEW_EFFORT,
-      format: { type: "json_schema", schema: PUBLICATION_OUTPUT_SCHEMA },
+      effort: shape.effort,
+      format: { type: "json_schema" as const, schema: PUBLICATION_OUTPUT_SCHEMA },
     },
-  });
+  };
+  const res =
+    shape.deadlineMs === undefined
+      ? await client.messages.create(params)
+      : await client.messages
+          .stream(params, { signal: AbortSignal.timeout(shape.deadlineMs) })
+          .finalMessage();
   if (
     onUsage &&
     Number.isFinite(res.usage?.input_tokens) &&
@@ -282,18 +314,51 @@ export async function runPublicationReview(args: ReviewArgs): Promise<Publicatio
       nonce: randomUUID().replaceAll("-", ""),
     });
     const inputDigest = publicationInputDigest({ facts, cleared, clearedInputs });
-    const modelOutput = await callPublicationReviewModel(system, user);
+    // A confirming run (ADR 0139, decision 1) is told its model by the Worker, in the inputs; the
+    // inputs, the prompt and so the digest are the first run's, and only the model and its effort
+    // differ. Any other pair is refused, so the inputs can never pick an arbitrary call.
+    const confirm = confirmingCallOf(body.confirm);
+    const model = confirm?.model ?? PUBLICATION_REVIEW_MODEL;
+    const modelOutput = await callPublicationReviewModel(
+      system,
+      user,
+      model,
+      undefined,
+      confirm?.shape ?? REVIEW_CALL,
+    );
     return {
       outcome: "reported",
-      report: assemblePublicationReport(modelOutput, facts, PUBLICATION_REVIEW_MODEL, {
+      report: assemblePublicationReport(modelOutput, facts, model, {
         inputDigest,
         resolverVersion: body.lineage.resolver_version,
         enrichmentSource: body.enrichment?.source ?? null,
+        effort: confirm?.shape.effort ?? PUBLICATION_REVIEW_EFFORT,
       }),
     };
   } catch (e) {
     return { outcome: "error", error: mapError(e), diag: describeError(e) };
   }
+}
+
+/**
+ * The confirming call the inputs name, or null for the review's own. Exactly the confirming model
+ * at the confirming effort; anything else the inputs name is refused as inputs the job cannot use.
+ */
+export function confirmingCallOf(
+  confirm: ReturnType<typeof parseReviewInputs>["confirm"],
+): { model: ReviewerModel; shape: ModelCallShape } | null {
+  if (confirm === undefined) return null;
+  if (confirm.model !== CONFIRMING_MODEL || confirm.effort !== CONFIRMING_EFFORT) {
+    throw new ReviewInputsError();
+  }
+  return {
+    model: CONFIRMING_MODEL,
+    shape: {
+      effort: CONFIRMING_EFFORT,
+      maxTokens: CONFIRM_MAX_TOKENS,
+      deadlineMs: CONFIRM_DEADLINE_MS,
+    },
+  };
 }
 
 /** The answer of the inputs route that is not a body: a fixed word, never the route's text. */

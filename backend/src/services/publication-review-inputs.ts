@@ -25,6 +25,7 @@
  */
 
 import { resolveLicenseLineage } from "../../../shared/license-lineage.js";
+import { CONFIRMING_EFFORT, CONFIRMING_MODEL } from "../../../shared/publication-auto-deny.js";
 import {
   COVERAGE_KEY,
   type CoverageSource,
@@ -436,6 +437,11 @@ export async function publicationReviewInputs(
     resubmission_note: note.note,
     previous_denial: await previousDenialOf(db, datasetId, request.previous_request_id),
     coverage: coverageOf(readNarrowScreenReport(request.identifier_screen_report), row.headSha),
+    // A confirming run is told its model here (ADR 0139, decision 1), so the dispatch payload and
+    // the workflow stay as they are; a first run's body is exactly what it was.
+    ...(row.confirmOf === null
+      ? {}
+      : { confirm: { model: CONFIRMING_MODEL, effort: CONFIRMING_EFFORT } }),
   };
   // The job now holds its inputs and may call the model: stamped once, on the claimed row still
   // waiting, so a later `inputs_unavailable` from it is stored as `workflow_failed` (it counts).
