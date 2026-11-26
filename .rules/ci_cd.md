@@ -92,6 +92,10 @@ Never use it:
 - on `main` or on a commit that gets a tag (`auto-tag.yml` explains why: a skipped push also
   blocks `npm-publish.yml`);
 - in a pull request title or body.
+- in any commit of a pull request that will be squash-merged into `dev`: the squash commit's body
+  lists every commit message, so the marker lands on `dev`'s head, skips `Auto Bump Dev`, and
+  leaves the open release pull request with no checks at all (0.10.41, 2026-11-26).
+  `gh pr checks` then prints "no checks reported", which a poll must treat as a failure, not as pending.
 
 ## Long jobs: agents push and report, the driver watches
 
