@@ -21,6 +21,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { Miniflare } from "miniflare";
 import type { Bindings } from "../backend/src/types/bindings";
 import {
   COMPUTE_KEYS,
@@ -45,12 +46,14 @@ import {
   type GithubCompareStandin,
   startGithubCompareStandin,
 } from "../backend/test/helpers/github-compare-standin";
+import { newJobId, seedDerivative, seedIcaStamp } from "../backend/test/helpers/quality-fixture";
 import { DEFAULT_COMPUTE_POLICY } from "../shared/contract/compute";
 import {
   ComputePipelineGridResponseSchema,
   ComputePipelineRunDetailResponseSchema,
   ComputePipelineRunResponseSchema,
   ComputePipelineStatusResponseSchema,
+  ComputeRunQualityResponseSchema,
 } from "../shared/contract/compute-admin";
 import { cellText } from "../src/commands/admin-compute-pipeline";
 
@@ -705,6 +708,113 @@ describe("status: the grid (ADR 0134 decision 5, epic #2324 phase 4a)", () => {
     const missing = await runCli("admin", ["failures", "999999"]);
     expect(missing.exitCode).toBe(1);
     expect(missing.stdout + missing.stderr).toContain("There is no such pipeline stamp.");
+  });
+});
+
+describe("quality <stamp-id>", () => {
+  let host: Miniflare;
+  let derivatives: R2Bucket;
+
+  beforeAll(async () => {
+    host = new Miniflare({
+      modules: true,
+      script: "export default { fetch() { return new Response('ok') } }",
+      compatibilityDate: "2024-12-01",
+      r2Buckets: ["COMPUTE_DERIVATIVES"],
+    });
+    derivatives = (await host.getR2Bucket("COMPUTE_DERIVATIVES")) as unknown as R2Bucket;
+  }, 120_000);
+
+  afterAll(async () => {
+    await host?.dispose();
+  }, 30_000);
+
+  /** A stored canary derivative of a nemar-ica run, with a recordings table of `n` succeeded rows. */
+  async function canary(n: number): Promise<number> {
+    workerEnv = {
+      COMPUTE_DERIVATIVES: derivatives,
+      COMPUTE_DERIVATIVES_BUCKET_NAME: "nemar-compute-derivatives",
+    };
+    const db = fx.env().DB;
+    const jobId = newJobId();
+    const stampId = await seedIcaStamp(db, { datasetId: "nm000104", jobId });
+    const key = await seedDerivative(db, { datasetId: "nm000104", stampId, jobId });
+    const rows = ["path\tstatus\tcode\tstep"];
+    for (let i = 0; i < n; i++) {
+      const sub = `sub-${String(i).padStart(3, "0")}`;
+      rows.push(`${sub}/eeg/${sub}_task-rest_eeg.edf\tsucceeded\tn/a\tn/a`);
+    }
+    await derivatives.put(`d/${key}/desc-nemarica_recordings.tsv`, `${rows.join("\n")}\n`);
+    return stampId;
+  }
+
+  test("prints the derivative's word, its dates and a page of succeeded recordings; --after pages on", async () => {
+    const stamp = await canary(120);
+    const first = await runCli("admin", ["quality", String(stamp)]);
+    expect(first.exitCode).toBe(0);
+    expect(first.stdout).toContain(`stamp ${stamp}: nm000104 v1.0.0 nemar-ica`);
+    expect(first.stdout).toContain(", canary");
+    expect(first.stdout).toContain("stored; administrators only");
+    expect(first.stdout).toContain("stored 2026-11-20 10:00:00, expires 2099-01-01 00:00:00");
+    expect(first.stdout).toContain("120 succeeded recordings");
+    expect(first.stdout).toContain("    sub-000/eeg/sub-000_task-rest_eeg.edf");
+    expect(first.stdout).not.toContain("sub-100/");
+    expect(first.stdout).toContain("more: --after sub-099/eeg/sub-099_task-rest_eeg.edf");
+    seen = [];
+    const next = await runCli("admin", [
+      "quality",
+      String(stamp),
+      "--after",
+      "sub-099/eeg/sub-099_task-rest_eeg.edf",
+    ]);
+    expect(next.exitCode).toBe(0);
+    expect(seen).toEqual([
+      `GET /admin/compute/pipeline/runs/${stamp}/quality?after=sub-099%2Feeg%2Fsub-099_task-rest_eeg.edf`,
+    ]);
+    expect(next.stdout).toContain("    sub-100/eeg/sub-100_task-rest_eeg.edf");
+    expect(next.stdout).toContain("    sub-119/eeg/sub-119_task-rest_eeg.edf");
+    expect(next.stdout).not.toContain("more:");
+  });
+
+  test("--json prints the Worker's answer; a run with no derivative prints its word", async () => {
+    const stamp = await canary(2);
+    const json = await runCli("admin", ["quality", String(stamp), "--json"]);
+    expect(json.exitCode).toBe(0);
+    const body = JSON.parse(json.stdout);
+    expect(ComputeRunQualityResponseSchema.safeParse(body).success).toBe(true);
+    expect(body.recordings.succeeded).toBe(2);
+    const failed = await seedIcaStamp(fx.env().DB, {
+      datasetId: "nm000104",
+      jobId: newJobId(),
+      state: "failed",
+      version: "v1.0.9",
+    });
+    const text = await runCli("admin", ["quality", String(failed)]);
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toContain("run_not_succeeded");
+    expect(text.stdout).toContain("recordings: not_stored");
+  });
+
+  test("a wrong stamp id or an empty cursor is refused before anything is sent; a forged one by the Worker", async () => {
+    const stamp = await canary(1);
+    seen = [];
+    for (const args of [
+      ["quality", "abc"],
+      ["quality", "0"],
+      ["quality", String(stamp), "--after", ""],
+    ]) {
+      const r = await runCli("admin", args);
+      expect([args.join(" "), r.exitCode]).toEqual([args.join(" "), 1]);
+    }
+    expect(seen).toEqual([]);
+    const forged = await runCli("admin", ["quality", String(stamp), "--after", "../x_eeg.edf"]);
+    expect(forged.exitCode).toBe(1);
+    expect(forged.stdout + forged.stderr).toContain("after");
+    const missing = await runCli("admin", ["quality", "999999"]);
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stdout + missing.stderr).toContain("There is no such pipeline stamp.");
+    const member = await runCli("member", ["quality", String(stamp)]);
+    expect(member.exitCode).toBe(1);
   });
 });
 

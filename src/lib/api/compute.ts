@@ -60,6 +60,8 @@ import {
   ComputeRecordResponseSchema,
   type ComputeRequeueResponse,
   ComputeRequeueResponseSchema,
+  type ComputeRunQualityResponse,
+  ComputeRunQualityResponseSchema,
   type ComputeStatusResponse,
   ComputeStatusResponseSchema,
   type ComputeUnmatchedResponse,
@@ -368,6 +370,23 @@ export async function getComputePipelineRun(
     {},
     true,
     ComputePipelineRunDetailResponseSchema,
+  );
+}
+
+/**
+ * `GET /admin/compute/pipeline/runs/:stamp/quality` (admin; epic #2324 phase B3): where the run's derivative
+ * stands, and a page of its succeeded recordings after `after`.
+ */
+export async function getComputeRunQuality(
+  stampId: number,
+  after?: string,
+): Promise<ComputeRunQualityResponse> {
+  const query = after === undefined ? "" : `?${new URLSearchParams({ after }).toString()}`;
+  return request(
+    `/admin/compute/pipeline/runs/${encodeURIComponent(String(stampId))}/quality${query}`,
+    {},
+    true,
+    ComputeRunQualityResponseSchema,
   );
 }
 

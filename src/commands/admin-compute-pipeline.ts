@@ -6,6 +6,7 @@
  *   nemar admin compute pipeline run <recipe> --eligible [--limit <n>] [--dry-run]
  *   nemar admin compute pipeline status [--recipe <name>] [--status <word>] [--dataset <id>] [--limit <n>] [--no-sync]
  *   nemar admin compute pipeline failures <stamp-id>
+ *   nemar admin compute pipeline quality <stamp-id> [--after <recording path>]
  *   nemar admin compute pipeline stamps [--recipe <name>] [--dataset <id>] [--state <state>] [--limit <n>]
  *
  * A run names a recipe and then ONE dataset (with an optional version) or the queue of eligible datasets
@@ -32,6 +33,7 @@ import {
   COMPUTE_PIPELINE_STAMP_ID_RE,
   COMPUTE_PIPELINE_STAMP_STATES,
   COMPUTE_PIPELINE_STATUS_PAGE_MAX,
+  COMPUTE_RUN_QUALITY_PAGE_SIZE,
   type ComputePipelineCell,
   ComputePipelineCellSchema,
   type ComputePipelineGridResponse,
@@ -42,6 +44,7 @@ import {
   type ComputePipelineRunRequest,
   type ComputePipelineRunResponse,
   type ComputePipelineStampView,
+  type ComputeRunQualityResponse,
 } from "../../shared/contract/compute-admin.js";
 import { PROGRESS_MAX_FAILURES } from "../../shared/contract/compute-progress.js";
 import { RUNNER_ID_RE } from "../../shared/contract/compute-runner.js";
@@ -56,6 +59,7 @@ import {
   getComputePipelineGrid,
   getComputePipelineRun,
   getComputePipelineStatus,
+  getComputeRunQuality,
   runComputePipeline,
 } from "../lib/api/compute.js";
 import { plain } from "../lib/terminal-text.js";
@@ -744,5 +748,93 @@ pipelineCommand
       printRunDetail(res);
     } catch (err) {
       failWith(err, null, "Could not read the pipeline run.", undefined, { json });
+    }
+  });
+
+/** What each derivative word means, for the line under the stamp (a word this CLI does not know is shown as it is). */
+const QUALITY_MEANING: Record<string, string> = {
+  run_not_succeeded: "the run did not succeed, so no derivative is made of it",
+  not_keyed: "the derivative store made no derivative of it",
+  awaiting_derivative: "the derivative store has not decided yet",
+  failed: "its copy could not be trusted",
+  expired: "its files are deleted, or about to be",
+  copying: "its files are being copied",
+  canary: "stored; administrators only",
+  current: "stored; the derivative public pages read",
+  superseded: "stored; a later catalog derivative replaced it",
+  not_current: "stored and public; a newer public derivative is the one pages read",
+};
+
+function printRunQuality(res: ComputeRunQualityResponse): void {
+  say(
+    `stamp ${res.stamp_id}: ${word(res.dataset_id)} ${word(res.version)} ${word(res.recipe)} ${word(res.recipe_version)} ${word(res.input)}, ${word(res.quality)}${res.skip ? ` (${word(res.skip)})` : ""}`,
+  );
+  const meaning = QUALITY_MEANING[res.quality];
+  if (meaning) say(`  ${meaning}`);
+  const d = res.derivative;
+  if (d) {
+    say(
+      `  derivative ${word(d.key.slice(0, 12))} ${word(d.state)} ${word(d.retention)}${d.failure ? ` (${word(d.failure)})` : ""}; stored ${word(d.stored_at ?? "never")}, expires ${word(d.expires_at ?? "never")}${d.superseded_at ? `, superseded ${word(d.superseded_at)}` : ""}`,
+    );
+  }
+  const r = res.recordings;
+  if (r.state !== "listed") {
+    say(`  recordings: ${word(r.state)}`);
+    return;
+  }
+  say(
+    `  ${r.succeeded ?? 0} succeeded recordings${r.unlisted > 0 ? ` (${r.unlisted} more with a path the quality route does not take)` : ""}`,
+  );
+  for (const item of r.items) say(`    ${word(item.path)}`);
+  if (r.next_after) say(`  more: --after ${word(r.next_after)}`);
+}
+
+const QUALITY_HELP = `
+Shows where one pipeline run's derivative stands (by its stamp id, the run column of "pipeline status"),
+in one word: run_not_succeeded, not_keyed (with the store's word), awaiting_derivative, failed, expired
+(a canary 30 days after it was stored), copying, canary, current (what public pages read), superseded or
+not_current; with its retention and its dates. When its files stand, it lists the recordings that
+succeeded, ${COMPUTE_RUN_QUALITY_PAGE_SIZE} a page in path order; --after <path> (the "more" line) shows the next page. Read only.
+
+Admin or owner. --json prints the Worker's answer as it is.
+
+Exit codes:
+  0  the run was printed, whatever its word.
+  1  the stamp id or the cursor is wrong or there is no such stamp, or the Worker refused or could not be
+     reached.`;
+
+pipelineCommand
+  .command("quality <stamp-id>")
+  .description("Show where one pipeline run's derivative stands and its succeeded recordings")
+  .option("--after <path>", "The page after this recording path (the last line's more)")
+  .option("--json", "Print the Worker's answer as JSON")
+  .addHelpText("after", QUALITY_HELP)
+  .action(async (stamp: string, o: { after?: string; json?: boolean }) => {
+    const json = o.json === true;
+    if (!requireSignedIn(json)) return;
+    const id = COMPUTE_PIPELINE_STAMP_ID_RE.test(stamp) ? Number(stamp) : Number.NaN;
+    if (!Number.isSafeInteger(id)) {
+      failMessage("<stamp-id> is a whole number from 1 (the run column of pipeline status).", {
+        json,
+        answered: true,
+      });
+      return;
+    }
+    if (o.after !== undefined && (o.after === "" || o.after.length > 1024)) {
+      failMessage("--after is a recording path, the one a page's more line names.", {
+        json,
+        answered: true,
+      });
+      return;
+    }
+    try {
+      const res = await getComputeRunQuality(id, o.after);
+      if (json) {
+        console.log(JSON.stringify(res, null, 2));
+        return;
+      }
+      printRunQuality(res);
+    } catch (err) {
+      failWith(err, null, "Could not read the pipeline run's quality.", undefined, { json });
     }
   });
