@@ -75,7 +75,13 @@ export interface FrameReaderOptions {
 }
 
 export class FrameReader {
-  private buf: Uint8Array = new Uint8Array(0);
+  /** The bytes not yet consumed, as the pieces they arrived in. Only the front of a frame
+   *  (prefix and header) is ever joined while it is incomplete; a payload is joined once, when
+   *  the whole frame has arrived, so feeding a large frame costs linear, not quadratic, copying. */
+  private chunks: Uint8Array[] = [];
+  private length = 0;
+  /** The end of the frame at the front, once its header has been read; null before. */
+  private frameEnd: number | null = null;
   private stopped = false;
   private readonly maxPayloadBytes: number;
 
@@ -87,14 +93,8 @@ export class FrameReader {
    *  reader ignores further input. */
   push(chunk: Uint8Array): FrameEvent[] {
     if (this.stopped || chunk.length === 0) return [];
-    if (this.buf.length === 0) {
-      this.buf = chunk;
-    } else {
-      const joined = new Uint8Array(this.buf.length + chunk.length);
-      joined.set(this.buf, 0);
-      joined.set(chunk, this.buf.length);
-      this.buf = joined;
-    }
+    this.chunks.push(chunk);
+    this.length += chunk.length;
     const events: FrameEvent[] = [];
     for (;;) {
       const event = this.next();
@@ -108,56 +108,97 @@ export class FrameReader {
   /** Signal end of input. Bytes left over mean a frame was cut off, which is `fatal`;
    *  an empty buffer is a clean end and yields nothing. */
   end(): FrameEvent[] {
-    if (this.stopped || this.buf.length === 0) return [];
+    if (this.stopped || this.length === 0) return [];
     this.stopped = true;
     return [
       {
         type: "fatal",
         kind: "truncated",
-        message: `input ended inside a frame (${this.buf.length} bytes buffered)`,
+        message: `input ended inside a frame (${this.length} bytes buffered)`,
       },
     ];
   }
 
   private fatal(kind: StreamErrorKind, message: string): FrameEvent {
     this.stopped = true;
-    this.buf = new Uint8Array(0);
+    this.chunks = [];
+    this.length = 0;
+    this.frameEnd = null;
     return { type: "fatal", kind, message };
+  }
+
+  /** The first `n` buffered bytes (n <= length) as one array, joining the leading pieces into
+   *  one when they are split, so a later call for as many bytes or fewer copies nothing. */
+  private front(n: number): Uint8Array {
+    if (n === 0) return new Uint8Array(0);
+    const first = this.chunks[0];
+    if (first !== undefined && first.length >= n) return first.subarray(0, n);
+    let covered = 0;
+    let count = 0;
+    while (covered < n) covered += this.chunks[count++].length;
+    const joined = new Uint8Array(covered);
+    let at = 0;
+    for (let i = 0; i < count; i++) {
+      joined.set(this.chunks[i], at);
+      at += this.chunks[i].length;
+    }
+    this.chunks.splice(0, count, joined);
+    return joined.subarray(0, n);
+  }
+
+  /** Drop the first `n` buffered bytes (the caller has read them with {@link front}). */
+  private consume(n: number): void {
+    const first = this.chunks[0];
+    if (first.length === n) this.chunks.shift();
+    else this.chunks[0] = first.subarray(n);
+    this.length -= n;
   }
 
   /** The next event the buffered bytes complete, or null when more bytes are needed. */
   private next(): FrameEvent | null {
-    const buf = this.buf;
-    // Bad magic is decided as soon as the bytes that disagree are here, so a client that
-    // sends a wrong prefix and waits is answered at once.
-    for (let i = 0; i < Math.min(buf.length, 4); i++) {
-      if (buf[i] !== FRAME_MAGIC.charCodeAt(i)) {
-        return this.fatal("bad_magic", "frame does not start with NZE0");
+    if (this.frameEnd === null) {
+      // Bad magic is decided as soon as the bytes that disagree are here, so a client that
+      // sends a wrong prefix and waits is answered at once.
+      const magic = this.front(Math.min(this.length, 4));
+      for (let i = 0; i < magic.length; i++) {
+        if (magic[i] !== FRAME_MAGIC.charCodeAt(i)) {
+          return this.fatal("bad_magic", "frame does not start with NZE0");
+        }
       }
-    }
-    if (buf.length < FRAME_PREFIX_BYTES) return null;
-    const headerLen = new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getUint32(4, true);
-    if (headerLen > MAX_HEADER_BYTES) {
-      return this.fatal("header_too_large", `header_len ${headerLen} exceeds ${MAX_HEADER_BYTES}`);
-    }
-    if ((FRAME_PREFIX_BYTES + headerLen) % 8 !== 0) {
-      return this.fatal("unpadded", `8 + header_len (${headerLen}) is not a multiple of 8`);
-    }
-    const payloadStart = FRAME_PREFIX_BYTES + headerLen;
-    if (buf.length < payloadStart) return null;
-
-    const declared = peekPayloadBytes(buf.subarray(FRAME_PREFIX_BYTES, payloadStart));
-    if (declared !== null && declared > this.maxPayloadBytes) {
-      return this.fatal(
-        "payload_too_large",
-        `payload_bytes ${declared} exceeds the ${this.maxPayloadBytes} a frame may carry here`,
+      if (this.length < FRAME_PREFIX_BYTES) return null;
+      const prefix = this.front(FRAME_PREFIX_BYTES);
+      const headerLen = new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength).getUint32(
+        4,
+        true,
       );
-    }
-    const frameEnd = payloadStart + (declared ?? 0);
-    if (buf.length < frameEnd) return null;
+      if (headerLen > MAX_HEADER_BYTES) {
+        return this.fatal(
+          "header_too_large",
+          `header_len ${headerLen} exceeds ${MAX_HEADER_BYTES}`,
+        );
+      }
+      if ((FRAME_PREFIX_BYTES + headerLen) % 8 !== 0) {
+        return this.fatal("unpadded", `8 + header_len (${headerLen}) is not a multiple of 8`);
+      }
+      const payloadStart = FRAME_PREFIX_BYTES + headerLen;
+      if (this.length < payloadStart) return null;
 
-    const frameBytes = buf.subarray(0, frameEnd);
-    this.buf = buf.subarray(frameEnd);
+      const declared = peekPayloadBytes(this.front(payloadStart).subarray(FRAME_PREFIX_BYTES));
+      if (declared !== null && declared > this.maxPayloadBytes) {
+        return this.fatal(
+          "payload_too_large",
+          `payload_bytes ${declared} exceeds the ${this.maxPayloadBytes} a frame may carry here`,
+        );
+      }
+      this.frameEnd = payloadStart + (declared ?? 0);
+    }
+    const frameEnd = this.frameEnd;
+    if (this.length < frameEnd) return null;
+
+    // The whole frame is here: one join (at most) and the codec decodes it.
+    const frameBytes = this.front(frameEnd);
+    this.consume(frameEnd);
+    this.frameEnd = null;
     try {
       const { header, payload } = decodeFrame(frameBytes);
       return { type: "frame", header, payload };

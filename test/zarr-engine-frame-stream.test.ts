@@ -26,6 +26,8 @@ const fixture = (name: string) => new Uint8Array(readFileSync(new URL(name, DIR)
 const hello = encodeFrame({ id: 1, type: "hello", protocol: "0.1", client: "t" });
 const release = encodeFrame({ id: 2, type: "release", handle: "h1" });
 const windowFrame = fixture("window-float64.bin");
+/** The time bound for reading a 128 MiB frame in 64 KiB pieces (see the test). */
+const BOUND_MS = 250;
 
 function concat(...parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
@@ -67,6 +69,52 @@ describe("FrameReader", () => {
       expect(win.payload.length).toBe(win.header.payload_bytes as number);
       expect(reader.end()).toEqual([]);
     }
+  });
+
+  test("a stream cut into three pieces at every pair of positions reads the same frames", () => {
+    // The reader keeps the pieces as they arrived and joins only when a frame is whole, so a
+    // cut inside the prefix, inside the header and inside the payload must all come out equal.
+    const whole = concat(hello, windowFrame, release);
+    const reference = new FrameReader().push(whole);
+    for (let a = 0; a <= whole.length; a++) {
+      for (let b = a; b <= whole.length; b++) {
+        const reader = new FrameReader();
+        const events = [
+          ...reader.push(whole.subarray(0, a)),
+          ...reader.push(whole.subarray(a, b)),
+          ...reader.push(whole.subarray(b)),
+        ];
+        if (events.length !== 3) throw new Error(`cut ${a}/${b}: ${events.length} events`);
+        expect(events).toEqual(reference);
+        expect(reader.end()).toEqual([]);
+      }
+    }
+  });
+
+  test("a 128 MiB frame fed in 64 KiB pieces is read in linear time", () => {
+    // Joining the buffer on every piece copied the whole buffer each time: quadratic, 1.25 s
+    // for 64 MiB, so a legal 1 GiB reply could outlast the client's call timeout. Measured on
+    // an M-series laptop: 8 to 13 ms with the pieces kept apart, 3.8 s with the old join. The
+    // bound is about 20 times the linear cost, for slow CI runners, and 15 times below the
+    // quadratic one.
+    const payload = new Uint8Array(128 * 1024 * 1024);
+    for (let i = 0; i < payload.length; i += 4096) payload[i] = i & 0xff;
+    const frame = encodeFrame({ id: 7, type: "window", payload_bytes: payload.length }, payload);
+    const reader = new FrameReader({ maxPayloadBytes: payload.length });
+    const piece = 64 * 1024;
+    const events = [];
+    const started = performance.now();
+    for (let at = 0; at < frame.length; at += piece) {
+      events.push(...reader.push(frame.subarray(at, at + piece)));
+    }
+    const elapsed = performance.now() - started;
+    expect(events.length).toBe(1);
+    const [event] = events;
+    if (event.type !== "frame") throw new Error(`expected a frame, got ${event.type}`);
+    expect(event.payload.length).toBe(payload.length);
+    expect(event.payload[4096 * 3]).toBe((4096 * 3) & 0xff);
+    expect(Buffer.compare(Buffer.from(event.payload), Buffer.from(payload))).toBe(0);
+    expect(elapsed).toBeLessThan(BOUND_MS);
   });
 
   test("one byte at a time reads every frame", () => {
