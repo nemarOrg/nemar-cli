@@ -230,7 +230,8 @@ describe("a verdict that needs a person proceeds only on an acknowledgment that 
 
   test("EDF clean beside a format the scanner skips is its own verdict", async () => {
     bidsWith(recording(CLEAN_PATIENT));
-    write("sub-01/eeg/sub-01_task-other_eeg.set", "MATLAB 5.0 MAT-file Quillfeather");
+    // .set is read since card A5; .nwb has no reader.
+    write("sub-01/eeg/sub-01_task-other_eeg.nwb", "HDF Quillfeather");
     expect((await scanLocalDataset(root)).status).toBe("partially-screened");
   });
 
