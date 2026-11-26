@@ -129,13 +129,14 @@ It clears that reason alone.
 
 - **What the depositor is told.**
   One sentence per outcome that needs action (`LINEAGE_PERMISSION_REQUEST`, `shared/license-lineage.ts`), worded from the owner's: the upstream license does not permit this copy under the dataset's license, so send evidence from the original authors that they accept this copy under that license, for example an email from them, to support@nemar.org, quoting the dataset id.
-  For `redistribution_prohibited` the evidence comes from the repository that holds the data (for example PhysioNet), because its data use agreement binds the authors too.
+  For `redistribution_prohibited` the evidence comes from the repository that holds the data (for example PhysioNet), because its data use agreement may bind the authors too.
   For `unresolved` the depositor replies with a link to the license, or waits for the next check.
   The placeholders are filled from the lineage's closed words and checked identifiers, never from free text.
   The sentence is mailed once per request and outcome when a review stores `license_lineage_unconfirmed` (through the dev mail fence), and `nemar dataset publish status` prints it.
 - **What is recorded.**
   `nemar admin dataset publish license-permission <dataset> --ticket <id> --evidence <text> [--apply]` is a dry run by default; with `--apply` it writes a `license_permissions` row and a `license_permission_recorded` audit row in one batch.
   The ticket must exist and be visible to the administrator (ADR 0112).
+  The administrator confirms that the ticket holds the evidence; the tool shows the ticket's subject and sender, warns when the sender is not the depositor, and audits both.
   The evidence is the administrator's own summary, at most 1,000 characters; it is shown to administrators only and never sent to a model.
 - **What it covers.**
   Each review stores the lineage it was served (its basis: the outcome, the target license and the sources behind the outcome).
