@@ -63,10 +63,23 @@ import type {
   ReasonView,
 } from "../../../shared/contract/publication-review-admin.js";
 import { type ScreenGate, screenGate } from "../../../shared/identifier-screen-report.js";
+import { isOneOf } from "../../../shared/pr-review.js";
+import {
+  AUTO_DENY_STATES,
+  PASS_MINIMUMS_LINE,
+  READY_TO_APPROVE_HEADLINE,
+  REVIEW_PASSED_NEEDS_ACK_HEADLINE,
+  autoDenyStateLine,
+  passAnswerLines,
+  passGateLine,
+  passLineageLine,
+  screenStatusQuote,
+} from "../../../shared/publication-auto-deny.js";
 import {
   type ApprovalStanding,
   DOCUMENT_LABEL,
   type LiveFacts,
+  NOT_ASSESSED_LINE,
   PUBLICATION_FINDING_LABEL,
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
   type PublicationDeclineDetail,
@@ -933,6 +946,62 @@ export async function publicationReviewDetail(
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * The administrators' section for a review that PASSED (ADR 0139, decision 8), or null for any
+ * other. A stored `pass` whose only live reason, if any, is the screen's acknowledgment:
+ *   - gate `clear` and no reason: "Ready to approve";
+ *   - gate `acknowledge`: "Review passed; the identifier screen still needs an acknowledgment",
+ *     quoting the screen's status line.
+ * Each lists what was confirmed (the gate, the minimums, the lineage outcome and where its sources
+ * are listed, the four answers) and gives the exact approve command (`next`, from the shared
+ * description, which carries the acknowledgment flag when one is needed). Fixed words and closed
+ * words only; never the model's summary or a note. No code path approves.
+ */
+function passedSection(
+  d: DerivedPublicationReview,
+  screenStatusLine: string | null,
+): PublicationReviewSection | null {
+  if (!d.enabled || d.rowView.kind !== "reported" || d.rowView.stored !== "pass") return null;
+  const report = d.rowView.report;
+  if (report === null || report.evidence.minimums !== "met") return null;
+  const gate = d.live.screen.gate;
+  const others = d.reasons.filter((r) => r.code !== "identifier_screen_needs_acknowledgment");
+  if (others.length > 0) return null;
+  const id = d.row?.datasetId ?? "";
+  const confirmed = [
+    PASS_MINIMUMS_LINE,
+    passLineageLine(
+      report.evidence.lineage?.outcome ?? null,
+      report.evidence.lineage?.credited ?? false,
+      id,
+    ),
+    ...passAnswerLines(report),
+    NOT_ASSESSED_LINE,
+  ];
+  const next = d.description.next ?? undefined;
+  if (gate === "clear" && d.reasons.length === 0) {
+    return {
+      headline: READY_TO_APPROVE_HEADLINE,
+      tone: "ok",
+      lines: [passGateLine("clear"), ...confirmed],
+      next,
+    };
+  }
+  if (gate === "acknowledge") {
+    return {
+      headline: REVIEW_PASSED_NEEDS_ACK_HEADLINE,
+      tone: "warn",
+      lines: [
+        ...(screenStatusLine === null ? [] : [screenStatusQuote(screenStatusLine)]),
+        passGateLine("acknowledge"),
+        ...confirmed,
+      ],
+      next,
+    };
+  }
+  return null;
+}
+
+/**
  * The review's part of the publication-request email: the headline, each reason in its shared
  * words, the next command and the standing line. Never the model's summary, and never any text
  * the model wrote.
@@ -962,6 +1031,7 @@ export async function publicationReviewEmailSection(
   env: Bindings,
   requestId: number,
   nowMs: number = Date.now(),
+  options: { screenStatusLine?: string } = {},
 ): Promise<PublicationReviewSection | null> {
   let datasetId = "";
   try {
@@ -975,12 +1045,18 @@ export async function publicationReviewEmailSection(
       overdueMinutes: PUBLICATION_REVIEW_DEADLINE_MINUTES,
     });
     if (!d.enabled && d.row === null) return null;
-    return {
+    const passed = passedSection(d, options.screenStatusLine ?? null);
+    const section: PublicationReviewSection = passed ?? {
       headline: d.description.headline,
       tone: d.description.tone,
       lines: d.description.lines,
       next: d.description.next ?? undefined,
     };
+    // What the automatic denial made of this review (ADR 0139): "automated review disagreed",
+    // "recommended: deny", and the rest of its words, first, from the one copy table.
+    const state = d.row?.autoDenyState ?? "none";
+    const line = isOneOf(AUTO_DENY_STATES, state) ? autoDenyStateLine(state) : null;
+    return line === null ? section : { ...section, lines: [line, ...section.lines] };
   } catch (err) {
     console.error(
       `[publication-review] could not read the review of request ${requestId} for the admin email (${errorWords(err)})`,

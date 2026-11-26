@@ -1402,7 +1402,7 @@ describe("the watchdog", () => {
       expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass" });
       const mails = sendsTo(calls, ADMIN_EMAIL);
       expect(mails).toHaveLength(2);
-      expect(mails[1].html).toContain("Publication review: pass");
+      expect(mails[1].html).toContain("Ready to approve");
     });
   });
 
