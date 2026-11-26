@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { PERSON_FIELDS, isPersonField } from "../shared/readers/person-fields";
+import { PERSON_FIELDS, isLocationField, isPersonField } from "../shared/readers/person-fields";
 
 describe("a qualified name is a thing's", () => {
   test("name after a word that is neither a person nor a describing word names a thing", () => {
@@ -42,5 +42,39 @@ describe("a qualified name is a thing's", () => {
     expect(isPersonField("SubjectArtefactDescription")).toBe(false);
     // The twin without it.
     expect(isPersonField("SubjectArtefact")).toBe(true);
+  });
+});
+
+describe("location fields", () => {
+  test("a last word of path, filepath, file, filename, dir or folder, or an original_ prefix", () => {
+    for (const f of [
+      "filepath",
+      "filename",
+      "SDfilepath",
+      "chanfile",
+      "hdmfile",
+      "splinefile",
+      "data_dir",
+      "datadir",
+      "OutputFolder",
+      "save_path",
+      "original_mff",
+    ]) {
+      expect(isLocationField(f), f).toBe(true);
+    }
+  });
+
+  test("other fields are not, words that only end alike included", () => {
+    for (const f of [
+      "comments",
+      "PatientProfile",
+      "profile",
+      "setname",
+      "path_length_m",
+      "fileCount",
+      "originality",
+    ]) {
+      expect(isLocationField(f), f).toBe(false);
+    }
   });
 });

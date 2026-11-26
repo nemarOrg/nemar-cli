@@ -125,6 +125,11 @@ export interface Finding {
   field: string;
   /** Letters, digits and length only; never the value. */
   shape: Shape;
+  /**
+   * How many places in the file the finding stands for, when a reader folds repeats into one
+   * finding per kind and field (the MATLAB readers, card A5). A count, never a value.
+   */
+  occurrences?: number;
 }
 
 /** Size of the fixed EDF/BDF header, which holds the identification fields this module reads. */

@@ -104,3 +104,35 @@ export function isPersonField(
       !(t === "name" && i > 0 && namesAThing(tokens[i - 1] as string)),
   );
 }
+
+/** The last name words of a field that holds where a file is kept (lead ruling on card A5). */
+const LOCATION_WORDS: ReadonlySet<string> = new Set([
+  "path",
+  "filepath",
+  "file",
+  "filename",
+  "dir",
+  "folder",
+]);
+
+/**
+ * Is this field a location field: one that records where the researcher kept a file, so the
+ * screen does not read it (EEGLAB's `filepath` ruling, card A5)? Its last name word is `path`,
+ * `filepath`, `file`, `filename`, `dir` or `folder`, run together with the words before it or
+ * not (`SDfilepath`, `chanfile`, `data_dir`), or it starts with `original_` (`original_mff`).
+ * The one definition for every format.
+ */
+export function isLocationField(name: string): boolean {
+  if (/^original_/i.test(name)) return true;
+  const tokens = fieldTokens(name);
+  const last = tokens[tokens.length - 1];
+  if (last === undefined) return false;
+  if (LOCATION_WORDS.has(last)) return true;
+  // Words run together: `SDfilepath`, `hdmfile`, `chanfile`, `datadir`.
+  return ["filepath", "filename", "file", "dir", "folder"].some(
+    (w) => last.endsWith(w) && last.length > w.length && !NOT_LOCATIONS.has(last),
+  );
+}
+
+/** Words that end like a location word and are not one. */
+const NOT_LOCATIONS: ReadonlySet<string> = new Set(["profile", "profiles", "redir"]);
