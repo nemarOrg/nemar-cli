@@ -256,7 +256,9 @@ describe("MATLAB v7.3 character arrays (HDF5 walker, matlabChars)", () => {
     );
     expect(expected.length).toBeGreaterThan(300);
     // The history, the comments and the edited fields are over the numeric rule's 64 elements.
-    expect(expected.some((e) => e.path === "/EEG/history" && e.value[0]!.length > 64)).toBe(true);
+    expect(expected.some((e) => e.path === "/EEG/history" && (e.value[0]?.length ?? 0) > 64)).toBe(
+      true,
+    );
     for (const e of expected) expect(got.get(e.path), e.path).toEqual(e.value);
   });
 
