@@ -177,7 +177,7 @@ describe.skipIf(!awsInstalled)("the finalize publish gate", () => {
         "Refusing to register: those keys would be advertised as NEMAR content that no clone can fetch.",
         "Re-run the copy phase, or prepare if the content exists only in a clone.",
         "If the copy phase cannot get them, check whether OpenNeuro still serves them before assuming a NEMAR bug:",
-        `\`nemar admin fleet content-recovery ${ID}\` reports, per key, whether any recorded source is readable.`,
+        `\`nemar admin rework annex content-recovery ${ID}\` reports, per key, whether any recorded source is readable.`,
       ].join(" "),
     );
     expect(classifyImportFailure({ stage: "finalize", lastError: gate.message }).cause).toBe(

@@ -75,8 +75,7 @@ import type {
   StartReviewResponse,
   WaiveNamingResponse,
 } from "../../../shared/contract/pr-review-admin.js";
-import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
-import type { NeurobagelWeekly } from "../../../shared/contract/weekly-attention.js";
+import type { NeurobagelWeekly, RfcWeekFacts } from "../../../shared/contract/weekly-attention.js";
 import type { RepullWeekFacts } from "../../../shared/repull-observability.js";
 import type {
   UpstreamFleetSummary,
@@ -320,7 +319,7 @@ export async function setAccountKind(
   );
 }
 
-/** The fields `nemar admin doctor kinds` reads off `GET
+/** The fields `nemar admin users kind-check` reads off `GET
  *  /admin/users/:username` (epic #1272 phase 4, #1284 review; ADR 0048).
  *  The route selects every NON-SECRET column (`ADMIN_USER_NON_SECRET_SELECT`;
  *  credentials are never returned, ADR 0096) plus two computed columns, so
@@ -377,26 +376,6 @@ export async function revokeKeyFor(username: string, id: number): Promise<{ ok: 
 // ============================================================================
 // Admin - Repository Management
 // ============================================================================
-
-export interface PublishDatasetResponse {
-  success: boolean;
-  message: string;
-  dataset_id: string;
-  github_url: string;
-  s3_url: string;
-}
-
-/**
- * Publish a dataset (make public) - admin only
- * This is a one-way operation that cannot be undone
- */
-export async function publishDataset(datasetId: string): Promise<PublishDatasetResponse> {
-  return request<PublishDatasetResponse>(
-    `/datasets/${datasetId}/publish`,
-    { method: "POST" },
-    true,
-  );
-}
 
 // ============================================================================
 // Admin - CI Management
@@ -960,7 +939,7 @@ export async function verifyImport(datasetId: string): Promise<ImportVerifyRespo
 }
 
 /**
- * Push `next_retry_at` forward for datasets `recover --execute` just
+ * Push `next_retry_at` forward for datasets `rework recover --apply` just
  * dispatched out-of-band, so the Phase-2 retry cron doesn't re-dispatch the
  * same onboard-openneuro.yml run on its next tick (#981).
  */
@@ -2350,6 +2329,9 @@ export interface WeeklySummaryResponse {
      *  and fixed words; null when it could not be read, and absent from an older backend, which is
      *  also unknown. Never rendered as zero. */
     repulls?: RepullWeekFacts | null;
+    /** The RFC clock (the RFCs open or awaiting a decision; whether `rfc-clock` still runs); null
+     *  when it could not be read, and absent from an older backend, which is also unknown. */
+    rfcs?: RfcWeekFacts | null;
     errors: { stage: string; error: string }[];
   } | null;
   issue: { number: number | null; action: "created" | "would-create" | "already-filed" } | null;
@@ -2369,59 +2351,6 @@ export async function importWeeklySummary(options?: {
   return request<WeeklySummaryResponse>(
     `/admin/imports/weekly-summary${query}`,
     { method: "POST", headers: { "Content-Type": "application/json" } },
-    true,
-  );
-}
-
-// ============================================================================
-// Researcher-name backfill (#1255, epic #1250)
-// ============================================================================
-
-export interface BackfillNameResult {
-  id: number;
-  username: string | null;
-  email: string;
-  orcid: string;
-  outcome: BackfillNameOutcome;
-  given_name?: string | null;
-  family_name?: string | null;
-  error?: string;
-}
-
-export interface BackfillNamesResponse {
-  apply: boolean;
-  scanned: number;
-  filled: number;
-  would_fill: number;
-  no_public_name: number;
-  lookup_failed: number;
-  /** Rows whose name UPDATE threw. Optional: a backend that predates #1274 had
-   *  no such outcome -- one failed write 500ed the whole batch. */
-  write_failed?: number;
-  /** Candidates still missing a name after this batch; `null` when the count
-   *  query itself failed (never confuse that with "nothing left"). */
-  remaining: number | null;
-  /** Set when a non-fatal part of the batch failed, e.g. the remaining count. */
-  warning?: string;
-  results: BackfillNameResult[];
-}
-
-/** Fill NULL researcher names from the public ORCID record. Dry run unless
- *  `apply` is true. */
-export async function backfillUserNames(options?: {
-  apply?: boolean;
-  limit?: number;
-}): Promise<BackfillNamesResponse> {
-  return request<BackfillNamesResponse>(
-    "/admin/users/backfill-names",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        apply: options?.apply ?? false,
-        ...(options?.limit != null ? { limit: options.limit } : {}),
-      }),
-    },
     true,
   );
 }

@@ -1,11 +1,15 @@
 /**
  * Which subcommands a command group leads with in plain `--help`.
  *
- * `nemar admin` carries 43 subcommands and `nemar dataset` 21, and most of
- * them are not what anyone came for: a one-off backfill, a sweep that runs
- * from cron and is invoked by hand about once a year, a git-level escape
- * hatch. Listing all of them flat makes the three or four commands people
+ * `nemar dataset` carries about 21 subcommands, and most of them are not what
+ * anyone came for: a git-level escape hatch, a command run a handful of times
+ * a year. Listing all of them flat makes the three or four commands people
  * actually type as hard to find as the rest.
+ *
+ * `nemar admin` used to be folded the same way, when it carried about 50
+ * top-level commands. ADR 0135 grouped it into fourteen objects, each a short
+ * line, so its plain `--help` now lists all of them and it has no entry here
+ * (`test/admin-write-flag.unit.test.ts` pins the fourteen).
  *
  * So plain `--help` renders the names below, in the order they appear here,
  * and folds everything else into a single comma-separated "More commands"
@@ -31,23 +35,4 @@ export const COMMON_COMMANDS: Readonly<Record<string, readonly string[]>> = {
   // The deposit-then-consume arc, in the order a depositor meets it, with the
   // two commands a consumer types (search, download) kept adjacent.
   dataset: ["search", "download", "upload", "validate", "status", "list"],
-
-  // Day-to-day operator work: the user queue, the publication lifecycle (`repo`: publish,
-  // unpublish, withdraw, restore), the pull-request queue, DOIs, and the two
-  // destructive-but-routine dataset actions. Everything under `import*`, every `*-sweep`,
-  // every `backfill-*`, and the fleet/exemplar/zarr/s3 groups are deliberately absent --
-  // they are run from cron or a handful of times a year.
-  admin: [
-    "users",
-    "approve",
-    "revoke",
-    "repo",
-    "pr-reviews",
-    "mail",
-    "doi",
-    "make-public",
-    "delete-dataset",
-    "notify",
-    "doctor",
-  ],
 };

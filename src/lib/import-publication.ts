@@ -308,9 +308,9 @@ export function describePublicationDecision(id: string, d: PublicationDecision):
       return "Identifier screen: blocked; publication not approved. The data must be corrected and publication requested again.";
     case "review":
       return d.reason === "history-holds-originals" || d.reason === "no-scrub-record"
-        ? `Import held (${d.reason}); the publication request was denied with that reason. An admin decides: nemar admin repo publish list`
-        : `Identifier screen: review (${d.reason}); publication not approved. An admin decides: nemar admin repo publish list`;
+        ? `Import held (${d.reason}); the publication request was denied with that reason. An admin decides: nemar admin dataset publish list`
+        : `Identifier screen: review (${d.reason}); publication not approved. An admin decides: nemar admin dataset publish list`;
     case "unchecked":
-      return `Identifier screen: unchecked (${d.reason}); publication not approved. An admin decides: nemar admin repo publish screen ${id}`;
+      return `Identifier screen: unchecked (${d.reason}); publication not approved. An admin decides: nemar admin dataset publish screen ${id}`;
   }
 }

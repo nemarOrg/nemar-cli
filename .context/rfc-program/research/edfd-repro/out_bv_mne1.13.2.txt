@@ -1,0 +1,6 @@
+mne 1.13.2
+bv_cont n= 1000 placement_error vs wall-clock = 0.0 s | value@idx500 = 5.0 | annotations: [(2.0, 'Stimulus/S1')] | meas_date: 2020-01-01 12:00:00+00:00
+bv_gap n= 1000 placement_error vs wall-clock = 5.0 s | value@idx500 = 10.0 | annotations: [(2.0, 'Stimulus/S1'), (5.0, 'New Segment/'), (7.0, 'Stimulus/S2')] | meas_date: 2020-01-01 12:00:00+00:00
+  marker Stimulus/S1 at axis 2.0 s marks sample whose wall-clock is 2.0 s (seg-relative +2.0 s)
+  marker Stimulus/S2 at axis 7.0 s marks sample whose wall-clock is 12.0 s (seg-relative +2.0 s)
+biosigio BV events: [[2.0, 'Stimulus/S1'], [5.0, 'New Segment/'], [7.0, 'Stimulus/S2']] duration 10.0

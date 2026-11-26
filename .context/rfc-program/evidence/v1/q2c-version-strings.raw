@@ -1,0 +1,139 @@
+[34m🔧 Using account: [1m[33msccn[39m[34m[22m[39m
+[34m⚡ Running: wrangler d1 execute nemar-db --remote --json --command SELECT substr(dataset_id,1,2) AS prefix, version, count(*) AS n FROM dataset_versions GROUP BY prefix, version ORDER BY prefix, version -c wrangler-sccn.toml[39m
+
+[
+  {
+    "results": [
+      {
+        "prefix": "nm",
+        "version": "1.0.0",
+        "n": 259
+      },
+      {
+        "prefix": "nm",
+        "version": "1.0.1",
+        "n": 262
+      },
+      {
+        "prefix": "nm",
+        "version": "1.0.2",
+        "n": 225
+      },
+      {
+        "prefix": "nm",
+        "version": "1.0.3",
+        "n": 126
+      },
+      {
+        "prefix": "nm",
+        "version": "1.0.4",
+        "n": 69
+      },
+      {
+        "prefix": "nm",
+        "version": "1.0.5",
+        "n": 29
+      },
+      {
+        "prefix": "nm",
+        "version": "1.0.6",
+        "n": 9
+      },
+      {
+        "prefix": "nm",
+        "version": "1.0.7",
+        "n": 4
+      },
+      {
+        "prefix": "nm",
+        "version": "1.0.8",
+        "n": 2
+      },
+      {
+        "prefix": "nm",
+        "version": "1.1.0",
+        "n": 12
+      },
+      {
+        "prefix": "nm",
+        "version": "1.1.1",
+        "n": 4
+      },
+      {
+        "prefix": "nm",
+        "version": "1.1.2",
+        "n": 2
+      },
+      {
+        "prefix": "nm",
+        "version": "1.1.3",
+        "n": 2
+      },
+      {
+        "prefix": "nm",
+        "version": "1.1.4",
+        "n": 1
+      },
+      {
+        "prefix": "nm",
+        "version": "1.2.0",
+        "n": 2
+      },
+      {
+        "prefix": "nm",
+        "version": "1.2.1",
+        "n": 1
+      },
+      {
+        "prefix": "nm",
+        "version": "2.0.0",
+        "n": 5
+      },
+      {
+        "prefix": "on",
+        "version": "1.0.0",
+        "n": 589
+      },
+      {
+        "prefix": "on",
+        "version": "1.0.1",
+        "n": 7
+      },
+      {
+        "prefix": "on",
+        "version": "1.0.2",
+        "n": 11
+      },
+      {
+        "prefix": "on",
+        "version": "1.0.3",
+        "n": 2
+      },
+      {
+        "prefix": "on",
+        "version": "2.0.0",
+        "n": 5
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "WNAM",
+      "served_by_colo": "DFW",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 1.416
+      },
+      "duration": 1.416,
+      "changes": 0,
+      "last_row_id": 47,
+      "changed_db": false,
+      "size_after": 38813696,
+      "rows_read": 3256,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
+[32m[39m
+[32m✅ Command completed successfully[39m

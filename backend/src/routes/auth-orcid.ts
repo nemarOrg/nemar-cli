@@ -895,7 +895,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       // link_new says only that no oauth_identities row claims the iD. That
       // is not the same as unclaimed (#1254, ADR 0043): a row whose identity
       // row was removed while `users.orcid` stayed behind still holds the iD
-      // for citation and for `nemar admin duplicates`, and linking over it is
+      // for citation and for `nemar admin users duplicates`, and linking over it is
       // how one person ends up backing two accounts (production rows 42/43).
       // Checked here rather than inside the relink branch so it covers both a
       // first link and an explicit relink -- both write `users.orcid`.

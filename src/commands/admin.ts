@@ -6,16 +6,15 @@
  * Commands:
  * - nemar admin users              - List users (pending, approved, all), or search every field
  * - nemar admin users show/edit    - Look up one account's details; edit a closed set of fields
- * - nemar admin approve            - Approve a pending user
- * - nemar admin revoke             - Revoke user access
- * - nemar admin role               - Change a user's role (owner only)
- * - nemar admin s3 regenerate-iam  - Regenerate AWS credentials for a user
- * - nemar admin repo publish/unpublish/withdraw/restore - Dataset publication lifecycle
- * - nemar admin ci check/add       - Manage CI workflows
- * - nemar admin doi create/info/update/enrich - DOI management
- * - nemar admin revert             - Revert dataset to a previous version
- * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
- * - nemar admin email-preferences show/update - Email notification opt-out
+ * - nemar admin users approve      - Approve a pending user
+ * - nemar admin users revoke       - Revoke user access
+ * - nemar admin users role         - Change a user's role (owner only)
+ * - nemar admin dataset (alias repo) - One dataset: publish/unpublish/withdraw/restore, delete,
+ *   bulk-delete, reindex, doi, ci, s3 lock/credential-check, exemplar, doctor scan/fix
+ * - nemar admin rework            - Change an existing dataset: revert, recover [status], and
+ *   annex normalize/policy/key-registration/content-recovery
+ * - nemar admin users verify/kind/kind-check/keys/duplicates/backfill-usernames - Accounts
+ * - nemar admin users email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
  * - nemar admin pr-reviews          - Dataset pull requests awaiting approval, with the automated review
@@ -30,6 +29,7 @@ import { Command, Option } from "commander";
 import inquirer from "inquirer";
 import ora, { type Ora } from "ora";
 import { formatBytesCli } from "../../shared/bytes.js";
+import { accountCopy } from "../../shared/contract/account-copy.js";
 import {
   ADMIN_USER_DESCRIPTIVE_FIELDS,
   ADMIN_USER_IDENTITY_FIELDS,
@@ -94,7 +94,6 @@ import {
   type AvailabilityReport,
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
-  type BackfillNamesResponse,
   type BackfillUsernamesResponse,
   type BroadcastDryRunResponse,
   type BroadcastResponse,
@@ -135,7 +134,6 @@ import {
   availabilityReport,
   availabilityReportSweep,
   availabilityReportSweepReset,
-  backfillUserNames,
   backfillUsernames,
   bulkDeleteDatasets,
   changeUserRole,
@@ -173,7 +171,6 @@ import {
   listUsers,
   neurobagelRegenerate,
   neurobagelVerify,
-  publishDataset,
   publishZarrCatalog,
   recordingStatsSweep,
   recordingStatsSweepReset,
@@ -223,6 +220,7 @@ import {
   deleteNotice,
   listAdminNotices,
 } from "../lib/api/notices.js";
+import { addApplyOption } from "../lib/apply-flag.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -244,6 +242,7 @@ import {
 } from "../lib/git-annex/clone-push.js";
 import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
+import { registerMovedCommands } from "../lib/moved-commands.js";
 import {
   type RecoverDatasetEntry,
   loadRecoverDatasets,
@@ -304,31 +303,29 @@ Description:
   These commands require admin privileges.
 
 User Management:
-  users          - List users and their status
-  approve        - Approve a pending user registration
-  revoke         - Revoke user access
-  role           - Change a user's role (owner only: owner > admin > member)
+  users          - List and search accounts. Its subcommands: show, edit,
+                   approve, revoke, role, verify, kind, kind-check, keys,
+                   email-preferences, duplicates, backfill-usernames
 
 Dataset Management:
-  repo            - Dataset publication lifecycle (publish, unpublish, withdraw, restore)
-  ci              - Manage CI workflows (check status, deploy)
-  s3              - S3/IAM credential management
-  doi             - Create and manage DOIs for datasets
-  revert          - Revert dataset to previous version (via PR)
-  make-public     - Publish a dataset (pull it back with 'repo unpublish')
-  delete-dataset    - Delete a dataset and all associated resources
-  import-openneuro  - Import an OpenNeuro dataset into NEMAR
+  dataset           - One dataset (alias 'repo'): publish, unpublish, withdraw, restore,
+                      delete, reindex, doi, ci, s3, exemplar, doctor
+  rework            - Change an existing dataset: revert (via PR), recover, and
+                      annex normalize, policy, key-registration, content-recovery
+  import            - OpenNeuro imports: openneuro (import a dataset), status, rollback,
+                      retry, verify, coverage, weekly, triage
+  fleet             - Across all datasets: drift, enforce, require-review, revalidate,
+                      sweep, summary, zarr-catalog, e2e-test
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
   $ nemar admin users --role admin         # List all admins
-  $ nemar admin approve john_doe           # Approve a user
-  $ nemar admin approve --id 123           # Approve a web/ORCID user (no username)
-  $ nemar admin role john_doe admin        # Promote user to admin (owner only)
-  $ nemar admin repo unpublish nm000104    # Pull a published dataset back to private
-  $ nemar admin ci check nm000104          # Check CI status
-  $ nemar admin s3 regenerate-iam john_doe # Regenerate AWS credentials
-  $ nemar admin doi create nm000104        # Create concept DOI`,
+  $ nemar admin users approve john_doe     # Approve a user
+  $ nemar admin users approve --id 123     # Approve a web/ORCID user (no username)
+  $ nemar admin users role john_doe admin  # Promote user to admin (owner only)
+  $ nemar admin dataset unpublish nm000104 # Pull a published dataset back to private
+  $ nemar admin dataset ci check nm000104  # Check CI status
+  $ nemar admin dataset doi create nm000104 # Create concept DOI`,
   );
 
 /**
@@ -349,7 +346,7 @@ function requireAuth(): boolean {
 
 const adminUsersCommand = adminCommand
   .command("users")
-  .description("List and search NEMAR users; 'show' and 'edit' work on one account")
+  .description("List and search NEMAR accounts; its subcommands look up and manage them")
   // A stray word (`nemar admin users ada`) would otherwise be ignored and the
   // command would list EVERY account, which is the wrong answer to someone
   // looking for one person. Commander 12 allows excess arguments by default.
@@ -373,7 +370,7 @@ const adminUsersCommand = adminCommand
 Tiers (ADR 0040):
   browse   base tier: browse, dashboard, settings, CLI API key, and sandbox
            training (ADR 0040 phase 2, landed)
-  upload   an admin granted upload access; 'nemar admin approve' is the grant
+  upload   an admin granted upload access; 'nemar admin users approve' is the grant
   unknown  the API reported no tier for this account (a backend older than
            the tier split, or a rolling deploy)
 
@@ -605,7 +602,7 @@ Examples:
 
         // Web/ORCID accounts have username = NULL by design (#1012), so the
         // heading falls back to the email and carries the numeric id — the
-        // only key `nemar admin approve --id` can address them by. Printing
+        // only key `nemar admin users approve --id` can address them by. Printing
         // the raw field would put the literal "null" in the listing.
         const heading = safeText(user.username ?? user.email);
         // A search is how an admin finds the id `show` and `edit` take, so the
@@ -723,37 +720,37 @@ const LISTING_ONLY_OPTIONS: ReadonlyArray<{
   {
     key: "role",
     flag: "--role",
-    hint: "A role is changed with 'nemar admin role <username> <role>' (owners only).",
+    hint: "A role is changed with 'nemar admin users role <username> <role>' (owners only).",
   },
   {
     key: "kind",
     flag: "--kind",
-    hint: "An account kind is changed with 'nemar admin kind <username> <kind>' (owners only).",
+    hint: "An account kind is changed with 'nemar admin users kind <username> <kind>' (owners only).",
   },
   {
     key: "pending",
     flag: "--pending",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "verified",
     flag: "--verified",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "approved",
     flag: "--approved",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "revoked",
     flag: "--revoked",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "uploadAccess",
     flag: "--no-upload-access",
-    hint: "Upload access is granted with 'nemar admin approve'.",
+    hint: "Upload access is granted with 'nemar admin users approve'.",
   },
   { key: "awaitingApproval", flag: "--awaiting-approval" },
   // `show` honours this one (it can read a deleted account); `edit` cannot edit one.
@@ -949,8 +946,8 @@ Who can change what:
       key minting. An owner changes their own in Settings ('nemar auth profile').
 
 What this does NOT change (each has its own command):
-  role / status / upload access   nemar admin role | approve | revoke
-  account kind                    nemar admin kind
+  role / status / upload access   nemar admin users role | approve | revoke
+  account kind                    nemar admin users kind
   ORCID iD sign-in record         the person links it in Settings or with
                                   'nemar auth profile orcid link'; --orcid records
                                   an owner's attestation without that record, and
@@ -1095,7 +1092,7 @@ Examples:
 // Approve
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("approve")
   .description("Approve a pending user")
   .argument("[username]", "Username to approve (CLI accounts)")
@@ -1207,7 +1204,7 @@ adminCommand
 // Revoke
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("revoke")
   .description("Revoke user access")
   .argument("[username]", "Username to revoke (CLI accounts)")
@@ -1215,7 +1212,7 @@ adminCommand
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(async (username: string | undefined, options: ConfirmOptions & { id?: string }) => {
-    // Exactly one addressing key, the same rule `admin approve` enforces:
+    // Exactly one addressing key, the same rule `admin users approve` enforces:
     // username (CLI accounts) or --id (web/ORCID accounts, whose username is
     // NULL by design). Approval can reach those accounts by id, so revocation
     // has to as well (ADR 0040: revoke is the eraser of what approval wrote).
@@ -1292,7 +1289,7 @@ adminCommand
 // Role Management (Owner Only)
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("role")
   .description("Change a user's role (owner only)")
   .argument("<username>", "Username to change role for")
@@ -1313,9 +1310,9 @@ Rules:
   - Demoting a user revokes their tokens (they must re-login)
 
 Examples:
-  $ nemar admin role john_doe admin        # Promote to admin
-  $ nemar admin role john_doe member       # Demote to member
-  $ nemar admin role jane_doe owner -y     # Promote to owner (skip confirm)`,
+  $ nemar admin users role john_doe admin    # Promote to admin
+  $ nemar admin users role john_doe member   # Demote to member
+  $ nemar admin users role jane_doe owner -y # Promote to owner (skip confirm)`,
   )
   .action(async (username: string, role: string, options: { yes?: boolean }) => {
     if (!requireAuth()) return;
@@ -1364,7 +1361,7 @@ Examples:
 // Force Verify (Owner Only)
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("verify")
   .description("Mark a pending account's email as verified (owner only)")
   .argument("<id>", "Numeric user id (find it with 'nemar admin users --pending')")
@@ -1384,11 +1381,11 @@ self-verify flows where the person proved their own inbox.
 Rules:
   - Only owners; it asserts an inbox the person did not prove
   - Only pending accounts; use approve or revoke for the other tiers
-  - It grants no upload access: that is still 'nemar admin approve'
+  - It grants no upload access: that is still 'nemar admin users approve'
 
 Examples:
-  $ nemar admin verify 80
-  $ nemar admin verify 80 -y`,
+  $ nemar admin users verify 80
+  $ nemar admin users verify 80 -y`,
   )
   .action(async (idArg: string, options: ConfirmOptions) => {
     const id = Number.parseInt(idArg, 10);
@@ -1439,7 +1436,7 @@ Examples:
 // Account Kind (Owner Only) -- epic #1272 phase 4, #1284; ADR 0048
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("kind")
   .description("Change a user's account kind (owner only)")
   .argument("<username>", "Username to change the kind for")
@@ -1452,7 +1449,7 @@ adminCommand
 Kinds:
   person  - a human's own account (the default)
   service - operational automation; no human signs in to it directly, keys
-            are owner-minted with 'nemar admin keys create'
+            are owner-minted with 'nemar admin users keys create'
   test    - a human's secondary persona; signs in and uploads like a person,
             but on production may only own xx sandbox datasets
 
@@ -1464,9 +1461,9 @@ Rules:
   - Keys are not revoked on a kind change
 
 Examples:
-  $ nemar admin kind cool-vibers test      # Mark a persona account
-  $ nemar admin kind nemarAdmin service    # Mark an operational account
-  $ nemar admin kind cool-vibers person -y # Revert (skip confirm)`,
+  $ nemar admin users kind cool-vibers test      # Mark a persona account
+  $ nemar admin users kind nemarAdmin service    # Mark an operational account
+  $ nemar admin users kind cool-vibers person -y # Revert (skip confirm)`,
   )
   .action(async (username: string, kindArg: string, options: ConfirmOptions) => {
     if (!requireAuth()) return;
@@ -1543,7 +1540,7 @@ adminKeysCommand
         // either side of that commit -- the key may already exist even
         // though this command never saw the response (epic #1272 phase 4,
         // #1284 review).
-        0: `The key may have been minted before the connection dropped; run \`nemar admin keys list ${username}\` before retrying.`,
+        0: `The key may have been minted before the connection dropped; run \`nemar admin users keys list ${username}\` before retrying.`,
       });
     }
   });
@@ -1585,7 +1582,7 @@ adminKeysCommand
   .command("revoke")
   .description("Revoke one of a target account's keys")
   .argument("<username>", "Username of the account")
-  .argument("<id>", "Key row id (from 'nemar admin keys list')")
+  .argument("<id>", "Key row id (from 'nemar admin users keys list')")
   .action(async (username: string, idStr: string) => {
     if (!requireAuth()) return;
 
@@ -1607,7 +1604,7 @@ adminKeysCommand
     }
   });
 
-adminCommand.addCommand(adminKeysCommand);
+adminUsersCommand.addCommand(adminKeysCommand);
 
 // ============================================================================
 // Documentation retrieval
@@ -1722,18 +1719,41 @@ both faster and easier on the rate limit than one command per page.`,
   });
 
 // ============================================================================
-// S3 / IAM Management
+// Dataset group (`admin dataset`, alias `repo`; ADR 0135)
 // ============================================================================
 
-const s3Command = new Command("s3").description("S3 and IAM credential management");
+const datasetGroupCommand = new Command("dataset")
+  .alias("repo")
+  .description("One dataset: publication lifecycle, DOIs, CI, S3 lock, deletion and repairs");
 
-s3Command
-  .command("regenerate-iam")
-  .description("Regenerate AWS IAM credentials for a user")
-  .argument("<username>", "Username to regenerate credentials for")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(regenerateIamAction);
+adminCommand.addCommand(datasetGroupCommand);
+
+datasetGroupCommand.addCommand(publishCommand);
+
+// ============================================================================
+// Rework group (`admin rework`; ADR 0135 decision 3): operations that change the content or
+// history of a dataset that already exists.
+// ============================================================================
+
+const reworkCommand = new Command("rework").description(
+  "Change the content or history of an existing dataset: revert, annex repairs, recovery",
+);
+
+adminCommand.addCommand(reworkCommand);
+
+const reworkAnnexCommand = new Command("annex").description(
+  "Repair a dataset's git-annex: normalize, policy, key registration, content recovery",
+);
+
+reworkCommand.addCommand(reworkAnnexCommand);
+
+// ============================================================================
+// S3: Object Lock and credential checks for one dataset (`admin dataset s3`)
+// ============================================================================
+
+const s3Command = new Command("s3").description(
+  "S3 Object Lock and credential checks for one dataset",
+);
 
 s3Command
   .command("lock")
@@ -1796,8 +1816,8 @@ its session token -- S3 refuses such a request with a bare 403 even on an object
 that is anonymously readable.
 
 Examples:
-  $ nemar admin s3 credential-check on007788
-  $ nemar admin s3 credential-check nm099999
+  $ nemar admin dataset s3 credential-check on007788
+  $ nemar admin dataset s3 credential-check nm099999
 `,
   )
   .action(async (datasetId: string) => {
@@ -1877,35 +1897,7 @@ Examples:
     }
   });
 
-adminCommand.addCommand(s3Command);
-
-// Hidden alias for backward compatibility
-adminCommand
-  .command("regenerate-iam", { hidden: true })
-  .argument("<username>")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(regenerateIamAction);
-
-async function regenerateIamAction(_username: string, _options: ConfirmOptions) {
-  if (!requireAuth()) return;
-
-  console.log(chalk.yellow("\nThis command is deprecated.\n"));
-  console.log("S3 access is now managed through backend-scoped credentials.");
-  console.log("Per-user IAM credentials are no longer needed.");
-  console.log();
-  console.log(chalk.dim("Users can upload datasets without any IAM setup."));
-}
-
-// ============================================================================
-// Repository Management
-// ============================================================================
-
-const repoCommand = new Command("repo").description(
-  "Dataset publication lifecycle: publish, unpublish, withdraw, restore",
-);
-
-adminCommand.addCommand(repoCommand);
+datasetGroupCommand.addCommand(s3Command);
 
 // ============================================================================
 // CI Management
@@ -1944,7 +1936,9 @@ ciCommand
           console.log(`      URL:    ${chalk.dim(result.bids_validation.url)}`);
         }
       } else {
-        console.log(`      ${chalk.dim("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
+        console.log(
+          `      ${chalk.dim("Not deployed. Use 'nemar admin dataset ci add' to deploy.")}`,
+        );
       }
 
       // Version Check
@@ -1952,7 +1946,9 @@ ciCommand
       const versionIcon = versionPresent ? chalk.green("[x]") : chalk.red("[ ]");
       console.log(`  ${versionIcon} Version Check`);
       if (!versionPresent) {
-        console.log(`      ${chalk.dim("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
+        console.log(
+          `      ${chalk.dim("Not deployed. Use 'nemar admin dataset ci add' to deploy.")}`,
+        );
       }
 
       console.log();
@@ -2061,7 +2057,7 @@ ciCommand
       console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
       console.log(
         chalk.dim(
-          "  (post-deploy parseability poll skipped for --all; run 'nemar admin ci validate <id>' per dataset)",
+          "  (post-deploy parseability poll skipped for --all; run 'nemar admin dataset ci validate <id>' per dataset)",
         ),
       );
       console.log();
@@ -2078,7 +2074,7 @@ ciCommand
       // Fleet deploys always skip the parseability poll. With many datasets
       // the per-dataset 2.5–7.5 s wait adds up; users running --all typically
       // just want fast confirmation of commits. Admins can run
-      // `nemar admin ci validate <id>` on individual datasets afterward.
+      // `nemar admin dataset ci validate <id>` on individual datasets afterward.
       // skipValidate is intentionally unused here — --no-validate accepts but
       // is a no-op on the fleet path (consistent with what the help text
       // says).
@@ -2312,7 +2308,7 @@ ciCommand
     }
   });
 
-adminCommand.addCommand(ciCommand);
+datasetGroupCommand.addCommand(ciCommand);
 
 // ============================================================================
 // DOI Management
@@ -2326,7 +2322,6 @@ doiCommand
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("--title <title>", "DOI title (defaults to dataset name)")
   .option("--description <desc>", "DOI description")
-  .option("--provider <provider>", "DOI provider: ezid (default) or zenodo", "ezid")
   .option("--sandbox", "Use sandbox/test DOI")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
@@ -2336,7 +2331,6 @@ doiCommand
       options: {
         title?: string;
         description?: string;
-        provider?: string;
         sandbox?: boolean;
       } & ConfirmOptions,
     ) => {
@@ -2389,19 +2383,16 @@ doiCommand
       }
       console.log();
 
-      // Enhanced sandbox warning
-      const provider = (options.provider === "zenodo" ? "zenodo" : "ezid") as "ezid" | "zenodo";
+      // EZID is the registrar (ADR 0007); the backend refuses a Zenodo concept DOI, so there is
+      // no provider to choose.
+      const provider = "ezid";
 
       if (options.sandbox) {
         console.log(chalk.yellow("━".repeat(60)));
         console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
         console.log(chalk.yellow("━".repeat(60)));
-        if (provider === "zenodo") {
-          console.log(chalk.yellow("  • Using Zenodo sandbox (sandbox.zenodo.org)"));
-        } else {
-          console.log(chalk.yellow("  • Using EZID test shoulder (doi:10.5072/FK2)"));
-          console.log(chalk.yellow("  • Test DOIs auto-delete after 2 weeks"));
-        }
+        console.log(chalk.yellow("  • Using EZID test shoulder (doi:10.5072/FK2)"));
+        console.log(chalk.yellow("  • Test DOIs auto-delete after 2 weeks"));
         console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
         console.log(chalk.yellow("  • DOI will NOT resolve in production"));
         console.log(chalk.yellow("  • Use this for testing workflows only"));
@@ -2557,7 +2548,7 @@ doiCommand
         }
       } else {
         console.log(chalk.yellow("No concept DOI created yet"));
-        console.log(chalk.dim("  Use 'nemar admin doi create' to create one"));
+        console.log(chalk.dim("  Use 'nemar admin dataset doi create' to create one"));
       }
 
       console.log();
@@ -2591,7 +2582,7 @@ doiCommand
   .option("--make-public", "Transition DOI from reserved to public (permanent)")
   .option(
     "--unavailable",
-    "Tombstone the concept DOI (EZID _status=unavailable); concept-only, reversible via --make-public. For a full withdrawal (visibility + every version DOI) use 'nemar admin repo withdraw' instead.",
+    "Tombstone the concept DOI (EZID _status=unavailable); concept-only, reversible via --make-public. For a full withdrawal (visibility + every version DOI) use 'nemar admin dataset withdraw' instead.",
   )
   .option("--refresh", "Refresh metadata from dataset_description.json and .nemar/metadata.json")
   .option(YES_OPTION, YES_DESCRIPTION)
@@ -3097,7 +3088,7 @@ doiCommand
         } else if (doiFetchFailed) {
           console.log(
             chalk.yellow(
-              "  DOI refresh skipped: could not verify DOI exists. Run 'nemar admin doi update --refresh' manually.",
+              "  DOI refresh skipped: could not verify DOI exists. Run 'nemar admin dataset doi update --refresh' manually.",
             ),
           );
         }
@@ -3112,15 +3103,13 @@ doiCommand
     },
   );
 
-adminCommand.addCommand(doiCommand);
-
-repoCommand.addCommand(publishCommand);
+datasetGroupCommand.addCommand(doiCommand);
 
 // ============================================================================
 // Revert (Admin Only)
 // ============================================================================
 
-adminCommand
+reworkCommand
   .command("revert")
   .description("Revert a dataset to a previous version (creates PR for review)")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
@@ -3400,147 +3389,11 @@ adminCommand
   );
 
 // ============================================================================
-// Make Public (One-Way Publish)
-// ============================================================================
-
-adminCommand
-  .command("make-public")
-  .description(
-    "Publish a dataset (make repository and data public); pull back with 'repo unpublish'",
-  )
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .addHelpText(
-    "after",
-    `
-Description:
-  Publish a dataset by making both the GitHub repository and S3 data publicly accessible.
-
-  ${chalk.yellow("WARNING: Publication mints DOIs that stay registered even if the dataset is later pulled back with 'nemar admin repo unpublish'")}
-
-  Once published:
-  - GitHub repository will be publicly visible
-  - S3 data files will be publicly downloadable
-  - git-annex will use public URLs for downloads
-
-  Publication leaves marks that unpublishing does not remove:
-  - Data may be cached, indexed, or linked externally
-  - Minted DOIs stay registered (DOI permanence); 'repo unpublish' never calls the registrar
-
-  Use this when:
-  - Dataset has been reviewed and validated
-  - Ready for public release and citation
-  - Associated with a DOI (concept or version)
-
-Requirements:
-  - Dataset must not be a sandbox dataset
-  - Dataset must have a GitHub repository
-  - Admin only; owners request publication via 'nemar dataset publish request'
-
-Examples:
-  $ nemar admin make-public nm000104
-
-  This will prompt for confirmation by requiring you to type
-  the dataset ID to confirm. Publication mints DOIs, which stay registered;
-  'nemar admin repo unpublish' pulls the dataset back to private afterwards.
-`,
-  )
-  .action(async (datasetIdArg: string) => {
-    if (!requireAuth()) return;
-
-    const datasetId = datasetIdArg.trim();
-
-    // Fetch dataset details first
-    let dataset: Dataset;
-    try {
-      dataset = await getDataset(datasetId);
-    } catch (error) {
-      if (error instanceof ApiError && error.statusCode === 404) {
-        console.error(chalk.red(`Dataset '${datasetId}' not found`));
-      } else {
-        console.error(
-          chalk.red(
-            `Failed to fetch dataset: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
-      }
-      process.exit(1);
-    }
-
-    // Show warning and dataset info
-    console.log(
-      chalk.yellow(
-        "\nWARNING: Publishing mints DOIs that stay registered. The dataset can be pulled back to private with 'nemar admin repo unpublish', but its DOIs remain.\n",
-      ),
-    );
-    console.log("This will:");
-    console.log("  1. Make the GitHub repository PUBLIC");
-    console.log("  2. Allow public S3 access to all dataset files");
-    console.log("  3. Update git-annex configuration for web access\n");
-    console.log(`Dataset: ${chalk.cyan(dataset.dataset_id)} - ${dataset.name}`);
-    if (dataset.owner_username) {
-      console.log(`Owner: ${dataset.owner_username}`);
-    }
-    if (dataset.github_repo) {
-      console.log(`Repository: ${dataset.github_repo}`);
-    }
-    console.log();
-
-    // Require typing dataset ID to confirm
-    const confirmation = await inquirer.prompt([
-      {
-        type: "input",
-        name: "datasetId",
-        message: `Type '${datasetId}' to confirm:`,
-        validate: (input: string) => {
-          if (input.trim() === datasetId) {
-            return true;
-          }
-          return `Please type exactly '${datasetId}' to confirm`;
-        },
-      },
-    ]);
-
-    if (confirmation.datasetId !== datasetId) {
-      console.log(chalk.dim("Cancelled."));
-      process.exit(0);
-    }
-
-    const spinner = ora("Publishing dataset...").start();
-
-    try {
-      const result = await publishDataset(datasetId);
-      spinner.succeed(chalk.green("Dataset published successfully"));
-      console.log(`\nGitHub: ${chalk.cyan(result.github_url)}`);
-      console.log(`S3: ${chalk.cyan(result.s3_url)}`);
-    } catch (error) {
-      spinner.fail(chalk.red("Failed to publish dataset"));
-      if (error instanceof ApiError) {
-        console.error(chalk.red(`\n${error.message}`));
-        if (error.details) {
-          console.error(chalk.dim(JSON.stringify(error.details, null, 2)));
-        }
-        if (error.statusCode === 403) {
-          console.log(
-            chalk.dim(
-              "  Admin only; owners request publication via 'nemar dataset publish request'",
-            ),
-          );
-        } else if (error.statusCode === 400 && error.message.includes("sandbox")) {
-          console.log(chalk.dim("  Sandbox datasets cannot be published"));
-        }
-      } else {
-        console.error(chalk.red(`\n${error instanceof Error ? error.message : String(error)}`));
-      }
-      process.exit(1);
-    }
-  });
-
-// ============================================================================
 // Delete Dataset (Admin/Owner Only)
 // ============================================================================
 
-adminCommand
-  .command("delete-dataset")
+datasetGroupCommand
+  .command("delete")
   .description("Delete a dataset and all associated resources (GitHub, S3, D1)")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000108)")
   .option("--force", "Force deletion of published datasets with DOIs (owner only)")
@@ -3639,7 +3492,7 @@ adminCommand
 // Bulk Delete
 // ============================================================================
 
-adminCommand
+datasetGroupCommand
   .command("bulk-delete")
   .description("Delete multiple phantom/orphaned datasets at once (owner only)")
   .argument("<dataset-ids>", "Comma-separated dataset IDs (e.g., nm000153,nm000154,nm000155)")
@@ -3764,7 +3617,7 @@ function printTransitionResult(
   }
 }
 
-/** Print one unpublish result (the plan on a dry run, the outcome on an execute). */
+/** Print one unpublish result (the plan on a dry run, the outcome on an --apply run). */
 function printUnpublishResult(tag: string, result: UnpublishResponse): void {
   if ("skipped" in result) {
     console.log(`  ${chalk.yellow("skipped".padEnd(8))} ${result.dataset_id}: ${result.skipped}`);
@@ -3799,14 +3652,17 @@ function printUnpublishResult(tag: string, result: UnpublishResponse): void {
     console.log(chalk.dim(`    ${UNPUBLISH_CACHE_NOTE}`));
 }
 
-repoCommand
-  .command("unpublish")
-  .description(
-    "Authors pull a dataset back: private everywhere, publication state reset, DOIs untouched, can be published again. A broken or removed dataset is 'withdraw' instead. Dry-run by default.",
-  )
-  .argument("<dataset-id>", "Dataset id (e.g., nm000104)")
-  .option("--reason <reason>", "Why it is being unpublished (required with --execute)")
-  .option("--execute", "Actually apply the unpublish (default is a dry run)")
+addApplyOption(
+  datasetGroupCommand
+    .command("unpublish")
+    .description(
+      "Authors pull a dataset back: private everywhere, publication state reset, DOIs untouched, can be published again. A broken or removed dataset is 'withdraw' instead. Dry-run by default.",
+    )
+    .argument("<dataset-id>", "Dataset id (e.g., nm000104)")
+    .option("--reason <reason>", "Why it is being unpublished (required with --apply)"),
+  "Actually apply the unpublish (default is a dry run)",
+  ["--execute"],
+)
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .option("--json", "Output raw JSON")
@@ -3821,22 +3677,22 @@ Unpublish versus withdraw:
              Undo with 'restore'.
 
 Also repairs a dataset that was made private by a bare visibility change and still carries a
-publication record. Making a dataset public is what publishing does ('admin repo publish').
+publication record. Making a dataset public is what publishing does ('admin dataset publish').
 
 Examples:
-  $ nemar admin repo unpublish nm000123                                      # dry run
-  $ nemar admin repo unpublish nm000123 --execute --reason "authors request"`,
+  $ nemar admin dataset unpublish nm000123                                    # dry run
+  $ nemar admin dataset unpublish nm000123 --apply --reason "authors request"`,
   )
   .action(
     async (
       datasetId: string,
-      options: { reason?: string; execute?: boolean; json?: boolean } & ConfirmOptions,
+      options: { reason?: string; apply?: boolean; json?: boolean } & ConfirmOptions,
     ) => {
       if (!requireAuth()) return;
 
-      const dryRun = !options.execute;
+      const dryRun = !options.apply;
       if (!dryRun && !options.reason) {
-        console.log(chalk.red("Error: --reason is required with --execute"));
+        console.log(chalk.red("Error: --reason is required with --apply"));
         process.exit(1);
       }
 
@@ -3869,22 +3725,25 @@ Examples:
         console.log();
         printUnpublishResult(dryRun ? "[dry-run] " : "", result);
         if (dryRun && !("skipped" in result)) {
-          console.log(chalk.dim("\nNothing was changed. Re-run with --execute --reason <why>."));
+          console.log(chalk.dim("\nNothing was changed. Re-run with --apply --reason <why>."));
         }
       }
       if (!("skipped" in result) && result.visibility.status === "failed") process.exit(1);
     },
   );
 
-repoCommand
-  .command("withdraw")
-  .description(
-    "Withdraw a BROKEN or removed published dataset: private + EZID DOIs tombstoned (concept + every version). Authors pulling a dataset back use 'unpublish' instead. Dry-run by default.",
-  )
-  .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
-  .option("--all", "Target the still-withdrawn entries on the checked-in list")
-  .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)")
-  .option("--execute", "Actually apply the withdrawal (default is a dry run)")
+addApplyOption(
+  datasetGroupCommand
+    .command("withdraw")
+    .description(
+      "Withdraw a BROKEN or removed published dataset: private + EZID DOIs tombstoned (concept + every version). Authors pulling a dataset back use 'unpublish' instead. Dry-run by default.",
+    )
+    .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
+    .option("--all", "Target the still-withdrawn entries on the checked-in list")
+    .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)"),
+  "Actually apply the withdrawal (default is a dry run)",
+  ["--execute"],
+)
   .option("--force", "Allow a dataset id that is not on the checked-in withdrawn-datasets list")
   .option(
     "--withdrawn-file <path>",
@@ -3899,7 +3758,7 @@ repoCommand
       options: {
         all?: boolean;
         reason?: string;
-        execute?: boolean;
+        apply?: boolean;
         force?: boolean;
         withdrawnFile?: string;
         json?: boolean;
@@ -3944,7 +3803,7 @@ repoCommand
       }
       const targets = resolved.targets;
 
-      const dryRun = !options.execute;
+      const dryRun = !options.apply;
       const tag = dryRun ? "[dry-run] " : "";
 
       if (!dryRun) {
@@ -3989,14 +3848,17 @@ repoCommand
     },
   );
 
-repoCommand
-  .command("restore")
-  .description(
-    "Reverse a 'withdraw': public again and EZID DOIs restored (concept + every version). Not for an 'unpublish'; publish again instead. Dry-run by default.",
-  )
-  .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
-  .option("--all", "Target the still-withdrawn entries on the checked-in list")
-  .option("--execute", "Actually apply the restore (default is a dry run)")
+addApplyOption(
+  datasetGroupCommand
+    .command("restore")
+    .description(
+      "Reverse a 'withdraw': public again and EZID DOIs restored (concept + every version). Not for an 'unpublish'; publish again instead. Dry-run by default.",
+    )
+    .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
+    .option("--all", "Target the still-withdrawn entries on the checked-in list"),
+  "Actually apply the restore (default is a dry run)",
+  ["--execute"],
+)
   .option(
     "--withdrawn-file <path>",
     "Path to the withdrawn-datasets JSON (default: scripts/withdrawn-datasets.json)",
@@ -4009,7 +3871,7 @@ repoCommand
       ids: string[],
       options: {
         all?: boolean;
-        execute?: boolean;
+        apply?: boolean;
         withdrawnFile?: string;
         json?: boolean;
       } & ConfirmOptions,
@@ -4040,7 +3902,7 @@ repoCommand
         targets = ids;
       }
 
-      const dryRun = !options.execute;
+      const dryRun = !options.apply;
       const tag = dryRun ? "[dry-run] " : "";
 
       if (!dryRun) {
@@ -4085,24 +3947,8 @@ repoCommand
     },
   );
 
-// The old top-level spellings moved under `admin repo`. They stay as hidden
-// commands that do nothing and exit nonzero, so a script that still calls them
-// fails loudly instead of silently running a different command.
-for (const [name, replacement] of [
-  ["publish", "nemar admin repo publish"],
-  ["withdraw", "nemar admin repo withdraw"],
-  ["restore", "nemar admin repo restore"],
-] as const) {
-  adminCommand
-    .command(name, { hidden: true })
-    .allowUnknownOption()
-    .allowExcessArguments()
-    .action(() => {
-      console.error(chalk.red(`'nemar admin ${name}' moved to '${replacement}'. Nothing was run.`));
-      markReportedExit();
-      process.exit(1);
-    });
-}
+// The old top-level spellings of the lifecycle commands are stubs in the moved-command
+// table (src/lib/moved-commands.ts), registered at the end of this file.
 
 // ============================================================================
 // Import OpenNeuro
@@ -4169,8 +4015,8 @@ export function importTagOptionError(
 /**
  * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
  * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
- * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
- * (non---local) branch, a brand-new import, and `recover --execute` (Phase
+ * hardened in epic #967 Phases 1-3. Shared by `import openneuro`'s default
+ * (non---local) branch, a brand-new import, and `rework recover --apply` (Phase
  * 5, #972), a re-copy of an existing import whose S3 content was found
  * empty; both dispatch the SAME workflow, one gh run per batch.
  *
@@ -4213,12 +4059,20 @@ async function dispatchOpenNeuroImportWorkflow(
   return { ok: true };
 }
 
-adminCommand
-  .command("annex-normalize <datasetId>")
-  .description(
-    "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0060)",
+// Dry run by default since the admin tree restructure (ADR 0135): it commits to the dataset and
+// pushes, so `--apply` is what makes it write. `--dry-run`, the old preview flag, is still accepted
+// (hidden) and changes nothing, since a dry run is the default.
+addApplyOption(
+  reworkAnnexCommand
+    .command("normalize <datasetId>")
+    .description(
+      "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0060). Dry-run by default.",
+    ),
+  "Make the change: annex, upload, commit and push (default is a dry run that only reports)",
+)
+  .addOption(
+    new Option("--dry-run", "Clone and report what would change; touch nothing").hideHelp(),
   )
-  .option("--dry-run", "Clone and report what would change; touch nothing")
   .option("--dir <path>", "Working directory for the clone (reuse it to resume without re-cloning)")
   .option("--no-push", "Do everything except push, for a rehearsal")
   .option(
@@ -4230,6 +4084,7 @@ adminCommand
     "Move the content with `aws s3 sync` rather than git-annex's S3 client, using whatever the aws CLI on this machine is already configured with. Faster for a large migration, and the only option on a host with no NEMAR credentials; the default path mints credentials scoped to this dataset instead.",
   )
   .option("-y, --yes", "Skip the confirmation prompt")
+  .option(NO_OPTION, NO_DESCRIPTION)
   .addHelpText(
     "after",
     `
@@ -4246,14 +4101,15 @@ and the repository does not shrink. Tags, DOIs, archives and existing S3 objects
 are untouched.
 
 Examples:
-  $ nemar admin annex-normalize on007788 --dry-run
-  $ nemar admin annex-normalize on007788 --dir /tmp/normalize-on007788
+  $ nemar admin rework annex normalize on007788                 # dry run
+  $ nemar admin rework annex normalize on007788 --apply --dir /tmp/normalize-on007788
 `,
   )
   .action(
     async (
       datasetId: string,
       options: {
+        apply?: boolean;
         dryRun?: boolean;
         dir?: string;
         push?: boolean;
@@ -4264,6 +4120,11 @@ Examples:
       },
     ) => {
       if (!requireAuth()) return;
+
+      if (options.apply && options.dryRun) {
+        console.error(chalk.red("Error: pass --apply or --dry-run, not both"));
+        process.exit(1);
+      }
 
       let maxBytes: number | undefined;
       if (options.normalizeMaxGb !== undefined) {
@@ -4334,8 +4195,10 @@ Examples:
         );
       }
 
-      if (options.dryRun) {
-        console.log(chalk.dim("--dry-run: stopping before any change."));
+      if (!options.apply) {
+        console.log(
+          chalk.dim("Dry run: stopping before any change. Re-run with --apply to make it."),
+        );
         return;
       }
 
@@ -4387,8 +4250,7 @@ Examples:
     },
   );
 
-adminCommand
-  .command("import-openneuro")
+const importOpenneuroCommand = new Command("openneuro")
   .description("Import an OpenNeuro dataset into NEMAR")
   .argument("<openneuro-ids>", "OpenNeuro dataset ID(s), comma-separated (e.g., ds007262,ds007263)")
   .option("--local", "Run import locally instead of dispatching GitHub Actions workflow")
@@ -4594,8 +4456,7 @@ adminCommand
 // E2E Test
 // ============================================================================
 
-adminCommand
-  .command("e2e-test")
+const e2eTestCommand = new Command("e2e-test")
   .description("Run end-to-end test against nm099999 (admin only)")
   .option("--verbose", "Show detailed output for each step")
   .option("--skip-reset", "Use existing nm099999 state (skip reset)")
@@ -4621,10 +4482,10 @@ Requirements:
   - Active nemar auth session
 
 Examples:
-  $ nemar admin e2e-test                    # Full test
-  $ nemar admin e2e-test --verbose          # With detailed output
-  $ nemar admin e2e-test --skip-cleanup     # Keep temp dirs for inspection
-  $ nemar admin e2e-test --skip-reset       # Reuse existing nm099999 state`,
+  $ nemar admin fleet e2e-test                 # Full test
+  $ nemar admin fleet e2e-test --verbose       # With detailed output
+  $ nemar admin fleet e2e-test --skip-cleanup  # Keep temp dirs for inspection
+  $ nemar admin fleet e2e-test --skip-reset    # Reuse existing nm099999 state`,
   )
   .action(async (options: { verbose?: boolean; skipReset?: boolean; skipCleanup?: boolean }) => {
     if (!requireAuth()) return;
@@ -4672,7 +4533,9 @@ Examples:
 // Import jobs (issue #754)
 // ============================================================================
 
-const importCommand = new Command("import").description("View and recover OpenNeuro import jobs");
+const importCommand = new Command("import").description(
+  "OpenNeuro imports: import a dataset, follow and recover its job, and the coverage, weekly and triage reports",
+);
 
 importCommand
   .command("status")
@@ -4857,6 +4720,7 @@ importCommand
   });
 
 adminCommand.addCommand(importCommand);
+importCommand.addCommand(importOpenneuroCommand);
 
 // ============================================================================
 // Dataset recovery (epic #967 phase 5, #972)
@@ -4865,7 +4729,7 @@ adminCommand.addCommand(importCommand);
 /** Default location of the checked-in recovery target list, resolved
  *  relative to this source file rather than cwd (mirrors
  *  defaultWithdrawnDatasetsPath, which shares this same shape). Shipped
- *  to npm (package.json "files") so `nemar admin recover` works from an
+ *  to npm (package.json "files") so `nemar admin rework recover` works from an
  *  installed build, not just a repo checkout -- the two layouts put this
  *  file at different depths from `import.meta.dir` (#1049):
  *   - source (`bun run src/index.ts`): this code lives at src/commands/, so
@@ -4887,10 +4751,13 @@ const recoverCommand = new Command("recover").description(
   "Re-copy epic #967 OpenNeuro imports published with 0-byte content, whose upstream is accessible (Phase 5, #972). Dry-run by default.",
 );
 
-recoverCommand
-  .argument("[ids...]", "Dataset id(s) to recover (omit when using --all)")
-  .option("--all", "Target every entry in the checked-in recover-datasets list")
-  .option("--execute", "Actually verify + dispatch the re-copy (default is a dry run)")
+addApplyOption(
+  recoverCommand
+    .argument("[ids...]", "Dataset id(s) to recover (omit when using --all)")
+    .option("--all", "Target every entry in the checked-in recover-datasets list"),
+  "Actually verify + dispatch the re-copy (default is a dry run)",
+  ["--execute"],
+)
   .option("--force", "Allow a dataset id that is not on the checked-in recover-datasets list")
   .option(
     "--recover-file <path>",
@@ -4907,22 +4774,22 @@ Description:
   datasets published with 0-byte content whose OpenNeuro upstream is still
   accessible today. A direct re-dispatch onto a still-'complete' import_jobs
   row silently no-ops the status callback (only a non-terminal row accepts
-  an update), so --execute FIRST forces a per-key S3 verify on every target
+  an update), so --apply FIRST forces a per-key S3 verify on every target
   (reclassifying a stale 'complete' row to 'incomplete'), THEN dispatches
   ONE batch 'gh workflow run onboard-openneuro.yml' for the whole set.
-  Afterward, treat 'nemar admin recover status' (datasets.data_complete) as
+  Afterward, treat 'nemar admin rework recover status' (datasets.data_complete) as
   the completion oracle, not import_jobs.status.
 
   The actual re-copy is production-only IN PRACTICE: outside production the
   target on###### ids have no import_jobs row (dev D1 is exemplars-only), so
   source-id resolution fails loudly before any dispatch. But verifyImport
-  itself is NOT environment-gated -- --execute's reclassify step ('complete'
+  itself is NOT environment-gated -- --apply's reclassify step ('complete'
   -> 'incomplete') runs against whatever backend the CLI is pointed at, so
-  only ever run --execute against production. A target already
+  only ever run --apply against production. A target already
   quarantined/blocklisted by the Phase 2 retry engine is not un-stuck by
   this reclassify (which only flips complete -> incomplete); trust
   datasets.data_complete, not import_jobs.status. Acceptance audit: run
-  'nemar admin data-integrity-sweep --reaudit' after the batch lands
+  'nemar admin fleet sweep data-integrity --reaudit' after the batch lands
   (--older-than 0 does NOT converge here -- its cutoff is relative to an
   ever-advancing now(), so a just-stamped row re-qualifies on the very next
   batch; --reaudit anchors the cutoff once so remaining reaches 0, #980).`,
@@ -4932,7 +4799,7 @@ Description:
       ids: string[],
       options: {
         all?: boolean;
-        execute?: boolean;
+        apply?: boolean;
         force?: boolean;
         recoverFile?: string;
         json?: boolean;
@@ -4968,7 +4835,7 @@ Description:
       }
       const targets = resolved.targets;
 
-      if (!options.execute) {
+      if (!options.apply) {
         // JSON first and exclusive: `recover --all --json | jq` must see pure
         // JSON on stdout, nothing else.
         if (options.json) {
@@ -4983,14 +4850,14 @@ Description:
         console.log(
           chalk.dim(
             "\nEach target: POST /admin/imports/:id/verify (reclassify), then one batch " +
-              "gh workflow run onboard-openneuro.yml for the whole set. Pass --execute to run.",
+              "gh workflow run onboard-openneuro.yml for the whole set. Pass --apply to run.",
           ),
         );
         return;
       }
 
       // Every human-readable console.log below is gated behind `!options.json`
-      // so `recover --execute --json | jq` sees pure JSON on stdout; the JSON
+      // so `rework recover --apply --json | jq` sees pure JSON on stdout; the JSON
       // result is assembled as the flow proceeds and printed once at the end
       // (it needs the dispatch/verify results, so it can't print up front the
       // way the dry-run branch above does). ora spinners write to stderr by
@@ -5130,7 +4997,7 @@ Description:
         console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
         console.log(
           chalk.dim(
-            "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --reaudit",
+            "  Watch progress with: nemar admin rework recover status  /  nemar admin fleet sweep data-integrity --reaudit",
           ),
         );
 
@@ -5259,7 +5126,7 @@ recoverStatusCommand.action(async (ids: string[]) => {
   console.log(chalk.bold(`\n${completeCount}/${results.length} data_complete`));
 });
 
-adminCommand.addCommand(recoverCommand);
+reworkCommand.addCommand(recoverCommand);
 
 // ============================================================================
 // Exemplar staging fleet (epic #923, Phase 5)
@@ -5468,14 +5335,14 @@ exemplarCommand
     }
   });
 
-adminCommand.addCommand(exemplarCommand);
+datasetGroupCommand.addCommand(exemplarCommand);
 
 // ============================================================================
 // Reindex (epic #417 phase 3): refresh enrichment +
 // Phase 2 metadata columns for one or many datasets.
 // ============================================================================
 
-/** The summary lines `nemar admin reindex` prints for one dataset. Pure, so
+/** The summary lines `nemar admin dataset reindex` prints for one dataset. Pure, so
  *  the wording operators act on (warnings, the lookup cap) is testable. */
 export function reindexLines(r: ReindexResponse, opts?: { showRef?: boolean }): string[] {
   const enrLabel = r.enrichment.status;
@@ -5540,7 +5407,7 @@ function printReindexLine(r: ReindexResponse, opts?: { showRef?: boolean }): voi
 // ============================================================================
 
 const fleetCommand = new Command("fleet").description(
-  "Governance drift reporting and enforcement (epic #713)",
+  "Across all datasets: governance drift and enforcement, sweeps, summary and Zarr catalog checks, the end-to-end test",
 );
 
 fleetCommand
@@ -6175,8 +6042,8 @@ fleetCommand
     );
   });
 
-fleetCommand
-  .command("annex-policy")
+reworkAnnexCommand
+  .command("policy")
   .description(
     "Report, and optionally fix, dataset repos that NEMAR's annex policy does not actually govern (#1374, ADR 0060)",
   )
@@ -6206,17 +6073,17 @@ without cloning anything, so a sweep of the fleet costs minutes.
                    One commit, no data moves, no S3 traffic.
   policy-and-data  ALSO keeps recordings in git. Skipped unless --include-data:
                    that needs credentials and an upload, which is
-                   nemar admin annex-normalize <id> with someone watching.
+                   nemar admin rework annex normalize <id> with someone watching.
 
 --apply pushes to main and to the git-annex branch for every dataset it touches,
 which starts that repo's BIDS validation. Run it in batches (--limit) rather than
 across 600 repositories at once (ADR 0020).
 
 Examples:
-  $ nemar admin fleet annex-policy                       # report the imported fleet
-  $ nemar admin fleet annex-policy --prefix nm           # report the uploaded fleet
-  $ nemar admin fleet annex-policy on001810 --apply      # fix one
-  $ nemar admin fleet annex-policy --apply --limit 10    # fix a batch
+  $ nemar admin rework annex policy                      # report the imported fleet
+  $ nemar admin rework annex policy --prefix nm          # report the uploaded fleet
+  $ nemar admin rework annex policy on001810 --apply     # fix one
+  $ nemar admin rework annex policy --apply --limit 10   # fix a batch
 `,
   )
   .action(
@@ -6451,7 +6318,7 @@ Examples:
       if (needsDataLeg.length > 0) {
         console.log(
           chalk.dim(
-            `  ${needsDataLeg.length} dataset(s) are not in this pass because they keep data in git: ${needsDataLeg.map((s) => s.datasetId).join(", ")}. Each needs the S3 leg (nemar admin annex-normalize <id>, or --include-data here).`,
+            `  ${needsDataLeg.length} dataset(s) are not in this pass because they keep data in git: ${needsDataLeg.map((s) => s.datasetId).join(", ")}. Each needs the S3 leg (nemar admin rework annex normalize <id>, or --include-data here).`,
           ),
         );
       }
@@ -6562,7 +6429,7 @@ Examples:
     },
   );
 
-fleetCommand
+reworkAnnexCommand
   .command("key-registration")
   .description(
     "Re-register annexed content NEMAR holds in S3 but never recorded in the location log (#1392)",
@@ -6628,10 +6495,10 @@ How presence is established:
   403 and 403 also means private, expired, or signed without a session token.
 
 Examples:
-  $ nemar admin fleet key-registration --prefix on --limit 10
-  $ nemar admin fleet key-registration --prefix on --limit 10 --apply
-  $ nemar admin fleet key-registration on000246 --apply
-  $ nemar admin fleet key-registration on004917 --retract-false-claims --apply
+  $ nemar admin rework annex key-registration --prefix on --limit 10
+  $ nemar admin rework annex key-registration --prefix on --limit 10 --apply
+  $ nemar admin rework annex key-registration on000246 --apply
+  $ nemar admin rework annex key-registration on004917 --retract-false-claims --apply
 `,
   )
   .action(async (datasetIds: string[], options) => {
@@ -6722,7 +6589,7 @@ Examples:
     if (sweep.tally.failed > 0) process.exitCode = 1;
   });
 
-fleetCommand
+reworkAnnexCommand
   .command("content-recovery")
   .description("Copy back annexed content the bucket never received, and prove each copy (#1396)")
   .argument("[dataset-id...]", "Datasets to act on")
@@ -6775,13 +6642,13 @@ Credentials:
   credentials only to list what the bucket already holds.
 
 Registering what it recovers:
-  this writes no location log. Run \`nemar admin fleet key-registration <id>
+  this writes no location log. Run \`nemar admin rework annex key-registration <id>
   --apply\` afterwards, which lists the bucket again and records what is there.
 
 Examples:
-  $ nemar admin fleet content-recovery on008730
-  $ nemar admin fleet content-recovery on008730 --apply
-  $ nemar admin fleet content-recovery on008730 on008798 --apply --json report.json
+  $ nemar admin rework annex content-recovery on008730
+  $ nemar admin rework annex content-recovery on008730 --apply
+  $ nemar admin rework annex content-recovery on008730 on008798 --apply --json report.json
 `,
   )
   .action(async (datasetIds: string[], options) => {
@@ -6902,7 +6769,7 @@ Examples:
       console.log(
         chalk.dim(
           "\nThe location log still says nothing about these objects: run " +
-            "`nemar admin fleet key-registration <id> --apply` to record them.",
+            "`nemar admin rework annex key-registration <id> --apply` to record them.",
         ),
       );
     }
@@ -6910,6 +6777,14 @@ Examples:
   });
 
 adminCommand.addCommand(fleetCommand);
+
+// `admin fleet sweep`: the sweeps that refresh or report derived metadata across the catalog
+// (ADR 0135 decision 3; no separate maintenance group, owner 2026-11-22).
+const fleetSweepCommand = new Command("sweep").description(
+  "Sweeps that refresh or report derived metadata across all datasets",
+);
+fleetCommand.addCommand(fleetSweepCommand);
+fleetCommand.addCommand(e2eTestCommand);
 
 const reindexCommand = new Command("reindex").description(
   "Refresh dataset metadata: enrichment + first-class D1 columns",
@@ -7088,22 +6963,22 @@ reindexCommand
         printReindexLine(r);
       }
       // Non-zero exit on partial bulk failure so shell scripts can chain
-      // safely (`nemar admin reindex --missing-metadata && do_next_step`).
+      // safely (`nemar admin dataset reindex --missing-metadata && do_next_step`).
       if (failed > 0) process.exit(1);
     },
   );
 
-adminCommand.addCommand(reindexCommand);
+datasetGroupCommand.addCommand(reindexCommand);
 
-const availabilityReportCommand = new Command("availability-report")
-  .description(
-    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every non-sandbox dataset that has a version and no report yet (#1001).",
-  )
-  .argument("[dataset-id]", "Dataset ID (e.g., nm000103)")
-  .option(
-    "--write",
-    "Commit the report to .nemar/availability-report.json on main (default: preview only)",
-  )
+const availabilityReportCommand = addApplyOption(
+  new Command("availability-report")
+    .description(
+      "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). One dataset: a preview unless --apply. --all runs the sweep and WRITES: it backfills a report for every non-sandbox dataset that has a version and no report yet, with or without --apply (#1001).",
+    )
+    .argument("[dataset-id]", "Dataset ID (e.g., nm000103)"),
+  "One dataset: commit the report to .nemar/availability-report.json on main (default: preview only). --all always writes",
+  ["--write"],
+)
   .option(
     "--all",
     "Backfill every non-sandbox dataset that has a version and no report yet, instead of a single one (#1001)",
@@ -7120,7 +6995,7 @@ const availabilityReportCommand = new Command("availability-report")
     async (
       datasetId: string | undefined,
       options: {
-        write?: boolean;
+        apply?: boolean;
         all?: boolean;
         missingOnly?: boolean;
         limit?: string;
@@ -7145,13 +7020,13 @@ const availabilityReportCommand = new Command("availability-report")
       // Single-dataset path (Phase 1, #1000)
       if (datasetId) {
         const spinner = ora(
-          options.write
+          options.apply
             ? `Generating and writing availability report for ${datasetId}...`
             : `Previewing availability report for ${datasetId}...`,
         ).start();
         let result: AvailabilityReportResult;
         try {
-          result = await availabilityReport(datasetId, { write: options.write === true });
+          result = await availabilityReport(datasetId, { write: options.apply === true });
         } catch (err) {
           spinner.fail(`Failed to generate availability report for ${datasetId}`);
           console.error(chalk.red(errorDetail(err)));
@@ -7292,9 +7167,9 @@ const availabilityReportCommand = new Command("availability-report")
     },
   );
 
-adminCommand.addCommand(availabilityReportCommand);
+fleetSweepCommand.addCommand(availabilityReportCommand.name("availability"));
 
-/** Batch response shape every `nemar admin *-sweep` command shares (PR
+/** Batch response shape every `nemar admin fleet sweep <name>` command shares (PR
  *  #1223 review, suggestion 5). */
 interface SweepBatchLike {
   remaining: number | null;
@@ -7302,8 +7177,8 @@ interface SweepBatchLike {
 }
 
 /**
- * Shared do-while loop for hed-sweep / recording-stats-sweep /
- * signal-defaults-sweep: calls `runBatch()` until `remaining` reaches 0,
+ * Shared do-while loop for `fleet sweep hed`, `recording-stats` and
+ * `signal-defaults`: calls `runBatch()` until `remaining` reaches 0,
  * paces GitHub-heavy batches, and bails with a warning if `remaining`
  * stops strictly decreasing (persistent write errors leave rows
  * unstamped). `onBatch` owns everything sweep-specific -- totals
@@ -7426,7 +7301,7 @@ hedSweepCommand
     },
   );
 
-adminCommand.addCommand(hedSweepCommand);
+fleetSweepCommand.addCommand(hedSweepCommand.name("hed"));
 
 const recordingStatsSweepCommand = new Command("recording-stats-sweep").description(
   "Backfill dataset-level recording duration/count/channel-range stats from each dataset's zarr index (migration 0070, #1146)",
@@ -7508,7 +7383,7 @@ recordingStatsSweepCommand
     },
   );
 
-adminCommand.addCommand(recordingStatsSweepCommand);
+fleetSweepCommand.addCommand(recordingStatsSweepCommand.name("recording-stats"));
 
 const signalDefaultsSweepCommand = new Command("signal-defaults-sweep").description(
   "Backfill BIDS signal defaults (sampling frequency, power line frequency, EEG reference, placement scheme) from each dataset's exemplar sidecar (migrations 0072/0073, #1153)",
@@ -7590,7 +7465,7 @@ signalDefaultsSweepCommand
     },
   );
 
-adminCommand.addCommand(signalDefaultsSweepCommand);
+fleetSweepCommand.addCommand(signalDefaultsSweepCommand.name("signal-defaults"));
 
 /** One data-integrity-sweep batch, as consumed by {@link runReauditLoop}. */
 export interface ReauditBatchResult {
@@ -7617,7 +7492,7 @@ export interface ReauditLoopResult {
 }
 
 /**
- * Pure convergence loop driving `nemar admin data-integrity-sweep --reaudit`
+ * Pure convergence loop driving `nemar admin fleet sweep data-integrity --reaudit`
  * (#980 review fix). `getBefore()` is called EXACTLY ONCE, before the first
  * `fetchBatch` call, and that single captured value is threaded UNCHANGED
  * into every subsequent `fetchBatch(before)` call -- this is the convergence
@@ -7812,7 +7687,7 @@ dataIntegritySweepCommand
     },
   );
 
-adminCommand.addCommand(dataIntegritySweepCommand);
+fleetSweepCommand.addCommand(dataIntegritySweepCommand.name("data-integrity"));
 
 // ============================================================================
 // Zarr fidelity verification sweep (issue #1068, epic #1181 phase 8)
@@ -7886,7 +7761,7 @@ zarrFidelitySweepCommand
     }
   });
 
-adminCommand.addCommand(zarrFidelitySweepCommand);
+fleetSweepCommand.addCommand(zarrFidelitySweepCommand.name("zarr-fidelity"));
 
 // ============================================================================
 // Upstream snapshot backfill (epic #1046 phase 2, #1908; ADR 0111)
@@ -7895,18 +7770,19 @@ adminCommand.addCommand(zarrFidelitySweepCommand);
 const BACKFILL_PAUSE_MS = 250;
 
 const upstreamBackfillCommand = new Command("upstream-backfill").description(
-  "Record which upstream snapshot each mirrored version came from (dry run unless --execute)",
+  "Record which upstream snapshot each mirrored version came from (dry run unless --apply)",
 );
 
-upstreamBackfillCommand
-  .option("--execute", "Write the results; without it nothing is recorded")
+addApplyOption(upstreamBackfillCommand, "Write the results; without it nothing is recorded", [
+  "--execute",
+])
   .option("--limit <n>", "Version rows per batch (server clamps to [1,50])", "25")
   .option("--after <cursor>", "Resume after this key, e.g. on000123@1.0.0 (skips a stuck row)")
   .option("--max-batches <n>", "Stop after this many batches", "200")
   .option("--json", "Output one JSON summary instead of progress lines")
   .action(
     async (options: {
-      execute?: boolean;
+      apply?: boolean;
       limit?: string;
       after?: string;
       maxBatches?: string;
@@ -7916,11 +7792,12 @@ upstreamBackfillCommand
 
       const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
       const maxBatches = Number.parseInt(options.maxBatches ?? "200", 10) || 200;
-      const execute = options.execute === true;
+      // The wire field is still `execute`; only the flag is `--apply` (ADR 0135 decision 4).
+      const execute = options.apply === true;
       const say = (line: string) => {
         if (!options.json) console.log(line);
       };
-      if (!execute) say(chalk.yellow("Dry run: nothing is written. Pass --execute to record."));
+      if (!execute) say(chalk.yellow("Dry run: nothing is written. Pass --apply to record."));
       say(
         chalk.dim(
           "A recorded 'unknown' is final: it is never examined again. A read that fails or whose 404 a control read does not confirm is not recorded.",
@@ -8041,7 +7918,7 @@ upstreamBackfillCommand
             ),
           );
         }
-        if (!execute) console.log(chalk.yellow("Dry run, pass --execute to record."));
+        if (!execute) console.log(chalk.yellow("Dry run, pass --apply to record."));
       }
 
       // Non-zero on any error, any failed batch, and any pass that did not finish, so a
@@ -8050,8 +7927,8 @@ upstreamBackfillCommand
     },
   );
 
-adminCommand.addCommand(upstreamBackfillCommand);
-adminCommand.addCommand(upstreamStatusCommand);
+repullCommand.addCommand(upstreamBackfillCommand);
+repullCommand.addCommand(upstreamStatusCommand);
 
 // ============================================================================
 // Anonymity verification sweep (issue #1409, epic #1406)
@@ -8149,13 +8026,15 @@ anonymitySweepCommand
     }
   });
 
-adminCommand.addCommand(anonymitySweepCommand);
+fleetSweepCommand.addCommand(anonymitySweepCommand.name("anonymity"));
 
 // ============================================================================
 // Doctor: diagnostic checks + remediation (#1130)
 // ============================================================================
 
-const doctorCommand = new Command("doctor").description(
+// `admin dataset doctor` holds the dataset checks; the one account check, the former
+// `admin doctor kinds`, is `admin users kind-check` (ADR 0135), so `admin doctor` is gone.
+const datasetDoctorCommand = new Command("doctor").description(
   "Diagnose and heal stuck-dataset patterns (e.g. missing S3 version manifests)",
 );
 
@@ -8172,7 +8051,7 @@ function printScanResults(res: DoctorScanResponse): number {
   return total;
 }
 
-doctorCommand
+datasetDoctorCommand
   .command("scan")
   .description("Run diagnostic checks (read-only)")
   .argument("[dataset-id]", "Narrow the scan to one dataset")
@@ -8194,7 +8073,7 @@ doctorCommand
       if (total > 0) {
         console.log(
           chalk.yellow(
-            `\n${total} finding(s). Preview the remediation with: nemar admin doctor fix <check> --dry-run`,
+            `\n${total} finding(s). Preview the remediation with: nemar admin dataset doctor fix <check>`,
           ),
         );
       }
@@ -8205,22 +8084,32 @@ doctorCommand
     }
   });
 
-doctorCommand
-  .command("fix")
-  .description("Apply a check's remediation (writes; use --dry-run first)")
-  .argument("<check>", "Check name (see: nemar admin doctor scan)")
-  .argument("[dataset-id]", "Narrow to one dataset")
-  .option("--dry-run", "List what would be fixed without writing")
+// Dry run by default since the admin tree restructure (ADR 0135): `--apply` dispatches the repairs. `--dry-run`, the
+// old preview flag, is still accepted (hidden) and changes nothing, since a dry run is the default.
+addApplyOption(
+  datasetDoctorCommand
+    .command("fix")
+    .description("List a check's remediation; --apply runs it (dry run by default)")
+    .argument("<check>", "Check name (see: nemar admin dataset doctor scan)")
+    .argument("[dataset-id]", "Narrow to one dataset"),
+  "Run the remediation (default is a dry run that lists what would be fixed)",
+)
+  .addOption(new Option("--dry-run", "List what would be fixed without writing").hideHelp())
   .option("--json", "Output raw JSON instead of the human summary")
   .action(
     async (
       check: string,
       datasetId: string | undefined,
-      options: { dryRun?: boolean; json?: boolean },
+      options: { apply?: boolean; dryRun?: boolean; json?: boolean },
     ) => {
       if (!requireAuth()) return;
 
-      if (options.dryRun) {
+      if (options.apply && options.dryRun) {
+        console.error(chalk.red("Error: pass --apply or --dry-run, not both"));
+        process.exit(1);
+      }
+
+      if (!options.apply) {
         const spinner = ora(`Listing ${check} findings (dry run)...`).start();
         try {
           const res = await doctorFix({ check, datasetId, dryRun: true });
@@ -8232,6 +8121,9 @@ doctorCommand
           console.log(`Would fix ${res.would_fix} finding(s) for ${chalk.bold(check)}:`);
           for (const f of res.findings) {
             console.log(`  ${f.dataset_id}${f.version ? `@v${f.version}` : ""}`);
+          }
+          if (res.would_fix > 0) {
+            console.log(chalk.dim("\nNothing was changed. Re-run with --apply to fix."));
           }
         } catch (err) {
           spinner.fail("Dry run failed");
@@ -8323,7 +8215,7 @@ export interface DoctorFixLoopOutcome {
 }
 
 /**
- * Per-dataset driver for `nemar admin doctor fix` (#1133 review fix). Pure
+ * Per-dataset driver for `nemar admin dataset doctor fix` (#1133 review fix). Pure
  * aggregation over a dependency-injected `fixOne`, mirroring runReauditLoop's
  * extraction convention, so two properties are unit-testable without a server:
  * a dataset healed in the interim is counted as `resolved` (never silently
@@ -8362,8 +8254,8 @@ export async function runDoctorFixLoop(
   return { totals, results };
 }
 
-doctorCommand
-  .command("kinds")
+adminUsersCommand
+  .command("kind-check")
   .description("Check that operational accounts carry their expected account kind (read-only)")
   .action(async () => {
     if (!requireAuth()) return;
@@ -8405,17 +8297,17 @@ doctorCommand
       }
       console.log(
         chalk.yellow(
-          `\n${mismatches.length + absent.length} finding(s). Fix a mismatch with \`nemar admin kind <username> <kind>\`.`,
+          `\n${mismatches.length + absent.length} finding(s). Fix a mismatch with \`nemar admin users kind <username> <kind>\`.`,
         ),
       );
     } catch (err) {
-      spinner.fail("Doctor kinds check failed");
+      spinner.fail("Account kind check failed");
       console.error(chalk.red(errorDetail(err)));
       process.exit(1);
     }
   });
 
-adminCommand.addCommand(doctorCommand);
+datasetGroupCommand.addCommand(datasetDoctorCommand);
 
 // ============================================================================
 // Email Notification Preferences
@@ -8471,7 +8363,9 @@ emailPrefsCommand
       console.log(chalk.dim(`  ${mailRecallWhy()}`));
 
       console.log();
-      console.log(chalk.dim("  Use 'nemar admin email-preferences update' to change settings."));
+      console.log(
+        chalk.dim("  Use 'nemar admin users email-preferences update' to change settings."),
+      );
     } catch (err) {
       spinner.fail("Failed to fetch preferences");
       console.error(chalk.red(errorDetail(err)));
@@ -8623,7 +8517,7 @@ emailPrefsCommand
     },
   );
 
-adminCommand.addCommand(emailPrefsCommand);
+adminUsersCommand.addCommand(emailPrefsCommand);
 
 // ============================================================================
 // System Notices
@@ -9187,7 +9081,7 @@ adminCommand
   );
 
 // ============================================================================
-// nemar admin summary check  (epic #618 / phase 2 #620)
+// nemar admin fleet summary check  (epic #618 / phase 2 #620)
 // ============================================================================
 
 /**
@@ -9244,10 +9138,13 @@ const summaryCommand = new Command("summary").description(
   "summary.json coverage across published dataset versions",
 );
 
-summaryCommand
-  .command("check")
-  .description("Report which (dataset_id, version) pairs have stale or missing summary.json")
-  .option("--fix", "Dispatch generate-manifest for every stale/missing version")
+addApplyOption(
+  summaryCommand
+    .command("check")
+    .description("Report which (dataset_id, version) pairs have stale or missing summary.json"),
+  "Dispatch generate-manifest for every stale/missing version",
+  ["--fix"],
+)
   .option("--id <id>", "Limit to a single dataset_id (exact match)")
   .option(
     "--match <glob>",
@@ -9260,7 +9157,7 @@ summaryCommand
   .action(
     async (
       options: {
-        fix?: boolean;
+        apply?: boolean;
         id?: string;
         match?: string;
         onlyStale?: boolean;
@@ -9337,11 +9234,11 @@ summaryCommand
           `${chalk.red(`error=${totals.error}`)}`,
       );
 
-      if (!options.fix) {
+      if (!options.apply) {
         if (totals.stale + totals.missing > 0) {
           console.log(
             chalk.dim(
-              `\nRun with --fix to dispatch generate-manifest for the ${totals.stale + totals.missing} drifted version(s).`,
+              `\nRun with --apply to dispatch generate-manifest for the ${totals.stale + totals.missing} drifted version(s).`,
             ),
           );
         }
@@ -9393,7 +9290,7 @@ summaryCommand
       );
       console.log(
         chalk.dim(
-          "Workflow runs will appear on https://github.com/nemarDatasets/.github/actions. Re-run `nemar admin summary check` once they complete to verify drift cleared.",
+          "Workflow runs will appear on https://github.com/nemarDatasets/.github/actions. Re-run `nemar admin fleet summary check` once they complete to verify drift cleared.",
         ),
       );
       if (failed > 0) process.exitCode = 1;
@@ -9410,7 +9307,7 @@ function recomputeTotals(rows: SummaryVersionCoverage[]) {
   };
 }
 
-adminCommand.addCommand(summaryCommand);
+fleetCommand.addCommand(summaryCommand);
 
 // ============================================================================
 // Zarr catalog (issue #1062, epic #1181 phase 2): on-demand refresh of the
@@ -9441,105 +9338,7 @@ zarrCatalogCommand
     }
   });
 
-adminCommand.addCommand(zarrCatalogCommand);
-
-// ============================================================================
-// Researcher-name backfill (#1255, epic #1250)
-//
-// DOIs cite the uploader by real name and publishing is blocked without one,
-// but most accounts predate the signup-time ORCID name lookup. This fills the
-// gap from each account's own public ORCID record.
-// ============================================================================
-
-const backfillNamesCommand = new Command("backfill-names").description(
-  "Fill missing researcher names from users' public ORCID records (dry run by default)",
-);
-
-backfillNamesCommand
-  .option("--apply", "Write the names (without this flag, only report what would change)")
-  .option("--limit <n>", "Users per batch (server clamps to [1,100])", "25")
-  .option("--json", "Output raw JSON instead of the human summary")
-  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
-    if (!requireAuth()) return;
-
-    const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
-    const apply = options.apply === true;
-    const spinner = ora(
-      apply ? "Backfilling names from ORCID..." : "Checking ORCID for missing names...",
-    ).start();
-
-    let res: BackfillNamesResponse;
-    try {
-      res = await backfillUserNames({ apply, limit });
-      spinner.stop();
-    } catch (err) {
-      spinner.fail("Name backfill failed");
-      console.error(chalk.red(errorDetail(err)));
-      process.exit(1);
-      return;
-    }
-
-    // Computed before the --json branch returns, so a scripted caller reading
-    // the exit code sees the same verdict as someone reading the summary below.
-    // A lookup failure leaves the row a candidate for the next run, and an
-    // unknown remainder means the batch's own bookkeeping failed. Neither is
-    // fatal, but a caller must not read either as a clean sweep.
-    if (res.lookup_failed > 0 || (res.write_failed ?? 0) > 0 || res.remaining === null) {
-      process.exitCode = 1;
-    }
-
-    if (options.json) {
-      console.log(JSON.stringify(res, null, 2));
-      return;
-    }
-
-    console.log();
-    if (!res.apply) {
-      console.log(chalk.yellow("DRY RUN — nothing was written. Re-run with --apply."));
-    }
-    console.log(
-      chalk.cyan(
-        `scanned=${res.scanned} ${res.apply ? "filled" : "would_fill"}=${
-          res.apply ? res.filled : res.would_fill
-        } no_public_name=${res.no_public_name} lookup_failed=${
-          res.lookup_failed
-        } write_failed=${res.write_failed ?? 0} remaining=${res.remaining ?? "unknown"}`,
-      ),
-    );
-    for (const r of res.results) {
-      const who = r.username ?? `id ${r.id} <${r.email}>`;
-      if (r.outcome === "filled" || r.outcome === "would_fill") {
-        const verb = r.outcome === "filled" ? chalk.green("filled  ") : chalk.cyan("would fill");
-        console.log(`  ${verb} ${who}: ${r.given_name} ${r.family_name}  (${r.orcid})`);
-      } else if (r.outcome === "no_public_name") {
-        console.log(
-          `  ${chalk.yellow("no name ")} ${who}: ORCID ${r.orcid} does not publish a full name`,
-        );
-      } else if (r.outcome === "write_failed") {
-        // Not folded in with the ORCID failure below: the name was READ fine
-        // and our own write is what refused it, so the operator is looking at
-        // D1 rather than at orcid.org.
-        console.log(`  ${chalk.red("write   ")} ${who}: ${r.error}; retry the batch`);
-      } else {
-        console.log(`  ${chalk.red("error   ")} ${who}: ${r.error}`);
-      }
-    }
-    // `remaining=unknown` above means the count query itself failed; say what
-    // failed rather than leaving the operator to guess (#1255 review item 28).
-    if (res.warning) {
-      console.log(chalk.yellow(`  Warning: ${res.warning}`));
-    }
-    if (res.no_public_name > 0) {
-      console.log();
-      console.log(
-        chalk.dim(
-          "These accounts must make their name public on their ORCID record and sign in again; NEMAR cannot type a name in for an ORCID-linked account, because the record is re-read on every sign-in and would overwrite it. An account with no verified ORCID can set its name in Settings (ADR 0042).",
-        ),
-      );
-    }
-  });
-
-adminCommand.addCommand(backfillNamesCommand);
+fleetCommand.addCommand(zarrCatalogCommand);
 
 // ============================================================================
 // Import-failure issue triage (#1310, epic #1306)
@@ -9790,7 +9589,7 @@ importIssueTriageCommand
     }
   });
 
-adminCommand.addCommand(importIssueTriageCommand);
+importCommand.addCommand(importIssueTriageCommand.name("triage"));
 
 // ============================================================================
 // Import coverage (#1311, epic #1306 phase 3)
@@ -9984,7 +9783,7 @@ importCoverageCommand
     }
   });
 
-adminCommand.addCommand(importCoverageCommand);
+importCommand.addCommand(importCoverageCommand.name("coverage"));
 
 // ============================================================================
 // Weekly import summary (#1312, epic #1306 phase 4)
@@ -10043,7 +9842,7 @@ importWeeklyCommand
 
     const f = res.facts;
 
-    // Exit codes mirror `nemar admin import-coverage`, so one rule works across the
+    // Exit codes mirror `nemar admin import coverage`, so one rule works across the
     // family: 2 = could not determine, 1 = determined and not healthy, 0 = healthy.
     // An earlier version set 1 only when a section failed to READ, so a week with
     // auto-import switched off exited 0 -- the exact condition this epic exists to
@@ -10145,6 +9944,28 @@ importWeeklyCommand
         ),
       );
     }
+    // RFC program card R3: the RFC clock, as the report states it. Absent or null is unknown; the
+    // reasons to look arrive below with the rest, from the shared rule.
+    if (f.rfcs == null) {
+      console.log(chalk.cyan(`rfcs=${chalk.yellow("unknown")}`));
+    } else {
+      const r = f.rfcs;
+      const unknown = chalk.yellow("unknown");
+      const workflow = r.workflow == null ? unknown : r.workflow.state;
+      const lastRun =
+        r.run == null
+          ? unknown
+          : r.run.latest === null
+            ? chalk.red("never")
+            : `${r.run.latest.createdAt.slice(0, 16)}Z ${r.run.latest.conclusion ?? "not ended"}`;
+      console.log(
+        chalk.cyan(
+          `rfcs: listed=${r.index == null ? unknown : r.index.listed.length} ` +
+            `closed_awaiting_decision=${r.index == null ? unknown : r.index.listed.filter((x) => x.phase === "closed").length} ` +
+            `clock=${workflow} last_run=${lastRun}`,
+        ),
+      );
+    }
 
     if (f.failuresByCause !== null) {
       const nonZero = Object.entries(f.failuresByCause).filter(([, n]) => n > 0);
@@ -10198,7 +10019,7 @@ importWeeklyCommand
     }
   });
 
-adminCommand.addCommand(importWeeklyCommand);
+importCommand.addCommand(importWeeklyCommand.name("weekly"));
 
 // ============================================================================
 // Username backfill (ADR 0042, #1253, epic #1250)
@@ -10209,7 +10030,7 @@ adminCommand.addCommand(importWeeklyCommand);
 // name (first initial plus family name) and, for a row it finishes, sends the
 // one verify-your-email message that lets the person sign in and use it.
 //
-// Run `nemar admin backfill-names` FIRST: this reads the names that one fills.
+// It reads the account's researcher name; an account with none is reported, never guessed at.
 // ============================================================================
 
 const backfillUsernamesCommand = new Command("backfill-usernames").description(
@@ -10307,7 +10128,7 @@ backfillUsernamesCommand
         );
       } else if (r.outcome === "no_name") {
         console.log(
-          `  ${chalk.yellow("no name   ")} ${who}: run 'nemar admin backfill-names --apply' first`,
+          `  ${chalk.yellow("no name   ")} ${who}: no name on record. ${accountCopy("cli.admin.owner_name_missing.fix")}`,
         );
       } else if (r.outcome === "conflict") {
         console.log(`  ${chalk.yellow("conflict  ")} ${who}: ${r.error}`);
@@ -10349,14 +10170,14 @@ backfillUsernamesCommand
     }
   });
 
-adminCommand.addCommand(backfillUsernamesCommand);
+adminUsersCommand.addCommand(backfillUsernamesCommand);
 
 // ============================================================================
 // Duplicate accounts (#1254, epic #1250; ADR 0043)
 // ============================================================================
 
 /**
- * `nemar admin duplicates` — live accounts sharing an ORCID iD, an email
+ * `nemar admin users duplicates` — live accounts sharing an ORCID iD, an email
  * address, or a GitHub handle, plus the `--clear` half that un-flags a row
  * once its collision is gone.
  *
@@ -10461,7 +10282,7 @@ duplicatesCommand
             `${report.flagged_count} account(s) still carry an identity-conflict flag with no remaining collision.`,
           ),
         );
-        console.log(chalk.dim("  Clear each with 'nemar admin duplicates --clear <id>'."));
+        console.log(chalk.dim("  Clear each with 'nemar admin users duplicates --clear <id>'."));
       }
       return;
     }
@@ -10487,13 +10308,13 @@ duplicatesCommand
     process.exitCode = 1;
   });
 
-adminCommand.addCommand(duplicatesCommand);
+adminUsersCommand.addCommand(duplicatesCommand);
 
 // ============================================================================
 // Neurobagel federation artifacts (epic #1586 phase 4, ADR 0084)
 //
-// `regenerate` is a DRY RUN unless --execute is given, and the server refuses
-// --execute unless the writer is enabled (NEUROBAGEL_WRITER_ENABLED=1). `status`
+// `regenerate` is a DRY RUN unless --apply is given (`--execute` is its hidden alias, ADR 0135),
+// and the server refuses a write unless the writer is enabled (NEUROBAGEL_WRITER_ENABLED=1). `status`
 // is a read: what is eligible, written, stale, and waiting on a person. A null
 // count in either means "unknown", and is printed as unknown, never as zero.
 // ============================================================================
@@ -10532,7 +10353,7 @@ function printNeurobagelVerification(v: NeurobagelVerification): void {
 function printNeurobagelRun(res: NeurobagelRunResult): void {
   console.log();
   if (res.dry_run) {
-    console.log(chalk.yellow("DRY RUN: nothing was written. Re-run with --execute to write."));
+    console.log(chalk.yellow("DRY RUN: nothing was written. Re-run with --apply to write."));
   }
   if (res.status !== "ok") {
     const why =
@@ -10610,12 +10431,15 @@ function printNeurobagelRun(res: NeurobagelRunResult): void {
   }
 }
 
-neurobagelCommand
-  .command("regenerate")
-  .description(
-    "Examine datasets and write what changed to the Neurobagel artifact store (dry run unless --execute)",
-  )
-  .option("--execute", "Write to the store (without it, only report what would change)")
+addApplyOption(
+  neurobagelCommand
+    .command("regenerate")
+    .description(
+      "Examine datasets and write what changed to the Neurobagel artifact store (dry run unless --apply)",
+    ),
+  "Write to the store (without it, only report what would change)",
+  ["--execute"],
+)
   .option("--dataset <ids...>", "Examine exactly these dataset ids instead of the next ones due")
   .option(
     "--limit <n>",
@@ -10625,7 +10449,7 @@ neurobagelCommand
   .option("--json", "Output raw JSON instead of the human summary")
   .action(
     async (options: {
-      execute?: boolean;
+      apply?: boolean;
       dataset?: string[];
       limit?: string;
       force?: boolean;
@@ -10656,7 +10480,8 @@ neurobagelCommand
         process.exit(1);
         return;
       }
-      const execute = options.execute === true;
+      // The request field is still `execute`; only the flag is `--apply`.
+      const execute = options.apply === true;
       const spinner = ora(
         execute ? "Regenerating Neurobagel artifacts..." : "Checking what would change...",
       ).start();
@@ -10672,7 +10497,7 @@ neurobagelCommand
         spinner.stop();
       } catch (err) {
         handleCommandError(err, spinner, "Neurobagel regenerate failed", {
-          409: "Set NEUROBAGEL_WRITER_ENABLED=1 (and bind the bucket) to write. A dry run needs neither the switch nor --execute.",
+          409: "Set NEUROBAGEL_WRITER_ENABLED=1 (and bind the bucket) to write. A dry run needs neither the switch nor --apply.",
         });
         process.exit(1);
         return;
@@ -10849,3 +10674,7 @@ adminCommand.addCommand(repullCommand);
 adminCommand.addCommand(oidcCommand);
 adminCommand.addCommand(mailCommand);
 adminCommand.addCommand(computeCommand);
+
+// Last, so every live command is registered before the moved-command stubs are checked
+// against the tree (ADR 0135 decision 5).
+registerMovedCommands(adminCommand);

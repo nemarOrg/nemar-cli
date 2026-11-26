@@ -170,7 +170,7 @@ export const HED_SWEEP_STAMP_ONLY_SQL =
  *
  * A dataset_id-narrowed call is UNAFFECTED (no cap, no `remaining`): its
  * findings are already scoped to one dataset and stay small -- this is
- * exactly the `nemar admin doctor fix` per-dataset shape the incident
+ * exactly the `nemar admin dataset doctor fix` per-dataset shape the incident
  * write-up says to prefer.
  */
 export const DOCTOR_FIX_DEFAULT_LIMIT = 25;
@@ -2110,7 +2110,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
    *
    * Reports which published (dataset_id, version) pairs have summary.json
    * at the current target schema (1.1) vs which are stale or missing.
-   * Powers `nemar admin summary check` and the weekly drift cron.
+   * Powers `nemar admin fleet summary check` and the weekly drift cron.
    *
    * Read-only: walks the version table and probes data.nemar.org for the
    * schema string. Bounded parallelism keeps us within data.nemar.org's

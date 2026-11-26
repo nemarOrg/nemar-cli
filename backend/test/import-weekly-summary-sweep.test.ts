@@ -138,9 +138,47 @@ const THIS_WEEK = coveredWeekOf(NOW);
  */
 const openneuro = startOpenNeuroStandin();
 const rawMirror = startRawHost();
+/**
+ * A quiet RFC week, answered where the report's RFC section reads it (`NEMAR_GITHUB_API_URL`): the
+ * generated index with no RFC, the clock workflow active, and a run of the day before NOW that
+ * succeeded. The RFC section has its own file (`import-weekly-rfc-section.test.ts`); this keeps
+ * every other weekly test off api.github.com, as the two stand-ins above keep it off OpenNeuro.
+ */
+const rfcGithub = Bun.serve({
+  port: 0,
+  fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === "/repos/nemarOrg/rfcs/contents/README.md") {
+      return new Response(
+        "<!-- rfc-index:start -->\nNo RFC has been proposed yet.\n<!-- rfc-index:end -->\n",
+      );
+    }
+    if (path === "/repos/nemarOrg/rfcs/actions/workflows/rfc-clock.yml") {
+      return Response.json({ state: "active" });
+    }
+    if (path === "/repos/nemarOrg/rfcs/actions/workflows/rfc-clock.yml/runs") {
+      return Response.json({
+        total_count: 1,
+        workflow_runs: [
+          {
+            created_at: new Date(NOW.getTime() - 13 * 3_600_000).toISOString(),
+            conclusion: "success",
+            html_url: "https://github.com/nemarOrg/rfcs/actions/runs/1",
+          },
+        ],
+      });
+    }
+    return Response.json({ message: "Not Found" }, { status: 404 });
+  },
+});
+const priorGithubApi = (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL;
+(globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+  `http://127.0.0.1:${rfcGithub.port}`;
 afterAll(() => {
   openneuro.stop();
   rawMirror.stop();
+  rfcGithub.stop(true);
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = priorGithubApi;
 });
 beforeEach(() => {
   openneuro.reset();

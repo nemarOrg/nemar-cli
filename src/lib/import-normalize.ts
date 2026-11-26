@@ -87,6 +87,23 @@ export type UploadStrategy = (args: {
 }) => Promise<{ copied: number }>;
 
 /**
+ * An annexing or upload failure, in two registers. `message` is the operator's and may name
+ * paths or quote a tool's stderr; `detail` is built only from fixed words and counts, so a line
+ * that is recorded or published (`describeError`) can say what failed without repeating either.
+ * Without it such a line read "Error." for every cause, which hid a stand-in storing a
+ * chunk-encoded body as the object.
+ */
+export class UploadFailed extends Error {
+  constructor(
+    message: string,
+    readonly detail: string,
+  ) {
+    super(message);
+    this.name = "UploadFailed";
+  }
+}
+
+/**
  * What a transfer signs with, stated rather than defaulted.
  *
  * `"inherit"` means the subprocess gets no credentials from us and uses whatever
@@ -376,7 +393,10 @@ export async function normalizeUnannexedData(args: {
     { forceLarge: true, checkGitignore: false, ...(args.backend ? { backend: args.backend } : {}) },
   );
   if (!added.success) {
-    throw new Error(`Failed to annex ${paths.length} data file(s): ${added.error}`);
+    throw new UploadFailed(
+      `Failed to annex ${paths.length} data file(s): ${added.error}`,
+      "git-annex add failed",
+    );
   }
 
   // The add reports success whether or not it did anything, so ask git-annex what
@@ -385,8 +405,9 @@ export async function normalizeUnannexedData(args: {
   const keys = await getAnnexKeysForPaths(datasetPath, paths);
   const missing = paths.filter((p) => !keys.has(p));
   if (missing.length > 0) {
-    throw new Error(
+    throw new UploadFailed(
       `Annexed ${paths.length} file(s) but git-annex reports no key for ${missing.length} of them (${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ", ..." : ""}). Refusing to continue: the commit would carry data files git-annex does not hold.`,
+      `git-annex holds no key for ${missing.length} of ${paths.length} file(s)`,
     );
   }
 
@@ -449,16 +470,18 @@ export function annexCopyUpload(options: {
       credentials,
     );
     if (!copy.success) {
-      throw new Error(
+      throw new UploadFailed(
         `Annexed ${paths.length} data file(s) but the upload to ${remoteName} failed: ${copy.error}. Not committing: the pushed tree would name keys with no content behind them.`,
+        "git-annex copy failed",
       );
     }
 
     const atRemote = await listAnnexedPaths(datasetPath, remoteName);
     const notAtRemote = paths.filter((path) => !atRemote.has(path));
     if (notAtRemote.length > 0) {
-      throw new Error(
+      throw new UploadFailed(
         `Uploaded to ${remoteName} without error, but git-annex does not record ${notAtRemote.length} of ${paths.length} path(s) as present there (${notAtRemote.slice(0, 3).join(", ")}${notAtRemote.length > 3 ? ", ..." : ""}). Not committing: those keys would have no content behind them.`,
+        `the location log does not record ${notAtRemote.length} of ${paths.length} path(s) at the remote`,
       );
     }
     return { copied: copy.filesCopied };

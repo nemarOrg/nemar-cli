@@ -1,6 +1,6 @@
 /**
  * Unit tests for runReauditLoop -- the pure convergence loop driving
- * `nemar admin data-integrity-sweep --reaudit` (#980 review fix).
+ * `nemar admin fleet sweep data-integrity --reaudit` (#980 review fix).
  *
  * Guards two properties nothing else tested before this file existed, and a
  * future edit to the loop could silently break:

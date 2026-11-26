@@ -158,3 +158,22 @@ The marker is a row in `mail_ticket_reads` (migration 0110), written when the ad
 The list carries `unread` per ticket, and `GET /admin/mail/unread-count` counts the unread tickets that are visible to the caller (the list's own predicate) and not closed or spam.
 The rows are removed by `mailReleaseStatements` with the rest of an admin's mail references.
 `mail_ticket_reads` is a sixth child table of `mail_tickets`, so any future rebuild of that table must back it up and restore it as 0109 does for the others.
+
+## Amendment, 2026-11-22: the legal-process queue is kept seven years
+
+Official requests for compute records (subpoenas, court orders, warrants) arrive as tickets in the `legal-process` queue, and those tickets are the record of each request and what was done with it.
+That record is kept seven years, the period the compute records themselves keep (ADR 0118), not purged two years after last activity like other tickets.
+
+- `legal-process` joins `security` and `conduct` in `RESTRICTED_TAGS` (`services/ticket-assignment.ts`), so it is owner-only whatever its row says, and mail to `legal-process@` keeps that queue tag when the row is missing instead of falling to `*`.
+  Migration 0149 seeds the row as a restricted pool with no assignee, so every owner sees its tickets until an owner names the custodians; a row an owner already created is kept as it is.
+- Retention per queue is declared once in code, `QUEUE_RETENTION_DAYS` in `services/ticket-retention.ts` (`legal-process`: 2557 days, seven years of 365 days plus the at most two leap days they can hold), and not as a column on `mail_queues`: a row is data an operator can edit or delete, and a deleted or edited row must not shorten a legal record, the reasoning that already keeps restriction off the row.
+- The figure is a floor: a ticket in such a queue is purged only once both `MAIL_RETENTION_DAYS` and its queue's period have passed, so a longer general value still governs and staging's 30 days does not shorten it.
+  The purge's scan and its per-ticket claim both apply it, measured back from the run's stamp.
+- The governing queue is the ticket's `queue_tag`.
+  No code path changes it after creation, so the queue at purge time is the queue the ticket was filed in, and a ticket cannot leave `legal-process` to be purged early; a test fails if an update of `queue_tag` appears in the Worker's source.
+  A request that arrived elsewhere is forwarded to `legal-process@`, which makes a new ticket in that queue; the original keeps its own queue's retention.
+  Mail to `legal-process@` never threads into a ticket of another queue (the `created` event records `retention_mismatch`), so a reply quoting a `security` or `conduct` ticket still opens a new `legal-process` ticket, while a reply to a `legal-process` ticket from another address threads into it and keeps the longer period.
+  Tags are never read for retention, as they are never read for access.
+- The raw message in R2 still expires by the bucket's lifecycle rule (two years in production): the raw key carries no queue, so no rule can single these out.
+  Between two and seven years a `legal-process` ticket's record is its D1 copy (messages, internal notes, events); a reprocess of its raw key is not possible then.
+- After seven years without activity the ticket is purged like any other, keeping only its summary.

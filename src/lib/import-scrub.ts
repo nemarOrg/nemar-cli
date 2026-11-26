@@ -94,6 +94,7 @@ import { IMPORT_SCRUB_MARKER, OPENNEURO_UPSTREAM_MARKER } from "./import-markers
 import {
   NORMALIZE_MAX_BYTES,
   type NormalizeImportResult,
+  UploadFailed,
   type UploadStrategy,
   normalizeImportedTree,
   normalizeUnannexedData,
@@ -174,9 +175,10 @@ const FIXED_WORD_ERRORS = new Set(["GitScrubError", "ContractError", "LedgerRefu
 const ERRNO = /^[A-Z][A-Z0-9_]{1,20}$/;
 
 /**
- * What an unexpected error may say in a public line: its class, its errno code, and its message
- * only when the class is one whose messages are fixed words. A Node fs error's message embeds the
- * path, and git's stderr names files, so neither is ever repeated.
+ * What an unexpected error may say in a public line: its class, its errno code, its message only
+ * when the class is one whose messages are fixed words, and an {@link UploadFailed}'s `detail`
+ * (fixed words and counts by construction). A Node fs error's message embeds the path, and git's
+ * stderr names files, so neither is ever repeated.
  */
 export function describeError(err: unknown): string {
   if (!(err instanceof Error)) return "non-error";
@@ -186,7 +188,12 @@ export function describeError(err: unknown): string {
   if (FIXED_WORD_ERRORS.has(err.name) && /^[a-z0-9 :,-]{1,80}$/i.test(err.message)) {
     parts.push(err.message);
   }
-  return parts.join(" ");
+  const described = parts.join(" ");
+  // The pattern is a second net: a detail is written from literals and numbers, never a path.
+  if (err instanceof UploadFailed && /^[a-z0-9 :,()-]{1,200}$/i.test(err.detail)) {
+    return `${described}: ${err.detail}`;
+  }
+  return described;
 }
 
 /** The scanner revision an import's ledger line names (ADR 0089): a digest of the rule files. */

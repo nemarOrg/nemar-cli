@@ -199,6 +199,13 @@ describe("CLI Help", () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain("users");
+    expect(stdout).toContain("dataset");
+  });
+
+  test("nemar admin users --help shows the account subcommands", async () => {
+    const { stdout, exitCode } = await runCli(["admin", "users", "--help"]);
+
+    expect(exitCode).toBe(0);
     expect(stdout).toContain("approve");
     expect(stdout).toContain("revoke");
   });
@@ -387,14 +394,21 @@ describe("CLI Error Handling", () => {
   // exactly-one-of rule is enforced by the action itself, before the auth
   // gate. These pin that contract.
   test("approve without username or --id shows error", async () => {
-    const { stderr, exitCode } = await runCli(["admin", "approve"]);
+    const { stderr, exitCode } = await runCli(["admin", "users", "approve"]);
 
     expect(exitCode).toBe(1);
     expect(stderr).toContain("provide a username or --id");
   });
 
   test("approve with both username and --id shows error", async () => {
-    const { stderr, exitCode } = await runCli(["admin", "approve", "someone", "--id", "5"]);
+    const { stderr, exitCode } = await runCli([
+      "admin",
+      "users",
+      "approve",
+      "someone",
+      "--id",
+      "5",
+    ]);
 
     expect(exitCode).toBe(1);
     expect(stderr).toContain("mutually exclusive");
@@ -988,8 +1002,8 @@ describe("CLI Dataset List", () => {
 });
 
 describe("CLI Admin Revert", () => {
-  test("nemar admin revert --help shows options", async () => {
-    const { stdout, exitCode } = await runCli(["admin", "revert", "--help"]);
+  test("nemar admin rework revert --help shows options", async () => {
+    const { stdout, exitCode } = await runCli(["admin", "rework", "revert", "--help"]);
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain("Revert a dataset to a previous version");
@@ -1001,16 +1015,16 @@ describe("CLI Admin Revert", () => {
     expect(stdout).toContain("[version]");
   });
 
-  test("nemar admin revert without auth shows error", async () => {
+  test("nemar admin rework revert without auth shows error", async () => {
     const ctx = createTestContext();
 
-    const { stdout, exitCode } = await runCli(["admin", "revert", "nm000104"], ctx);
+    const { stdout, exitCode } = await runCli(["admin", "rework", "revert", "nm000104"], ctx);
 
     expect(stdout).toContain("Not authenticated");
   });
 
   test.skipIf(LIVE_TARGET_BLOCKED)(
-    "nemar admin revert with nonexistent dataset shows error",
+    "nemar admin rework revert with nonexistent dataset shows error",
     async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
@@ -1020,7 +1034,7 @@ describe("CLI Admin Revert", () => {
       });
 
       const { stdout, stderr, exitCode } = await runCli(
-        ["admin", "revert", "nm999999", "--list"],
+        ["admin", "rework", "revert", "nm999999", "--list"],
         ctx,
       );
 

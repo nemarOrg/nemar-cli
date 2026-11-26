@@ -1,0 +1,6 @@
+{
+  "message": "NEMAR RFC 0001, a request for comments on the biosig-zarr format and its single-file form .bzx, is open until {{CLOSE_UTC}} UTC. Read it and comment: {{THREAD_URL}}",
+  "level": "announcement",
+  "scope": "all",
+  "expires_at": "{{CLOSE_UTC_ISO}}"
+}

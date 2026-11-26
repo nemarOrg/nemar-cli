@@ -1,0 +1,35 @@
+{
+  "rows": 84,
+  "initial_rows": 30,
+  "later_nm": {
+    "source": 21,
+    "unknown": 12,
+    "nemar": 4,
+    "community": 1
+  },
+  "later_on": {
+    "source": 4,
+    "community": 9,
+    "unknown": 1,
+    "nemar": 2
+  },
+  "later_nm_literal": {
+    "source": 21,
+    "unknown": 12,
+    "nemar": 4,
+    "community": 1
+  },
+  "later_on_literal": {
+    "source": 7,
+    "community": 8,
+    "unknown": 1
+  },
+  "later_nopr_range_nm": {
+    "source": 8,
+    "unknown": 4
+  },
+  "later_nopr_range_on": {
+    "community": 1
+  },
+  "initial_with_pr": 1
+}

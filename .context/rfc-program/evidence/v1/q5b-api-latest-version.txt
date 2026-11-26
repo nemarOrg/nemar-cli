@@ -1,0 +1,26 @@
+{
+ "total": 910,
+ "public": 910,
+ "with_doi": 909,
+ "t": {
+  "on latest=1.0.0": 558,
+  "nm latest=1.0.0": 47,
+  "nm latest=above 1.0.0": 280,
+  "on latest=above 1.0.0": 24,
+  "on latest=null": 1
+ },
+ "nm2": [
+  "nm000103",
+  "nm000107",
+  "nm000106",
+  "nm000105",
+  "nm000104"
+ ],
+ "on2": [
+  "on003061",
+  "on003739",
+  "on004362",
+  "on003645",
+  "on000117"
+ ]
+}
