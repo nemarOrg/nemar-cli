@@ -122,7 +122,7 @@ describe("real files", () => {
     const entries = Array.from({ length: 5 }, () => char(["event", "type"], "Quillfeather Marlow"));
     const result = matResult(scanEeglabEntries(entries, PATH), { format: "v5", entries });
     expect(result.findings).toEqual([
-      expect.objectContaining({ kind: "eeglab-event-name", occurrences: 5 }),
+      expect.objectContaining({ kind: "eeglab-event-name", count: 5 }),
     ]);
   });
 

@@ -128,16 +128,12 @@ export interface Finding {
   /** Letters, digits and length only; never the value. */
   shape: Shape;
   /**
-   * How many places in the file the finding stands for, when a reader folds repeats into one
-   * finding per kind and field (the MATLAB readers, card A5). A count, never a value.
+   * Reader-internal: how many hits this one finding stands for, when a reader folds repeats into
+   * one (the ZIP reader, one per kind per archive; the MATLAB readers, one per kind and field per
+   * file). A count only, never a name or a value. It is not reported: every count of findings
+   * counts this finding once.
    */
-  occurrences?: number;
-  /**
-   * Reader-internal: how many paths this one finding stands for, when a reader folds a path
-   * rule's hits into one (the ZIP reader, one per kind per archive). A count only, never a name.
-   * It is not reported: every count of findings counts this finding once.
-   */
-  entries?: number;
+  count?: number;
 }
 
 /** Size of the fixed EDF/BDF header, which holds the identification fields this module reads. */

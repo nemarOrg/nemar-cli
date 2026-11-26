@@ -151,10 +151,14 @@ export async function walkMatForReader(
  * text longer than the text rules read ({@link FREE_TEXT_MAX_CHARS}), or a numeric array under
  * an identifier-key name skipped for its size (`limit`); or an array of a class no rule reads
  * (`unsupported-datatype`). The first such array names the reason; null when there is none. A
- * skipped signal under any other name is not text, and does not count (A4's rule).
+ * skipped signal under any other name is not text, and does not count (A4's rule); nor does a
+ * location field ({@link isLocationField}) or FieldTrip provenance ({@link isProvenance}),
+ * which no rule reads.
  */
 export function unscannedMat(entries: readonly MatEntry[]): ReaderIncompleteReason | null {
   for (const e of entries) {
+    // A field no rule reads cannot leave text unread.
+    if (isLocationField(leafName(e)) || isProvenance(e.fields)) continue;
     if (e.skipped === "type") return "unsupported-datatype";
     if (e.skipped === "size") {
       if (e.class === "char") return "limit";
@@ -256,7 +260,7 @@ export function fromHdf5(entries: readonly Hdf5Entry[]): MatEntry[] {
         out.push({ fields, class: cls, dims, value: null, skipped: "size" });
       } else if (Array.isArray(e.value) && e.value.every((v) => typeof v === "number")) {
         // Read under the numeric rule (its MATLAB_class was stored densely): the code units.
-        const text = String.fromCharCode(...(e.value as number[]));
+        const text = fromCodes(e.value as number[]);
         out.push({ fields, class: cls, dims, value: [text] });
       } else if (Array.isArray(e.value)) {
         out.push({ fields, class: cls, dims, value: e.value as string[] });
@@ -271,6 +275,28 @@ export function fromHdf5(entries: readonly Hdf5Entry[]): MatEntry[] {
     }
     const numbers = Array.isArray(e.value) && e.value.every((v) => typeof v === "number");
     out.push({ fields, class: cls, dims, value: numbers ? (e.value as number[]) : null });
+  }
+  return out;
+}
+
+/** FieldTrip's provenance structs: the version, call and toolbox records of a `cfg`. */
+const PROVENANCE: ReadonlySet<string> = new Set(["version", "callinfo", "toolbox"]);
+
+/**
+ * Is this array FieldTrip provenance: under `cfg.version`, `cfg.callinfo` or `cfg.toolbox` at
+ * any depth (lead ruling 7, card A5)? They record where FieldTrip and the analysis ran, as the
+ * location fields record where a file was kept. `cfg.previous` is not skipped wholesale: it is
+ * an earlier `cfg`, whose own provenance this same rule skips.
+ */
+export function isProvenance(fields: readonly string[]): boolean {
+  return fields.some((f, i) => f === "cfg" && PROVENANCE.has(fields[i + 1] ?? ""));
+}
+
+/** Character codes as text, converted in slices so no call takes more arguments than it can. */
+export function fromCodes(codes: readonly number[]): string {
+  let out = "";
+  for (let at = 0; at < codes.length; at += 8192) {
+    out += String.fromCharCode(...codes.slice(at, at + 8192));
   }
   return out;
 }
@@ -297,8 +323,9 @@ export function scanMatText(
   options: { personFields?: boolean } = {},
 ): Finding[] {
   const leaf = leafName(entry);
-  // A location field records where the researcher kept a file: not read (lead ruling).
-  if (isLocationField(leaf)) return [];
+  // A location field records where the researcher kept a file, and FieldTrip's provenance
+  // where its code ran: neither is read (lead rulings).
+  if (isLocationField(leaf) || isProvenance(entry.fields)) return [];
   // The name the rules see: the field's own, unless the person-field rule must not apply to it,
   // when a neutral one leaves the identifier-key, path and contact rules.
   const personRule = options.personFields !== false;
@@ -326,7 +353,7 @@ export function scanMatText(
 
 /**
  * One finding per kind and field per file, the first of each standing for the rest, with the
- * count in `occurrences` (lead ruling, card A5): a struct array of thousands of events cannot
+ * count in `count` (lead ruling, card A5): a struct array of thousands of events cannot
  * multiply a finding.
  */
 export function foldFindings(findings: readonly Finding[]): Finding[] {
@@ -334,8 +361,8 @@ export function foldFindings(findings: readonly Finding[]): Finding[] {
   for (const f of findings) {
     const key = `${f.kind}\u0000${f.field}`;
     const held = byKey.get(key);
-    if (held) held.occurrences = (held.occurrences ?? 1) + 1;
-    else byKey.set(key, { ...f });
+    if (held) held.count = (held.count ?? 1) + 1;
+    else byKey.set(key, { ...f, count: 1 });
   }
   return [...byKey.values()];
 }

@@ -11,7 +11,7 @@
  *
  * - **Names.** Every entry name goes through `scanPaths` as `<archive>!/<entry>`. The path rules'
  *   hits are folded to one finding per kind per archive, with the number of entries it stands for
- *   in `entries` (lead ruling on #2392): an archive of 500 figures is one `image-or-document-file`.
+ *   in `count` (lead ruling on #2392): an archive of 500 figures is one `image-or-document-file`.
  * - **Inner recordings.** An entry is read when its extension has a reader, its method is stored
  *   (0) or deflate (8), its uncompressed size is at most {@link ZIP_ENTRY_MAX_BYTES} and it is
  *   not encrypted. A deflated entry is inflated lazily with `DecompressionStream("deflate-raw")`,
@@ -597,8 +597,8 @@ export function foldPathFindings(findings: readonly Finding[]): Finding[] {
   const byKind = new Map<string, Finding>();
   for (const f of findings) {
     const seen = byKind.get(f.kind);
-    if (seen) seen.entries = (seen.entries ?? 1) + 1;
-    else byKind.set(f.kind, { ...f, entries: 1 });
+    if (seen) seen.count = (seen.count ?? 1) + 1;
+    else byKind.set(f.kind, { ...f, count: 1 });
   }
   return [...byKind.values()];
 }

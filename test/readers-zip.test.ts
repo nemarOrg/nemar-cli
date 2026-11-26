@@ -389,7 +389,7 @@ describe("which inner entries are read", () => {
         { name: "sub-Quintavius/a.txt" },
       ]).bytes,
     );
-    const path = result.findings.map((f) => [f.kind, f.entries]);
+    const path = result.findings.map((f) => [f.kind, f.count]);
     expect(path).toEqual([
       ["image-or-document-file", 6],
       ["tooling-debris", 2],
