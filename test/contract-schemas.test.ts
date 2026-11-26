@@ -776,6 +776,10 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
       side: "lenient",
       valid: () => ({ url: "https://r2.example.test/b", expires_at: "2026-11-03T12:00:00Z" }),
     },
+    ServingIndexResponseSchema: {
+      side: "lenient",
+      valid: () => ({ url: "https://r2.example.test/s", expires_at: "2026-11-03T12:00:00Z" }),
+    },
     OutputsResponseSchema: {
       side: "lenient",
       valid: () => ({

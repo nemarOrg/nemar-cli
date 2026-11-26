@@ -599,6 +599,26 @@ export function recipeZarrArguments(input: {
 }
 
 /**
+ * The arguments a run of the archive adds when the Worker staged the serving index for it (ADR 0141): the
+ * index's path inside the container (the launch contract's `SERVING_INDEX_CONTAINER_PATH`, handed in because
+ * this file imports nothing) and the commit the index was built from, which is the tag's (`--source-commit`).
+ * They follow {@link recipeArguments}, which already names `--dataset-id`. A path that is not absolute or a
+ * commit that is not 40 lowercase hex digits is a programming error, never passed on.
+ */
+export function recipeServingIndexArguments(input: {
+  path: string;
+  sourceCommit: string;
+}): string[] {
+  if (typeof input.path !== "string" || !input.path.startsWith("/")) {
+    throw new RangeError("the serving index path is absolute");
+  }
+  if (!isSourceCommit(input.sourceCommit)) {
+    throw new RangeError("a source commit is 40 lowercase hex digits");
+  }
+  return [RECIPE_SERVING_INDEX_FLAG, input.path, RECIPE_SOURCE_COMMIT_FLAG, input.sourceCommit];
+}
+
+/**
  * The image digest a recipe job's arguments pass, or null when there is not exactly one well-formed
  * value for the flag (none, two, or a value that is not `sha256:` and 64 lowercase hex digits). Exactly
  * one: a second flag would let the recipe and the Worker read different values.

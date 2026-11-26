@@ -422,6 +422,9 @@ export const LAUNCHER_DETAILS = {
     "content_missing",
     "file_not_found",
     "disk_error",
+    // The serving index the Worker staged (ADR 0141) is not the size or SHA-256 the launch specification
+    // names: the platform's copy, so the platform's failure.
+    "serving_index_mismatch",
   ],
   entry_not_found: [],
   runtime_error: [
@@ -492,6 +495,7 @@ export const PLATFORM_LAUNCHER_DETAILS = [
   "manifest_too_large",
   "unsafe_path",
   "file_not_found",
+  "serving_index_mismatch",
   "incomplete_plan",
   "upload_failed",
   "outputs_refused",
