@@ -48,7 +48,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 32 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 39 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -70,21 +70,21 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | A3 | [Pure-TS HDF5 metadata reader](cards/A3.md) |  | worker-hard |  | claude-worker | done |  | 2378 | r1 panel: 2 important (never-throw, unshuffle hang) + 4 fixed; r2 delta clean, 1 sugg fixed, 2 accepted | 2026-11-25T14:10 | 2d | merged d767b62b |
 | D0 | [Review in prod, shadow 20](cards/D0.md) |  | lead |  |  | owner |  | 2370 | r1 code+tests+comments: 0 important, 2 suggestions fixed |  | 4h | draft #2370; owner checklist, then owner merges and releases |
 | B2 | ADR 0139 auto-deny (draft on decide branch) |  | lead |  |  | done |  |  |  |  |  | accepted 2026-11-25 |
-| A2 | [BrainVision and NIRx](cards/A2.md) |  | worker-hard |  | claude-worker | review | A1 | 2381 |  | 2026-11-25T14:46 | 1d | review panel r1 running (head 12db68c2) |
-| A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  | claude-worker | active | A1, A3 |  |  | 2026-11-25T15:23 | 1.5d | implementer running |
-| A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  |  | todo | A1 |  |  |  | 1d | after A1 |
-| A9 | [nemar dataset screen](cards/A9.md) |  | worker |  |  | todo | A1 |  |  |  | 1d | after A1 |
+| A2 | [BrainVision and NIRx](cards/A2.md) |  | worker-hard |  | claude-worker | review | A1 | 2381 | r1 panel: 2 important (regex DoS, not-applicable evasion) + 3 fixed; r2 delta: 2 important evasions fixed, verified by lead with r2 probes (no r3) | 2026-11-25T14:46 | 1d | CI on 7840826a, then merge |
+| A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  | claude-worker | review | A1, A3 | 2385 |  | 2026-11-25T15:23 | 1.5d | r1: 2 important (unscanned big strings, numeric id fields) + 5 sent; r2 needs 1 agent |
+| A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  |  | todo | A1 |  |  |  | 1d | next day's budget (39/40 used) |
+| A9 | [nemar dataset screen](cards/A9.md) |  | worker |  |  | todo | A1 |  |  |  | 1d | next day's budget |
 | A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  |  | todo | A1, A4 |  |  |  | 2d | after A4 |
-| D3 | [Batch ack on public upstream](cards/D3.md) |  | worker-hard |  | claude-worker | review | D1, D2 | 2380 | r1 panel: 2 important (audit fail-open, item isolation) + 4 + lead (D1 batch txn, no JSON bundle) fixed; r2 delta clean, 2 sugg fixed | 2026-11-25T14:32 | 2d | last small push, CI, merge |
+| D3 | [Batch ack on public upstream](cards/D3.md) |  | worker-hard |  | claude-worker | done | D1, D2 | 2380 | r1 panel: 2 important (audit fail-open, item isolation) + 4 + lead (D1 batch txn, no JSON bundle) fixed; r2 delta clean, 2 sugg fixed | 2026-11-25T14:32 | 2d | merged |
 | B3 | [Resubmission note](cards/B3.md) |  | worker |  | claude-worker | done | B2 | 2379 | r1 panel: 1 important + 7 fixed; r2 delta clean; 1 sugg rejected | 2026-11-25T14:10 | 1d | merged |
-| B4 | [Review inputs and record](cards/B4.md) |  | worker-hard |  | claude-worker | review | D1, B2 | 2382 |  | 2026-11-25T14:54 | 2d | additions (prev reason codes, SourceRecord fields, cache service) before panel |
-| B5 | [Auto-deny and ready mail](cards/B5.md) |  | worker-hard |  |  | todo | B2, B3, B4, D4 |  |  |  | 2.5d | after B3, B4, D4 |
+| B4 | [Review inputs and record](cards/B4.md) |  | worker-hard |  | claude-worker | done | D1, B2 | 2382 | r1 panel: 1 important (screen codes) + 5 fixed, lead cap-gap fix; r2 delta clean, 3 sugg fixed | 2026-11-25T14:54 | 2d | merged |
+| B5 | [Auto-deny and ready mail](cards/B5.md) |  | worker-hard |  | claude-worker | active | B2, B3, B4, D4 |  |  | 2026-11-25T16:29 | 2.5d | implementer running |
 | CPD3 | Seam review; decide epic to dev; release D |  | lead |  |  | outline | D1, D3, D4, B3, B4, B5 |  |  |  |  | CP-D3 |
 | C1 | Calibration in prod shadow mode |  | owner |  |  | outline | CPD3, D0 |  |  |  |  | owner labels |
 | A10 | docs.nemar.org pages from copy tables |  | worker |  |  | outline | A2, A4, A5, A6, A9 |  |  |  |  | CP-E1; include a test that every copy-table anchor exists on the docs page |
 | CPE2 | Seam review; evidence epic to dev; release E; O2 |  | lead |  |  | outline | A10 |  |  |  |  | CP-E2 |
 | O4 | Empty repos nm000589, nm000978 have publication requests |  | owner |  |  | owner |  |  |  |  |  | owner: nemar admin repo publish deny nm000589 / nm000978 (reason in checkpoints.md) |
-| O5 | SNIRF DateOfBirth may block queued conversions |  | owner |  |  | owner |  |  |  |  |  | after A4 FP counts: owner decides scrub-and-resubmit message to depositor |
+| O5 | SNIRF DateOfBirth may block queued conversions |  | owner |  |  | owner |  |  |  |  |  | FP gate: 29/296 public SNIRF files carry day-precision DOB (ds004514, ds004541, ds005963); queued conversions with DOB will block; owner: tell depositor to scrub, and consider notifying OpenNeuro |
 
 ## Questions
 
@@ -129,7 +129,14 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-2378-r2 | reviewer | claude-worker | Sonnet 5.5 | A3 | 2026-11-25T15:01 | done |
 | rev-2380a | reviewer | claude-worker | Sonnet 5.5 | D3 | 2026-11-25T15:23 | done |
 | rev-2380b | reviewer | claude-worker | Sonnet 5.5 | D3 | 2026-11-25T15:23 | done |
-| A4 | implementer | claude-worker | Opus 5.5 | A4 | 2026-11-25T15:23 | running |
+| A4 | implementer | claude-worker | Opus 5.5 | A4 | 2026-11-25T15:23 | done |
 | rev-2380-r2 | reviewer | claude-worker | Sonnet 5.5 | D3 | 2026-11-25T15:32 | done |
-| rev-2381a | reviewer | claude-worker | Sonnet 5.5 | A2 | 2026-11-25T15:48 | running |
-| rev-2381b | reviewer | claude-worker | Sonnet 5.5 | A2 | 2026-11-25T15:48 | running |
+| rev-2381a | reviewer | claude-worker | Sonnet 5.5 | A2 | 2026-11-25T15:48 | done |
+| rev-2381b | reviewer | claude-worker | Sonnet 5.5 | A2 | 2026-11-25T15:48 | done |
+| rev-2382a | reviewer | claude-worker | Sonnet 5.5 | B4 | 2026-11-25T15:58 | done |
+| rev-2382b | reviewer | claude-worker | Sonnet 5.5 | B4 | 2026-11-25T15:58 | done |
+| rev-2381-r2 | reviewer | claude-worker | Sonnet 5.5 | A2 | 2026-11-25T16:03 | done |
+| rev-2382-r2 | reviewer | claude-worker | Sonnet 5.5 | B4 | 2026-11-25T16:09 | done |
+| rev-2385a | reviewer | claude-worker | Sonnet 5.5 | A4 | 2026-11-25T16:27 | done |
+| rev-2385b | reviewer | claude-worker | Sonnet 5.5 | A4 | 2026-11-25T16:27 | done |
+| B5 | implementer | claude-worker | Opus 5.5 | B5 | 2026-11-25T16:29 | running |

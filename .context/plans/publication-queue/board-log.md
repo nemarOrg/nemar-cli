@@ -25,6 +25,9 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T15:22-08:00 | D3: BIDS _photo files make a request ineligible for batch ack (individual look); screen rule unchanged | lead |  |
 | 2026-11-25T15:33-08:00 | A4: hdf5-identifier-field (JSON identifier keys on HDF5 fields); day-precision DOB = identifier, year/month = review; name-like only in person fields; elsewhere local-path rule only | lead |  |
 | 2026-11-25T15:34-08:00 | A2: name mismatch = informational (non-gating); vmrk limit 16 MiB; age alone no finding, DOB by precision; Notes/Contact local-path+email/phone+person-field names; contract adds coverage not-applicable (Analyze .hdr stays unscreened) | lead |  |
+| 2026-11-25T15:49-08:00 | A4: SubjectID identifier only for an all-letter name-like token; letters+digits = review; shared function reused by A5 for EEGLAB subject | lead |  |
+| 2026-11-25T16:06-08:00 | B4: inputs_unavailable after the Worker served inputs is rewritten to workflow_failed (counted), via inputs_served_at | lead |  |
+| 2026-11-25T16:25-08:00 | A4 deviations accepted (bare 'name' not a person field; rule B in person fields; byte bound on requested bytes; label role removed; extensions kept in OTHER list); SNIRF limits 48 MiB/1,000 fetches/180 s | lead |  |
 
 ## Log
 
