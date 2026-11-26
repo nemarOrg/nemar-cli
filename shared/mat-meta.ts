@@ -242,14 +242,18 @@ class Direct implements Forward {
     this.pos = start;
   }
   async take(n: number): Promise<Uint8Array> {
-    if (this.pos + n > this.end) throw new MatProblem("corrupt");
+    if (!Number.isSafeInteger(n) || n < 0 || this.pos + n > this.end) {
+      throw new MatProblem("corrupt");
+    }
     const bytes = await this.src.read(this.pos, n);
     if (bytes.length < n) throw new MatProblem("corrupt");
     this.pos += n;
     return bytes;
   }
   async skip(n: number): Promise<void> {
-    if (this.pos + n > this.end) throw new MatProblem("corrupt");
+    if (!Number.isSafeInteger(n) || n < 0 || this.pos + n > this.end) {
+      throw new MatProblem("corrupt");
+    }
     this.pos += n;
   }
 }
@@ -481,11 +485,15 @@ class MatWalker {
         throw new MatProblem("corrupt");
       }
       const tag = this.tag(raw);
+      // Every top-level element counts against the element cap, whatever its type.
+      if (tag.type !== MI.MATRIX) this.charge(1);
       if (tag.small !== null) {
         pos += 8;
         continue;
       }
       const length = 8 + tag.bytes;
+      // An element that says it runs past the end of a file of known size: cut short.
+      if (pos + length > this.src.size) throw new MatProblem("corrupt");
       if (tag.type === MI.COMPRESSED) {
         const stream = new Inflating(this.src, pos + 8, tag.bytes, (n) => this.spend(n));
         try {
@@ -510,6 +518,12 @@ class MatWalker {
     if (tag.type !== MI.MATRIX || tag.small !== null) throw new MatProblem("corrupt");
     const name = await this.matrix(r, tag.bytes, [], 0, true);
     this.variables.push({ name, offset, length, compressed: true });
+  }
+
+  /** Count `n` arrays against the element cap: past it the walk ends with `limit`. */
+  private charge(n: number): void {
+    this.elements += n;
+    if (this.elements > this.limits.maxElements) throw new MatProblem("limit");
   }
 
   private spend(n: number): void {
@@ -626,10 +640,11 @@ class MatWalker {
     fields: string[],
     depth: number,
     top = false,
+    charged = false,
   ): Promise<string> {
     const end = r.pos + bytes;
-    this.elements++;
-    if (this.elements > this.limits.maxElements) throw new MatProblem("limit");
+    // A container charges its members before walking them, so a member is not charged again.
+    if (!charged) this.charge(1);
     if (depth > this.limits.maxDepth) throw new MatProblem("limit");
     // An empty element: an empty cell member or struct field.
     if (bytes === 0) return "";
@@ -669,49 +684,83 @@ class MatWalker {
         this.entries.push({ fields: path, class: cls, dims, value: this.text(data, raw, dims) });
       }
     } else if (cls === "cell") {
-      for (let i = 0; i < count; i++) {
-        const tag = await this.elementTag(r, end);
-        if (tag.type !== MI.MATRIX || tag.small !== null) throw new MatProblem("corrupt");
-        await this.matrix(r, tag.bytes, path, depth + 1);
-      }
+      await this.members(r, end, count, [path], depth);
     } else if (cls === "struct") {
       const lengthEl = await this.element(r, end);
       const [width] = this.numbers(lengthEl.tag, lengthEl.data);
       const namesEl = await this.element(r, end);
+      // The field names are `width`-byte slots: a width of 0, or names that do not fill whole
+      // slots, is not a struct the format allows.
+      if (width === undefined || width <= 0 || namesEl.data.length % width !== 0) {
+        throw new MatProblem("corrupt");
+      }
       const names: string[] = [];
-      if (width !== undefined && width > 0) {
-        for (let at = 0; at + width <= namesEl.data.length; at += width) {
-          names.push(latin1.decode(namesEl.data.subarray(at, at + width)).replace(/\0.*$/s, ""));
-        }
+      for (let at = 0; at < namesEl.data.length; at += width) {
+        names.push(latin1.decode(namesEl.data.subarray(at, at + width)).replace(/\0.*$/s, ""));
       }
+      // A struct array with elements and no fields holds nothing to walk, and cannot be told
+      // from a count no file could hold.
+      if (names.length === 0 && count > 0) throw new MatProblem("corrupt");
       // One path per field, shared by every element of a struct array.
-      const paths = names.map((field) => [...path, field]);
-      for (let i = 0; i < count; i++) {
-        for (const fieldPath of paths) {
-          const tag = await this.elementTag(r, end);
-          if (tag.type !== MI.MATRIX || tag.small !== null) throw new MatProblem("corrupt");
-          await this.matrix(r, tag.bytes, fieldPath, depth + 1);
-        }
-      }
+      await this.members(
+        r,
+        end,
+        count,
+        names.map((field) => [...path, field]),
+        depth,
+      );
     } else if (count > this.limits.numericElements) {
       const entry: MatEntry = { fields: path, class: cls, dims, value: null, skipped: "size" };
       if (r instanceof Direct) entry.unread = { offset: r.pos, bytes: end - r.pos };
       this.entries.push(entry);
     } else {
-      const real = await this.element(r, end);
-      this.entries.push({
-        fields: path,
-        class: cls,
-        dims,
-        value: this.numbers(real.tag, real.data),
-      });
+      // The real part holds `count` elements: a data tag that declares more than that (and its
+      // padding) is not this array's.
+      const real = await this.elementTag(r, end);
+      const size = MI_SIZE[real.type];
+      if (size === undefined || real.bytes > count * size + 8) throw new MatProblem("corrupt");
+      const data = real.small ?? (await r.take(real.bytes));
+      const numbers = this.numbers(real, data).slice(0, this.limits.numericElements);
+      this.entries.push({ fields: path, class: cls, dims, value: numbers });
     }
 
+    // A container's members fill it exactly (each is a whole miMATRIX, so there is no padding):
+    // bytes left over are members the declared count does not list, at the top level too.
+    if (cls === "cell" || cls === "struct") {
+      if (r.pos !== end) throw new MatProblem("corrupt");
+      return name;
+    }
     // A variable's stream is left where it is: a large array is not read (or inflated) past
     // the bytes that said what it is.
     if (top) return name;
     if (r.pos > end) throw new MatProblem("corrupt");
     await r.skip(end - r.pos);
     return name;
+  }
+
+  /**
+   * The members of a cell (one path) or a struct array (one path per field), `count` elements.
+   * They are charged against the element cap before any is walked, and each member is a whole
+   * `miMATRIX` of at least its 8-byte tag, so a declared count the remaining bytes cannot hold is
+   * `corrupt` before the loop starts: no count from the file drives a loop on its own.
+   */
+  private async members(
+    r: Forward,
+    end: number,
+    count: number,
+    paths: string[][],
+    depth: number,
+  ): Promise<void> {
+    const total = count * paths.length;
+    if (!Number.isSafeInteger(total)) throw new MatProblem("corrupt");
+    if (total * 8 > end - r.pos) throw new MatProblem("corrupt");
+    this.charge(total);
+    for (let i = 0; i < count; i++) {
+      for (const fieldPath of paths) {
+        const tag = await this.elementTag(r, end);
+        if (tag.type !== MI.MATRIX || tag.small !== null) throw new MatProblem("corrupt");
+        await this.matrix(r, tag.bytes, fieldPath, depth + 1, false, true);
+      }
+    }
   }
 }

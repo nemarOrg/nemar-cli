@@ -266,6 +266,131 @@ describe("classes no fixture holds", () => {
   });
 });
 
+/** A struct array's header: flags, dims, name, field-name width and names. */
+const structHead = (dims: number[], name: string, width: number, names: Uint8Array) => [
+  sub(6, u32(2, 0)),
+  sub(5, i32(...dims)),
+  sub(1, ascii(name)),
+  sub(5, i32(width)),
+  sub(1, names),
+];
+const scalar = matrix(
+  sub(6, u32(6, 0)),
+  sub(5, i32(1, 1)),
+  sub(1, ascii("")),
+  sub(9, new Uint8Array(8)),
+);
+
+describe("declared counts and sizes do not drive the walk (review round 1)", () => {
+  test("a 1e9 x 1e9 struct with no fields returns at once, corrupt", async () => {
+    const huge = matrix(...structHead([1e9, 1e9], "X", 0, new Uint8Array(0)));
+    const started = performance.now();
+    const w = await walkMat(bufferSource(level5(huge)));
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(w.incomplete).toBe("corrupt");
+    // With a field and the same count, the bytes cannot hold the members: corrupt, at once.
+    const many = matrix(...structHead([1e9, 1e9], "X", 8, ascii("a".padEnd(8, "\0"))));
+    const t = performance.now();
+    expect((await walkMat(bufferSource(level5(many)))).incomplete).toBe("corrupt");
+    expect(performance.now() - t).toBeLessThan(1000);
+  });
+
+  test("a cell's members are charged against the element cap before any is walked", async () => {
+    const cell = matrix(
+      sub(6, u32(1, 0)),
+      sub(5, i32(1, 3)),
+      sub(1, ascii("c")),
+      scalar,
+      scalar,
+      scalar,
+    );
+    expect(
+      (await walkMat(bufferSource(level5(cell)), { limits: { maxElements: 3 } })).incomplete,
+    ).toBe("limit");
+    // The twin: the variable and its three members fit a cap of 4.
+    const ok = await walkMat(bufferSource(level5(cell)), { limits: { maxElements: 4 } });
+    expect(ok.incomplete).toBeUndefined();
+    expect(ok.entries).toHaveLength(3);
+  });
+
+  test("a 1 x 1 double whose data tag declares 2 MB is corrupt, and no more than the cap is read", async () => {
+    const big = matrix(
+      sub(6, u32(6, 0)),
+      sub(5, i32(1, 1)),
+      sub(1, ascii("X")),
+      sub(2, new Uint8Array(2_000_000)),
+    );
+    const { src, ranges } = recording(level5(big));
+    const w = await walkMat(src);
+    expect(w.incomplete).toBe("corrupt");
+    expect(ranges.reduce((n, [, l]) => n + l, 0)).toBeLessThan(1024);
+    // The twin: a data tag of exactly one double reads.
+    const one = matrix(
+      sub(6, u32(6, 0)),
+      sub(5, i32(1, 1)),
+      sub(1, ascii("X")),
+      sub(9, new Uint8Array(8)),
+    );
+    expect((await walkMat(bufferSource(level5(one)))).entries).toEqual([
+      { fields: ["X"], class: "double", dims: [1, 1], value: [0] },
+    ]);
+  });
+
+  test("bytes left in a cell or struct past its members are corrupt, at the top level too", async () => {
+    const cellOf = (...members: Uint8Array[]) =>
+      matrix(sub(6, u32(1, 0)), sub(5, i32(1, 1)), sub(1, ascii("c")), ...members);
+    expect((await walkMat(bufferSource(level5(cellOf(scalar))))).incomplete).toBeUndefined();
+    expect((await walkMat(bufferSource(level5(cellOf(scalar, scalar))))).incomplete).toBe(
+      "corrupt",
+    );
+    // Nested below the top: a struct whose one field is a cell with a stray member.
+    const nested = matrix(
+      ...structHead([1, 1], "s", 8, ascii("f".padEnd(8, "\0"))),
+      cellOf(scalar, scalar),
+    );
+    expect((await walkMat(bufferSource(level5(nested)))).incomplete).toBe("corrupt");
+    // A struct with two names and one member per element: corrupt.
+    const short = matrix(
+      ...structHead([1, 1], "s", 8, ascii("a".padEnd(8, "\0") + "b".padEnd(8, "\0"))),
+      scalar,
+    );
+    expect((await walkMat(bufferSource(level5(short)))).incomplete).toBe("corrupt");
+    const whole = matrix(
+      ...structHead([1, 1], "s", 8, ascii("a".padEnd(8, "\0") + "b".padEnd(8, "\0"))),
+      scalar,
+      scalar,
+    );
+    expect((await walkMat(bufferSource(level5(whole)))).incomplete).toBeUndefined();
+  });
+
+  test("a field-name width of 0, or names that do not fill whole slots, are corrupt", async () => {
+    const zero = matrix(...structHead([1, 1], "s", 0, ascii("ab")), scalar);
+    expect((await walkMat(bufferSource(level5(zero)))).incomplete).toBe("corrupt");
+    const ragged = matrix(...structHead([1, 1], "s", 8, ascii("a".padEnd(12, "\0"))), scalar);
+    expect((await walkMat(bufferSource(level5(ragged)))).incomplete).toBe("corrupt");
+  });
+
+  test("every top-level element counts against the element cap", async () => {
+    const small = sub(1, ascii("x"));
+    const many = level5(...Array.from({ length: 20 }, () => small));
+    expect((await walkMat(bufferSource(many), { limits: { maxElements: 10 } })).incomplete).toBe(
+      "limit",
+    );
+    expect(
+      (await walkMat(bufferSource(many), { limits: { maxElements: 20 } })).incomplete,
+    ).toBeUndefined();
+  });
+
+  test("a top-level element that runs past the end of the file is corrupt, unread", async () => {
+    const bytes = level5(scalar).slice();
+    // Declare 1 MiB for the variable.
+    new DataView(bytes.buffer).setUint32(MAT_HEADER_BYTES + 4, 1024 * 1024, true);
+    const { src, ranges } = recording(bytes);
+    expect((await walkMat(src)).incomplete).toBe("corrupt");
+    expect(ranges.every(([o]) => o < bytes.length)).toBe(true);
+  });
+});
+
 describe("damaged input", () => {
   test("a file cut short is corrupt, keeping the arrays before the cut", async () => {
     const bytes = load("eeglab-data.set");
