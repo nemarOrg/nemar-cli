@@ -60,6 +60,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { duplicateMigrationPrefixes } from "./migration-prefixes";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const BACKEND = join(REPO_ROOT, "backend");
@@ -164,6 +165,14 @@ async function wrangler(args: string[]): Promise<{ ok: boolean; output: string }
 async function main(): Promise<void> {
   if (!existsSync(WRANGLER)) {
     console.error(`wrangler not found at ${WRANGLER}. Run 'bun install' in backend/ first.`);
+    process.exit(1);
+  }
+
+  const duplicates = duplicateMigrationPrefixes(MIGRATIONS_DIR);
+  if (duplicates.length > 0) {
+    for (const d of duplicates)
+      console.error(`Shared migration prefix ${d.prefix}: ${d.files.join(", ")}`);
+    console.error("wrangler tracks migrations by file name; renumber the newer file.");
     process.exit(1);
   }
 
