@@ -60,7 +60,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { duplicateMigrationPrefixes } from "./migration-prefixes";
+import { migrationPrefixProblems } from "./migration-prefixes";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const BACKEND = join(REPO_ROOT, "backend");
@@ -168,11 +168,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const duplicates = duplicateMigrationPrefixes(MIGRATIONS_DIR);
-  if (duplicates.length > 0) {
-    for (const d of duplicates)
-      console.error(`Shared migration prefix ${d.prefix}: ${d.files.join(", ")}`);
-    console.error("wrangler tracks migrations by file name; renumber the newer file.");
+  const prefixProblems = migrationPrefixProblems(MIGRATIONS_DIR);
+  if (prefixProblems.length > 0) {
+    for (const problem of prefixProblems) console.error(problem);
+    console.error("wrangler tracks migrations by file name (scripts/migration-prefixes.ts).");
     process.exit(1);
   }
 

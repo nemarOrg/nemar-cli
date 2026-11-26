@@ -33,27 +33,40 @@ export interface DuplicatePrefix {
 }
 
 /**
- * Every numeric prefix shared by two or more `.sql` files in `dir`, excluding a
- * grandfathered prefix whose files are exactly the grandfathered set. A `.sql` file
- * without a leading `NNNN_` prefix is reported under the prefix `(none)`.
+ * wrangler reads a migration's number as `parseInt(name.split("_")[0])` but applies in string-sort
+ * order, so `00153_b.sql` or `154_x.sql` beside `0153_a.sql` would sort and number apart. Every
+ * migration therefore carries exactly four digits and an underscore.
+ */
+const PREFIX = /^(\d{4})_/;
+
+function sqlFiles(dir: string): string[] {
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+}
+
+/** `.sql` files in `dir` without an exact four-digit `NNNN_` prefix. */
+export function malformedMigrationNames(dir: string): string[] {
+  return sqlFiles(dir).filter((f) => !PREFIX.test(f));
+}
+
+/**
+ * Every four-digit prefix shared by two or more `.sql` files in `dir`, excluding a grandfathered
+ * prefix whose files are exactly the grandfathered set. A file without a four-digit prefix is not
+ * counted here; {@link malformedMigrationNames} reports it.
  */
 export function duplicateMigrationPrefixes(
   dir: string,
   grandfathered: ReadonlyMap<string, readonly string[]> = GRANDFATHERED_PREFIXES,
 ): DuplicatePrefix[] {
   const byPrefix = new Map<string, string[]>();
-  for (const file of readdirSync(dir)
-    .filter((f) => f.endsWith(".sql"))
-    .sort()) {
-    const prefix = /^(\d+)_/.exec(file)?.[1] ?? "(none)";
+  for (const file of sqlFiles(dir)) {
+    const prefix = PREFIX.exec(file)?.[1];
+    if (prefix === undefined) continue;
     byPrefix.set(prefix, [...(byPrefix.get(prefix) ?? []), file]);
   }
   const duplicates: DuplicatePrefix[] = [];
   for (const [prefix, files] of byPrefix) {
-    if (prefix === "(none)") {
-      duplicates.push({ prefix, files });
-      continue;
-    }
     if (files.length < 2) continue;
     const allowed = grandfathered.get(prefix);
     if (allowed && allowed.length === files.length && allowed.every((f) => files.includes(f))) {
@@ -62,4 +75,19 @@ export function duplicateMigrationPrefixes(
     duplicates.push({ prefix, files });
   }
   return duplicates;
+}
+
+/** One line per problem in `dir`, saying what to do; empty when every migration is numbered once. */
+export function migrationPrefixProblems(dir: string): string[] {
+  const malformed = malformedMigrationNames(dir);
+  return [
+    ...(malformed.length > 0
+      ? [
+          `Migration without a 4-digit NNNN_ prefix: ${malformed.join(", ")}; give it the next number`,
+        ]
+      : []),
+    ...duplicateMigrationPrefixes(dir).map(
+      (d) => `Shared migration prefix ${d.prefix}: ${d.files.join(", ")}; renumber the newer file`,
+    ),
+  ];
 }

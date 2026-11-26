@@ -10,17 +10,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { copyFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { duplicateMigrationPrefixes } from "../scripts/migration-prefixes";
+import { duplicateMigrationPrefixes, migrationPrefixProblems } from "../scripts/migration-prefixes";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../backend/src/db/migrations");
 
 describe("D1 migration prefixes", () => {
-  test("no two migrations in backend/src/db/migrations share a numeric prefix", () => {
-    const duplicates = duplicateMigrationPrefixes(MIGRATIONS_DIR);
-    expect(
-      duplicates,
-      `Renumber the newer file: ${duplicates.map((d) => d.files.join(" + ")).join("; ")}`,
-    ).toEqual([]);
+  test("every migration in backend/src/db/migrations has its own four-digit prefix", () => {
+    const problems = migrationPrefixProblems(MIGRATIONS_DIR);
+    expect(problems, problems.join("\n")).toEqual([]);
   });
 
   describe("on a copy of the directory", () => {
@@ -38,7 +35,7 @@ describe("D1 migration prefixes", () => {
     });
 
     test("the unchanged copy passes", () => {
-      expect(duplicateMigrationPrefixes(dir)).toEqual([]);
+      expect(migrationPrefixProblems(dir)).toEqual([]);
     });
 
     test("a second file on an existing prefix fails, naming both files", () => {
@@ -48,8 +45,10 @@ describe("D1 migration prefixes", () => {
         .at(-1) as string;
       const prefix = last.split("_")[0];
       writeFileSync(join(dir, `${prefix}_from_another_branch.sql`), "SELECT 1;\n");
-      expect(duplicateMigrationPrefixes(dir)).toEqual([
-        { prefix, files: [`${prefix}_from_another_branch.sql`, last].sort() },
+      const files = [`${prefix}_from_another_branch.sql`, last].sort();
+      expect(duplicateMigrationPrefixes(dir)).toEqual([{ prefix, files }]);
+      expect(migrationPrefixProblems(dir)).toEqual([
+        `Shared migration prefix ${prefix}: ${files.join(", ")}; renumber the newer file`,
       ]);
     });
 
@@ -60,10 +59,15 @@ describe("D1 migration prefixes", () => {
       expect(dup[0].files).toHaveLength(3);
     });
 
-    test("a file with no numeric prefix fails", () => {
-      writeFileSync(join(dir, "add_column.sql"), "SELECT 1;\n");
-      expect(duplicateMigrationPrefixes(dir)).toEqual([
-        { prefix: "(none)", files: ["add_column.sql"] },
+    test.each([
+      ["no numeric prefix", "add_column.sql"],
+      ["a five-digit prefix", "00153_b.sql"],
+      ["a three-digit prefix", "154_x.sql"],
+    ])("a file with %s fails with its own message", (_label, name) => {
+      writeFileSync(join(dir, name), "SELECT 1;\n");
+      expect(duplicateMigrationPrefixes(dir)).toEqual([]);
+      expect(migrationPrefixProblems(dir)).toEqual([
+        `Migration without a 4-digit NNNN_ prefix: ${name}; give it the next number`,
       ]);
     });
   });
