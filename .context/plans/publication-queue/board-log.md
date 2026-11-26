@@ -42,6 +42,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-25T19:20-08:00 | B6 ticket binding: trust the admin visibly (dry run shows ticket subject and sender, warns if sender is not the depositor, audit records both) | lead |  |
 | 2026-11-25T19:55-08:00 | A5 FieldTrip: pwd/cwd location words; skip cfg.version/callinfo/toolbox as provenance; not cfg.previous wholesale, not bare dataset; merge occurrences+entries into one Finding count | lead |  |
 | 2026-11-25T20:31-08:00 | A5: a fieldless struct with count > 0 is valid (MATLAB struct()), walks nothing; counts past 2^53 are corrupt | lead |  |
+| 2026-11-25T20:43-08:00 | Owner raised today's limit to 66 (Q3) | owner |  |
 
 ## Log
 

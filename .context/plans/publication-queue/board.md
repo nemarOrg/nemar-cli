@@ -17,10 +17,10 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Repo | nemarOrg/nemar-cli |
 | Integration branch | feature/issue-2182-epic-pq-decide, feature/issue-2182-epic-pq-evidence |
 | Manager id | mba-claude-opus |
-| State | paused |
+| State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-25T20:31-08:00 |
-| Next tick | - |
+| Last tick | 2026-11-25T20:43-08:00 |
+| Next tick | 2026-11-25T21:13-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-25T11:07-08:00 |
 
@@ -48,7 +48,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 60 | 60 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 66 | 61 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -74,18 +74,19 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  | claude-worker | done | A1, A3 | 2385 | r1 panel: 2 important (unscanned strings, numeric id fields) + 5 fixed; seam fix (one person-field rule); r2 delta: all resolved, describing-field exclusion + token match + placeholder sent, lead verifies | 2026-11-25T15:23 | 1.5d | merged |
 | A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  | claude-worker | done | A1 | 2392 | r1 panel: 2 important (hidden entries, NaN hang) + 5 fixed; r2 delta: 1 important (directory end alignment) sent, 2 documented as out of scope; lead verifies | 2026-11-25T17:38 | 1d | merged |
 | A9 | [nemar dataset screen](cards/A9.md) |  | worker |  | claude-worker | done | A1 | 2389 | r1 panel: 4 important (update-check network, superseded honesty, git failure, copy) + 4 fixed; r2 delta clean, 1 sugg fixed, 1 rejected (fails closed) | 2026-11-25T17:38 | 1d | merged |
-| A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  | claude-worker | review | A1, A4 | 2395 |  | 2026-11-25T18:11 | 2d | r1 fixed at e401e6a3 (critical hang fixed; fieldless struct() accepted as valid); delta review waits for budget |
+| A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  | claude-worker | review | A1, A4 | 2395 |  | 2026-11-25T18:11 | 2d | r2 delta review (head e401e6a3) |
 | D3 | [Batch ack on public upstream](cards/D3.md) |  | worker-hard |  | claude-worker | done | D1, D2 | 2380 | r1 panel: 2 important (audit fail-open, item isolation) + 4 + lead (D1 batch txn, no JSON bundle) fixed; r2 delta clean, 2 sugg fixed | 2026-11-25T14:32 | 2d | merged |
 | B3 | [Resubmission note](cards/B3.md) |  | worker |  | claude-worker | done | B2 | 2379 | r1 panel: 1 important + 7 fixed; r2 delta clean; 1 sugg rejected | 2026-11-25T14:10 | 1d | merged |
 | B4 | [Review inputs and record](cards/B4.md) |  | worker-hard |  | claude-worker | done | D1, B2 | 2382 | r1 panel: 1 important (screen codes) + 5 fixed, lead cap-gap fix; r2 delta clean, 3 sugg fixed | 2026-11-25T14:54 | 2d | merged |
 | B5 | [Auto-deny and ready mail](cards/B5.md) |  | worker-hard |  | claude-worker | done | B2, B3, B4, D4 | 2387 | r1 panel: 3 important (silent mail failure, confirm_failed gaps, recipients) + 6 fixed; r2 delta clean, 3 sugg fixed | 2026-11-25T16:29 | 2.5d | merged |
 | CPD3 | Seam review; decide epic to dev; release D |  | lead |  | claude-opus | owner | D1, D3, D4, B3, B4, B5, B6 | 2397 | seam review ready-with-fixes; fixes merged in #2394 (r1 one reviewer, all fixed) | 2026-11-25T18:11-08:00 |  | owner: wait for full CI on #2397, merge into dev, release; then #2370 checklist and C1 shadow |
 | C1 | Calibration in prod shadow mode |  | owner |  |  | outline | CPD3, D0 |  |  |  |  | owner labels |
-| A10 | docs.nemar.org pages from copy tables |  | worker |  |  | outline | A2, A4, A5, A6, A9 |  |  |  |  | CP-E1; include a test that every copy-table anchor exists on the docs page |
+| A10 | [Screen docs from copy tables](cards/A10.md) |  | worker |  |  | todo | A2, A4, A6, A9 |  |  |  | 1d | dispatch now (A5 docs added when it merges) |
 | CPE2 | Seam review; evidence epic to dev; release E; O2 |  | lead |  |  | outline | A10 |  |  |  |  | CP-E2 |
 | O4 | Empty repos nm000589, nm000978 have publication requests |  | owner |  |  | owner |  |  |  |  |  | owner: nemar admin repo publish deny nm000589 / nm000978 (reason in checkpoints.md) |
 | O5 | SNIRF DateOfBirth may block queued conversions |  | owner |  |  | owner |  |  |  |  |  | FP gate: 29/296 public SNIRF files carry day-precision DOB (ds004514, ds004541, ds005963); queued conversions with DOB will block; owner: tell depositor to scrub, and consider notifying OpenNeuro |
 | B6 | [License permission workflow](cards/B6.md) |  | worker-hard |  | claude-worker | done | B5 | 2393 | r1 panel: 6 important (race, mail gating, ticket binding, unreadable, CLI mail lines, no_recipient) + 4 fixed; r2 delta clean, 2 sugg rejected (admin-only audit; advisory warning) | 2026-11-25T18:29 | 1.5d | merged |
+| A11 | Decide-lane docs anchors (lineage, upstream ack, auto-deny) after #2397 in dev |  | worker |  |  | outline | CPD3 |  |  |  |  | after decide epic merges |
 
 ## Questions
 
@@ -93,7 +94,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 |---|---|---|---|---|---|---|---|
 | Q1 | - | Raise PLATFORM_DAILY_CAP (50 model calls/day) for the queue? At 50/day ~300 requests take ~1 week; ADR 0139 adds a Sonnet call per fail | Keep 50 for the shadow batch, decide after (Recommended) / Raise to 150 now / Make it an env var you set | none | 2026-11-27T17:00 | closed | Raise to 150 now (owner, 2026-11-25T11:22-08:00) |
 | Q2 | - | Agent budget 40/40 used today. Raise today's limit so the B5 (auto-deny) review panel and A5, A6, A9 can start now, or wait for the daily reset? | Raise to 60 today (Recommended) / Wait for the reset | none | 2026-11-26T09:00 | closed | Raise to 60 today |
-| Q3 | - | Budget 60/60 used. Raise by 5 today for A5's delta review and A10 docs, or wait for the reset? | Raise to 65 today / Wait for the reset (Recommended) | none | 2026-11-26T09:00 | open |  |
+| Q3 | - | Budget 60/60 used. Raise by 5 today for A5's delta review and A10 docs, or wait for the reset? | Raise to 65 today / Wait for the reset (Recommended) | none | 2026-11-26T09:00 | closed | Raise to 66 today |
 
 ## Proposals
 
@@ -164,3 +165,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-2394 | reviewer | claude-worker | Sonnet 5.5 | CPD3 | 2026-11-25T19:43 | done |
 | rev-2395a | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T19:53 | done |
 | rev-2395b | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T19:53 | done |
+| rev-2395-r2 | reviewer | claude-worker | Sonnet 5.5 | A5 | 2026-11-25T20:43 | running |
