@@ -297,8 +297,9 @@ describe("coverage and summaries", () => {
       "sub-03/anat/t1.nii.gz",
       "participants.tsv",
     ]);
-    expect(cov.byReader).toEqual({ edf: 2 });
-    expect(cov.unscreened).toEqual({ ".set": 1, ".fdt": 1, ".fif.gz": 1, ".nii.gz": 1 });
+    // The EEGLAB reader reads the .set and claims the .fdt beside it (card A5).
+    expect(cov.byReader).toEqual({ edf: 2, eeglab: 1 });
+    expect(cov.unscreened).toEqual({ ".fif.gz": 1, ".nii.gz": 1 });
   });
 
   test("summaries carry counts, and shapes carry no letters or digits", () => {
@@ -748,7 +749,7 @@ describe("second review: delimiters, record numbers, slots, coverage, canonical 
       [["sub-01/eeg/a.mff/info.xml", "sub-01/eeg/a.mff/signal1.bin"], { ".mff/": 1 }],
       [["sub-01/ieeg/a.mefd/x/y.timd"], { ".mefd/": 1 }],
       [["sub-01/eeg/a.zarr/.zarray", "sub-01/eeg/b.zarr/.zarray"], { ".zarr/": 2 }],
-      [["sourcedata/a.mat", "sourcedata/b.mat"], { ".mat": 2 }],
+      [["sourcedata/a.xdf", "sourcedata/b.xdf"], { ".xdf": 2 }],
     ];
     for (const [paths, expected] of cases) {
       expect(formatCoverage(paths).unscreened, paths[0]).toEqual(expected);

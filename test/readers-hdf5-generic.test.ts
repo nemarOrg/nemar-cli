@@ -48,12 +48,12 @@ const kindsOf = (e: Hdf5Entry) =>
   scanEntryText(e, "hdf5.attribute").map((f) => `${f.kind}/${f.severity}`);
 
 describe("registration", () => {
-  test(".h5 and .hdf5 are read by the hdf5 reader; .snirf stays SNIRF's; .nwb and .mat by neither", () => {
+  test(".h5 and .hdf5 are read by the hdf5 reader; .snirf stays SNIRF's; .nwb by neither; .mat by the MATLAB reader", () => {
     expect(readerFor("sourcedata/run1.h5")?.id).toBe("hdf5");
     expect(readerFor("sub-01/eeg/sub-01_eeg.HDF5")?.id).toBe("hdf5");
     expect(readerFor("a.snirf")?.id).toBe("snirf");
     expect(readerFor("a.nwb")).toBeNull();
-    expect(readerFor("a.mat")).toBeNull();
+    expect(readerFor("a.mat")?.id).toBe("mat");
   });
 
   test("the new kinds have copy, and the direct ones are direct", () => {

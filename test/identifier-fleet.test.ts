@@ -788,7 +788,7 @@ describe("status from EDF/BDF headers", () => {
   test("a date with an unparsed recording format beside it follows the unscreened rule, not dates-only", async () => {
     const mixed = await scanFiles({
       [EDF]: edfHeader({ startdate: "14.03.93" }),
-      "sub-01/eeg/b.set": "x",
+      "sub-01/eeg/b.nwb": "x",
     });
     expect(mixed.record.status).toBe("partially-screened");
   });
@@ -916,11 +916,11 @@ describe("status from JSON keys: severity decides, not kind", () => {
 });
 
 describe("status from recording formats", () => {
-  const SET = "sub-01/eeg/sub-01_task-rest_eeg.set";
+  const SET = "sub-01/eeg/sub-01_task-rest_eeg.nwb";
   test("recordings only in a format the scanner cannot parse: not-screened, and never fetched", async () => {
     const { w, record } = await scanFiles({ [SET]: "x", "dataset_description.json": "{}" });
     expect(record.status).toBe("not-screened");
-    expect(record.unscreened_formats).toEqual({ ".set": 1 });
+    expect(record.unscreened_formats).toEqual({ ".nwb": 1 });
     expect(w.hits(w.pathOf(ID, SET))).toBe(0);
   });
   test("clean EDF beside an unparsed format: partially-screened", async () => {
@@ -1307,7 +1307,7 @@ describe("sampling caps are counted and make the dataset incomplete", () => {
   test("a dated scans row follows the same rules as a dated header: others unscreened, an unread header, a review finding", async () => {
     const table = "filename\tacq_time\nsub-01/eeg/a.edf\t2020-03-14T10:00:00\n";
     const scans = { "sub-01/sub-01_scans.tsv": table };
-    const withSet = await scanFiles({ [EDF]: CLEAN, ...scans, "sub-01/eeg/b.set": "x" });
+    const withSet = await scanFiles({ [EDF]: CLEAN, ...scans, "sub-01/eeg/b.nwb": "x" });
     expect(withSet.record.status).toBe("partially-screened");
     const unread = await scanFiles({
       [EDF]: CLEAN,

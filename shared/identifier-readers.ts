@@ -23,10 +23,13 @@ import {
   OTHER_RECORDING_EXTENSIONS,
   scanEdfHeader,
 } from "./identifier-scan";
-import { HDF5_GENERIC_READER } from "./readers/hdf5-generic";
-import { SNIRF_READER } from "./readers/snirf";
 import { BRAINVISION_READER } from "./readers/brainvision";
+import { EEGLAB_READER } from "./readers/eeglab";
+import { HDF5_GENERIC_READER } from "./readers/hdf5-generic";
+import { HOMER_NIRS_READER } from "./readers/homer-nirs";
+import { MAT_GENERIC_READER } from "./readers/mat-generic";
 import { NIRX_READER } from "./readers/nirx";
+import { SNIRF_READER } from "./readers/snirf";
 
 // ---------------------------------------------------------------------------------------
 // Vocabulary
@@ -34,7 +37,7 @@ import { NIRX_READER } from "./readers/nirx";
 
 /**
  * Every reader the screen may name. Closed: the report's door accepts exactly these, so a later
- * reader changes no vocabulary. `edf`, `brainvision`, `nirx`, `snirf` and `hdf5` have readers today.
+ * reader changes no vocabulary. Every id but `zip` has a reader today.
  */
 export const READER_IDS = [
   "edf",
@@ -275,6 +278,15 @@ export interface ReaderResult {
   incomplete?: ReaderIncompleteReason;
   /** Informational notes, one per kind per file (see {@link READER_NOTES}). */
   notes?: ReaderNote[];
+  /**
+   * Companions the file's content names that must sit beside it (EEGLAB's `.fdt`, named by the
+   * `.set`; card A5, lead ruling 2026-11-25). Bare file names only: each is resolved in the
+   * recording's own directory and never anywhere else, and a name with a path separator or
+   * `..` is never followed. Each one the dataset's paths lack, and each name that is not bare,
+   * counts as a missing companion (`companion-missing`), as a pairing by name does
+   * ({@link namedCompanionsMissing}). Never read: a companion named here is not opened.
+   */
+  needs?: string[];
 }
 
 /**
@@ -338,6 +350,9 @@ export const READERS: readonly FormatReader[] = [
   NIRX_READER,
   SNIRF_READER,
   HDF5_GENERIC_READER,
+  EEGLAB_READER,
+  HOMER_NIRS_READER,
+  MAT_GENERIC_READER,
 ];
 
 /** The limits a reader reads one path under: its extension's own, else the reader's. */
@@ -401,6 +416,35 @@ export function companionsOf(
     if (check.missing.length > 0) missing.set(path, check.missing.length);
   }
   return { claimed, missing };
+}
+
+/**
+ * How many of the companions a file's content names (`ReaderResult.needs`) are not beside it in
+ * `paths`. A name must be a bare file name (no `/` or `\\`, not `.` or `..`): one that is not
+ * names nothing beside the file, so it counts as missing. Names compare exactly, or else ignoring
+ * letter case (a writer on a case-insensitive disk may spell the name differently).
+ */
+export function namedCompanionsMissing(
+  path: string,
+  needs: readonly string[] | undefined,
+  paths: ReadonlySet<string>,
+): number {
+  if (!needs || needs.length === 0) return 0;
+  const slash = path.lastIndexOf("/");
+  const dir = slash < 0 ? "" : path.slice(0, slash + 1);
+  let lowered: Set<string> | undefined;
+  let missing = 0;
+  for (const name of needs) {
+    if (name === "" || name === "." || name === ".." || /[/\\]/.test(name)) {
+      missing++;
+      continue;
+    }
+    const candidate = dir + name;
+    if (paths.has(candidate)) continue;
+    lowered ??= new Set([...paths].map((p) => p.toLowerCase()));
+    if (!lowered.has(candidate.toLowerCase())) missing++;
+  }
+  return missing;
 }
 
 // ---------------------------------------------------------------------------------------
