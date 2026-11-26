@@ -71,6 +71,16 @@ function utf16Of(bytes: Uint8Array): "utf-16le" | "utf-16be" | null {
 }
 
 /**
+ * The C0 control characters a header may not hold, all but tab, line feed and carriage return:
+ * U+0000 to U+0008, U+000B, U+000C and U+000E to U+001F. Built from code points, so the source
+ * holds no control character.
+ */
+const CONTROL_CHARACTERS = new RegExp(
+  `[${String.fromCharCode(0x00)}-${String.fromCharCode(0x08)}${String.fromCharCode(0x0b)}${String.fromCharCode(0x0c)}${String.fromCharCode(0x0e)}-${String.fromCharCode(0x1f)}]`,
+  "g",
+);
+
+/**
  * Decode a header's text. UTF-16 (a byte-order mark, `FF FE` or `FE FF`, or a NUL in every other
  * byte) decodes as UTF-16. Anything else decodes as UTF-8 when the bytes are valid UTF-8, and as
  * Windows-1252 when they are not, whatever a `Codepage` line declares: a header that says UTF-8
@@ -99,7 +109,7 @@ export function decodeHeader(bytes: Uint8Array): string {
     }
   }
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  return text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
+  return text.replace(CONTROL_CHARACTERS, "");
 }
 
 /**
@@ -256,19 +266,8 @@ export function checkReference(
   return resolved.toLowerCase() === expected.toLowerCase() ? "match" : "mismatch";
 }
 
-/**
- * Field names that hold a person: the list phase A4 uses for its free-text name rule (`name`,
- * `subject`, `patient`, `operator`, `experimenter`), defined here too because A4 has not merged;
- * the two must stay equal. Fields that describe the person rather than name them, and fields that
- * name a thing (the experiment, a file, a device, a montage), are excluded.
- */
-export const PERSON_FIELD = /name|subject|patient|operator|experimenter/i;
-const NOT_A_NAME_FIELD =
-  /age|gender|sex|birth|dob|contact|info|type|history|notes|remarks|date|experiment_name|file_?name|device|study|probe|montage|paradigm|task/i;
-
-/** True for a field that names a person (and not one that describes them). */
-export const isPersonField = (key: string): boolean =>
-  PERSON_FIELD.test(key) && !NOT_A_NAME_FIELD.test(key);
+// Which field names hold a person is one rule for every reader: `isPersonField` in
+// `./person-fields.ts`.
 
 /**
  * The most characters of one value the free-text and name rules read. A longer value is cut to

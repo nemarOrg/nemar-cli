@@ -34,52 +34,10 @@ import {
   shapeOf,
 } from "../identifier-scan";
 import { walkForReader } from "./hdf5-incomplete";
+import { isPersonField } from "./person-fields";
 import { capText, contactIn } from "./text-header";
 
-/**
- * Which field names are a person's: a canonical name (lowercase, no space, `_` or `-`) that
- * contains a `person` word not qualified by a `thing` word before it, and is not one of the `own`
- * names. A field called just `name` names its own object (a stimulus, an aux channel, a group), as
- * SNIRF's `stim{k}/name` and many HDF5 layouts use it, so it is not a person's. `ExperimenterName`,
- * `PatientProfile` and `SubjectTask` are a person's; `ManufacturerName`, `AppName` and `name` are
- * not.
- */
-export const PERSON_FIELDS = {
-  person: ["name", "subject", "patient", "operator", "experimenter", "participant"],
-  thing: [
-    "manufacturer",
-    "app",
-    "model",
-    "device",
-    "software",
-    "file",
-    "stim",
-    "aux",
-    "channel",
-    "cap",
-    "label",
-    "unit",
-    "institution",
-    "task",
-    "condition",
-  ],
-  own: ["name"],
-} as const;
-
-/** Is this field name (any spelling) a person's? */
-export function isPersonField(name: string): boolean {
-  const c = canonical(name);
-  if ((PERSON_FIELDS.own as readonly string[]).includes(c)) return false;
-  // A thing word suppresses a person word only when it comes before it, as its qualifier:
-  // `ManufacturerName` is a manufacturer's; `PatientProfile` and `SubjectTask` are a person's.
-  for (const w of PERSON_FIELDS.person) {
-    for (let at = c.indexOf(w); at >= 0; at = c.indexOf(w, at + 1)) {
-      const before = c.slice(0, at);
-      if (!PERSON_FIELDS.thing.some((t) => before.includes(t))) return true;
-    }
-  }
-  return false;
-}
+export { PERSON_FIELDS, isPersonField } from "./person-fields";
 
 /** Values that mean "nothing was entered" in an identifier field or a SubjectID. */
 export const EMPTY_VALUES: ReadonlySet<string> = new Set([

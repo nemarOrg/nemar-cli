@@ -35,6 +35,7 @@ import {
   isNameLike,
   shapeOf,
 } from "../identifier-scan";
+import { isPersonField } from "./person-fields";
 import {
   type IniSection,
   TEXT_HEADER_LIMITS,
@@ -44,7 +45,6 @@ import {
   entryValue,
   freeTextFindings,
   isAnotherFormat,
-  isPersonField,
   pairByName,
   parseIni,
   readHeader,
@@ -180,7 +180,7 @@ function screenSubjectBlock(
       });
     } else if (FREE_TEXT_FIELD.test(key)) {
       for (const f of freeTextFindings(v, "nirx-freetext", key).findings) once(f);
-    } else if (isPersonField(key)) {
+    } else if (isPersonField(key, { bareName: "person" })) {
       if (PLACEHOLDER.test(v) || !nameIsNameLike(v) || isSubjectLabel(v, path)) continue;
       once({ kind: "nirx-subject-name", severity: "identifier", field: key, shape: shapeOf(v) });
     }
