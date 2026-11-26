@@ -1,7 +1,8 @@
 /**
- * No two D1 migrations may share a numeric prefix (`scripts/migration-prefixes.ts`
- * says why). The first test holds the real directory; the rest prove the check
- * fails on a duplicate by building one in a temporary directory.
+ * Every D1 migration carries exactly four digits and an underscore (`NNNN_`), and
+ * no two share a prefix (`scripts/migration-prefixes.ts` says why). The first test
+ * holds the real directory; the rest prove the check fails on a duplicate or a
+ * malformed name by building one in a temporary directory.
  *
  * Real filesystem, no mocks.
  */

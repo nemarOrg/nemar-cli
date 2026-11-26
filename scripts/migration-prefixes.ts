@@ -1,5 +1,5 @@
 /**
- * Reject two D1 migrations that share a numeric prefix.
+ * Every D1 migration carries exactly four digits and an underscore (`NNNN_`), and no two share a prefix.
  *
  * `wrangler d1 migrations apply` tracks what it has applied by FILE NAME, not by
  * number, and applies the rest in lexicographic order. Two branches that each add
