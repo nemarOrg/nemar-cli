@@ -159,6 +159,9 @@ export function scanEntryText(entry: Hdf5Entry, field: string): Finding[] {
   return out;
 }
 
+/** Numbers that mean "nothing was entered" in an identifier field. */
+const NUMERIC_PLACEHOLDERS: ReadonlySet<number> = new Set([0, -1]);
+
 /** The numbers an entry holds, or none. */
 function numbersOf(entry: Hdf5Entry): number[] {
   if (!Array.isArray(entry.value)) return [];
@@ -169,7 +172,8 @@ function numbersOf(entry: Hdf5Entry): number[] {
 }
 
 /**
- * An identifier-key field that holds numbers (lead ruling, review round 1): a number is content.
+ * An identifier-key field that holds numbers (lead ruling, review round 1): a number other than
+ * the placeholders 0 and -1 is content.
  * A record number or ID is `identifier`; a birth-date field is `identifier` when a number is a
  * `YYYYMMDD` date at day precision and `review` for any other number (a year, a year and month, or
  * a number that is not a date). Numbers under any other name are not text and fire nothing.
@@ -178,10 +182,13 @@ export function scanNumericIdentifier(entry: Hdf5Entry, numbers: readonly number
   const key = canonical(entry.name);
   const keySeverity = identifierKeySeverity(key);
   if (keySeverity === null) return [];
+  // 0 and -1 mean "nothing was entered", as an empty string does (lead ruling).
+  const filled = numbers.filter((n) => !NUMERIC_PLACEHOLDERS.has(n));
+  if (filled.length === 0) return [];
   let severity: Severity = keySeverity;
-  let shown = numbers[0] as number;
+  let shown = filled[0] as number;
   if (BIRTH_KEYS.has(key)) {
-    const dated = numbers.find(
+    const dated = filled.find(
       (n) => Number.isInteger(n) && /^\d{8}$/.test(String(n)) && datePrecision(String(n)) === "day",
     );
     severity = dated === undefined ? "review" : "identifier";

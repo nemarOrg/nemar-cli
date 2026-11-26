@@ -244,7 +244,12 @@ describe("numeric identifier fields (review round 1)", () => {
     expect(sev("dob", [19710101])).toEqual(["review"]);
     expect(sev("dob", [197104])).toEqual(["review"]);
     expect(sev("DateOfBirth", [123])).toEqual(["review"]);
-    expect(sev("PatientID", [0])).toEqual(["identifier"]);
+    // 0 and -1 are placeholders, like an empty string; any other number is content.
+    expect(sev("PatientID", [0])).toEqual([]);
+    expect(sev("MRN", [-1])).toEqual([]);
+    expect(sev("dob", [0, -1])).toEqual([]);
+    expect(sev("PatientID", [0, 7])).toEqual(["identifier"]);
+    expect(sev("PatientID", [1])).toEqual(["identifier"]);
     expect(sev("phone", [5550100])).toEqual(["review"]);
     expect(sev("count", [19710423])).toEqual([]);
   });
