@@ -989,7 +989,10 @@ jobs:
       # does not carry until its epic merges there, so `ref: dev` fails the recipe drift test. Once
       # nemar-process's epic is on its `dev`, set this back to `ref: dev`: the drift test then compares
       # with `dev` again and passes, because that `dev` holds the same versions and plugins. Do not
-      # delete that epic branch before this pin is gone from nemar-cli `main`.
+      # delete that epic branch before this pin is gone from nemar-cli `main`. The pin freezes every
+      # comparison that reads this checkout, not only the recipe drift test: the observation-schema and
+      # fixtures drift test and the queue check on exec.json.tmpl also compare with that commit, so
+      # drift in those files on nemar-process `dev` goes unseen until the pin is removed (#2411).
       - name: Check out nemar-process's observation schema and fixtures
         uses: actions/checkout@v4
         with:

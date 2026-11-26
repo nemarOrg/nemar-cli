@@ -113,6 +113,7 @@ earlier releases are described only by their generated notes.
   Six manifest vectors are added and none changes; nemar-process re-copies the manifest schema and the vectors at its next pin (its phase P3).
 - **CI: until nemar-process's epic reaches its `dev`, the test workflow checks out nemar-process at `a5125c7b` (the head of `feature/issue-65-epic-pipeline-progress`), not `dev`.**
   This epic's recipe registry (`1.0.0-b2`, the quality plugins) is ahead of nemar-process `dev`, so the recipe drift test fails against `dev`; set the checkout back to `ref: dev` once nemar-process's epic merges there, and keep that epic branch until the pin is gone from nemar-cli `main`.
+  The observation-schema and fixtures comparison and the queue comparison read the same checkout, so they are frozen at that commit too until the pin is removed (#2411).
 
 ## 0.10.40 - 2026-11-26
 
