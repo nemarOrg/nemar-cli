@@ -32,8 +32,10 @@
  *    invocation and the daily tick shares them. The progress is in D1: `copied` is the copy cursor of a row,
  *    a decided stamp leaves the candidate set, and the rows take turns (`last_attempt_at`).
  *  - ISOLATION. The bucket is reached by this binding and by a server-side copy only; no address is ever
- *    signed for it and no route returns an object's bytes. Only `description` (`derivative.json`) is read
- *    back, by an administrator, through the route.
+ *    signed for it. `description` (`derivative.json`) is read back by an administrator through the admin
+ *    route, and ONE route returns an object's bytes: the public quality route (`routes/quality.ts`, ADR
+ *    0137 decision 7), which serves only a file a validated view of a current public derivative declares,
+ *    after the dataset's gate and a fresh digest check.
  *  - NOTHING HERE TOUCHES A DOI, GITHUB OR MAIL. A log line carries ids and fixed words, never a path.
  */
 
