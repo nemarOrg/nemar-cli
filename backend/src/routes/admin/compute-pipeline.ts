@@ -10,6 +10,9 @@
  *   GET  /admin/compute/pipeline/runs/:stamp/quality  where the run's derivative stands, and a page of its
  *                                         succeeded recordings (epic #2324 phase B3, services/quality-admin.ts)
  *
+ * A run's quality record and files (`.../runs/:stamp/quality/record/...` and `.../quality/file/...`, epic
+ * #2324 phase B3b) are `routes/admin/quality-views.ts`'s, registered after these.
+ *
  * The grid, coverage, run and run-quality routes READ ONLY (epic #2324 phase 4a): they never sync, never reconcile and
  * never write, so a page the website renders costs a few statements. `grid?sync=1` brings the open stamps
  * up to date first, as the status route always does; the CLI asks for it, the website never does. A run's
