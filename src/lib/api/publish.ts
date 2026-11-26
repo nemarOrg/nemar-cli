@@ -419,6 +419,8 @@ export interface LicensePermissionAnswer {
   request_line: string;
   permission_id?: number;
   line?: string | null;
+  /** What the record sent: the administrators' "Ready to approve" mail and the depositor's notice. */
+  mail?: { administrators: string; depositor: string };
 }
 
 /**

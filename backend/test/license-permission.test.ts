@@ -540,6 +540,53 @@ describe("what a permission clears", () => {
     expect(JSON.stringify(section)).not.toContain("EVIDENCE-SENTINEL");
   });
 
+  test("--apply closes the loop: 'Ready to approve' to the administrators when it now passes, and the depositor is told", async () => {
+    await accounts();
+    const ticketId = ticket("amber-falcon-river");
+    await withFakeResend(() => reviewed(basisOf([SOURCE])));
+    await withFakeResend(async (calls) => {
+      const res = await record({ ticket_id: ticketId, evidence: EVIDENCE, apply: true });
+      expect(res.status).toBe(200);
+      expect(res.body.mail).toEqual({ administrators: "sent", depositor: "sent" });
+      const sends = calls.filter((c) => c.path === "/emails").map(asSend);
+      const ready = sends.filter((m) => m.to.includes("licpermadmin@example.org"));
+      expect(ready).toHaveLength(1);
+      expect(textOf(ready[0]?.html ?? "")).toContain(READY_TO_APPROVE_HEADLINE);
+      const told = sends.filter((m) => m.subject === `License evidence recorded: ${PROD_DATASET}`);
+      expect(told.map((m) => m.to)).toEqual([[DEPOSITOR_EMAIL]]);
+      expect(textOf(told[0]?.html ?? "")).toContain(
+        `Your evidence for ${PROD_DATASET} was recorded by an administrator; the review continues.`,
+      );
+      expect(JSON.stringify(sends)).not.toContain("EVIDENCE-SENTINEL");
+    });
+  });
+
+  test("a request that still does not pass gets no 'Ready to approve'; the depositor is still told", async () => {
+    await accounts();
+    const ticketId = ticket("amber-falcon-river");
+    await withFakeResend(() => reviewed(basisOf([SOURCE]), "needs_permission", { fail: true }));
+    await withFakeResend(async (calls) => {
+      const res = await record({ ticket_id: ticketId, evidence: EVIDENCE, apply: true });
+      expect(res.body.mail).toEqual({ administrators: "not_ready", depositor: "sent" });
+      const sends = calls.filter((c) => c.path === "/emails").map(asSend);
+      expect(sends.filter((m) => m.to.includes("licpermadmin@example.org"))).toHaveLength(0);
+      expect(sends.filter((m) => m.to.includes(DEPOSITOR_EMAIL))).toHaveLength(1);
+    });
+  });
+
+  test("on the dev Worker both mails are fenced: nothing reaches the provider", async () => {
+    await accounts();
+    const ticketId = ticket("amber-falcon-river");
+    h.envOverrides = { ENVIRONMENT: "development", DEV_EMAIL_ALLOWLIST: "" };
+    await withFakeResend(() => reviewed(basisOf([SOURCE])));
+    await withFakeResend(async (calls) => {
+      const res = await record({ ticket_id: ticketId, evidence: EVIDENCE, apply: true });
+      expect(res.status).toBe(200);
+      expect(res.body.mail).toEqual({ administrators: "undelivered", depositor: "fenced" });
+      expect(calls.filter((c) => c.path === "/emails")).toHaveLength(0);
+    });
+  });
+
   test("it never clears another reason: a failed question still fails the request", async () => {
     await accounts();
     const ticketId = ticket("amber-falcon-river");

@@ -8,14 +8,23 @@
 import { LICENSE_EVIDENCE_ADDRESS } from "../../../shared/license-lineage.js";
 import {
   type LicenseNoticeMailState,
+  type ReadyMailOutcome,
   isActionRequiredOutcome,
 } from "../../../shared/license-permission.js";
+import { READY_TO_APPROVE_HEADLINE } from "../../../shared/publication-auto-deny.js";
 import type { Bindings } from "../types/bindings.js";
-import { DevEmailFenceError, resolveEmailConfig, sendLicenseNoticeEmail } from "./email.js";
+import {
+  DevEmailFenceError,
+  resolveEmailConfig,
+  sendLicenseNoticeEmail,
+  sendLicenseRecordedEmail,
+} from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
+import { mailPublicationRequest, screenEmailSection } from "./identifier-screen.js";
 import { licenseNoticeLines, permissionFactOf } from "./license-permission.js";
 import { errorWords } from "./publication-review-log.js";
 import { readReview, rowViewOf } from "./publication-review-rows.js";
+import { publicationReviewEmailSection } from "./publication-review-view.js";
 
 export type LicenseNoticeOutcome =
   | "no_row"
@@ -111,4 +120,98 @@ async function notice(env: Bindings, reviewId: number): Promise<LicenseNoticeOut
       .run();
   }
   return state;
+}
+
+// ---------------------------------------------------------------------------------------------
+// After a permission is recorded
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What a recorded permission sends (lead ruling on PR #2393): the request's verdict is derived
+ * again, and when it is now a pass with a clear screen (the review section's "Ready to approve"
+ * headline, which `passedSection` gives only then) the administrators get the existing
+ * publication-request mail with that section, through the admin fence
+ * (`getAdminEmailsForCategory`, production only unless `DEV_ADMIN_NOTIFICATIONS`). The requester
+ * is always told, in one fixed sentence, through the delivery fence. Never throws: a fault is
+ * logged with ids and an error class only.
+ */
+export async function afterPermissionRecorded(
+  env: Bindings,
+  requestId: number,
+): Promise<{ administrators: ReadyMailOutcome; depositor: LicenseNoticeMailState }> {
+  let administrators: ReadyMailOutcome = "undelivered";
+  let depositor: LicenseNoticeMailState = "failed";
+  try {
+    const request = await env.DB.prepare(
+      `SELECT pr.dataset_id, pr.requested_by, pr.anonymous, pr.identifier_screen_status,
+              pr.identifier_screen_report, u.email, u.username
+         FROM publication_requests pr
+         LEFT JOIN users u ON u.id = pr.requested_by AND u.deleted_at IS NULL
+        WHERE pr.id = ?`,
+    )
+      .bind(requestId)
+      .first<{
+        dataset_id: string;
+        requested_by: number;
+        anonymous: number | null;
+        identifier_screen_status: string | null;
+        identifier_screen_report: string | null;
+        email: string | null;
+        username: string | null;
+      }>();
+    if (!request) return { administrators, depositor };
+    const screen = screenEmailSection(
+      request.dataset_id,
+      request.identifier_screen_status,
+      request.identifier_screen_report,
+    );
+    const review = await publicationReviewEmailSection(env, requestId, Date.now(), {
+      screenStatusLine: screen.headline,
+    });
+    if (review?.headline !== READY_TO_APPROVE_HEADLINE) {
+      administrators = "not_ready";
+    } else {
+      try {
+        const out = await mailPublicationRequest(env, {
+          requestId,
+          datasetId: request.dataset_id,
+          username: request.username ?? `user ${request.requested_by}`,
+          anonymous: request.anonymous === 1,
+          screen,
+          review,
+        });
+        administrators = out.delivered > 0 ? "sent" : "undelivered";
+      } catch (err) {
+        console.error(
+          `[license-permission] request ${requestId}: ready mail not sent (${errorWords(err)})`,
+        );
+      }
+    }
+    if (request.email !== null && request.username !== null) {
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
+      try {
+        await sendLicenseRecordedEmail(
+          request.email,
+          request.username,
+          request.dataset_id,
+          env.RESEND_API_KEY ?? "",
+          fromEmail,
+          isNonProductionEnv(env) ? replyTo : LICENSE_EVIDENCE_ADDRESS,
+          isDev,
+          env,
+        );
+        depositor = "sent";
+      } catch (err) {
+        depositor = err instanceof DevEmailFenceError ? "fenced" : "failed";
+        console.error(
+          `[license-permission] request ${requestId}: depositor mail not sent (${errorWords(err)})`,
+        );
+      }
+    }
+  } catch (err) {
+    console.error(
+      `[license-permission] request ${requestId}: mail step failed (${errorWords(err)})`,
+    );
+  }
+  return { administrators, depositor };
 }
