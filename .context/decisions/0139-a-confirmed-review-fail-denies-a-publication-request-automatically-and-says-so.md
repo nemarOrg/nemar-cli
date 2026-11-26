@@ -119,3 +119,30 @@ ADR 0102 §2's ban on data content, header values, `.tsv` files, identifier find
 Decision 7 also covers the lineage outcomes `redistribution_prohibited` and `source_is_publication`, which the license-lineage resolver added after this ADR was written; each needs action and never denies automatically.
 The previous-denial input of decision 5 carries closed reason codes only, never a screen code (ADR 0102 §2 stays): the codes the model may see are the allowlist `PREVIOUS_DENIAL_SENDABLE`.
 A review that was served its inputs and then fails before or without a model call is counted against the daily cap; this is deliberate, so that a job cannot evade the cap.
+
+## Amendment 2026-11-25: license permission evidence (owner decision, epic #2182 card B6)
+
+A license lineage that needs permission is cleared only by an administrator recording the evidence received, linked to a support ticket.
+The depositor is told what to send and where.
+The permission covers the named sources, and later requests with the same sources.
+It clears that reason alone.
+
+- **What the depositor is told.**
+  One sentence per outcome that needs action (`LINEAGE_PERMISSION_REQUEST`, `shared/license-lineage.ts`), worded from the owner's: the upstream license does not permit this copy under the dataset's license, so send evidence from the original authors that they accept this copy under that license, for example an email from them, to support@nemar.org, quoting the dataset id.
+  For `redistribution_prohibited` the evidence comes from the repository that holds the data (for example PhysioNet), because its data use agreement binds the authors too.
+  For `unresolved` the depositor replies with a link to the license, or waits for the next check.
+  The placeholders are filled from the lineage's closed words and checked identifiers, never from free text.
+  The sentence is mailed once per request and outcome when a review stores `license_lineage_unconfirmed` (through the dev mail fence), and `nemar dataset publish status` prints it.
+- **What is recorded.**
+  `nemar admin dataset publish license-permission <dataset> --ticket <id> --evidence <text> [--apply]` is a dry run by default; with `--apply` it writes a `license_permissions` row and a `license_permission_recorded` audit row in one batch.
+  The ticket must exist and be visible to the administrator (ADR 0112).
+  The evidence is the administrator's own summary, at most 1,000 characters; it is shown to administrators only and never sent to a model.
+- **What it covers.**
+  Each review stores the lineage it was served (its basis: the outcome, the target license and the sources behind the outcome).
+  A permission covers a review when the outcome and the target license are the same and it names every source behind the outcome; the dataset's own unreadable files are never covered.
+  It covers the request it was recorded against and every later request of the dataset with the same basis.
+  Binding the target license as well as the sources follows the owner's wording ("this specific license on the copy that we are publishing"): a later request under another license needs new evidence.
+- **What it does.**
+  The derivation drops `license_lineage_unconfirmed`, and the stored verdict is derived again without it when the stored column still equals what its report derives; the verdict then follows the other reasons.
+  It never clears another reason and never approves; an administrator's override still clears the reason too.
+  The admin show and the administrators' mail print "License permission recorded on (date) by (administrator), ticket (ticket)".
