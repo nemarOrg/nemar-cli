@@ -18,8 +18,10 @@
 
 import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Hono } from "hono";
+import pkg from "../../package.json" with { type: "json" };
 import type { ReadWindowOutput } from "../../shared/contract/mcp.js";
 import { READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES } from "../../shared/contract/mcp.js";
 import {
@@ -475,6 +477,35 @@ describe("read_window (route)", () => {
       expect(output.recipe.channel_slice).toBeUndefined();
       // Default start_s 0, duration_s 10 -> sample_slice [0, 2500) at 250 Hz.
       expect(output.recipe.sample_slice).toEqual({ start: 0, end: 2500 });
+    });
+
+    // The MCP and the local engine protocol share one seconds-to-samples rule
+    // (shared/zarr/window-samples.ts). Whole seconds never exercise rounding, so
+    // these pin the MCP to that rule at fractional seconds (250 Hz).
+    test("a tie rounds up, for the start and for the duration on its own", async () => {
+      const { body } = await callTool(app, env(db), 1, "read_window", {
+        dataset_id: V3_ID,
+        recording: FIRST_STORE_ZARR,
+        start_s: 0.25, // 62.5 -> 63 (truncation would give 62)
+        duration_s: 0.25, // 62.5 -> 63 samples (end minus start would give 62)
+      });
+      const output = structuredContentOf(body);
+      expect(output.mode).toBe("recipe");
+      if (output.mode !== "recipe") return;
+      expect(output.recipe.sample_slice).toEqual({ start: 63, end: 126 });
+    });
+
+    test("below a tie rounds down (not up)", async () => {
+      const { body } = await callTool(app, env(db), 1, "read_window", {
+        dataset_id: V3_ID,
+        recording: FIRST_STORE_ZARR,
+        start_s: 1,
+        duration_s: 0.201, // 50.25 -> 50 samples (rounding up would give 51)
+      });
+      const output = structuredContentOf(body);
+      expect(output.mode).toBe("recipe");
+      if (output.mode !== "recipe") return;
+      expect(output.recipe.sample_slice).toEqual({ start: 250, end: 300 });
     });
   });
 
@@ -1001,6 +1032,191 @@ describe("read_window (route)", () => {
         fixtureServer.ignoreRangeForKeys.delete(key);
       }
     });
+  });
+
+  // ---------------------------------------------------------------------
+  // The tool's own error texts for a failed shard read. `readLevel0Window`
+  // (shared/zarr/read.ts) reports WHICH step failed; `read-window.ts` maps that
+  // to these prefixes, which callers and docs may match on, so they are pinned
+  // here in full. The third stage, `plan` ("could not plan the shard read for
+  // recording"), is defensive and has no test: `planShardReads` only throws when
+  // a planned local index has no footer entry, and the footer always carries
+  // exactly `nInner` entries (a cached one with another count is re-read), while
+  // the planned indices are `< nInner` -- so no input a route can send reaches it.
+  // ---------------------------------------------------------------------
+
+  describe("a failed shard read names its stage", () => {
+    const SHARD_PREFIX = `${SHARD_ID}/zarr/${SHARD_ZARR}/${SHARD_GROUP}/0/c/0/`;
+    const tasteArgs = {
+      dataset_id: SHARD_ID,
+      recording: SHARD_ZARR,
+      start_s: 0,
+      duration_s: 1,
+      channels: [0, 1, 2, 3],
+      taste: true,
+    };
+
+    test("footer stage: a Range-ignoring origin on a cold cache", async () => {
+      const key = `${SHARD_PREFIX}0`;
+      fixtureServer.ignoreRangeForKeys.add(key);
+      try {
+        const { body } = await callTool(app, env(db), 1, "read_window", tasteArgs);
+        expect(errorTextOf(body)).toStartWith(
+          `read_window could not read the shard index for recording "${SHARD_ZARR}" in dataset "${SHARD_ID}": HTTP 200 fetching `,
+        );
+      } finally {
+        fixtureServer.ignoreRangeForKeys.delete(key);
+      }
+    });
+
+    test("chunk stage: the footer is warm, then the chunk read fails", async () => {
+      // One good read warms the shard-index cache (and the array metadata).
+      const warm = await callTool(app, env(db), 1, "read_window", tasteArgs);
+      structuredContentOf(warm.body);
+      await Bun.sleep(10); // let the deferred cache writes land
+      const key = `${SHARD_PREFIX}0`;
+      fixtureServer.ignoreRangeForKeys.add(key);
+      fixtureServer.requestLog.length = 0;
+      try {
+        const { body } = await callTool(app, env(db), 2, "read_window", tasteArgs);
+        expect(errorTextOf(body)).toStartWith(
+          `read_window could not read a chunk for recording "${SHARD_ZARR}" in dataset "${SHARD_ID}": HTTP 200 fetching `,
+        );
+        // The footer came from the cache: no suffix-range (footer) request.
+        expect(fixtureServer.requestLog.filter((r) => r.range.startsWith("bytes=-"))).toEqual([]);
+      } finally {
+        fixtureServer.ignoreRangeForKeys.delete(key);
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // Golden (G1): the whole tools/call result and the fixture-server request
+  // log, pinned before the read path moves into shared/zarr/. The file is
+  // written once (NEMAR_WRITE_GOLDEN=1, only if absent) on the unmodified
+  // code and never overwritten, so it cannot be re-baselined.
+  // ---------------------------------------------------------------------
+
+  describe("read_window golden (G1)", () => {
+    const GOLDEN_PATH = join(import.meta.dir, "fixtures/mcp/nm099500-read-window-golden.json");
+
+    // Capture only when asked AND the file is absent: never an overwrite. A
+    // capture run always fails (see below), and writes nothing unless every
+    // case was captured, so a partial or unverified baseline cannot go green.
+    const capture = process.env.NEMAR_WRITE_GOLDEN === "1" && !existsSync(GOLDEN_PATH);
+    const captured: Record<string, unknown> = {};
+
+    afterAll(() => {
+      if (capture && Object.keys(captured).length === GOLDEN_CASES.length) {
+        writeFileSync(GOLDEN_PATH, `${JSON.stringify(captured, null, 2)}\n`);
+      }
+    });
+
+    const GOLDEN_CASES: Array<{ name: string; args: Record<string, unknown> }> = [
+      {
+        name: "recipe",
+        args: { dataset_id: SHARD_ID, recording: SHARD_ZARR, start_s: 0, duration_s: 26 },
+      },
+      {
+        name: "one-chunk",
+        args: {
+          dataset_id: SHARD_ID,
+          recording: SHARD_ZARR,
+          start_s: 1,
+          duration_s: 2,
+          channels: [0, 1, 2, 3],
+          taste: true,
+        },
+      },
+      {
+        name: "absent",
+        args: {
+          dataset_id: SHARD_ID,
+          recording: SHARD_ZARR,
+          start_s: 6,
+          duration_s: 8,
+          channels: [0, 1, 2, 3],
+          taste: true,
+        },
+      },
+      {
+        name: "boundary",
+        args: {
+          dataset_id: SHARD_ID,
+          recording: SHARD_ZARR,
+          start_s: 14,
+          duration_s: 4,
+          channels: [1, 3],
+          taste: true,
+        },
+      },
+      {
+        name: "tail",
+        args: {
+          dataset_id: SHARD_ID,
+          recording: SHARD_ZARR,
+          start_s: 24,
+          duration_s: 2,
+          channels: [0, 1, 2, 3],
+          taste: true,
+        },
+      },
+      {
+        name: "refusal",
+        args: {
+          dataset_id: SHARD_ID,
+          recording: SHARD_ZARR,
+          start_s: 0,
+          duration_s: 61,
+          channels: [0, 1, 2, 3],
+          taste: true,
+        },
+      },
+    ];
+
+    // The server stamps the CLI package version into every reply, and CI bumps
+    // it on each dev release. It says nothing about the read, so the golden
+    // holds a placeholder there; everything else is compared byte for byte.
+    const SERVER_VERSION_PLACEHOLDER = "<server version>";
+    const withServerVersionPlaceholder = (result: unknown): unknown => {
+      const copy = structuredClone(result) as {
+        _meta?: { "io.modelcontextprotocol/serverInfo"?: { version?: unknown } };
+      };
+      const info = copy?._meta?.["io.modelcontextprotocol/serverInfo"];
+      if (info && typeof info.version === "string") {
+        // The placeholder must not hide a wrong version: the server reports the
+        // version of the package.json it imports (backend/src/mcp/server.ts).
+        expect(info.version).toBe(pkg.version);
+        info.version = SERVER_VERSION_PLACEHOLDER;
+      }
+      return copy;
+    };
+
+    for (const { name, args } of GOLDEN_CASES) {
+      test(`${name}: result and requests match the committed golden`, async () => {
+        const { body } = await callTool(app, env(db), 1, "read_window", args);
+        const actual = {
+          args,
+          result: withServerVersionPlaceholder(body.result),
+          requests: fixtureServer.requestLog.map((r) => ({
+            method: r.method,
+            url: r.url,
+            range: r.range,
+          })),
+        };
+
+        if (capture) {
+          captured[name] = actual;
+          throw new Error(
+            `golden captured for ${name}; re-run without NEMAR_WRITE_GOLDEN to verify it`,
+          );
+        }
+
+        const golden = JSON.parse(readFileSync(GOLDEN_PATH, "utf8")) as Record<string, unknown>;
+        expect(actual).toEqual(golden[name] as typeof actual);
+        expect(JSON.stringify(actual)).toBe(JSON.stringify(golden[name]));
+      });
+    }
   });
 });
 
