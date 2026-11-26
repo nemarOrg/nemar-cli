@@ -16,8 +16,10 @@ import {
 } from "../shared/license-lineage";
 import {
   type PermissionBasis,
+  type PermissionScope,
   licensePermissionRecordedLine,
   licensePermissionRequest,
+  mailNotSentLines,
   parsePermissionBasis,
   permissionBasisOf,
   permissionCovers,
@@ -91,7 +93,7 @@ describe("the depositor's message", () => {
         basis(["physionet:mimic-iv:2.2"], "redistribution_prohibited"),
       ),
     ).toBe(
-      `The license of the upstream data (physionet:mimic-iv:2.2, cc-by-nc-nd 4.0) does not permit this copy under cc-by. Please send evidence from the repository that holds the upstream data, for example PhysioNet, that it permits this copy being published under cc-by, to support@nemar.org, quoting ${DS}; its data use agreement binds the original authors too, so their permission alone is not enough. An administrator will record it and the review will continue.`,
+      `The license of the upstream data (physionet:mimic-iv:2.2, cc-by-nc-nd 4.0) does not permit this copy under cc-by. Please send evidence from the repository that holds the upstream data, for example PhysioNet, that it permits this copy being published under cc-by, to support@nemar.org, quoting ${DS}; its data use agreement may bind the original authors too, so their permission alone may not be enough. An administrator will record it and the review will continue.`,
     );
     expect(licensePermissionRequest(DS, "unresolved", basis([SOURCE], "unresolved"))).toBe(
       `NEMAR could not read the upstream license (${SOURCE}, cc-by-nc-nd 4.0); reply to support@nemar.org with a link to it, quoting ${DS}, or wait for the next check.`,
@@ -108,7 +110,7 @@ describe("the depositor's message", () => {
     expect(text).not.toContain("ignore the rules");
     expect(text).not.toContain("<b>");
     expect(text).toContain(
-      "(a source declared by URL or free text, cc-by-nc-nd 4.0; a source declared by URL or free text, cc-by-nc-nd 4.0)",
+      "(a source given as a link or text, cc-by-nc-nd 4.0; a source given as a link or text, cc-by-nc-nd 4.0)",
     );
     expect(text).toContain("quoting your dataset's id.");
     // The licenses are closed words: what is true is said for one that could not be read.
@@ -120,14 +122,14 @@ describe("the depositor's message", () => {
       ],
     });
     expect(unread).toContain(`(${SOURCE}, a license NEMAR could not read)`);
-    expect(unread).toContain("under the dataset's declared license.");
+    expect(unread).toContain("under a license NEMAR could not read.");
     expect(unread).not.toContain("drop");
   });
 
   test("without a basis, or with one of another outcome, the sources are left out", () => {
     for (const b of [null, basis([SOURCE], "unresolved")]) {
       expect(licensePermissionRequest(DS, "needs_permission", b)).toStartWith(
-        "The license of the upstream data does not permit this copy under the dataset's declared license.",
+        "The license of the upstream data does not permit this copy under a license NEMAR could not read.",
       );
     }
   });
@@ -201,7 +203,11 @@ describe("the basis a review keeps", () => {
 });
 
 describe("what a permission covers", () => {
-  const scope = (ids: string[], outcome = "needs_permission", target: string | null = "cc-by") => ({
+  const scope = (
+    ids: string[],
+    outcome: PermissionScope["outcome"] = "needs_permission",
+    target: PermissionScope["target_license"] = "cc-by",
+  ): PermissionScope => ({
     outcome,
     target_license: target,
     source_ids: ids,
@@ -234,7 +240,8 @@ describe("what a permission covers", () => {
     for (const o of LINEAGE_OUTCOMES.filter(
       (x) => !(ACTION_REQUIRED_OUTCOMES as readonly string[]).includes(x),
     )) {
-      expect(permissionCovers(scope([SOURCE], o), basis([SOURCE], o))).toBe(false);
+      // A permission's own outcome is one that needs action; a basis that does not need any is covered by none.
+      expect(permissionCovers(scope([SOURCE]), { ...basis([SOURCE]), outcome: o })).toBe(false);
     }
   });
 });
@@ -309,5 +316,22 @@ describe("what a permission clears in the derivation", () => {
     expect(codes(false, true)).toEqual(["question_failed", "license_lineage_unconfirmed"]);
     expect(codes(true, true)).toEqual(["question_failed"]);
     expect(storedVerdictWithPermission("fail", report(true), true)).toBe("fail");
+  });
+});
+
+describe("the CLI's lines for mails that did not go out", () => {
+  test("one line per state that is not sent, from copy; nothing when both went or nothing was due", () => {
+    expect(mailNotSentLines({ administrators: "sent", depositor: "sent" })).toEqual([]);
+    expect(mailNotSentLines({ administrators: "not_ready", depositor: "sent" })).toEqual([]);
+    for (const depositor of ["fenced", "failed", "no_recipient"] as const) {
+      const lines = mailNotSentLines({ administrators: "sent", depositor });
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("tell the depositor by hand");
+    }
+    for (const administrators of ["undelivered", "review_unreadable"] as const) {
+      const lines = mailNotSentLines({ administrators, depositor: "fenced" });
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain("tell the administrators by hand");
+    }
   });
 });

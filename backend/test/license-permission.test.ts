@@ -14,9 +14,13 @@
 
 import { describe, expect, test } from "bun:test";
 import { Miniflare } from "miniflare";
-import { LICENSE_PERMISSION_AUDIT_ACTION } from "../../shared/license-permission";
+import {
+  LICENSE_PERMISSION_AUDIT_ACTION,
+  TICKET_SENDER_WARNING,
+} from "../../shared/license-permission";
 import { READY_TO_APPROVE_HEADLINE } from "../../shared/publication-auto-deny";
 import { PUBLICATION_PROMPT_VERSION, REVIEW_INPUTS } from "../../shared/publication-review";
+import { afterPermissionRecorded } from "../src/services/license-notice";
 import {
   derivePublicationReview,
   publicationReviewEmailSection,
@@ -32,7 +36,7 @@ import {
   seedUser,
   textOf,
 } from "./helpers/publication-review";
-import { PROD_DATASET, createHarness } from "./helpers/publication-review-harness";
+import { PROD_DATASET, createHarness, hookedD1 } from "./helpers/publication-review-harness";
 import { type CapturedEmail, asSend, withFakeResend } from "./helpers/resend";
 
 const h = createHarness();
@@ -45,6 +49,8 @@ const EVIDENCE = "EVIDENCE-SENTINEL authors' email chain of 2026-11-20 accepting
 const ABSENT_INPUTS = Object.fromEntries(REVIEW_INPUTS.map((i) => [i, "absent"]));
 const SOURCE = "10.18112/openneuro.ds000001.v1.0.0";
 const OTHER_SOURCE = "10.5281/zenodo.1234567";
+const AUTHORS_EMAIL = "licperm-authors@example.org";
+const TICKET_SUBJECT = "Fwd: our permission for the nm000480 copy";
 const NOTICE_SUBJECT = `Publication request needs license evidence: ${PROD_DATASET}`;
 
 interface Basis {
@@ -121,13 +127,13 @@ async function accounts(): Promise<void> {
 }
 
 /** A support ticket; `restricted` puts it in a queue only owners see (ADR 0112). */
-function ticket(ref: string, restricted = false): number {
+function ticket(ref: string, restricted = false, sender = AUTHORS_EMAIL): number {
   const row = h.db
-    .query<{ id: number }, [string, string, number]>(
-      `INSERT INTO mail_tickets (ref, queue_tag, requester_email, restricted)
-       VALUES (?, ?, 'authors@example.org', ?) RETURNING id`,
+    .query<{ id: number }, [string, string, string, number]>(
+      `INSERT INTO mail_tickets (ref, queue_tag, requester_email, subject, restricted)
+       VALUES (?, ?, ?, ?, ?) RETURNING id`,
     )
-    .get(ref, restricted ? "security" : "support", restricted ? 1 : 0);
+    .get(ref, restricted ? "security" : "support", sender, TICKET_SUBJECT, restricted ? 1 : 0);
   return row?.id as number;
 }
 
@@ -358,6 +364,12 @@ describe("recording a permission", () => {
       outcome: "needs_permission",
       target_license: "cc-by",
       ticket_id: ticketId,
+      // The ticket is shown so the administrator confirms it holds the evidence; its sender is not
+      // the depositor, so the dry run says so.
+      ticket_subject: TICKET_SUBJECT,
+      ticket_sender: AUTHORS_EMAIL,
+      ticket_sender_is_depositor: false,
+      ticket_warning: TICKET_SENDER_WARNING,
     });
     expect((dry.body.sources as { id: string }[]).map((s) => s.id)).toEqual([SOURCE]);
     expect(dry.text).not.toContain("EVIDENCE-SENTINEL");
@@ -400,6 +412,8 @@ describe("recording a permission", () => {
       target_license: "cc-by",
       source_ids: [SOURCE],
       ticket_id: ticketId,
+      ticket_sender: AUTHORS_EMAIL,
+      ticket_subject: TICKET_SUBJECT,
     });
 
     // A second apply is refused: the request is already covered.
@@ -407,6 +421,53 @@ describe("recording a permission", () => {
     expect(again.status).toBe(409);
     expect(again.body.code).toBe("already_covered");
     expect(permissions()).toHaveLength(1);
+  });
+
+  test("a ticket from the depositor's own address carries no warning", async () => {
+    await accounts();
+    const ticketId = ticket("amber-falcon-river", false, DEPOSITOR_EMAIL.toUpperCase());
+    await withFakeResend(() => reviewed(basisOf([SOURCE])));
+    const dry = await record({ ticket_id: ticketId, evidence: EVIDENCE });
+    expect(dry.body).toMatchObject({ ticket_sender_is_depositor: true, ticket_warning: null });
+  });
+
+  test("two applies at once write one row and one audit row, and mail once", async () => {
+    await accounts();
+    const ticketId = ticket("amber-falcon-river");
+    await withFakeResend(() => reviewed(basisOf([SOURCE])));
+    // Hold the first apply's batch until the second reaches its own, so both have passed every
+    // check before either writes: the race the unique index settles.
+    let arrivals = 0;
+    let release: (() => void) | null = null;
+    h.envOverrides = {
+      DB: hookedD1(h.env().DB, {
+        batch: async (sqls) => {
+          if (!sqls.some((q) => /INSERT INTO license_permissions/.test(q))) return;
+          arrivals++;
+          if (arrivals === 1) {
+            await new Promise<void>((r) => {
+              release = r;
+            });
+          } else release?.();
+        },
+      }),
+    };
+    await withFakeResend(async (calls) => {
+      const [a, b] = await Promise.all([
+        record({ ticket_id: ticketId, evidence: EVIDENCE, apply: true }),
+        record({ ticket_id: ticketId, evidence: EVIDENCE, apply: true }),
+      ]);
+      expect(arrivals).toBe(2);
+      expect([a.status, b.status].sort()).toEqual([200, 409]);
+      expect([a.body.code, b.body.code]).toContain("already_covered");
+      expect(permissions()).toHaveLength(1);
+      expect(audits()).toHaveLength(1);
+      const sends = calls.filter((c) => c.path === "/emails").map(asSend);
+      expect(
+        sends.filter((m) => m.subject === `License evidence recorded: ${PROD_DATASET}`),
+      ).toHaveLength(1);
+      expect(sends.filter((m) => m.to.includes("licpermadmin@example.org"))).toHaveLength(1);
+    });
   });
 
   test("an unknown ticket, and one the administrator may not see, are refused and record nothing", async () => {
@@ -584,6 +645,42 @@ describe("what a permission clears", () => {
       expect(res.status).toBe(200);
       expect(res.body.mail).toEqual({ administrators: "undelivered", depositor: "fenced" });
       expect(calls.filter((c) => c.path === "/emails")).toHaveLength(0);
+    });
+  });
+
+  test("a review that cannot be read after the record is review_unreadable, never not_ready", async () => {
+    await accounts();
+    const ticketId = ticket("amber-falcon-river");
+    const { requestId } = await withFakeResend(() => reviewed(basisOf([SOURCE])));
+    expect((await record({ ticket_id: ticketId, evidence: EVIDENCE, apply: true })).status).toBe(
+      200,
+    );
+    // The review's read fails while the mails are decided.
+    const env = h.env({
+      DB: hookedD1(h.env().DB, {
+        statement: (sql) => {
+          if (/FROM license_permissions/.test(sql)) throw new Error("read failed");
+        },
+      }),
+    });
+    const mail = await withFakeResend(() => afterPermissionRecorded(env, requestId));
+    expect(mail).toEqual({ administrators: "review_unreadable", depositor: "sent" });
+  });
+
+  test("a depositor with no address to mail is no_recipient, and the notice records it", async () => {
+    await accounts();
+    h.db.run("UPDATE users SET deleted_at = datetime('now') WHERE id = ?", [depositorId]);
+    await withFakeResend(async (calls) => {
+      const { requestId } = await reviewed(basisOf([SOURCE]));
+      expect(noticesTo(calls)).toHaveLength(0);
+      expect(
+        h.db
+          .query("SELECT mail_state FROM license_permission_notices WHERE request_id = ?")
+          .get(requestId),
+      ).toEqual({ mail_state: "no_recipient" });
+      expect(await afterPermissionRecorded(h.env(), requestId)).toMatchObject({
+        depositor: "no_recipient",
+      });
     });
   });
 
