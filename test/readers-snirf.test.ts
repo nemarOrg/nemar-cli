@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { HDF5_LIMITS, type Hdf5Entry, type Hdf5Incomplete } from "../shared/hdf5-meta";
 import {
   type FormatReader,
+  LimitExceeded,
   READERS,
   type RangeSource,
   ReadFailure,
@@ -258,6 +259,38 @@ describe("walkForReader", () => {
     expect(HDF5_LIMITS.maxObjects).toBeLessThan(66_500);
   });
 
+  test("a limit error from a source that does not say it was limited is rethrown", async () => {
+    const bytes = load("snirf-samples-simple-probe.snirf");
+    const plain: RangeSource = {
+      size: bytes.length,
+      read: async () => {
+        throw new LimitExceeded();
+      },
+    };
+    await expect(walkForReader(plain, SNIRF_READER.limits)).rejects.toBeInstanceOf(LimitExceeded);
+  });
+
+  test("a limited source whose first error is not the limit rethrows that error", async () => {
+    const bytes = load("snirf-samples-simple-probe.snirf");
+    const flagged = {
+      size: bytes.length,
+      limited: true,
+      read: async (offset: number, length: number) => {
+        if (offset > 0) throw new ReadFailure("network");
+        return bytes.slice(offset, offset + length);
+      },
+    };
+    await expect(walkForReader(flagged, SNIRF_READER.limits)).rejects.toBeInstanceOf(ReadFailure);
+  });
+
+  test("a refusal past the limits, then nothing else read: limit", async () => {
+    const bytes = load("snirf-samples-simple-probe.snirf");
+    const src = cachedSource(bufferSource(bytes), { ...SNIRF_READER.limits, maxBytes: 1024 });
+    const { incomplete } = await walkForReader(src, SNIRF_READER.limits);
+    expect(src.limited).toBe(true);
+    expect(incomplete).toBe("limit");
+  });
+
   test("an unsupported construct maps through the table", async () => {
     const { incomplete } = await walkForReader(
       bufferSource(load("unsupported-filter.h5")),
@@ -338,6 +371,15 @@ describe("SNIRF fields", () => {
     expect(kindsAt("/nirs/metaDataTags/ManufacturerName", "Marlow")).toEqual([]);
     expect(kindsAt("/nirs/metaDataTags/DateOfBirth", "1971-04-23")).toEqual([
       "hdf5-identifier-field/identifier",
+    ]);
+  });
+
+  test("SubjectID and MeasurementDate match in any letter case", () => {
+    expect(kindsAt("/nirs/metaDataTags/subjectid", "Marlow")).toEqual([
+      "snirf-subject-name/identifier",
+    ]);
+    expect(kindsAt("/NIRS2/METADATATAGS/MEASUREMENTDATE", "2020-05-16")).toEqual([
+      "snirf-measurement-date/review",
     ]);
   });
 

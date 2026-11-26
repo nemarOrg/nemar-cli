@@ -17,7 +17,9 @@ import {
   PERSON_FIELDS,
   isPersonField,
   scanEntryText,
+  scanNumericIdentifier,
 } from "../shared/readers/hdf5-generic";
+import { unscannedReason } from "../shared/readers/hdf5-incomplete";
 
 const DIR = join(import.meta.dir, "fixtures", "hdf5");
 const load = (name: string) => new Uint8Array(readFileSync(join(DIR, name)));
@@ -111,6 +113,15 @@ describe("person fields", () => {
     }
   });
 
+  test("a thing word suppresses a person word only as its qualifier", () => {
+    expect(isPersonField("ManufacturerName")).toBe(false);
+    expect(isPersonField("TaskName")).toBe(false);
+    expect(isPersonField("PatientProfile")).toBe(true);
+    expect(isPersonField("SubjectTask")).toBe(true);
+    expect(isPersonField("subject_label")).toBe(true);
+    expect(isPersonField("ExperimenterName")).toBe(true);
+  });
+
   test("each thing word unmakes one", () => {
     for (const w of PERSON_FIELDS.thing) expect(isPersonField(`${w}Name`)).toBe(false);
     // A field called just `name` names its own object, in any spelling.
@@ -167,5 +178,74 @@ describe("identifier fields", () => {
     ]);
     expect(kindsOf(attr("phone", "555 0100"))).toEqual(["hdf5-identifier-field/review"]);
     expect(kindsOf(attr("Address", ["", "1 Main St"]))).toEqual(["hdf5-identifier-field/review"]);
+  });
+});
+
+describe("unscanned text is never complete (review round 1)", () => {
+  test("a string over the size rules makes the file partial (limit); a large signal does not", async () => {
+    const unscanned = await scan("unscanned-strings.h5");
+    expect(unscanned).toEqual({ findings: [], coverage: "partial", incomplete: "limit" });
+    // Twin: identifier-fields.h5 holds a 1,000-element float signal, skipped by size, and is complete.
+    expect((await scan("identifier-fields.h5")).coverage).toBe("complete");
+  });
+
+  test("an identifier-named value the walker did not return makes the file partial", async () => {
+    expect(await scan("skipped-identifier.h5")).toEqual({
+      findings: [],
+      coverage: "partial",
+      incomplete: "limit",
+    });
+  });
+
+  test("skipped by type: a string or an identifier name is unsupported-datatype; a number is not", () => {
+    const entry = (name: string, dtype: string, skipped: "size" | "type"): Hdf5Entry => ({
+      path: "/",
+      kind: "dataset",
+      name,
+      dtype,
+      shape: [2],
+      value: null,
+      skipped,
+    });
+    expect(unscannedReason([entry("notes", "vlen", "type")])).toBeNull();
+    expect(unscannedReason([entry("notes", "vlen:string[2]", "type")])).toBe(
+      "unsupported-datatype",
+    );
+    expect(unscannedReason([entry("MRN", "compound", "type")])).toBe("unsupported-datatype");
+    expect(unscannedReason([entry("dob", "int64", "size")])).toBe("limit");
+    expect(unscannedReason([entry("signal", "float64", "size")])).toBeNull();
+    expect(unscannedReason([entry("signal", "compound", "type")])).toBeNull();
+  });
+});
+
+describe("numeric identifier fields (review round 1)", () => {
+  test("an int64 MRN is an identifier; an int dob at day precision too; a year is review", async () => {
+    const result = await scan("numeric-identifiers.h5");
+    expect(result.coverage).toBe("complete");
+    expect(summary(result.findings)).toEqual([
+      "hdf5-identifier-field/identifier/dob",
+      "hdf5-identifier-field/identifier/mrn",
+      "hdf5-identifier-field/review/birthdate",
+    ]);
+  });
+
+  test("birth-date numbers: only a YYYYMMDD day is an identifier", () => {
+    const num = (name: string, value: number[]): Hdf5Entry => ({
+      path: "/",
+      kind: "dataset",
+      name,
+      dtype: "int32",
+      shape: [],
+      value,
+    });
+    const sev = (name: string, value: number[]) =>
+      scanNumericIdentifier(num(name, value), value).map((f) => f.severity);
+    expect(sev("dob", [19710423])).toEqual(["identifier"]);
+    expect(sev("dob", [19710101])).toEqual(["review"]);
+    expect(sev("dob", [197104])).toEqual(["review"]);
+    expect(sev("DateOfBirth", [123])).toEqual(["review"]);
+    expect(sev("PatientID", [0])).toEqual(["identifier"]);
+    expect(sev("phone", [5550100])).toEqual(["review"]);
+    expect(sev("count", [19710423])).toEqual([]);
   });
 });
