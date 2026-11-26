@@ -67,6 +67,9 @@
     "test/upload-preflight-recording.test.ts",
     "test/identifier-screen-ci.test.ts",
     "test/identifier-scrub.test.ts",
+    "test/dataset-screen.test.ts",
+    "test/dataset-screen-spawn.test.ts",
+    "test/helpers/dataset-screen-fixture.ts",
     "scripts/scrub/**/*.ts",
     "test/scrub/**/*.ts"
   ],
