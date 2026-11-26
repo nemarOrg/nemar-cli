@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.41 - 2026-11-26
+
 ### Local Zarr reader (#2144, ADR 0120)
 
 The CLI can read a time window of a public dataset's Zarr recording itself, through a local engine that shares one read core with the MCP server (ADR 0120).
