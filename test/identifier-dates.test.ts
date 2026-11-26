@@ -548,6 +548,10 @@ describe("a header written by an independent EDF+ tool", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     },
+    // The spawn above may take its full 120 s: uv resolves and downloads the tool on a cold
+    // cache. Bun's 5 s default killed it mid-download on CI (run 45754555613: 5,019 ms, status
+    // null; the same cold call took 1,095 ms in run 45759397275), so the test gets that budget.
+    130_000,
   );
 });
 

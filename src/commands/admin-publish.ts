@@ -9,6 +9,7 @@
  *   nemar admin dataset publish approve <ds>           approve and publish (admin-publish-approve.ts)
  *   nemar admin dataset publish deny <ds> [-r <why>]   deny one, mailing the depositor the reason
  *   nemar admin dataset publish screen <ds>            run the identifier screen of a request again
+ *   nemar admin dataset publish screen-batch ...       re-screen many requests, paced, one digest (admin-publish-screen-batch.ts)
  *
  * Split out of `admin.ts` (epic #1726, phase 2) so the publication review's commands do not grow
  * a file of ten thousand lines. The group is registered on `datasetGroupCommand` (`nemar admin dataset`, alias `repo`; the old
@@ -17,14 +18,30 @@
  * subcommands alphabetically, so the order of registration does not show in `--help`.
  */
 
+import { readFileSync } from "node:fs";
 import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { lineageExitCode, lineageLines } from "../../shared/license-lineage.js";
+import {
+  LICENSE_PERMISSION_EVIDENCE_MAX,
+  mailNotSentLines,
+} from "../../shared/license-permission.js";
 import { DENIAL_REASON_MAX_LENGTH } from "../../shared/publication-limits.js";
 import { searchLimitProblem } from "../../shared/publish-list-search.js";
+import { RESUBMISSION_NOTE_LABEL } from "../../shared/resubmission-note.js";
+import { UPSTREAM_ACK_COPY } from "../../shared/upstream-ack.js";
 import { checkedDatasetId, failMessage, failWith, requireSignedIn } from "../lib/admin-command.js";
-import { denyPublication, listPublishRequests, rerunIdentifierScreen } from "../lib/api/publish.js";
+import { getLicenseLineage } from "../lib/api/admin.js";
+import {
+  acknowledgeBatch,
+  denyPublication,
+  listPublishRequests,
+  recordLicensePermission,
+  rerunIdentifierScreen,
+  restorePublication,
+} from "../lib/api/publish.js";
 import {
   type ConfirmOptions,
   NO_DESCRIPTION,
@@ -49,9 +66,18 @@ import {
   resolveListStatuses,
 } from "../lib/publish-list-filter.js";
 import { plain } from "../lib/terminal-text.js";
+import {
+  type AckSelection,
+  applyEligible,
+  dryRun,
+  parseIdsFile,
+  policyLines,
+  resultLines,
+} from "../lib/upstream-ack-batch.js";
 import { printable, registerApproveCommand, requestNumber } from "./admin-publish-approve.js";
 import { registerNextCommand } from "./admin-publish-next.js";
 import { registerReviewCommands } from "./admin-publish-review.js";
+import { registerScreenBatchCommand } from "./admin-publish-screen-batch.js";
 
 export const publishCommand = new Command("publish").description("Publication workflow management");
 
@@ -197,6 +223,13 @@ Examples:
               `    ${chalk.yellow("! anonymous release:")} ${chalk.dim(
                 "repository stays private, DOI stays reserved, depositor is not named",
               )}`,
+            );
+          }
+          // ADR 0139, decision 5: a resubmission carries the depositor's own words. Only the fact
+          // is listed, with where to read it; the text is long, theirs, and printed by `show`.
+          if (typeof req.resubmission_note === "string" && req.resubmission_note !== "") {
+            console.log(
+              `    ${chalk.cyan("!")} ${RESUBMISSION_NOTE_LABEL} ${chalk.dim(`(read it: nemar admin dataset publish show ${plain(req.dataset_id)})`)}`,
             );
           }
           // Epic #1610 phase 4: the identifier screen, in the backend's words.
@@ -412,6 +445,65 @@ Examples:
     },
   );
 
+publishCommand
+  .command("restore")
+  .description("Restore a denied publication request to waiting for its decision")
+  .argument("<dataset-id>", "Dataset ID")
+  .option(
+    "--request-id <n>",
+    "The request this restore is for (default: the newest); refused if it is not the newest",
+  )
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Description:
+  Reverse a denial: the dataset's newest publication request, denied by an
+  administrator or by the automatic denial (ADR 0139), goes back to waiting
+  for its decision, and an audit row records who restored it. A request its
+  depositor withdrew, or one with a newer request after it, is refused.
+  Nobody is mailed; decide the request as usual afterwards.
+
+Examples:
+  $ nemar admin dataset publish restore nm099999
+  $ nemar admin dataset publish restore nm099999 --request-id 42 --yes`,
+  )
+  .action(async (datasetArg: string, options: ConfirmOptions & { requestId?: string }) => {
+    if (!requireSignedIn()) return;
+    const datasetId = checkedDatasetId(datasetArg);
+    if (datasetId === null) return;
+    const named = options.requestId === undefined ? undefined : requestNumber(options.requestId);
+    if (options.requestId !== undefined && named === undefined) {
+      console.log(
+        chalk.red(
+          `--request-id needs a request number (a positive whole number); "${plain(options.requestId)}" is not one.`,
+        ),
+      );
+      process.exitCode = 1;
+      markReportedExit();
+      return;
+    }
+    const confirmResult = await confirm(
+      `Restore the denied publication request of ${datasetId}${named === undefined ? "" : ` (request #${named})`}?`,
+      options,
+    );
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      process.exitCode = 1;
+      markReportedExit();
+      return;
+    }
+    const spinner = ora(`Restoring the request of ${datasetId}...`).start();
+    try {
+      const out = await restorePublication(datasetId, named);
+      spinner.succeed(`Request #${out.request_id} of ${datasetId} restored`);
+      console.log(chalk.dim(`  ${plain(out.message)}`));
+    } catch (error) {
+      failWith(error, spinner, "Failed to restore the request");
+    }
+  });
+
 /**
  * Whether a denial reason is short enough for the Worker (`DENIAL_REASON_MAX_LENGTH`), saying so
  * and setting the exit code when it is not; `next` makes the same check before it sends. A missing
@@ -476,5 +568,255 @@ Examples:
     }
   });
 
+// `nemar admin dataset publish license-lineage <id>` (epic #2182 card D1, ADR 0139 decision 7):
+// read-only. It sits in the publish group because ADR 0135 caps `admin dataset` at twelve children.
+publishCommand
+  .command("license-lineage")
+  .description("A dataset's upstream license lineage, computed on demand (read-only)")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000480)")
+  .option("--json", "Print the result as one JSON document")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Reads the dataset's declared upstream sources (SourceDatasets, the
+  enrichment's IsDerivedFrom and IsIdenticalTo, the deposit attestation and
+  the README) and each source's license record, and prints the outcome with
+  its evidence, remedy and docs link. It is the same resolver the depositor
+  runs with 'nemar dataset license-check <path>'. Writes nothing.
+
+Exit codes:
+  0  compatible, compatible_attribution or compatible_nc
+  1  the request failed
+  2  any other outcome
+
+Examples:
+  $ nemar admin dataset publish license-lineage nm000480
+  $ nemar admin dataset publish license-lineage nm000480 --json`,
+  )
+  .action(async (rawId: string, options: { json?: boolean }) => {
+    if (!requireSignedIn(options.json)) return;
+    const datasetId = checkedDatasetId(rawId, options.json);
+    if (!datasetId) return;
+    try {
+      const result = await getLicenseLineage(datasetId);
+      if (options.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`Dataset: ${result.dataset_id}`);
+        for (const line of lineageLines(result)) console.log(line);
+      }
+      process.exitCode = lineageExitCode(result.outcome);
+    } catch (error) {
+      failWith(error, null, "Failed to read the license lineage", undefined, {
+        json: options.json,
+      });
+    }
+  });
+
+// `nemar admin dataset publish license-permission <id>` (epic #2182 card B6; ADR 0139 decision 7,
+// amendment of 2026-11-25): record the evidence a depositor sent to support@nemar.org. A dry run
+// unless --apply.
+publishCommand
+  .command("license-permission")
+  .description(
+    "Record license evidence from a support ticket against a request (dry run unless --apply)",
+  )
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000480)")
+  .requiredOption("--ticket <id>", "The support ticket the evidence arrived on (its number)")
+  .requiredOption(
+    "--evidence <text>",
+    `Your own summary of what was received, at most ${LICENSE_PERMISSION_EVIDENCE_MAX} characters (administrators only)`,
+  )
+  .option("--request-id <n>", "The request this is for (default: the active one)")
+  .option("--apply", "Record the permission (without it, nothing is written)")
+  .option("--json", "Print the answer as one JSON document")
+  .addHelpText(
+    "after",
+    `
+Description:
+  When a request's license lineage needs action, the depositor is asked to
+  send evidence from the original authors (or, for data a repository such
+  as PhysioNet restricts, from that repository) that they accept this copy
+  under the dataset's license, to support@nemar.org. An email chain from the
+  authors is acceptable evidence.
+
+  This command records that evidence against the dataset's active request,
+  linked to the support ticket. The dry run shows the request, its lineage
+  outcome, the target license and the sources the permission would name.
+  With --apply it records the permission and an audit row together. The
+  permission clears the license lineage reason for this request and for
+  later requests of the dataset with the same sources and license; it never
+  clears another reason, and it never approves.
+
+  The evidence text is stored for administrators only: it is never shown to
+  the depositor, never sent to a model, and never printed back.
+
+Examples:
+  $ nemar admin dataset publish license-permission nm000480 --ticket 412 --evidence "Authors' email of 2026-11-20 accepts CC BY 4.0 for this copy"
+  $ nemar admin dataset publish license-permission nm000480 --ticket 412 --evidence "..." --apply`,
+  )
+  .action(
+    async (
+      rawId: string,
+      options: {
+        ticket: string;
+        evidence: string;
+        requestId?: string;
+        apply?: boolean;
+        json?: boolean;
+      },
+    ) => {
+      if (!requireSignedIn(options.json)) return;
+      const datasetId = checkedDatasetId(rawId, options.json);
+      if (!datasetId) return;
+      const bad = (message: string) => {
+        if (options.json) console.log(JSON.stringify({ error: message }));
+        else console.log(chalk.red(message));
+        process.exitCode = 1;
+        markReportedExit();
+      };
+      const ticketId = requestNumber(options.ticket);
+      if (ticketId === undefined) {
+        bad(
+          `--ticket needs a ticket number (a positive whole number); "${plain(options.ticket)}" is not one.`,
+        );
+        return;
+      }
+      const named = options.requestId === undefined ? undefined : requestNumber(options.requestId);
+      if (options.requestId !== undefined && named === undefined) {
+        bad(
+          `--request-id needs a request number (a positive whole number); "${plain(options.requestId)}" is not one.`,
+        );
+        return;
+      }
+      const evidence = options.evidence.trim();
+      if (evidence === "" || evidence.length > LICENSE_PERMISSION_EVIDENCE_MAX) {
+        bad(
+          `--evidence needs 1 to ${LICENSE_PERMISSION_EVIDENCE_MAX} characters; it has ${evidence.length}.`,
+        );
+        return;
+      }
+      try {
+        const out = await recordLicensePermission(datasetId, {
+          ticketId,
+          evidence,
+          requestId: named,
+          apply: options.apply === true,
+        });
+        if (options.json) {
+          console.log(JSON.stringify(out, null, 2));
+          return;
+        }
+        console.log(
+          `${chalk.bold(plain(out.dataset_id))}  request ${plain(String(out.request_id))}, review ${plain(String(out.review_id))}`,
+        );
+        console.log(`  License lineage: ${plain(out.outcome)}`);
+        console.log(`  Target license: ${plain(out.target_license ?? "unknown")}`);
+        console.log(`  Sources the permission names (${out.sources.length}):`);
+        for (const src of out.sources) {
+          const lic = src.license
+            ? `${src.license}${src.license_version ? ` ${src.license_version}` : ""}`
+            : "unknown";
+          console.log(`    - ${plain(src.id)}: ${plain(src.outcome)}; license ${plain(lic)}`);
+        }
+        console.log(
+          `  Ticket: ${plain(String(out.ticket_id))}, "${plain(out.ticket_subject)}" from ${plain(out.ticket_sender)}`,
+        );
+        if (out.ticket_warning !== null)
+          console.log(chalk.yellow(`  ${plain(out.ticket_warning)}`));
+        console.log(`  The depositor was asked: ${plain(out.request_line)}`);
+        if (out.applied && typeof out.line === "string") console.log(`  ${plain(out.line)}`);
+        console.log(out.applied ? chalk.green(plain(out.message)) : chalk.dim(plain(out.message)));
+        // Each mail that did not go out, so the person it was for is told by hand.
+        if (out.mail !== undefined) {
+          for (const line of mailNotSentLines(out.mail))
+            console.log(chalk.yellow(`  ${plain(line)}`));
+        }
+      } catch (error) {
+        failWith(error, null, "Failed to record the license permission", undefined, {
+          json: options.json,
+        });
+      }
+    },
+  );
+
+// `nemar admin dataset publish acknowledge-batch` (epic #2182 card D3; ADR 0086, amendment
+// 2026-11-25): one documented act acknowledging the screens of conversions of a public upstream.
+publishCommand
+  .command("acknowledge-batch")
+  .description(
+    "Acknowledge the identifier screens of requests converted from a public upstream (dry run unless --apply)",
+  )
+  .option("--all-requested", "Every request awaiting an administrator")
+  .option("--ids <file>", "A file of dataset ids, one per line")
+  .option("--apply", "Record the acknowledgments the dry run reports eligible, as your own act")
+  .option("--json", "Print the results as one JSON document")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Reads each selected request's identifier screen, the dataset's license
+  lineage and the publication-queue measurement, and reports per request:
+  eligible, not_eligible:<reason>, or (with --apply) acknowledged,
+  state_moved, or not_recorded:write_failed (nothing written; repeat the run). A request is eligible only when it is a conversion of a
+  public, redistributable upstream whose license was read from the source's
+  own record, and its screen found nothing but unread formats and image,
+  document or tooling files. Nothing is approved.
+
+  The dry run always runs and prints first. With --apply, only what it
+  reported eligible is recorded, each with a reason naming the upstream, its
+  license and the unread formats, linked to the policy. The acknowledgment
+  counts for your own approval only. A request that changed after the dry run
+  is reported as state_moved and nothing is recorded for it.
+
+  ${UPSTREAM_ACK_COPY["never-acknowledged"].statement}
+
+Examples:
+  $ nemar admin dataset publish acknowledge-batch --all-requested
+  $ nemar admin dataset publish acknowledge-batch --ids queue.txt --apply`,
+  )
+  .action(
+    async (options: { allRequested?: boolean; ids?: string; apply?: boolean; json?: boolean }) => {
+      if (!requireSignedIn(options.json)) return;
+      if (Boolean(options.allRequested) === Boolean(options.ids)) {
+        failMessage(UPSTREAM_ACK_COPY["cli:selection"].statement, {
+          json: options.json,
+          answered: true,
+        });
+        return;
+      }
+      let selection: AckSelection = { all: true };
+      if (options.ids) {
+        try {
+          selection = { ids: parseIdsFile(readFileSync(options.ids, "utf-8")) };
+        } catch (error) {
+          failMessage(
+            `${UPSTREAM_ACK_COPY["cli:ids_unreadable"].statement} ${error instanceof Error ? error.message : String(error)}.`,
+            { json: options.json, answered: true },
+          );
+          return;
+        }
+      }
+      try {
+        const dry = await dryRun(acknowledgeBatch, selection);
+        const applied = options.apply ? await applyEligible(acknowledgeBatch, dry) : null;
+        if (options.json) {
+          console.log(JSON.stringify({ dry_run: dry, applied }, null, 2));
+        } else {
+          for (const line of resultLines("Dry run:", dry)) console.log(plain(line));
+          for (const line of policyLines()) console.log(plain(line));
+          if (applied)
+            for (const line of resultLines("Applied:", applied)) console.log(plain(line));
+          else console.log(UPSTREAM_ACK_COPY["cli:nothing_recorded"].statement);
+        }
+      } catch (error) {
+        failWith(error, null, UPSTREAM_ACK_COPY["cli:failed"].statement, undefined, {
+          json: options.json,
+        });
+      }
+    },
+  );
+
 registerApproveCommand(publishCommand);
 registerNextCommand(publishCommand);
+registerScreenBatchCommand(publishCommand);

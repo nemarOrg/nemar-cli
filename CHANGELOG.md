@@ -15,6 +15,23 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Publication queue: decide (epic #2182, ADR 0139)
+
+**Release note.**
+Publication requests can now be decided at scale with evidence that the depositor can check.
+Deploy the Worker and the review script together.
+Reviews that start between the two report `inputs_unavailable`; restart them with `nemar admin dataset publish start <id>`.
+Two switches stay off until the owner turns them on, each in a reviewed change: `PUBLICATION_REVIEW_ENABLED` in production (pull request #2370), and `PUBLICATION_AUTO_DENY_MODE` (`off`, `shadow` or `on`) with its owner-set `PUBLICATION_AUTO_DENY_DAILY_CAP`; neither may appear in `backend/wrangler-sccn.toml` except through such a change.
+
+- **Upstream license lineage.** `nemar dataset license-check <path>` and `nemar admin dataset publish license-lineage <id>` find a dataset's upstream sources and read each license from DataCite, Crossref, OpenAlex, or OpenNeuro's and PhysioNet's own records. They return one outcome: compatible, attribution, NC, share-alike mismatch, needs permission, redistribution prohibited, source is a publication, no upstream declared, or unresolved. Unresolved is never compatible.
+- **License permission workflow.** When lineage needs permission, the depositor is told to send evidence from the original authors to support@nemar.org. `nemar admin dataset publish license-permission <id> --ticket <n>` records it against the support ticket. A recorded permission clears only the license reason.
+- **Batch acknowledgment on a public upstream.** `nemar admin dataset publish acknowledge-batch` acknowledges, in one audited act, the screens of conversions whose public, redistributable upstream NEMAR confirmed. It covers unread formats and images only, and never photos, questionnaires or content findings (ADR 0086 amendment).
+- **Quiet re-screen.** `nemar admin dataset publish screen-batch` re-screens many requests, paced, with no per-request mail and one digest.
+- **Review inputs and record.** The review also reads the enrichment, the upstream registry records, the lineage outcome, the screen's coverage counts, the resubmission note and the previous denial's non-screen reason codes, all scanned before sending. It never reads data. Each review stores its head, scanner, models, prompt version and input digest.
+- **Resubmission note.** `nemar dataset publish request --note` (or the prompt after a denial) tells the reviewer what changed.
+- **Automatic denial (off by default).** A review fail with a reason that is eligible for automatic denial, confirmed by a second Sonnet run on the same inputs, denies the request as nemarAdmin. The denial mail says an automated agent decided, gives remedies and reproduce commands, and invites a resubmission. A pass with a clear screen mails administrators "Ready to approve". `nemar admin dataset publish restore <id>` reverses a denial.
+- Migrations 0150 to 0154.
+
 ## 0.10.41 - 2026-11-26
 
 ### Local Zarr reader (#2144, ADR 0120)

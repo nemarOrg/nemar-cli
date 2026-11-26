@@ -58,7 +58,11 @@
     "test/identifier-screen-ci.test.ts",
     "test/identifier-scrub.test.ts",
     "scripts/scrub/**/*.ts",
-    "test/scrub/**/*.ts"
+    "test/scrub/**/*.ts",
+    "test/license-lineage.test.ts",
+    "test/license-lineage.integration.test.ts",
+    "test/license-check-spawn.test.ts",
+    "test/fixtures/license-lineage/*.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

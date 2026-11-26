@@ -17,7 +17,7 @@
  * - nemar dataset push            - Push commits and data to remotes
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "bun";
@@ -35,10 +35,33 @@ import {
   PREFLIGHT_ACKNOWLEDGEABLE,
   publicationRequestNotice,
 } from "../../shared/identifier-screen-report.js";
+import {
+  DEFAULT_BASES,
+  type LineageInputs,
+  type RegistryBases,
+  SOURCE_STATUS_COPY,
+  lineageExitCode,
+  lineageLines,
+  readLineageInputs,
+  resolveLicenseLineage,
+} from "../../shared/license-lineage.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { MODALITY_FILTER_CLI_HELP } from "../../shared/modality-filter.js";
 import { stepsForRelease } from "../../shared/publication-steps.js";
 import { RangeParseError } from "../../shared/range.js";
+import { README_CANDIDATES } from "../../shared/readme-candidates.js";
+import {
+  RESUBMISSION_NOTE_CANCELLED,
+  RESUBMISSION_NOTE_FLAGS_EXCLUSIVE,
+  RESUBMISSION_NOTE_NOT_CONFIRMED,
+  RESUBMISSION_NOTE_NOT_REQUESTED,
+  RESUBMISSION_NOTE_OFFER,
+  RESUBMISSION_NOTE_RECORDED,
+  RESUBMISSION_NOTE_REFUSAL_SENTENCES,
+  readResubmissionNote,
+  resubmissionNoteFileUnreadable,
+  resubmissionPrompt,
+} from "../../shared/resubmission-note.js";
 import { isAnswered } from "../lib/admin-command.js";
 import { addCi } from "../lib/api/admin.js";
 import { getCurrentUser } from "../lib/api/auth.js";
@@ -248,6 +271,7 @@ import {
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
+import { plain } from "../lib/terminal-text.js";
 import { clip } from "../lib/terminal-text.js";
 import { theme } from "../lib/theme.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
@@ -4496,6 +4520,91 @@ function printAnonymousNotConfirmed(datasetId: string): void {
   );
 }
 
+/** The options of `publish request` that carry a resubmission note (ADR 0139, decision 5). */
+interface NoteOptions {
+  note?: string;
+  noteFile?: string;
+}
+
+/** A refusal of what was typed for the note: said plainly, nothing is sent, and it is no bug. */
+function refuseNote(sentence: string): never {
+  console.log(chalk.red(`Error: ${sentence}`));
+  console.log(chalk.dim(`  ${RESUBMISSION_NOTE_NOT_REQUESTED}`));
+  markUsageExit();
+  process.exit(1);
+}
+
+/**
+ * The note to send with a publication request, or none (ADR 0139, decision 5).
+ *
+ * A note given with `--note` or `--note-file` is read by the one rule the Worker applies
+ * (`readResubmissionNote`) and refused here before anything is sent. With neither flag, the dataset's
+ * last request is read: when it was DENIED and not withdrawn, a terminal is asked once (Enter
+ * skips) and a session with no terminal is told a note can be added, and goes on without one. A
+ * request that cannot be read changes nothing: the request itself will say what is wrong.
+ */
+async function settleResubmissionNote(
+  datasetId: string,
+  options: NoteOptions,
+): Promise<string | undefined> {
+  if (options.note !== undefined && options.noteFile !== undefined) {
+    refuseNote(RESUBMISSION_NOTE_FLAGS_EXCLUSIVE);
+  }
+  let given = options.note;
+  if (options.noteFile !== undefined) {
+    try {
+      given = readFileSync(options.noteFile, "utf8");
+    } catch {
+      refuseNote(resubmissionNoteFileUnreadable(clip(options.noteFile, 200)));
+    }
+  }
+  if (given !== undefined) {
+    const read = readResubmissionNote(given);
+    if (!read.ok) refuseNote(RESUBMISSION_NOTE_REFUSAL_SENTENCES[read.refusal]);
+    return read.note ?? undefined;
+  }
+
+  let previous: Awaited<ReturnType<typeof getPublishStatus>>;
+  try {
+    previous = await getPublishStatus(datasetId);
+  } catch {
+    return undefined;
+  }
+  if (previous.status !== "denied" || previous.withdrawn === true) return undefined;
+  if (process.stdin.isTTY !== true) {
+    console.log(chalk.dim(`  ${RESUBMISSION_NOTE_OFFER}`));
+    return undefined;
+  }
+  const day = (previous.denied_at ?? "").slice(0, 10) || "an earlier date";
+  // A rule-breaking answer is asked again by the prompt itself, with the rule's own sentence. The
+  // author is passed as the status answer gave it: an older backend sends none, and the question
+  // then names nobody rather than an administrator.
+  // Ctrl+C at inquirer 9's prompt does not reject it: the prompt's own handler signals this
+  // process with SIGINT (`baseUI.onForceClose`), which Bun may not deliver before the event loop
+  // drains, and the command then ends with exit code 0 as if nothing had been asked. So this
+  // listens on the same readline interface, after inquirer's, and exits 130 itself (the code of a
+  // walked-away prompt, which the exit hook does not read as a failure to report).
+  const asking = inquirer.prompt<{ value: string }>([
+    {
+      type: "input",
+      name: "value",
+      message: resubmissionPrompt(day, previous.denied_by_kind ?? null),
+      validate: (typed: string) => {
+        const check = readResubmissionNote(typed);
+        return check.ok ? true : RESUBMISSION_NOTE_REFUSAL_SENTENCES[check.refusal];
+      },
+    },
+  ]);
+  // `rl` is protected in inquirer's types and public at run time.
+  (asking.ui as unknown as { rl: NodeJS.EventEmitter }).rl.on("SIGINT", () => {
+    console.log(chalk.dim(`\n  ${RESUBMISSION_NOTE_CANCELLED}`));
+    process.exit(130);
+  });
+  const { value } = await asking;
+  const read = readResubmissionNote(value);
+  return read.ok ? (read.note ?? undefined) : undefined;
+}
+
 publishCommand
   .command("request")
   .description("Request publication of a dataset")
@@ -4514,6 +4623,12 @@ Description:
   - Have S3 Object Lock enabled (prevents data deletion)
 
   You can only have one active publication request per dataset.
+
+  After a denial, add a note for the reviewer (--note <text>, or --note-file
+  <path>): what changed, or why the decision was wrong. At most 2000 characters,
+  line breaks allowed, no other control characters. At a terminal the command
+  asks for one when the last request was denied (a withdrawal does not count);
+  elsewhere it says a note can be added and goes on. Only administrators read it.
 
   BIDS validation runs on GitHub after the upload. A request made before it has
   completed is recorded, and NEMAR continues it once validation passes.
@@ -4539,11 +4654,20 @@ Anonymous deposit (--anonymous):
 Examples:
   $ nemar dataset publish request nm000104
   $ nemar dataset publish request nm000104 --anonymous   # blind, for review
+  $ nemar dataset publish request nm000104 --note "Added the missing participants.tsv"
   $ nemar dataset publish status nm000104     # Check request status`,
   )
   .option("--anonymous", "Release the data with your identity withheld until publication")
-  .action(async (datasetId, options: { anonymous?: boolean }) => {
+  .option(
+    "--note <text>",
+    "Tell the reviewer what changed, or why a denial was wrong (at most 2000 characters)",
+  )
+  .option("--note-file <path>", "Read the note from a file instead of the command line")
+  .action(async (datasetId, options: { anonymous?: boolean } & NoteOptions) => {
     requireAuth();
+
+    // Settled before the spinner starts, so a question at a terminal is not drawn over by it.
+    const note = await settleResubmissionNote(datasetId, options);
 
     const spinner = ora(
       options.anonymous
@@ -4552,8 +4676,15 @@ Examples:
     ).start();
 
     try {
-      const result = await requestPublication(datasetId, { anonymous: options.anonymous });
+      const result = await requestPublication(datasetId, { anonymous: options.anonymous, note });
       spinner.succeed(result.message);
+      if (note !== undefined && result.resubmission_note_recorded === true) {
+        console.log(chalk.dim(`  ${RESUBMISSION_NOTE_RECORDED}`));
+      } else if (note !== undefined) {
+        // The server did not confirm it (an older backend, or a note lost on the way): said, so
+        // the depositor does not rely on a reviewer having read what was never stored.
+        console.log(chalk.yellow(`  ${RESUBMISSION_NOTE_NOT_CONFIRMED}`));
+      }
       // Printed from the server's ECHO, not from the flag that was typed. A
       // request whose body never arrived would otherwise succeed with a
       // message indistinguishable from a correct one, and the depositor would
@@ -4749,6 +4880,21 @@ Examples:
       if (screenLines.length > 0) {
         console.log();
         for (const line of screenLines) console.log(line);
+      }
+
+      // ADR 0139, decision 7 (amendment of 2026-11-25): what license evidence to send, and where,
+      // or that it was recorded; in the server's words.
+      const licenseLines = result.license_permission_lines ?? [];
+      if (licenseLines.length > 0) {
+        console.log(`\n  ${chalk.yellow("License evidence:")}`);
+        for (const line of licenseLines) console.log(`    ${plain(line)}`);
+      }
+
+      // ADR 0139, decision 9: the record of the newest automated review, in the server's words.
+      const recordLines = result.review_record_lines ?? [];
+      if (recordLines.length > 0) {
+        console.log(`\n  ${chalk.cyan("Automated review record:")}`);
+        for (const line of recordLines) console.log(`    ${plain(line)}`);
       }
 
       // Blocked requests: surface WHY (e.g. BIDS validation pending/failed) plus
@@ -6225,3 +6371,117 @@ function renderAnonymityVerdict(info: {
     console.log(chalk.dim(`               Not checked: ${unchecked.join(", ")}`));
   }
 }
+
+// ============================================================================
+// License lineage (`nemar dataset license-check <path>`; epic #2182 card D1, ADR 0139)
+// ============================================================================
+
+/**
+ * The registry origins, overridable by environment for the CLI spawn test only
+ * (test/license-check-spawn.test.ts serves recorded responses from a local stand-in).
+ */
+function licenseCheckBases(): RegistryBases {
+  const env = process.env;
+  return {
+    datacite: env.NEMAR_LICENSE_DATACITE_URL || DEFAULT_BASES.datacite,
+    crossref: env.NEMAR_LICENSE_CROSSREF_URL || DEFAULT_BASES.crossref,
+    openalex: env.NEMAR_LICENSE_OPENALEX_URL || DEFAULT_BASES.openalex,
+    openneuro: env.NEMAR_LICENSE_OPENNEURO_URL || DEFAULT_BASES.openneuro,
+    physionet: env.NEMAR_LICENSE_PHYSIONET_URL || DEFAULT_BASES.physionet,
+  };
+}
+
+/** The lineage inputs of a local dataset copy: everything but the attestation, which is on the server. */
+function localLineageInputs(root: string): LineageInputs {
+  // Every read can throw (a permission error, a directory where a file should be); the caller
+  // turns that into one line and exit 1.
+  const read = (name: string): string | null => {
+    const p = join(root, name);
+    return existsSync(p) ? readFileSync(p, "utf-8") : null;
+  };
+  let readme: string | null = null;
+  for (const name of README_CANDIDATES) {
+    readme = read(name);
+    if (readme !== null) break;
+  }
+  return {
+    datasetDescription: read("dataset_description.json"),
+    nemarMetadata: read(".nemar/metadata.json"),
+    attestationUpstreamSource: null,
+    readme,
+  };
+}
+
+/** Print one line on stderr and exit 1: the check could not read its inputs. */
+function licenseCheckFail(message: string): never {
+  console.error(chalk.red(message));
+  // The message is the whole report; no "run again with --debug" footer.
+  markReportedExit();
+  process.exit(1);
+}
+
+datasetCommand
+  .command("license-check")
+  .description("Check the dataset's license against its upstream sources' licenses")
+  .argument("<path>", "Path to the local dataset")
+  .option("--json", "Print the result as one JSON document")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Recomputes the upstream license lineage with the same resolver NEMAR's
+  review uses. The sources are read from dataset_description.json
+  (SourceDatasets), .nemar/metadata.json (IsDerivedFrom and IsIdenticalTo),
+  and data-repository DOIs and OpenNeuro, Zenodo or PhysioNet URLs in the
+  README. Each source's license is read from DataCite, Crossref or OpenAlex
+  (OpenNeuro's or PhysioNet's own record where the registries hold none).
+  The deposit attestation is read only by the server's check.
+
+Exit codes:
+  0  compatible, compatible_attribution or compatible_nc
+  1  the path could not be read
+  2  any other outcome (it needs an action; see the remedy)
+
+Examples:
+  $ nemar dataset license-check ./my-dataset
+  $ nemar dataset license-check ./my-dataset --json`,
+  )
+  .action(async (path: string, options: { json?: boolean }) => {
+    const root = resolve(path);
+    // Each step records a failure message; the exit happens outside every `try`, so an exit can
+    // never be caught and reported as a read error.
+    let failure: string | null = null;
+    let inputs: LineageInputs | null = null;
+    try {
+      if (!statSync(root).isDirectory()) failure = `Not a directory: ${path}`;
+      else if (!existsSync(join(root, "dataset_description.json"))) {
+        failure = `No dataset_description.json in ${path}`;
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      failure =
+        code === "ENOENT"
+          ? `Path not found: ${path}`
+          : `Could not read ${path} (${code ?? "error"})`;
+    }
+    if (failure === null) {
+      try {
+        inputs = localLineageInputs(root);
+      } catch (error) {
+        failure = `Could not read ${path} (${(error as NodeJS.ErrnoException).code ?? "error"})`;
+      }
+    }
+    if (failure !== null || inputs === null) licenseCheckFail(failure ?? `Could not read ${path}`);
+    // A file that is there but cannot be parsed is not a lineage: name it and stop.
+    const { states } = readLineageInputs(inputs);
+    if (states.dataset_description === "unparseable") {
+      licenseCheckFail(SOURCE_STATUS_COPY.description_unreadable.statement);
+    }
+    if (states.nemar_metadata === "unparseable") {
+      licenseCheckFail(SOURCE_STATUS_COPY.metadata_unreadable.statement);
+    }
+    const result = await resolveLicenseLineage(inputs, { bases: licenseCheckBases() });
+    if (options.json) console.log(JSON.stringify(result, null, 2));
+    else for (const line of lineageLines(result)) console.log(line);
+    process.exit(lineageExitCode(result.outcome));
+  });

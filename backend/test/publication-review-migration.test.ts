@@ -50,6 +50,7 @@ import {
 } from "./helpers/publication-review";
 
 const SQL = readFileSync(join(MIGRATIONS_DIR, "0098_publication_reviews.sql"), "utf8");
+const RECORD_SQL = readFileSync(join(MIGRATIONS_DIR, "0152_publication_review_record.sql"), "utf8");
 const OTHER_HEAD = "fedcba9876543210fedcba9876543210fedcba98";
 
 interface ColumnInfo {
@@ -95,6 +96,24 @@ describe("0098 publication_reviews: columns", () => {
     override_reasons: { type: "TEXT", notnull: 0, dflt: null },
     created_at: { type: "TEXT", notnull: 1, dflt: "datetime('now')" },
     decided_at: { type: "TEXT", notnull: 0, dflt: null },
+    // Migration 0152: the reproducibility record (ADR 0139, decision 9).
+    scanner_id: { type: "TEXT", notnull: 0, dflt: null },
+    reader_versions: { type: "TEXT", notnull: 0, dflt: null },
+    resolver_version: { type: "TEXT", notnull: 0, dflt: null },
+    models: { type: "TEXT", notnull: 0, dflt: null },
+    prompt_version: { type: "TEXT", notnull: 0, dflt: null },
+    input_digest: { type: "TEXT", notnull: 0, dflt: null },
+    enrichment_source: { type: "TEXT", notnull: 0, dflt: null },
+    inputs_served_at: { type: "TEXT", notnull: 0, dflt: null },
+    // Migration 0153: the automatic denial (ADR 0139, decisions 1 to 3).
+    confirm_of: { type: "INTEGER", notnull: 0, dflt: null },
+    auto_deny_state: { type: "TEXT", notnull: 1, dflt: "'none'" },
+    auto_deny_at: { type: "TEXT", notnull: 0, dflt: null },
+    denial_mail_state: { type: "TEXT", notnull: 0, dflt: null },
+    denial_mail_attempts: { type: "INTEGER", notnull: 1, dflt: "0" },
+    denial_mail_listed_at: { type: "TEXT", notnull: 0, dflt: null },
+    // Migration 0154: the lineage the review was served, for a license permission (card B6).
+    lineage_basis: { type: "TEXT", notnull: 0, dflt: null },
   };
 
   test("exactly the declared columns, types, NOT NULLs and defaults", () => {
@@ -111,17 +130,23 @@ describe("0098 publication_reviews: columns", () => {
     expect(db.query("PRAGMA foreign_key_list(publication_reviews)").all()).toEqual([]);
   });
 
-  test("the depositor and state indexes exist beside the UNIQUE key's own", () => {
-    const names = (db.query("PRAGMA index_list(publication_reviews)").all() as { name: string }[])
-      .map((i) => i.name)
-      .sort();
+  test("the depositor and state indexes exist beside the key's own, which 0153 made partial", () => {
+    const list = db.query("PRAGMA index_list(publication_reviews)").all() as {
+      name: string;
+      unique: number;
+      partial: number;
+    }[];
+    const names = list.map((i) => i.name).sort();
     expect(names).toContain("idx_publication_reviews_depositor");
     expect(names).toContain("idx_publication_reviews_state");
-    const unique = names.filter((n) => n.startsWith("sqlite_autoindex_publication_reviews"));
-    expect(unique).toHaveLength(1);
-    const cols = (db.query(`PRAGMA index_info(${unique[0]})`).all() as { name: string }[]).map(
-      (c) => c.name,
-    );
+    // Migration 0153: the table's UNIQUE became a partial unique index over first runs, so a
+    // confirming row (ADR 0139) can share its first run's request, commit and kind.
+    expect(names.filter((n) => n.startsWith("sqlite_autoindex_publication_reviews"))).toEqual([]);
+    const key = list.find((i) => i.name === "idx_publication_reviews_key");
+    expect(key).toMatchObject({ unique: 1, partial: 1 });
+    const cols = (
+      db.query("PRAGMA index_info(idx_publication_reviews_key)").all() as { name: string }[]
+    ).map((c) => c.name);
     expect(cols).toEqual(["request_id", "head_sha", "anonymous"]);
   });
 });
@@ -171,7 +196,13 @@ describe("0098: the vocabularies of the migration and the code are the same list
     expect(listAfter(/verdict TEXT CHECK \(verdict IS NULL OR verdict IN \(([^)]*)\)/)).toEqual([
       ...PUBLICATION_OUTCOMES,
     ]);
+    // 0098's list is every run error but the one migration 0152 added; 0152's is the whole list.
     expect(listAfter(/detail TEXT CHECK \(detail IS NULL OR detail IN \(([^)]*)\)/)).toEqual([
+      ...PUBLICATION_DECLINE_DETAILS,
+      ...PUBLICATION_RUN_ERRORS.filter((e) => e !== "inputs_unavailable"),
+    ]);
+    const m = RECORD_SQL.match(/detail TEXT CHECK \(detail IS NULL OR detail IN \(([^)]*)\)/);
+    expect([...(m?.[1] ?? "").matchAll(/'([a-z_]+)'/g)].map((x) => x[1])).toEqual([
       ...PUBLICATION_DECLINE_DETAILS,
       ...PUBLICATION_RUN_ERRORS,
     ]);
@@ -553,6 +584,17 @@ describe("the row module", () => {
         "overrideReasons",
         "createdAt",
         "decidedAt",
+        "scannerId",
+        "readerVersions",
+        "resolverVersion",
+        "models",
+        "promptVersion",
+        "inputDigest",
+        "enrichmentSource",
+        "confirmOf",
+        "autoDenyState",
+        "autoDenyAt",
+        "lineageBasis",
       ].sort(),
     );
     expect(row).toMatchObject({

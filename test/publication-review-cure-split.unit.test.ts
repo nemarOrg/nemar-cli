@@ -92,6 +92,12 @@ const GOLDEN: Record<string, { startable: string; notStartable?: string }> = {
   },
   text_withheld: { startable: `Read the withheld documents yourself. ${TERM_OVERRIDE}` },
   question_unknown: { startable: `Answer it yourself from the dataset. ${TERM_OVERRIDE}` },
+  license_lineage_unconfirmed: {
+    startable: `Read the license lineage: nemar admin dataset publish license-lineage nm000123. The depositor sends the original authors' evidence to support@nemar.org and an administrator records it against the request, which clears this reason; or the depositor corrects License in dataset_description.json. ${TERM_OVERRIDE}`,
+  },
+  resubmission_note_unaddressed: {
+    startable: `Read the note and the previous denial yourself. ${TERM_OVERRIDE}`,
+  },
   bids_unconcluded_at_review: {
     startable: `Check the validation run of that commit. ${TERM_OVERRIDE}`,
   },
@@ -229,6 +235,12 @@ const NEUTRAL: Record<string, { startable: string; notStartable?: string }> = {
   },
   text_withheld: { startable: `Read the withheld documents yourself. ${NEUTRAL_OVERRIDE}` },
   question_unknown: { startable: `Answer it yourself from the dataset. ${NEUTRAL_OVERRIDE}` },
+  license_lineage_unconfirmed: {
+    startable: `Read the license lineage. The depositor sends the original authors' evidence to support@nemar.org and an administrator records it against the request, which clears this reason; or the depositor corrects License in dataset_description.json. ${NEUTRAL_OVERRIDE}`,
+  },
+  resubmission_note_unaddressed: {
+    startable: `Read the note and the previous denial yourself. ${NEUTRAL_OVERRIDE}`,
+  },
   bids_unconcluded_at_review: {
     startable: `Check the validation run of that commit. ${NEUTRAL_OVERRIDE}`,
   },
@@ -254,6 +266,7 @@ const COMMANDS: Record<string, string> = {
   review_did_not_report: START_CMD,
   review_limit_reached: START_CMD,
   review_could_not_run: START_CMD,
+  license_lineage_unconfirmed: "nemar admin dataset publish license-lineage nm000123",
 };
 
 const neutralExpected = (code: string, startable: boolean): string => {
@@ -303,14 +316,14 @@ describe("the neutral cure is what a page prints", () => {
 });
 
 describe("the command is what a terminal runs", () => {
-  test("commandOf is the pinned command for the eight cures that name one, and null for the rest", () => {
+  test("commandOf is the pinned command for the nine cures that name one, and null for the rest", () => {
     let named = 0;
     for (const code of REASON_CODES) {
       const want = COMMANDS[code] ?? null;
       expect(commandOf(code, ID, true)).toBe(want);
       if (want !== null) named++;
     }
-    expect(named).toBe(8);
+    expect(named).toBe(9);
   });
 
   test("the four start codes name no command for a request no start can reach", () => {
