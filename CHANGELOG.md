@@ -180,6 +180,13 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
   `GET /admin/compute/pipeline/runs/:stamp/quality` says where the run's derivative stands in one word (`run_in_progress` for a dispatched stamp, `run_not_succeeded`, `not_keyed` with the store's skip word, `awaiting_derivative`, `failed`, `expired`, `copying`, `canary`, `current`, `superseded` or `not_current`), with its retention, `stored_at` and `expires_at`, and `dataset_public` (the quality route's gate now: a `current` row is what public pages read only while it is true); a canary past its date is `expired` before the sync marks it, and no state is a 500.
   When the derivative's files stand, it lists the recordings that succeeded, 100 a page in path order (`after` continues; a cursor that is not a recording path is `invalid_query`), from the recordings table stored under the derivative's key: read once, at most 32 MiB, and kept in the edge cache under that key, so a later page reads no store. Every answer is `no-store`.
   `nemar admin compute pipeline quality <stamp-id> [--after <path>]` prints it.
+- **A run's quality record and files, for administrators (ADR 0137 decision 7, epic #2324 phase B3b).**
+  `GET /admin/compute/pipeline/runs/:stamp/quality/record/<recording>` and `.../quality/file/<sha256>/<recording>` answer what the public quality route answers, of the run's own derivative: canary, catalog or published, superseded included, while it is `stored` and not past `expires_at`.
+  Otherwise the answer is one word with no store read: `stamp_not_found`, `derivative_not_keyed`, `derivative_copying`, `derivative_failed` or `views_expired`.
+  The record and file checks are the public route's own code (`services/quality-serve.ts`): the whole schema, recording scope, the record's own dataset and recording, the row's `quality_plugins`, declared files only, the size bounds and a re-hash.
+  There is no dataset gate, so the mount never reads or writes the edge cache; every answer the handler gives is `no-store`, with no `Cache-Tag` and no `ETag` (a refusal from the router's middleware or the rate limiter is the website proxy's to make `no-store`).
+  The path must be `record/<recording>` or `file/<64 hex>/<recording>`, with no `.` or `..` segment, no encoded `/`, `\` or `.`, a decoded recording that passes the one shared recording rule (`isQualityRecordingPath`, which the public route and the run-quality listing now use too), and no `?` anywhere, and the method must be GET.
+  The website's proxy builds its upstream path with `qualityAdminForwardPath(stamp, rest)` in `shared/contract/quality-route.ts`, whose docblock lists the proxy's obligations; every log line of the mount leads with `stamp=<id>`.
 
 ### Changed
 
