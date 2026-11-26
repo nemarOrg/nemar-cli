@@ -1144,13 +1144,17 @@ jobs:
           # mid-test, or ends "The runner has received a shutdown signal") until the job's time limit.
           # So the runner's memory is printed to the log every 15 s, where it survives the runner, and
           # kept beside the timings. Not to the bun logs: the checks below read only bun's own output.
-          ( while sleep 15; do
-              line="[memory] $(free -m | awk '/^Mem:/ {printf "used %d of %d MiB, available %d", $3, $2, $7} /^Swap:/ {printf ", swap used %d MiB", $3}'); largest: $(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{printf "%s %d MiB; ", $2, $1 / 1024}')"
+          # The subshell inherits `set -euo pipefail`, which would end the sampler at its first failed
+          # command, so it turns both off; awk reads all of ps's output, so ps cannot get SIGPIPE.
+          ( set +e +o pipefail
+            while sleep 15; do
+              line="[memory] $(free -m | awk '/^Mem:/ {printf "used %d of %d MiB, available %d", $3, $2, $7} /^Swap:/ {printf ", swap used %d MiB", $3}'); largest: $(ps -eo rss=,comm= --sort=-rss | awk 'NR <= 3 {printf "%s %d MiB; ", $2, $1 / 1024}')"
               echo "$line"
               echo "$line" >> "$out/memory.txt"
             done ) &
           sampler=$!
-          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          # The sampler and the sleep it is waiting on.
+          trap 'pkill -P "$sampler" 2>/dev/null; kill "$sampler" 2>/dev/null || true' EXIT
 
           # TWO bun processes per shard, one after the other, each running half of this shard's
           # files (#2351). A bun worker does not give back what a finished file used: on the 16 GB
