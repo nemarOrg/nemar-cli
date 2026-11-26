@@ -157,6 +157,9 @@ export function statusBody(over: Record<string, unknown> = {}) {
     current_step: null,
     last_error: null,
     updated_at: "2026-10-07 20:00:00",
+    // No review has reported for this request, so there is no record (ADR 0139, decision 9).
+    review_record: null,
+    review_record_lines: [],
     ...over,
   };
 }

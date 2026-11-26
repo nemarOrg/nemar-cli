@@ -28,11 +28,20 @@
  * environment's NAME, so a payload cannot steer the report to a host of its choosing. The report
  * echoes the head and the release kind, and the Worker refuses one that does not match its row.
  *
- * **The model sees only cleared text.** Every document goes through `publication-review-presend.ts`
- * and the prompt builder accepts nothing else (ADR 0102, section 2).
+ * **The metadata comes from the Worker.** After the workflow's claim and before anything is
+ * examined, the script asks the Worker for the review's widened inputs
+ * (`POST /webhooks/publication-review-inputs`, with the same callback token; ADR 0139, decision 6):
+ * the enrichment as D1 holds it at review time, the license lineage, the resubmission note, the
+ * previous denial's closed reason codes and the screen's coverage counts. A failed call, or any
+ * answer but a 200 that parses, is the run error `inputs_unavailable`: the review never runs on
+ * part of its inputs. The body is never logged: it is the dataset's metadata.
+ *
+ * **The model sees only cleared text.** Every document, and every section of the inputs, goes
+ * through `publication-review-presend.ts` (`presend`, `presendInputs`), and the prompt builder
+ * accepts nothing else (ADR 0102, section 2).
  *
  * **The public log carries no value.** `nemarDatasets/.github` is public, so this prints a review
- * id, a request id and a fixed word, never a dataset's text, a finding, a count of findings, the
+ * id, a request id and a fixed word, never a dataset's text, an input the Worker served, a finding, a count of findings, the
  * model's output or a token. Every error is reported as a closed word, and only the words a job
  * may post: the Worker's own (`dispatch_failed`, `dispatch_unconfigured`, `review_disabled`) are
  * not in this script's vocabulary.
@@ -45,11 +54,15 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
 import {
+  PUBLICATION_REVIEW_EFFORT,
   type PublicationReviewReport,
   PublicationReviewReportError,
   type PublicationRunError,
+  ReviewInputsError,
   type ReviewerModel,
   type WORKER_ONLY_RUN_ERRORS,
+  lineageCredited,
+  parseReviewInputs,
 } from "../../shared/publication-review";
 import {
   PublicationEvidenceError,
@@ -59,11 +72,13 @@ import {
   readTree,
   structuralSummary,
 } from "./publication-review-evidence";
+import { presendInputs } from "./publication-review-presend";
 import {
   PUBLICATION_OUTPUT_SCHEMA,
   PUBLICATION_REVIEW_MODEL,
   assemblePublicationReport,
   buildPublicationReviewMessages,
+  publicationInputDigest,
 } from "./publication-review-prompt";
 
 // RunFailure, mapError, describeError, the callback poster, flag and need, and CALLBACK_ORIGINS
@@ -108,11 +123,18 @@ export interface ReviewArgs {
   /** The BIDS validation workflow's runs at `head`, or `{"unavailable":true}`. */
   bidsRunsFile: string;
   anonymous: boolean;
+  /**
+   * Fetch the widened inputs from the Worker (`POST /webhooks/publication-review-inputs`), for this
+   * claimed review. Resolves to the body of a 200; anything else rejects, and the review is
+   * `inputs_unavailable`.
+   */
+  fetchInputs: () => Promise<unknown>;
 }
 
 /** Map anything that went wrong to a fixed word. The error's text is never forwarded. */
 export function mapError(e: unknown): JobRunError {
   if (e instanceof RunFailure) return e.error;
+  if (e instanceof ReviewInputsError) return "inputs_unavailable";
   if (e instanceof PublicationEvidenceError) return "evidence_unavailable";
   // Our own evidence block failing the parser is a bug on this side, not the model's doing.
   if (e instanceof PublicationReviewReportError) {
@@ -180,7 +202,7 @@ export async function callPublicationReviewModel(
     system,
     messages: [{ role: "user", content: user }],
     output_config: {
-      effort: "high",
+      effort: PUBLICATION_REVIEW_EFFORT,
       format: { type: "json_schema", schema: PUBLICATION_OUTPUT_SCHEMA },
     },
   });
@@ -230,25 +252,81 @@ export async function runPublicationReview(args: ReviewArgs): Promise<Publicatio
     // screened one.
     if (args.fetchedHead !== args.head) throw new RunFailure("stale_head");
 
+    // The widened inputs, from the Worker that owns them, before anything is examined. A failure
+    // here reviews nothing: never a review over part of its inputs.
+    let body: ReturnType<typeof parseReviewInputs>;
+    try {
+      body = parseReviewInputs(await args.fetchInputs());
+    } catch {
+      throw new RunFailure("inputs_unavailable");
+    }
+    const inputs = {
+      presend: presendInputs(body),
+      lineage: { outcome: body.lineage.outcome, credited: lineageCredited(body.lineage.sources) },
+    };
+
     const tree = await readTree(args.repoDir, args.head);
     const docs = readRootDocuments(args.repoDir, tree);
-    const { facts, cleared } = evidenceFromDocuments(docs, {
+    const { facts, cleared, clearedInputs } = evidenceFromDocuments(docs, {
       head: args.head,
       anonymous: args.anonymous,
       tagsText: readText(args.tagsFile),
       bidsRuns: readText(args.bidsRunsFile),
       summary: structuralSummary(args.repoDir, tree),
+      inputs,
     });
     const { system, user } = buildPublicationReviewMessages({
       facts,
       cleared,
+      clearedInputs,
       nonce: randomUUID().replaceAll("-", ""),
     });
+    const inputDigest = publicationInputDigest({ facts, cleared, clearedInputs });
     const modelOutput = await callPublicationReviewModel(system, user);
-    return { outcome: "reported", report: assemblePublicationReport(modelOutput, facts) };
+    return {
+      outcome: "reported",
+      report: assemblePublicationReport(modelOutput, facts, PUBLICATION_REVIEW_MODEL, {
+        inputDigest,
+        resolverVersion: body.lineage.resolver_version,
+        enrichmentSource: body.enrichment?.source ?? null,
+      }),
+    };
   } catch (e) {
     return { outcome: "error", error: mapError(e), diag: describeError(e) };
   }
+}
+
+/** The answer of the inputs route that is not a body: a fixed word, never the route's text. */
+class InputsUnavailable extends Error {}
+
+/**
+ * Fetch the widened inputs of a claimed review from the Worker, retrying a network failure or a
+ * 5xx as the callback does. Resolves to the parsed JSON of a 200 and rejects on anything else. The
+ * body is returned, never logged: it holds the dataset's metadata.
+ */
+export async function fetchPublicationReviewInputs(
+  origin: string,
+  token: string,
+  ids: { reviewId: number; datasetId: string },
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<unknown> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(2 ** attempt * 1000);
+    let res: Response;
+    try {
+      res = await fetch(`${origin}/webhooks/publication-review-inputs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Webhook-Token": token },
+        body: JSON.stringify({ review_id: ids.reviewId, dataset_id: ids.datasetId }),
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch {
+      continue;
+    }
+    if (res.status === 200) return await res.json();
+    if (res.status < 500) break;
+  }
+  throw new InputsUnavailable("inputs_unavailable");
 }
 
 /** POST the result, retrying a network failure or a 5xx. A 4xx will not improve and is not retried. */
@@ -377,6 +455,8 @@ export async function main(
     tagsFile: flags["tags-file"],
     bidsRunsFile: flags["bids-runs-file"],
     anonymous: anonymous === "true",
+    fetchInputs: () =>
+      fetchPublicationReviewInputs(origins[environment], token, { reviewId, datasetId: dataset }),
   });
 
   const body: Record<string, unknown> = {

@@ -17,15 +17,19 @@ import {
   LINEAGE_OUTCOMES,
   type LineageInputs,
   type LineageOutcome,
+  MAX_CREATORS,
   MAX_SOURCES,
   type NormalizedLicense,
   OUTCOME_RANK,
   RESOLVER_READ,
+  RESOLVER_VERSION,
   SOURCE_STATUSES,
   SOURCE_STATUS_COPY,
   type SourceInputs,
   combineOutcomes,
+  crossrefDescribed,
   crossrefLicenses,
+  dataciteDescribed,
   dataciteLicenses,
   extractSourceRefs,
   isValidCachedRecord,
@@ -33,6 +37,7 @@ import {
   lineageLines,
   mapCache,
   normalizeLicense,
+  openalexDescribed,
   physionetLicense,
   resolveLicenseLineage,
   sourceOutcome,
@@ -582,11 +587,14 @@ describe("cached hits", () => {
     expect(isValidCachedRecord({ ...record, status: "fetch_failed" })).toBe(false);
     expect(isValidCachedRecord({ ...record, license: "beerware" })).toBe(false);
     expect(isValidCachedRecord(null)).toBe(false);
+    // A record written before the descriptive fields existed is a miss, never served.
+    const { creators: _c, ...older } = record;
+    expect(isValidCachedRecord(older)).toBe(false);
   });
 
   test("a bad hit is fetched again", async () => {
     const cache = mapCache();
-    await cache.put("license-lineage/1:doi:10.5281/zenodo.24539621", {
+    await cache.put(`${RESOLVER_VERSION}:doi:10.5281/zenodo.24539621`, {
       id: "10.5281/zenodo.24539621",
       status: "bogus",
     } as never);
@@ -716,7 +724,7 @@ describe("lineageLines", () => {
     expect(text).toContain(`evidence: ${standIn.bases.datacite}/dois/10.5281%2Fzenodo.22967622`);
     expect(text).toContain(LINEAGE_COPY.needs_permission.remedy);
     expect(text).toContain(LINEAGE_COPY.needs_permission.anchor);
-    expect(text).toContain("Resolver: license-lineage/1");
+    expect(text).toContain(`Resolver: ${RESOLVER_VERSION}`);
     expect(text).toContain(`read: ${RESOLVER_READ.datacite}`);
     expect(text).toContain(`Read: ${LINEAGE_COPY.needs_permission.read}`);
   });
@@ -730,5 +738,73 @@ describe("lineageLines", () => {
       expect(a.startsWith(`${LINEAGE_DOCS_URL}#`)).toBe(true);
       expect(LINEAGE_ANCHORS).toContain(a.slice(a.indexOf("#") + 1));
     }
+  });
+});
+
+describe("each record's title, creators and publisher, from the recorded responses (card B4)", () => {
+  const fixture = (file: string) =>
+    JSON.parse(readFileSync(join(import.meta.dir, "fixtures/license-lineage", file), "utf-8"));
+
+  test("DataCite: an OpenNeuro snapshot is described by its DataCite record", async () => {
+    const [src] = (await run(inputs({ license: "CC0", sources: [ON_CC0] }))).sources;
+    expect(src).toMatchObject({
+      resolver: "openneuro",
+      title: "Face processing MEEG dataset with HED annotation",
+      publisher: "OpenNeuro",
+    });
+    expect(src?.creators.slice(0, 2)).toEqual(["Daniel G. Wakeman", "Richard N Henson"]);
+  });
+
+  test("DataCite: a Zenodo record", async () => {
+    const [src] = (await run(inputs({ license: "CC0", sources: [ZENODO_BY] }))).sources;
+    expect(src).toMatchObject({
+      resolver: "datacite",
+      title:
+        "Dataset S1: B98 rat 40 Hz click-train EEG exports (filtered and unfiltered) and stimulus channel",
+      creators: ["Digavalli, Sivarao V.", "Gautam, Deepshila", "Oprisan, Sorinel A."],
+      publisher: "Zenodo",
+    });
+  });
+
+  test("PhysioNet: the project's title, and PhysioNet as the publisher", async () => {
+    const [src] = (await run(inputs({ license: "CC0", sources: [PN_ODC_BY] }))).sources;
+    expect(src).toMatchObject({
+      resolver: "physionet",
+      title: "EEG Motor Movement/Imagery Dataset",
+      creators: [],
+      publisher: "PhysioNet",
+    });
+  });
+
+  test("Crossref: an article DataCite does not hold", async () => {
+    const [src] = (await run(inputs({ license: "CC0", sources: [ARTICLE] }))).sources;
+    expect(src).toMatchObject({
+      resolver: "crossref",
+      title: "Multi-channel EEG recordings during a sustained-attention driving task",
+      publisher: "Springer Science and Business Media LLC",
+    });
+    expect(src?.creators.slice(0, 2)).toEqual(["Zehong Cao", "Chun-Hsiang Chuang"]);
+  });
+
+  test("OpenAlex: the title, the authorships' names and the location's host", () => {
+    expect(openalexDescribed(fixture("20-openalex-openalex-dataset.json"))).toEqual({
+      title: "Face processing MEEG dataset with HED annotation",
+      creators: expect.arrayContaining(["Daniel G. Wakeman", "Richard N. Henson"]),
+      publisher: "OpenNeuro",
+    });
+    const article = openalexDescribed(fixture("19-openalex-article.json"));
+    expect(article.title).toBe(
+      "Multi-channel EEG recordings during a sustained-attention driving task",
+    );
+    expect(article.publisher).toBe("Nature Portfolio");
+  });
+
+  test("at most ten creators, and a record with none of the fields is described by nulls", () => {
+    const many = Array.from({ length: 25 }, (_, i) => ({ name: `Person ${i}` }));
+    expect(dataciteDescribed({ creators: many }).creators).toHaveLength(MAX_CREATORS);
+    expect(crossrefDescribed({ author: many }).creators).toHaveLength(MAX_CREATORS);
+    expect(dataciteDescribed({})).toEqual({ title: null, creators: [], publisher: null });
+    expect(dataciteDescribed({ publisher: { name: "Zenodo" } }).publisher).toBe("Zenodo");
+    expect(crossrefDescribed(fixture("18-crossref-article.json").message).creators.length).toBe(4);
   });
 });

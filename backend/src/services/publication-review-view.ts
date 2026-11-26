@@ -96,6 +96,7 @@ import {
   reasonLine,
   reasonStatement,
   reasonsOf,
+  reproducibilityOf,
   shownBlockReason,
   startOffered,
   stricterOf,
@@ -791,6 +792,7 @@ function recordOf(row: PublicationReviewRow, view: ReviewRowView): PublicationRe
     })),
     summary: report === null || report.summary === "" ? null : report.summary,
     evidence: report?.evidence ?? null,
+    reproducibility: reproducibilityOf(row),
   };
 }
 

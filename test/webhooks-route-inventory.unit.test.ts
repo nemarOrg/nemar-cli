@@ -47,6 +47,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
 
   // Publication review callbacks (domain-tagged token, same secret; ADR 0102)
   "POST /publication-review-claim": 1,
+  "POST /publication-review-inputs": 1,
   "POST /publication-review-result": 1,
 
   // Web approval release (the dispatch token alone authenticates; ADR 0105, decision 9)
@@ -82,7 +83,7 @@ describe("webhooks route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(webhooks.routes.length).toBe(21);
+    expect(webhooks.routes.length).toBe(22);
   });
 
   // The webhooks router has NO router-level middleware: every route does its

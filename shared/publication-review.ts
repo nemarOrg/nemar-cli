@@ -35,6 +35,7 @@
 
 import type { FindingKind } from "./identifier-scan.js";
 import { FINDING_KINDS, KNOWN_FORMATS, type ScreenGate } from "./identifier-screen-report.js";
+import { LINEAGE_OUTCOMES, type LineageOutcome, MAX_CREATORS } from "./license-lineage.js";
 import { SEMVER, isOneOf } from "./pr-review.js";
 import { PUBLICATION_DATASET_ID_RE } from "./publication-limits.js";
 import { MINIMUM_FAILURES, MIN_NAME_LENGTH, type MinimumFailure } from "./submission-minimums.js";
@@ -44,7 +45,34 @@ import { sanitizeNote } from "./untrusted-text.js";
 // Versions, models, timing and caps
 // ---------------------------------------------------------------------------------------------
 
-export const PUBLICATION_REPORT_VERSION = 1;
+/**
+ * The version a review job writes. Version 2 (ADR 0139, decisions 5, 6 and 9) adds the widened
+ * inputs to the evidence (`inputs`, `lineage`), the fifth answer (`note_answer`) and the
+ * reproducibility record (`record`). A stored version-1 report still parses, as it was written.
+ */
+export const PUBLICATION_REPORT_VERSION = 2;
+/** Every version the parser reads. */
+export const PUBLICATION_REPORT_VERSIONS = [1, 2] as const;
+export type PublicationReportVersion = (typeof PUBLICATION_REPORT_VERSIONS)[number];
+
+/**
+ * The version of the prompt the job sends (`scripts/ci/publication-review-prompt.ts`): raised with
+ * every change to the system prompt, the output schema or the shape of the user message, so two
+ * reviews with the same prompt version, models and input digest were asked the same thing
+ * (ADR 0139, decision 9). Reviews before this constant existed are version 1 and record none.
+ */
+export const PUBLICATION_PROMPT_VERSION = "publication-review-prompt/2";
+
+/** The effort every call of the review is made at. One word, recorded with the model. */
+export const PUBLICATION_REVIEW_EFFORT = "high";
+
+/**
+ * Every effort a record may name: the review's, and the others a call can be made at (the
+ * confirming run of ADR 0139 decision 1 is made at `max`). A closed list, so a record keeps the
+ * effort it was made at whatever the review's effort is now.
+ */
+export const RECORDED_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type RecordedEffort = (typeof RECORDED_EFFORTS)[number];
 
 /** The models a production report may name. A closed set, so a model change is a reviewed code change. */
 export const PUBLICATION_REVIEW_MODELS = ["claude-haiku-5-5"] as const;
@@ -122,8 +150,23 @@ export const PUBLICATION_FINDING_CODES = [
   "evidence_incomplete",
   "steering_attempt",
   "other",
+  "source_credit_missing",
 ] as const;
 export type PublicationFindingCode = (typeof PUBLICATION_FINDING_CODES)[number];
+
+/**
+ * The finding codes only the platform files, from its own facts. The model's output schema does
+ * not offer them, and the parser decides them from the evidence alone: it removes every one the
+ * report holds and adds exactly one where the evidence calls for it ({@link platformFindingsOf}),
+ * so a model cannot file one and parsing a parsed report changes nothing.
+ */
+export const PLATFORM_FINDING_CODES: readonly PublicationFindingCode[] = ["source_credit_missing"];
+
+/** The words of a platform finding's note, so no surface writes its own. */
+export const PLATFORM_FINDING_NOTE: Record<"source_credit_missing", string> = {
+  source_credit_missing:
+    "An upstream source's license requires attribution, and dataset_description.json does not declare it in SourceDatasets (which becomes IsDerivedFrom on the DOI).",
+};
 
 export const MAX_PUBLICATION_FINDINGS = 8;
 export const PUBLICATION_NOTE_MAX = 200;
@@ -208,6 +251,60 @@ export const WITHHELD_DOCUMENT_STATES: readonly DocumentState[] = DOCUMENT_STATE
 export function isWithheld(state: DocumentState): boolean {
   return WITHHELD_DOCUMENT_STATES.includes(state);
 }
+
+/**
+ * The metadata a review reads besides the root documents (ADR 0139, decision 6), each a fenced
+ * section of its own. The Worker serves them to the job (`POST /webhooks/publication-review-inputs`)
+ * and the job's pre-send module examines each one immediately before it is sent, as it does a
+ * document. None of them is data: no header value, table, recording, finding kind or finding count.
+ *
+ *  - `enrichment`: the fields {@link ENRICHMENT_FIELDS_SHOWN} of `.nemar/metadata.json` as D1 keeps
+ *    it (`datasets.enrichment_json`). Model-written, so it is as untrusted as the README.
+ *  - `registry_records`: what the license-lineage resolver read about each upstream source.
+ *  - `lineage`: the lineage outcome and each source's normalized license.
+ *  - `coverage`: the identifier screen's counts per format (files, read, partial, failed).
+ *  - `resubmission_note`: the depositor's note (ADR 0139, decision 5), when the request has one.
+ *  - `previous_denial`: when the request follows a denial, the closed reason codes it was denied
+ *    for and whether an automated agent denied it. Codes only: never the denial's free text.
+ */
+export const REVIEW_INPUTS = [
+  "enrichment",
+  "registry_records",
+  "lineage",
+  "coverage",
+  "resubmission_note",
+  "previous_denial",
+] as const;
+export type ReviewInput = (typeof REVIEW_INPUTS)[number];
+
+/** The most characters of each section the model is shown; a longer one is cut, and the cut is a fact. */
+export const INPUT_CHAR_CAPS: Record<ReviewInput, number> = {
+  enrichment: 12_000,
+  registry_records: 8_000,
+  lineage: 2_000,
+  coverage: 1_000,
+  resubmission_note: 2_000,
+  previous_denial: 1_000,
+};
+
+/** The fields of the enrichment the model is shown; every other field is left out unread. */
+export const ENRICHMENT_FIELDS_SHOWN = [
+  "title",
+  "description",
+  "keywords",
+  "license",
+  "related_identifiers",
+  "funding_references",
+  "creators",
+] as const;
+export type EnrichmentField = (typeof ENRICHMENT_FIELDS_SHOWN)[number];
+
+/** Which question the note's answer is: asked only when a note was shown (ADR 0139, decision 5). */
+export const NOTE_QUESTION = "note_addresses_reasons";
+
+/** The fifth answer: a question's three, and `not_asked` when no note was shown. */
+export const NOTE_ANSWERS = ["pass", "fail", "unknown", "not_asked"] as const;
+export type NoteAnswer = (typeof NOTE_ANSWERS)[number];
 
 /** Which documents each question needs. A withheld or cut one lowers that question to at best unknown. */
 export const QUESTION_NEEDS: Record<Question, readonly ReviewDocument[]> = {
@@ -354,7 +451,46 @@ export interface PublicationReviewEvidence {
   description_keys_shown: number;
   description_keys_not_shown: number;
   summary: StructuralSummary;
+  /**
+   * What happened to each widened input ({@link REVIEW_INPUTS}), in the states a document has
+   * ({@link INPUT_STATES}). Null in a version-1 report, which had none.
+   */
+  inputs: Record<ReviewInput, DocumentState> | null;
+  /**
+   * The license-lineage outcome the Worker resolved for the reviewed commit, and whether
+   * `dataset_description.json` declares an upstream source in `SourceDatasets` (`credited`). Null
+   * in a version-1 report, and in the offline calibration, which resolves none.
+   */
+  lineage: ReviewLineage | null;
 }
+
+/** The lineage facts a report carries: a closed word and a boolean. */
+export interface ReviewLineage {
+  outcome: LineageOutcome;
+  credited: boolean;
+}
+
+/** The states an input may have: a document's, less the ones that only a git file can be in. */
+export const INPUT_STATES = [
+  "sent",
+  "sent_cut",
+  "absent",
+  "withheld_finding",
+  "withheld_unreadable",
+] as const satisfies readonly DocumentState[];
+
+/**
+ * The lineage outcomes that need action before a release (ADR 0139, decision 7, as amended on
+ * 2026-11-25): each is the reason `license_lineage_unconfirmed`, which an override clears and which
+ * never denies automatically.
+ */
+export const LINEAGE_UNCONFIRMED_OUTCOMES: readonly LineageOutcome[] = [
+  "needs_permission",
+  "share_alike_mismatch",
+  "redistribution_prohibited",
+  "source_is_publication",
+  "unresolved",
+];
 
 declare const factsBrand: unique symbol;
 
@@ -400,6 +536,294 @@ export interface PreSendResult {
 
 export type PreSend = (docs: Record<ReviewDocument, RawDocument>) => PreSendResult;
 
+/** The cleared widened inputs of one review; an input that was absent or withheld has no entry. */
+export type ClearedInputs = Partial<Record<ReviewInput, ClearedText>>;
+
+/** What the pre-send check made of the widened inputs. */
+export interface InputPreSendResult {
+  cleared: ClearedInputs;
+  states: Record<ReviewInput, DocumentState>;
+  /** Counts by kind of what withheld an input for a finding. Never sent to the model. */
+  withheld_findings: Partial<Record<FindingKind, number>>;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The widened inputs, as the Worker serves them (ADR 0139, decision 6)
+// ---------------------------------------------------------------------------------------------
+
+/** The version of the inputs body; the job refuses any other. */
+export const REVIEW_INPUTS_VERSION = 1;
+
+/** One reader's or format's files in the identifier screen, and how their reads ended. Counts only. */
+export interface CoverageTally {
+  files: number;
+  read: number;
+  partial: number;
+  failed: number;
+}
+
+/** Which screen report the coverage counts were read from: version 1, version 2, or none stored. */
+export const COVERAGE_SOURCES = ["screen_v1", "screen_v2", "none"] as const;
+export type CoverageSource = (typeof COVERAGE_SOURCES)[number];
+
+/** A coverage key: a reader id (version 2) or a format the screen names (version 1). Never a path. */
+export const COVERAGE_KEY =
+  /^(?:[a-z][a-z0-9-]{0,31}|\.[a-z0-9]{1,12}(?:\.[a-z0-9]{1,12})?\/?|\(no extension\))$/;
+/** The most coverage keys an inputs body carries; a screen names far fewer. */
+export const MAX_COVERAGE_KEYS = 64;
+
+/** One upstream source of the lineage, as the resolver described it. Text fields are untrusted. */
+export interface InputSource {
+  id: string;
+  resolver: string | null;
+  resource_type: string | null;
+  /** The registry record's title, creators (at most ten names) and publisher. */
+  title: string | null;
+  creators: string[];
+  publisher: string | null;
+  license: string | null;
+  license_version: string | null;
+  evidence_url: string | null;
+  status: string;
+  origin: string;
+  outcome: LineageOutcome;
+}
+
+/** The most upstream sources an inputs body carries (the resolver checks at most this many). */
+export const MAX_INPUT_SOURCES = 32;
+
+/**
+ * `POST /webhooks/publication-review-inputs`: everything the review reads besides git, for one
+ * claimed review. Served by the Worker, which owns every part of it, so the dispatch payload stays
+ * as it is and the workflow is unchanged.
+ */
+export interface ReviewInputsBody {
+  v: typeof REVIEW_INPUTS_VERSION;
+  /**
+   * The fields {@link ENRICHMENT_FIELDS_SHOWN} of `datasets.enrichment_json`, and when D1 last
+   * stored it (`source`, an instant); null when the dataset has no enrichment.
+   */
+  enrichment: { fields: Partial<Record<EnrichmentField, unknown>>; source: string | null } | null;
+  /** The resolver's result for the reviewed commit, computed by the Worker. */
+  lineage: {
+    outcome: LineageOutcome;
+    target_license: string | null;
+    sources: InputSource[];
+    resolver_version: string;
+  };
+  /** The request's resubmission note (ADR 0139, decision 5), or null. */
+  resubmission_note: string | null;
+  /**
+   * The denial the request answers (`previous_request_id`), when it was a denial and not a
+   * withdrawal: whether an automated agent made it, and the closed reason codes it named
+   * ({@link previousDenialReasonsOf}). Null when the request follows no denial.
+   */
+  previous_denial: { automated: boolean; reasons: ReasonCode[] } | null;
+  coverage: { source: CoverageSource; formats: Record<string, CoverageTally> };
+}
+
+/** Why an inputs body was refused: one fixed word, never its content. */
+export class ReviewInputsError extends Error {
+  constructor() {
+    super("inputs_invalid");
+    this.name = "ReviewInputsError";
+  }
+}
+
+function badInputs(): never {
+  throw new ReviewInputsError();
+}
+
+const strOrNullIn = (v: unknown): string | null =>
+  v === null || v === undefined ? null : typeof v === "string" ? v : badInputs();
+
+/**
+ * Read an inputs body as the job receives it. Exact keys at the top, closed words where the
+ * vocabulary is closed, counts where there are counts; the lineage result keeps only the fields the
+ * review reads. Throws {@link ReviewInputsError}, never quoting the body; the job reports that as
+ * `inputs_unavailable` and reviews nothing.
+ */
+export function parseReviewInputs(raw: unknown): ReviewInputsBody {
+  if (!isRecord(raw)) badInputs();
+  const r = raw as Record<string, unknown>;
+  if (
+    !hasExactKeys(r, [
+      "v",
+      "enrichment",
+      "lineage",
+      "resubmission_note",
+      "coverage",
+      "previous_denial",
+    ])
+  ) {
+    badInputs();
+  }
+  if (r.v !== REVIEW_INPUTS_VERSION) badInputs();
+
+  let enrichment: ReviewInputsBody["enrichment"] = null;
+  if (r.enrichment !== null) {
+    const e = r.enrichment;
+    if (!isRecord(e) || !hasExactKeys(e, ["fields", "source"]) || !isRecord(e.fields)) badInputs();
+    const raw = (e as Record<string, Record<string, unknown>>).fields;
+    const fields: Partial<Record<EnrichmentField, unknown>> = {};
+    for (const key of Object.keys(raw)) {
+      if (!isOneOf(ENRICHMENT_FIELDS_SHOWN, key)) badInputs();
+      fields[key] = raw[key];
+    }
+    enrichment = { fields, source: strOrNullIn((e as Record<string, unknown>).source) };
+  }
+
+  const l = r.lineage;
+  if (!isRecord(l) || !isOneOf(LINEAGE_OUTCOMES, l.outcome)) badInputs();
+  const lineage = l as Record<string, unknown>;
+  if (
+    typeof lineage.resolver_version !== "string" ||
+    !RESOLVER_VERSION_RE.test(lineage.resolver_version) ||
+    !Array.isArray(lineage.sources)
+  ) {
+    badInputs();
+  }
+  if ((lineage.sources as unknown[]).length > MAX_INPUT_SOURCES) badInputs();
+  const sources = (lineage.sources as unknown[]).map((s): InputSource => {
+    if (!isRecord(s) || !isOneOf(LINEAGE_OUTCOMES, s.outcome)) badInputs();
+    const x = s as Record<string, unknown>;
+    if (typeof x.id !== "string" || typeof x.status !== "string" || typeof x.origin !== "string") {
+      badInputs();
+    }
+    if (
+      !Array.isArray(x.creators) ||
+      x.creators.length > MAX_CREATORS ||
+      !x.creators.every((c) => typeof c === "string")
+    ) {
+      badInputs();
+    }
+    return {
+      id: x.id as string,
+      resolver: strOrNullIn(x.resolver),
+      resource_type: strOrNullIn(x.resource_type),
+      title: strOrNullIn(x.title),
+      creators: [...(x.creators as string[])],
+      publisher: strOrNullIn(x.publisher),
+      license: strOrNullIn(x.license),
+      license_version: strOrNullIn(x.license_version),
+      evidence_url: strOrNullIn(x.evidence_url),
+      status: x.status as string,
+      origin: x.origin as string,
+      outcome: x.outcome as LineageOutcome,
+    };
+  });
+
+  const c = r.coverage;
+  if (!isRecord(c) || !hasExactKeys(c, ["source", "formats"])) badInputs();
+  const coverage = c as Record<string, unknown>;
+  if (!isOneOf(COVERAGE_SOURCES, coverage.source) || !isRecord(coverage.formats)) badInputs();
+  const entries = Object.entries(coverage.formats as Record<string, unknown>);
+  if (entries.length > MAX_COVERAGE_KEYS) badInputs();
+  const formats: Record<string, CoverageTally> = {};
+  for (const [key, t] of entries) {
+    if (!COVERAGE_KEY.test(key) || !isRecord(t)) badInputs();
+    if (!hasExactKeys(t as Record<string, unknown>, ["files", "read", "partial", "failed"])) {
+      badInputs();
+    }
+    const tally = t as Record<string, unknown>;
+    const n = (v: unknown) =>
+      typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= MAX_COUNT
+        ? v
+        : badInputs();
+    const out = {
+      files: n(tally.files),
+      read: n(tally.read),
+      partial: n(tally.partial),
+      failed: n(tally.failed),
+    };
+    if (out.read + out.partial + out.failed > out.files) badInputs();
+    formats[key] = out;
+  }
+
+  let previous_denial: ReviewInputsBody["previous_denial"] = null;
+  if (r.previous_denial !== null) {
+    const p = r.previous_denial;
+    if (!isRecord(p) || !hasExactKeys(p, ["automated", "reasons"])) badInputs();
+    const d = p as Record<string, unknown>;
+    if (typeof d.automated !== "boolean" || !Array.isArray(d.reasons)) badInputs();
+    const reasons = d.reasons as unknown[];
+    if (
+      reasons.length > REASON_CODES.length ||
+      !reasons.every((c) => isOneOf(PREVIOUS_DENIAL_SENDABLE, c)) ||
+      new Set(reasons).size !== reasons.length
+    ) {
+      badInputs();
+    }
+    previous_denial = { automated: d.automated as boolean, reasons: reasons as ReasonCode[] };
+  }
+
+  return {
+    v: REVIEW_INPUTS_VERSION,
+    previous_denial,
+    enrichment,
+    lineage: {
+      outcome: l.outcome as LineageOutcome,
+      target_license: strOrNullIn(lineage.target_license),
+      sources,
+      resolver_version: lineage.resolver_version as string,
+    },
+    resubmission_note: strOrNullIn(r.resubmission_note),
+    coverage: { source: coverage.source as CoverageSource, formats },
+  };
+}
+
+/**
+ * The reason codes a previous denial may show the model (ADR 0139, decision 5, under ADR 0102 §2).
+ * An allowlist, so a new code is sendable only on purpose: the reasons about the dataset's own
+ * documents, answers, metadata and release. Never a screen code (every `identifier_screen_*`,
+ * which would tell the model what the identifier screen found or could not read), never
+ * `text_withheld` (its cause is the shared identifier rules), never `request_blocked` (its block
+ * reason can be the screen's), and never a code about the review's own running.
+ */
+export const PREVIOUS_DENIAL_SENDABLE = [
+  "submission_minimum_failed",
+  "version_kept_after_anonymous_release",
+  "question_failed",
+  "steering_attempt",
+  "bids_failed_at_review",
+  "version_already_released",
+  "version_malformed",
+  "stored_verdict_fail",
+  "question_unknown",
+  "license_lineage_unconfirmed",
+  "resubmission_note_unaddressed",
+  "bids_unconcluded_at_review",
+  "version_missing",
+  "doi_state_unexpected",
+] as const satisfies readonly ReasonCode[];
+
+/**
+ * The reason codes a denial named that the model may be shown, from its `denied_reason` column: a
+ * JSON array of codes, or codes separated by commas or spaces. Codes only: a column holding
+ * anything that is not a reason code (an administrator's own words) gives none, so no free text can
+ * reach the model; and of the codes, only {@link PREVIOUS_DENIAL_SENDABLE}, so no screen code does
+ * (ADR 0102 §2). Each code once, in {@link REASON_CODES} order.
+ */
+export function previousDenialReasonsOf(deniedReason: string | null): ReasonCode[] {
+  if (deniedReason === null) return [];
+  let tokens: unknown[];
+  try {
+    const parsed: unknown = JSON.parse(deniedReason);
+    tokens = Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    tokens = deniedReason.split(/[\s,]+/).filter((t) => t !== "");
+  }
+  if (tokens.length === 0 || !tokens.every((t) => isOneOf(REASON_CODES, t))) return [];
+  const named = new Set(tokens as ReasonCode[]);
+  const sendable: readonly ReasonCode[] = PREVIOUS_DENIAL_SENDABLE;
+  return REASON_CODES.filter((c) => named.has(c) && sendable.includes(c));
+}
+
+/** Whether a lineage's attribution is declared where the DOI's IsDerivedFrom is made from. */
+export function lineageCredited(sources: readonly InputSource[]): boolean {
+  return sources.some((s) => s.origin === "source_datasets");
+}
+
 // ---------------------------------------------------------------------------------------------
 // The report
 // ---------------------------------------------------------------------------------------------
@@ -414,8 +838,36 @@ export interface PublicationFinding {
   note: string;
 }
 
+/** One model call of a review: the model and the effort it was asked at (ADR 0139, decision 9). */
+export interface ReviewModelCall {
+  model: ReviewerModel;
+  effort: RecordedEffort;
+}
+
+/**
+ * What a job records so a review can be compared with another (ADR 0139, decision 9): the prompt
+ * version, every model call, the SHA-256 of the exact input it sent (the system prompt and the
+ * user message, the run's fence nonce replaced by a fixed one), and the license-lineage resolver's
+ * version. The scanner and its readers are the identifier screen's, which the Worker records from
+ * its own copy of the screen's report. Null in a version-1 report.
+ */
+export interface ReviewReproducibility {
+  prompt_version: string;
+  models: ReviewModelCall[];
+  input_digest: string;
+  resolver_version: string | null;
+  /**
+   * Which enrichment the review read: the copy of `.nemar/metadata.json` that D1 held at review
+   * time, named by when D1 stored it (or the commit it was read at); null when there was none.
+   */
+  enrichment_source: string | null;
+}
+
+/** An enrichment's source: a stored instant (`datetime('now')` text) or a commit. */
+export const ENRICHMENT_SOURCE_RE = /^(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}|[0-9a-f]{40})$/;
+
 export interface PublicationReportShape {
-  v: typeof PUBLICATION_REPORT_VERSION;
+  v: PublicationReportVersion;
   model: ReviewerModel;
   /** The model's answers, after the report's own agreement rules (before the facts). */
   questions: Record<Question, Answer>;
@@ -425,6 +877,13 @@ export interface PublicationReportShape {
   /** The text tried to instruct the reviewer. Always a fail reason. */
   steering: boolean;
   evidence: ReviewFacts;
+  /**
+   * The fifth answer, {@link NOTE_QUESTION}: `not_asked` exactly when no note was shown (always,
+   * in a version-1 report). It can only add a reason that needs action ({@link reportReasons}).
+   */
+  note_answer: NoteAnswer;
+  /** The reproducibility record; null in a version-1 report. */
+  record: ReviewReproducibility | null;
 }
 
 declare const reportBrand: unique symbol;
@@ -449,6 +908,8 @@ export const PUBLICATION_REPORT_ERRORS = [
   "bad_summary",
   "bad_steering",
   "bad_evidence",
+  "bad_note_answer",
+  "bad_record",
 ] as const;
 export type PublicationReportErrorCode = (typeof PUBLICATION_REPORT_ERRORS)[number];
 
@@ -598,6 +1059,16 @@ const EVIDENCE_KEYS = [
   "summary",
 ] as const;
 
+/** A version-2 evidence block's keys: version 1's, and the widened inputs and the lineage. */
+const EVIDENCE_V2_KEYS = [...EVIDENCE_KEYS, "inputs", "lineage"] as const;
+
+function parseLineage(raw: unknown): ReviewLineage | null {
+  if (raw === null) return null;
+  if (!isRecord(raw) || !hasExactKeys(raw, ["outcome", "credited"])) badEvidence();
+  const r = raw as Record<string, unknown>;
+  return { outcome: word(LINEAGE_OUTCOMES, r.outcome), credited: bool(r.credited) };
+}
+
 /** The Authors words that belong to one kind of release only (`shared/submission-minimums.ts`). */
 const NAMED_ONLY_FAILURES: readonly MinimumFailure[] = ["authors_missing"];
 const ANONYMOUS_ONLY_FAILURES: readonly MinimumFailure[] = [
@@ -626,7 +1097,10 @@ function parseMinimumFailures(raw: unknown, anonymous: boolean): MinimumFailure[
  * for one, and formats that add up to the recordings. Throws `bad_evidence`, never the input.
  */
 export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
-  if (!isRecord(raw) || !hasExactKeys(raw, EVIDENCE_KEYS)) badEvidence();
+  if (!isRecord(raw)) badEvidence();
+  // Version 1's keys exactly, or version 2's exactly: a block is one or the other, never between.
+  const v2 = hasExactKeys(raw as Record<string, unknown>, EVIDENCE_V2_KEYS);
+  if (!v2 && !hasExactKeys(raw as Record<string, unknown>, EVIDENCE_KEYS)) badEvidence();
   const r = raw as Record<string, unknown>;
   if (typeof r.head !== "string" || !HEAD.test(r.head)) badEvidence();
   const anonymous = bool(r.anonymous);
@@ -663,7 +1137,22 @@ export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
     if (c === 0) badEvidence();
     withheld_findings[kind as FindingKind] = c;
   }
-  const withheldForFinding = REVIEW_DOCUMENTS.some((d) => documents[d] === "withheld_finding");
+  // A version-1 block read back after a store carries both new keys as null (the parsed shape is
+  // serialized whole); it is still a version-1 block, and the lineage is null with it.
+  let inputs: Record<ReviewInput, DocumentState> | null = null;
+  if (v2 && r.inputs === null && r.lineage !== null) badEvidence();
+  if (v2 && r.inputs !== null) {
+    if (!isRecord(r.inputs) || !hasExactKeys(r.inputs, REVIEW_INPUTS)) badEvidence();
+    const rawInputs = r.inputs as Record<string, unknown>;
+    inputs = {} as Record<ReviewInput, DocumentState>;
+    for (const i of REVIEW_INPUTS) inputs[i] = word(INPUT_STATES, rawInputs[i]);
+  }
+  const lineage = v2 ? parseLineage(r.lineage) : null;
+
+  // The finding counts exist exactly when a document or an input was withheld for a finding.
+  const withheldForFinding =
+    REVIEW_DOCUMENTS.some((d) => documents[d] === "withheld_finding") ||
+    (inputs !== null && REVIEW_INPUTS.some((i) => inputs[i] === "withheld_finding"));
   if (withheldForFinding !== Object.keys(withheld_findings).length > 0) badEvidence();
 
   const description_keys_shown = count(r.description_keys_shown);
@@ -687,6 +1176,8 @@ export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
     description_keys_shown,
     description_keys_not_shown: count(r.description_keys_not_shown),
     summary: parseSummary(r.summary),
+    inputs,
+    lineage,
   };
   return evidence as ReviewFacts;
 }
@@ -709,6 +1200,98 @@ function parseFinding(raw: unknown): PublicationFinding {
 }
 
 const REPORT_KEYS = ["v", "model", "questions", "findings", "summary", "steering", "evidence"];
+/**
+ * A version-2 report's keys: version 1's, the fifth answer and the record. A version-1 report read
+ * back after a store has them too, because the parsed shape is serialized whole (`not_asked` and
+ * null), and it is still read as version 1.
+ */
+const REPORT_V2_KEYS = [...REPORT_KEYS, "note_answer", "record"];
+const PROMPT_VERSION_RE = /^publication-review-prompt\/[1-9]\d{0,3}$/;
+const RESOLVER_VERSION_RE = /^license-lineage\/[1-9]\d{0,3}$/;
+const DIGEST_RE = /^[0-9a-f]{64}$/;
+/** A review makes one model call today; a confirming call (ADR 0139, decision 1) makes two. */
+export const MAX_RECORDED_CALLS = 4;
+
+function badRecord(): never {
+  throw new PublicationReviewReportError("bad_record");
+}
+
+/** A record of the calls the report's own model made: the first call is always that model's. */
+function parseRecord(raw: unknown, model: ReviewerModel): ReviewReproducibility {
+  if (
+    !isRecord(raw) ||
+    !hasExactKeys(raw, [
+      "prompt_version",
+      "models",
+      "input_digest",
+      "resolver_version",
+      "enrichment_source",
+    ])
+  ) {
+    badRecord();
+  }
+  const r = raw as Record<string, unknown>;
+  if (typeof r.prompt_version !== "string" || !PROMPT_VERSION_RE.test(r.prompt_version)) {
+    badRecord();
+  }
+  if (typeof r.input_digest !== "string" || !DIGEST_RE.test(r.input_digest)) badRecord();
+  if (
+    r.resolver_version !== null &&
+    (typeof r.resolver_version !== "string" || !RESOLVER_VERSION_RE.test(r.resolver_version))
+  ) {
+    badRecord();
+  }
+  if (!Array.isArray(r.models) || r.models.length < 1 || r.models.length > MAX_RECORDED_CALLS) {
+    badRecord();
+  }
+  if (
+    r.enrichment_source !== null &&
+    (typeof r.enrichment_source !== "string" || !ENRICHMENT_SOURCE_RE.test(r.enrichment_source))
+  ) {
+    badRecord();
+  }
+  const models = (r.models as unknown[]).map((m): ReviewModelCall => {
+    if (!isRecord(m) || !hasExactKeys(m, ["model", "effort"])) badRecord();
+    const call = m as Record<string, unknown>;
+    if (!isOneOf(CALIBRATION_MODELS, call.model) || !isOneOf(RECORDED_EFFORTS, call.effort)) {
+      badRecord();
+    }
+    return { model: call.model as ReviewerModel, effort: call.effort as RecordedEffort };
+  });
+  if (models[0]?.model !== model) badRecord();
+  return {
+    prompt_version: r.prompt_version as string,
+    models,
+    input_digest: r.input_digest as string,
+    resolver_version: r.resolver_version as string | null,
+    enrichment_source: r.enrichment_source as string | null,
+  };
+}
+
+/**
+ * The findings only the platform files, decided from the evidence: `source_credit_missing` when an
+ * upstream source's license asks for attribution and `dataset_description.json` declares no source
+ * in `SourceDatasets`.
+ */
+export function platformFindingsOf(evidence: PublicationReviewEvidence): PublicationFinding[] {
+  const l = evidence.lineage;
+  if (l === null || l.outcome !== "compatible_attribution" || l.credited) return [];
+  return [
+    {
+      question: "authors_and_license",
+      severity: "concern",
+      code: "source_credit_missing",
+      document: "dataset_description",
+      note: PLATFORM_FINDING_NOTE.source_credit_missing,
+    },
+  ];
+}
+
+/** Whether the note was shown to the model, so that its question was asked. */
+function noteShown(evidence: PublicationReviewEvidence): boolean {
+  const s = evidence.inputs?.resubmission_note;
+  return s === "sent" || s === "sent_cut";
+}
 
 /**
  * Validate a report. Accepts only the keys declared above, only members of the closed sets, and
@@ -730,8 +1313,15 @@ export function parsePublicationReviewReport(
   options: { models?: readonly ReviewerModel[] } = {},
 ): PublicationReviewReport {
   if (!isRecord(raw)) throw new PublicationReviewReportError("not_an_object");
-  if (!hasExactKeys(raw, REPORT_KEYS)) throw new PublicationReviewReportError("unknown_key");
-  if (raw.v !== PUBLICATION_REPORT_VERSION) throw new PublicationReviewReportError("bad_version");
+  const v1Keys = hasExactKeys(raw, REPORT_KEYS);
+  if (!v1Keys && !hasExactKeys(raw, REPORT_V2_KEYS)) {
+    throw new PublicationReviewReportError("unknown_key");
+  }
+  if (raw.v !== 1 && raw.v !== 2) throw new PublicationReviewReportError("bad_version");
+  const v: PublicationReportVersion = raw.v;
+  // A version-2 report carries the fifth answer and the record; a version-1 one carries neither,
+  // or (read back after a store) carries them as `not_asked` and null.
+  if (v === 2 && v1Keys) throw new PublicationReviewReportError("unknown_key");
   const models = options.models ?? PUBLICATION_REVIEW_MODELS;
   if (!isOneOf(models, raw.model) || !isOneOf(CALIBRATION_MODELS, raw.model)) {
     throw new PublicationReviewReportError("bad_model");
@@ -749,10 +1339,34 @@ export function parsePublicationReviewReport(
   if (!Array.isArray(raw.findings) || raw.findings.length > MAX_PUBLICATION_FINDINGS) {
     throw new PublicationReviewReportError("bad_findings");
   }
-  const findings = raw.findings.map(parseFinding);
+  // The platform's findings are decided below from the evidence; whatever the report held under
+  // their codes, the model's or a stored copy of the platform's own, is set aside here.
+  const findings = raw.findings
+    .map(parseFinding)
+    .filter((f) => !PLATFORM_FINDING_CODES.includes(f.code));
   if (typeof raw.summary !== "string") throw new PublicationReviewReportError("bad_summary");
   if (typeof raw.steering !== "boolean") throw new PublicationReviewReportError("bad_steering");
   const evidence = parsePublicationReviewEvidence(raw.evidence);
+  // A version-2 report is about the widened inputs, and a version-1 report never saw them.
+  if ((v === 2) !== (evidence.inputs !== null)) badEvidence();
+
+  let note_answer: NoteAnswer = "not_asked";
+  let record: ReviewReproducibility | null = null;
+  if (v === 2) {
+    if (!isOneOf(NOTE_ANSWERS, raw.note_answer)) {
+      throw new PublicationReviewReportError("bad_note_answer");
+    }
+    // Asked exactly when a note was shown. An answer about a note that was not shown is dropped
+    // (nothing was asked); a note that was shown and not answered is unknown, never a pass.
+    note_answer = !noteShown(evidence)
+      ? "not_asked"
+      : raw.note_answer === "not_asked"
+        ? "unknown"
+        : raw.note_answer;
+    record = parseRecord(raw.record, raw.model);
+  } else if (!v1Keys && (raw.note_answer !== "not_asked" || raw.record !== null)) {
+    throw new PublicationReviewReportError("unknown_key");
+  }
 
   // Both coerce toward "needs a person"; neither can raise anything.
   const steering = raw.steering || findings.some((f) => f.code === "steering_attempt");
@@ -764,11 +1378,13 @@ export function parsePublicationReviewReport(
   const unexplained = QUESTIONS.filter(
     (q) => questions[q] === "fail" && !findings.some((f) => f.question === q),
   );
-  // Make room for one filler per unexplained question by dropping the model's LAST findings, but
-  // never the one finding that explains another failed question: the first of each stays. Cutting
-  // blindly from the end could take it, leaving that question failed with nothing to read, and
-  // then a re-parse (every read of a stored report) would move the same hole to another question.
-  // At most four questions fail and the list holds eight, so there is always room.
+  const platform = platformFindingsOf(evidence);
+  // Make room for one filler per unexplained question, and for the platform's own findings, by
+  // dropping the model's LAST findings, but never the one finding that explains another failed
+  // question: the first of each stays. Cutting blindly from the end could take it, leaving that
+  // question failed with nothing to read, and then a re-parse (every read of a stored report) would
+  // move the same hole to another question. At most four questions fail, the platform files at most
+  // one finding, and the list holds eight, so there is always room.
   const explains = new Set<PublicationFinding>();
   for (const q of QUESTIONS) {
     const first = findings.find((f) => f.question === q);
@@ -776,7 +1392,7 @@ export function parsePublicationReviewReport(
   }
   for (
     let i = findings.length - 1;
-    i >= 0 && findings.length + unexplained.length > MAX_PUBLICATION_FINDINGS;
+    i >= 0 && findings.length + unexplained.length + platform.length > MAX_PUBLICATION_FINDINGS;
     i--
   ) {
     if (!explains.has(findings[i])) findings.splice(i, 1);
@@ -790,15 +1406,18 @@ export function parsePublicationReviewReport(
       note: "No detail given.",
     });
   }
+  findings.push(...platform);
 
   const report: PublicationReportShape = {
-    v: PUBLICATION_REPORT_VERSION,
+    v,
     model: raw.model,
     questions,
     findings,
     summary: sanitizeNote(raw.summary, PUBLICATION_SUMMARY_MAX),
     steering,
     evidence,
+    note_answer,
+    record,
   };
   return report as PublicationReviewReport;
 }
@@ -958,6 +1577,7 @@ export const PUBLICATION_RUN_ERRORS = [
   "dispatch_unconfigured",
   "review_disabled",
   "workflow_failed",
+  "inputs_unavailable",
 ] as const;
 export type PublicationRunError = (typeof PUBLICATION_RUN_ERRORS)[number];
 
@@ -971,6 +1591,8 @@ export const WORKER_ONLY_RUN_ERRORS = [
 /** Attempts that never reached a model: not counted against a cap, restarted by a new screen result. */
 export const NEVER_REACHED_MODEL = [
   "stale_head",
+  // The job could not read its inputs; it calls the model only after they are read.
+  "inputs_unavailable",
   "dispatch_failed",
   "dispatch_unconfigured",
   "review_disabled",
@@ -1032,6 +1654,8 @@ export const REASON_CODES = [
   "review_could_not_run",
   "text_withheld",
   "question_unknown",
+  "license_lineage_unconfirmed",
+  "resubmission_note_unaddressed",
   "bids_unconcluded_at_review",
   "version_missing",
   "doi_state_unexpected",
@@ -1090,6 +1714,7 @@ const COMMAND_START = "nemar admin dataset publish start <dataset>";
 const COMMAND_SHOW = "nemar admin dataset publish show <dataset>";
 const COMMAND_APPROVE = "nemar admin dataset publish approve <dataset>";
 const COMMAND_DENY = "nemar admin dataset publish deny <dataset>";
+const COMMAND_LINEAGE = "nemar admin dataset publish license-lineage <dataset>";
 const ACKNOWLEDGE_FLAG = '--acknowledge-identifier-screen "<reason>"';
 const COMMAND_ACKNOWLEDGE = `${COMMAND_APPROVE} ${ACKNOWLEDGE_FLAG}`;
 
@@ -1242,6 +1867,24 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     clearedBy: "override",
     sentence: "A question of the review could not be answered.",
     cure: `Answer it yourself from the dataset. ${OVERRIDE}`,
+  },
+  // ADR 0139, decision 7 (amended 2026-11-25): every lineage outcome that needs action is this one
+  // reason, of the unknown class, so it never fails a request and never denies one automatically.
+  license_lineage_unconfirmed: {
+    class: "unknown",
+    clearedBy: "override",
+    sentence:
+      "The license of an upstream source of this dataset could not be confirmed as allowing this release.",
+    cure: `Read the license lineage: ${COMMAND_LINEAGE}. The depositor records the source's permission, or corrects License in dataset_description.json. ${OVERRIDE}`,
+    command: COMMAND_LINEAGE,
+  },
+  // ADR 0139, decision 5: the note's answer can only ask for a person, never fail or pass a request.
+  resubmission_note_unaddressed: {
+    class: "unknown",
+    clearedBy: "override",
+    sentence:
+      "The reviewer could not confirm that the depositor's resubmission note addresses why the previous request was denied.",
+    cure: `Read the note and the previous denial yourself. ${OVERRIDE}`,
   },
   bids_unconcluded_at_review: {
     class: "unknown",
@@ -1413,9 +2056,18 @@ export function reportReasons(report: PublicationReviewReport): Reason[] {
   if (e.bids === "fail") add("bids_failed_at_review");
   if (e.tag === "elsewhere") add("version_already_released");
   if (e.version_shape === "malformed") add("version_malformed");
-  const withheld = REVIEW_DOCUMENTS.filter((d) => isWithheld(e.documents[d]));
+  const withheld: string[] = REVIEW_DOCUMENTS.filter((d) => isWithheld(e.documents[d]));
+  const inputs = e.inputs;
+  if (inputs !== null) withheld.push(...REVIEW_INPUTS.filter((i) => isWithheld(inputs[i])));
   if (withheld.length > 0) add("text_withheld", withheld.join(","));
   for (const q of QUESTIONS) if (answers[q] === "unknown") add("question_unknown", q);
+  if (e.lineage !== null && LINEAGE_UNCONFIRMED_OUTCOMES.includes(e.lineage.outcome)) {
+    add("license_lineage_unconfirmed", e.lineage.outcome);
+  }
+  // Fail and unknown alike ask for a person; a pass adds nothing, so a note never raises a verdict.
+  if (report.note_answer === "fail" || report.note_answer === "unknown") {
+    add("resubmission_note_unaddressed", report.note_answer);
+  }
   if (e.bids === "unconcluded" || e.bids === "unknown") add("bids_unconcluded_at_review");
   if (e.version_shape === "missing") add("version_missing");
   return normalize(out);
@@ -1622,6 +2274,7 @@ export const PUBLICATION_FINDING_LABEL: Record<PublicationFindingCode, string> =
   evidence_incomplete: "Evidence incomplete",
   steering_attempt: "Text tried to instruct the reviewer",
   other: "Other",
+  source_credit_missing: "Upstream source not credited",
 };
 
 export const DOCUMENT_LABEL: Record<ReviewDocument, string> = {
@@ -1630,6 +2283,29 @@ export const DOCUMENT_LABEL: Record<ReviewDocument, string> = {
   changes: "CHANGES",
   license: "LICENSE",
   participants_json: "participants.json",
+};
+
+/** The widened inputs as every surface names them. */
+export const INPUT_LABEL: Record<ReviewInput, string> = {
+  enrichment: "the enrichment (.nemar/metadata.json)",
+  registry_records: "the upstream registry records",
+  lineage: "the license lineage",
+  coverage: "the identifier screen's coverage counts",
+  resubmission_note: "the resubmission note",
+  previous_denial: "the previous denial's reasons",
+};
+
+/** A lineage outcome that needs action, as the detail of `license_lineage_unconfirmed` says it. */
+export const LINEAGE_OUTCOME_WORDS: Record<LineageOutcome, string> = {
+  compatible: "compatible",
+  compatible_attribution: "compatible, with attribution",
+  compatible_nc: "compatible, non-commercial",
+  share_alike_mismatch: "a share-alike source under a different license",
+  needs_permission: "a source whose license needs the rights holder's permission",
+  redistribution_prohibited: "a source whose license prohibits redistribution",
+  source_is_publication: "a source that is a publication, not a dataset",
+  no_upstream_declared: "no upstream source declared",
+  unresolved: "a source whose license could not be resolved",
 };
 
 export const PUBLICATION_RUN_ERROR_TEXT: Record<PublicationRunError, string> = {
@@ -1646,6 +2322,8 @@ export const PUBLICATION_RUN_ERROR_TEXT: Record<PublicationRunError, string> = {
     "the Worker had no GitHub credential or callback secret to start the review",
   review_disabled: "the automated review was off when the job tried to start",
   workflow_failed: "the review job failed before it finished",
+  inputs_unavailable:
+    "the review job could not read the dataset's metadata inputs from NEMAR, so it reviewed nothing",
 };
 
 export const PUBLICATION_DECLINE_TEXT: Record<PublicationDeclineDetail, string> = {
@@ -1694,8 +2372,18 @@ function detailText(reason: Reason, report: PublicationReviewReport | null): str
     case "text_withheld":
       return d
         .split(",")
-        .map((doc) => (isOneOf(REVIEW_DOCUMENTS, doc) ? DOCUMENT_LABEL[doc] : doc))
+        .map((doc) =>
+          isOneOf(REVIEW_DOCUMENTS, doc)
+            ? DOCUMENT_LABEL[doc]
+            : isOneOf(REVIEW_INPUTS, doc)
+              ? INPUT_LABEL[doc]
+              : doc,
+        )
         .join(", ");
+    case "license_lineage_unconfirmed":
+      return isOneOf(LINEAGE_OUTCOMES, d) ? LINEAGE_OUTCOME_WORDS[d] : d;
+    case "resubmission_note_unaddressed":
+      return d === "fail" ? "the reviewer found it does not" : "the reviewer could not tell";
     case "review_could_not_run":
       return isPublicationRunError(d) ? PUBLICATION_RUN_ERROR_TEXT[d] : d;
     case "review_limit_reached":
@@ -2075,4 +2763,139 @@ export function parsePublicationCallbackOutcome(
         ? error
         : "workflow_failed",
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The reproducibility record, as every surface shows it (ADR 0139, decision 9)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A review's reproducibility record, read back from its row. Every field is checked against its
+ * own shape on the way out, so a column edited by hand is shown as absent, never printed.
+ */
+export interface PublicationReviewReproducibility {
+  head_sha: string;
+  scanner_id: string | null;
+  reader_versions: Record<string, string> | null;
+  resolver_version: string | null;
+  models: { model: string; effort: string }[] | null;
+  prompt_version: string | null;
+  input_digest: string | null;
+  /** The enrichment the review read, as D1 held it at review time (see {@link ReviewReproducibility}). */
+  enrichment_source: string | null;
+}
+
+const RECORD_SCANNER_RE = /^identifier-scan@[0-9a-f]{7,40}$/;
+const RECORD_READER_KEY = /^[a-z][a-z0-9-]{0,31}$/;
+const RECORD_READER_VERSION = /^[0-9a-z][0-9a-z.+-]{0,31}$/;
+
+function parseJsonOrNull(text: string | null): unknown {
+  if (text === null) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The record of a stored row, each column checked: null when the row has no record at all (a
+ * review that did not report, or one reported before the record existed).
+ */
+export function reproducibilityOf(row: {
+  headSha: string;
+  scannerId: string | null;
+  readerVersions: string | null;
+  resolverVersion: string | null;
+  models: string | null;
+  promptVersion: string | null;
+  inputDigest: string | null;
+  enrichmentSource: string | null;
+}): PublicationReviewReproducibility | null {
+  const models = parseJsonOrNull(row.models);
+  const shownModels =
+    Array.isArray(models) &&
+    models.length > 0 &&
+    models.length <= MAX_RECORDED_CALLS &&
+    models.every(
+      (m) =>
+        isRecord(m) && isOneOf(CALIBRATION_MODELS, m.model) && isOneOf(RECORDED_EFFORTS, m.effort),
+    )
+      ? (models as { model: string; effort: string }[]).map((m) => ({
+          model: m.model,
+          effort: m.effort,
+        }))
+      : null;
+  const readers = parseJsonOrNull(row.readerVersions);
+  const shownReaders =
+    isRecord(readers) &&
+    Object.entries(readers).every(
+      ([k, v]) =>
+        RECORD_READER_KEY.test(k) && typeof v === "string" && RECORD_READER_VERSION.test(v),
+    )
+      ? (readers as Record<string, string>)
+      : null;
+  const record: PublicationReviewReproducibility = {
+    head_sha: row.headSha,
+    scanner_id:
+      row.scannerId !== null && RECORD_SCANNER_RE.test(row.scannerId) ? row.scannerId : null,
+    reader_versions: shownReaders,
+    resolver_version:
+      row.resolverVersion !== null && RESOLVER_VERSION_RE.test(row.resolverVersion)
+        ? row.resolverVersion
+        : null,
+    models: shownModels,
+    prompt_version:
+      row.promptVersion !== null && PROMPT_VERSION_RE.test(row.promptVersion)
+        ? row.promptVersion
+        : null,
+    input_digest:
+      row.inputDigest !== null && DIGEST_RE.test(row.inputDigest) ? row.inputDigest : null,
+    enrichment_source:
+      row.enrichmentSource !== null && ENRICHMENT_SOURCE_RE.test(row.enrichmentSource)
+        ? row.enrichmentSource
+        : null,
+  };
+  const empty =
+    record.scanner_id === null &&
+    record.reader_versions === null &&
+    record.resolver_version === null &&
+    record.models === null &&
+    record.prompt_version === null &&
+    record.input_digest === null &&
+    record.enrichment_source === null;
+  return empty ? null : record;
+}
+
+/** What a reproducible review is and is not, in the words every surface uses (ADR 0139, decision 9). */
+export const REPRODUCIBILITY_LINE =
+  "Reproducible means the evidence can be recomputed (nemar dataset screen --committed, nemar dataset license-check) and the inputs, prompt version and models are recorded; a model may still answer differently when asked again.";
+
+/**
+ * The record as lines of fixed words and checked values, for the terminal and the status answer.
+ * A field that is not recorded says so; nothing here is model or depositor text.
+ */
+export function reproducibilityLines(record: PublicationReviewReproducibility): string[] {
+  const unrecorded = "not recorded";
+  const readers =
+    record.reader_versions === null
+      ? unrecorded
+      : Object.entries(record.reader_versions)
+          .map(([k, v]) => `${k} ${v}`)
+          .join(", ");
+  const models =
+    record.models === null
+      ? unrecorded
+      : record.models.map((m) => `${m.model} (effort ${m.effort})`).join(", ");
+  return [
+    `Reviewed commit: ${record.head_sha}`,
+    `Identifier scanner: ${record.scanner_id ?? unrecorded}`,
+    `Format readers: ${readers}`,
+    `License-lineage resolver: ${record.resolver_version ?? unrecorded}`,
+    `Models: ${models}`,
+    `Prompt version: ${record.prompt_version ?? unrecorded}`,
+    `Input digest (SHA-256): ${record.input_digest ?? unrecorded}`,
+    `Enrichment read: ${record.enrichment_source === null ? "none, or not recorded" : `the copy stored at ${record.enrichment_source}`}`,
+    REPRODUCIBILITY_LINE,
+  ];
 }

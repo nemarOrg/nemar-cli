@@ -28,6 +28,7 @@ import {
   DOCUMENT_LABEL,
   MAX_PUBLICATION_FINDINGS,
   NOT_ASSESSED_LINE,
+  PLATFORM_FINDING_CODES,
   PUBLICATION_FINDING_CODES,
   PUBLICATION_FINDING_LABEL,
   REASONS,
@@ -1180,8 +1181,11 @@ describe("GET /admin/publish/:id/review", () => {
         "findings",
         "summary",
         "evidence",
+        // ADR 0139, decision 9; null for a review reported before the record existed.
+        "reproducibility",
       ].sort(),
     );
+    expect(d.review?.reproducibility).toBeNull();
     expect(Object.keys(d.history[0]).sort()).toEqual(
       ["id", "head_sha", "anonymous", "state", "stored_verdict", "created_at", "decided_at"].sort(),
     );
@@ -1314,7 +1318,10 @@ describe("GET /admin/publish/:id/review", () => {
 
   test("every finding code and every document reaches the detail with the shared label", async () => {
     const documents = [...REVIEW_DOCUMENTS, null] as const;
-    const all = PUBLICATION_FINDING_CODES.flatMap((code) =>
+    // The platform's own codes are decided from the evidence, never taken from a report.
+    const all = PUBLICATION_FINDING_CODES.filter(
+      (c) => !PLATFORM_FINDING_CODES.includes(c),
+    ).flatMap((code) =>
       documents.map((document, i) => ({
         question: "authors_and_license" as const,
         severity: "note" as const,
@@ -1349,7 +1356,9 @@ describe("GET /admin/publish/:id/review", () => {
       expect(f.label).toBe(PUBLICATION_FINDING_LABEL[f.code]);
       expect(f.document_label).toBe(f.document === null ? null : DOCUMENT_LABEL[f.document]);
     }
-    expect(new Set(got.map((f) => f.code))).toEqual(new Set(PUBLICATION_FINDING_CODES));
+    expect(new Set(got.map((f) => f.code))).toEqual(
+      new Set(PUBLICATION_FINDING_CODES.filter((c) => !PLATFORM_FINDING_CODES.includes(c))),
+    );
     expect(new Set(got.map((f) => f.document))).toEqual(new Set(documents));
   });
 

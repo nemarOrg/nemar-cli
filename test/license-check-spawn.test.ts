@@ -19,6 +19,7 @@ import { spawn } from "bun";
 import {
   LINEAGE_COPY,
   type LineageResult,
+  RESOLVER_VERSION,
   SOURCE_STATUS_COPY,
   lineageLines,
   resolveLicenseLineage,
@@ -138,7 +139,7 @@ describe("nemar dataset license-check", () => {
     const { stdout, exitCode } = await licenseCheck([dataset, "--json"]);
     const result = JSON.parse(stdout) as LineageResult;
     expect(result.outcome).toBe("redistribution_prohibited");
-    expect(result.resolver_version).toBe("license-lineage/1");
+    expect(result.resolver_version).toBe(RESOLVER_VERSION);
     expect(result.sources[0]).toMatchObject({
       resolver: "physionet",
       license: "physionet-credentialed",

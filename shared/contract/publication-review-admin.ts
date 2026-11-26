@@ -27,6 +27,7 @@ import type {
   PublicationOutcome,
   PublicationReviewDescription,
   PublicationReviewEvidence,
+  PublicationReviewReproducibility,
   PublicationReviewState,
   PublicationRunError,
   Question,
@@ -206,6 +207,12 @@ export interface PublicationReviewRecord {
   /** The model's summary, sanitized. */
   summary: string | null;
   evidence: PublicationReviewEvidence | null;
+  /**
+   * The reproducibility record (ADR 0139, decision 9): the commit, the scanner and its readers, the
+   * resolver, the models, the prompt version and the input digest. Null for a review that did not
+   * report, or one reported before the record existed. Optional so an older server's answer reads.
+   */
+  reproducibility?: PublicationReviewReproducibility | null;
 }
 
 /**
