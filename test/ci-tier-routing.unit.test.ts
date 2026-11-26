@@ -248,7 +248,9 @@ describe("the process tier is its own job and no unit-pure shard runs a process 
     const deploy = parse(readFileSync(`${ROOT}.github/workflows/deploy-backend.yml`, "utf8")) as {
       jobs: Record<string, Job>;
     };
-    const steps = (deploy.jobs["test-gate-static"]?.steps ?? []).flatMap((s) => (s.run ? [s.run] : []));
+    const steps = (deploy.jobs["test-gate-static"]?.steps ?? []).flatMap((s) =>
+      s.run ? [s.run] : [],
+    );
     const runners = steps.filter((s) => s.includes("scripts/ci/process-files.sh"));
     expect(runners.length).toBe(1);
     expect(runners[0]).toMatch(/\$\{#files\[@\]\}" -gt 0/);
@@ -328,6 +330,62 @@ describe("the pure tier has one classifier, used by both gates", () => {
   test("each guards against an empty list", () => {
     for (const scripts of [shardScripts, gateScripts]) {
       expect(scripts.join("\n")).toMatch(/\$\{#files\[@\]\}" -gt 0/);
+    }
+  });
+});
+
+/**
+ * `bun test --shard --timings` cuts the sorted file list into runs of equal summed duration, and it
+ * weighs a file the table does not name as almost nothing. When 262 files were missing from the
+ * table (#2351), bun piled them into shard 1, which ran 466 of 992 files and twice the time of the
+ * lightest shard. So every pure file has a measured duration, and the table names nothing else.
+ */
+describe("every pure test file has a measured duration in test/unit-pure-timings.json", () => {
+  const TABLE = "test/unit-pure-timings.json";
+  const table = JSON.parse(readFileSync(`${ROOT}${TABLE}`, "utf8")) as {
+    version: unknown;
+    files: Record<string, unknown>;
+  };
+  const pure = files.filter((f) => routedTo(basename(f.path), f.text) === "unit-pure");
+  const named = Object.keys(table.files);
+  const REFRESH = `refresh ${TABLE} as the note above test.yml's unit-pure-shard job says, or add the file with an estimate in milliseconds`;
+
+  test("the table is the format bun reads, and every entry is a positive whole number of milliseconds", () => {
+    expect(table.version).toBe(1);
+    for (const [path, ms] of Object.entries(table.files)) {
+      expect(Number.isInteger(ms) && (ms as number) > 0, `${path}: ${String(ms)}`).toBe(true);
+    }
+  });
+
+  test("the classifier's files are found here, so an empty comparison cannot pass", () => {
+    expect(pure.length).toBeGreaterThan(500);
+  });
+
+  test("no pure file is missing from the table", () => {
+    const missing = pure.map((f) => f.path).filter((p) => !(p in table.files));
+    expect(missing, REFRESH).toEqual([]);
+  });
+
+  test("the table names no file that is not a pure test file", () => {
+    const paths = new Set(pure.map((f) => f.path));
+    expect(
+      named.filter((p) => !paths.has(p)),
+      `remove these from ${TABLE}`,
+    ).toEqual([]);
+  });
+
+  test("both shard matrices balance on the table", () => {
+    const deploy = parse(readFileSync(`${ROOT}.github/workflows/deploy-backend.yml`, "utf8")) as {
+      jobs: Record<string, Job>;
+    };
+    const gate = (deploy.jobs["test-gate-shard"]?.steps ?? []).flatMap((s) =>
+      s.run ? [s.run] : [],
+    );
+    for (const scripts of [scriptsOf("unit-pure-shard"), gate]) {
+      const run = scripts.find((s) => s.includes("--shard="));
+      expect(run).toBeDefined();
+      expect(run).toContain(TABLE);
+      expect(run).toMatch(/--timings /);
     }
   });
 });
