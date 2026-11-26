@@ -16,7 +16,7 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -202,11 +202,20 @@ describe("a child that misbehaves", () => {
 
 const b64 = (header: Record<string, unknown>, payload?: Uint8Array) =>
   Buffer.from(encodeFrame(header, payload)).toString("base64");
+/** A JavaScript expression, for a child's `-e` script, that evaluates to the frame `frameB64`.
+ *  The frame goes through a file in the test's directory rather than the command line: Linux
+ *  refuses a single argument over 128 KiB (E2BIG), and the large-reply tests pass more. */
+let frameFiles = 0;
+const frameExpr = (frameB64: string): string => {
+  const path = join(tmp, `frame-${++frameFiles}.b64`);
+  writeFileSync(path, frameB64);
+  return `Buffer.from(require("node:fs").readFileSync(${JSON.stringify(path)}, "utf8"), "base64")`;
+};
 /** A child that writes `frameB64` to stdout after `delayMs`, then idles. */
 const replying = (frameB64: string, delayMs = 0) => [
   process.execPath,
   "-e",
-  `setTimeout(() => process.stdout.write(Buffer.from("${frameB64}", "base64")), ${delayMs}); setInterval(() => {}, 1000)`,
+  `setTimeout(() => process.stdout.write(${frameExpr(frameB64)}), ${delayMs}); setInterval(() => {}, 1000)`,
 ];
 
 describe("the engine's environment", () => {
@@ -468,7 +477,7 @@ describe("a reply the engine wrote before the client asked", () => {
       cmd: [
         process.execPath,
         "-e",
-        `process.stdout.write(Buffer.from("${reply}", "base64"), () => process.exit(0))`,
+        `process.stdout.write(${frameExpr(reply)}, () => process.exit(0))`,
       ],
     });
     clients.push(c);
@@ -494,7 +503,7 @@ describe("an engine that has already exited when its reply is read", () => {
       cmd: [
         process.execPath,
         "-e",
-        `process.stdout.write(Buffer.from("${reply}", "base64"), () => process.exit(0))`,
+        `process.stdout.write(${frameExpr(reply)}, () => process.exit(0))`,
       ],
       stdioSettleMs: 0,
     });
@@ -660,7 +669,7 @@ describe("a reply to the wrong request", () => {
   const staying = (frame: string) => [
     process.execPath,
     "-e",
-    `process.on("SIGTERM", () => {}); process.stdout.write(Buffer.from("${frame}", "base64")); setInterval(() => {}, 1000)`,
+    `process.on("SIGTERM", () => {}); process.stdout.write(${frameExpr(frame)}); setInterval(() => {}, 1000)`,
   ];
 
   test("an error for another request is the same desync: engine killed, client unusable", async () => {
@@ -712,7 +721,7 @@ describe("a reply to the wrong request", () => {
       cmd: [
         process.execPath,
         "-e",
-        `process.on("SIGTERM", () => {}); process.stdout.write(Buffer.from("${wrong}", "base64")); setInterval(() => {}, 1000)`,
+        `process.on("SIGTERM", () => {}); process.stdout.write(${frameExpr(wrong)}); setInterval(() => {}, 1000)`,
       ],
       timeoutMs: 5000,
       closeGraceMs: 5000,
