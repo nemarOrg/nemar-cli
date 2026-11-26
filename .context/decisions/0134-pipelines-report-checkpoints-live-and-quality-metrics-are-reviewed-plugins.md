@@ -132,7 +132,14 @@ This amendment settles it; where it and the decisions above differ, it holds, an
    A recording's entry and link are built on request from the derivative's recordings table and the recording's record, under the quality route's gate, edge cache and purge (`GET /<id>/quality/v1/<recipe>/processing/<recording>`); a recording that failed or was skipped has no record, so its link is `failed`.
    D1 gains no row per recording (ADR 0137 decision 8).
    Migration 0154 drops the latest-run documents of migration 0150, keeps each run's link on its run row, and keeps each derivative's checkpoint map, so a derivative made by a recipe version the registry has moved past is still read with its own map.
-3. **neuroschema's wording.**
+3. **`stored` follows the last declared checkpoint.**
+   A recording is `stored` when it passed the recipe's last declared checkpoint (`quality` for both recipes) and its run's derivative was kept; otherwise `stored` is `skipped` with that checkpoint's code and step.
+   So a recording whose quality plugin was skipped shows `stored: skipped` with the plugin's code even though its other files were copied with the derivative: `stored` says the recording completed the recipe and was kept, not that some file of it exists.
+   The dataset counts follow the same rule (`passed` is the last checkpoint's `passed`), so the two levels agree.
+   It holds only while every plugin step sits in the last declared checkpoint, which the registry's tests require; a plugin at an earlier checkpoint would break the cascade rule of the record-level entry.
+4. **One row per recording.**
+   A recordings table that names one path twice is refused, by reconciliation (the run's outcome is `table_unreadable` and it has no counts, so no dataset `processing` entry is shown for it) and by the record-level read alike.
+5. **neuroschema's wording.**
    neuroschema's `signalJourney` extension says a link describes "the latest run"; on NEMAR's public pages that is the latest run NEMAR shows, the promoted one, and each record-level answer names the derivative it came from.
 
 ## Consequences
