@@ -168,6 +168,7 @@ describe("recordings are read through the registry", () => {
       eeglab: "1",
       "homer-nirs": "1",
       mat: "1",
+      zip: "1",
     });
     // The twin: without the reader the same file is a format nobody reads.
     const without = await scan(files, WITHOUT_HDF5);
@@ -392,6 +393,7 @@ describe("the registry and the page cache", () => {
       "eeglab",
       "homer-nirs",
       "mat",
+      "zip",
     ]);
   });
 });

@@ -7,7 +7,12 @@
  *
  * - `nirx-subject-name` (identifier): a person field (the subject's `Name=` in an `.inf`,
  *   NIRSport2's `experiment_subject=`, an operator or experimenter) that is not empty, reads as a
- *   name, and is not the BIDS subject label of the file's path.
+ *   name, and is not the BIDS subject label of the file's path. The subject's `Name=` in
+ *   `[Subject Demographics]` is read by the one subject-identifier rule (`readSubjectId`, shared
+ *   with SNIRF's `SubjectID` and EEGLAB's `subject`): a name-like word of letters only is
+ *   `nirx-subject-name`; other text with a name-like word in it (letters fused with digits, an
+ *   underscore-joined code) is `nirx-subject-freetext` (review); the BIDS label and short codes
+ *   are nothing.
  * - `nirx-demographics`: a birth date, by A4's rule: to the day it is an identifier; a year or a
  *   year and month is review; empty or a placeholder is nothing. An age alone is nothing (ages are
  *   routinely public in participants.tsv).
@@ -36,6 +41,7 @@ import {
   shapeOf,
 } from "../identifier-scan";
 import { isPersonField } from "./person-fields";
+import { readSubjectId } from "./snirf";
 import {
   type IniSection,
   TEXT_HEADER_LIMITS,
@@ -155,6 +161,7 @@ function screenSubjectBlock(
   section: IniSection | undefined,
   path: string,
   findings: Finding[],
+  demographics = false,
 ): { cut: boolean } {
   let cut = false;
   const seen = new Set<string>();
@@ -180,6 +187,18 @@ function screenSubjectBlock(
       });
     } else if (FREE_TEXT_FIELD.test(key)) {
       for (const f of freeTextFindings(v, "nirx-freetext", key).findings) once(f);
+    } else if (demographics && key.toLowerCase() === "name") {
+      // The subject's own identifier: the shared rule, with the NIRx device words dropped.
+      if (PLACEHOLDER.test(v) || !nameIsNameLike(v)) continue;
+      const reading = readSubjectId(v, path);
+      if (reading === "none") continue;
+      const name = reading === "name";
+      once({
+        kind: name ? "nirx-subject-name" : "nirx-subject-freetext",
+        severity: name ? "identifier" : "review",
+        field: key,
+        shape: shapeOf(v),
+      });
     } else if (isPersonField(key, { bareName: "person" })) {
       if (PLACEHOLDER.test(v) || !nameIsNameLike(v) || isSubjectLabel(v, path)) continue;
       once({ kind: "nirx-subject-name", severity: "identifier", field: key, shape: shapeOf(v) });
@@ -249,7 +268,7 @@ export function scanNirxText(
     // NIRSport2 keeps the subject in the header's experiment notes; NIRStar keeps notes there.
     cut ||= screenSubjectBlock(sections.get("experimentnotes"), path, findings).cut;
   } else {
-    cut ||= screenSubjectBlock(section, path, findings).cut;
+    cut ||= screenSubjectBlock(section, path, findings, true).cut;
   }
 
   const notes = unmatched ? { notes: ["companion-name-mismatch" as const] } : {};

@@ -30,6 +30,7 @@ import { HOMER_NIRS_READER } from "./readers/homer-nirs";
 import { MAT_GENERIC_READER } from "./readers/mat-generic";
 import { NIRX_READER } from "./readers/nirx";
 import { SNIRF_READER } from "./readers/snirf";
+import { createZipReader } from "./readers/zip";
 
 // ---------------------------------------------------------------------------------------
 // Vocabulary
@@ -37,7 +38,7 @@ import { SNIRF_READER } from "./readers/snirf";
 
 /**
  * Every reader the screen may name. Closed: the report's door accepts exactly these, so a later
- * reader changes no vocabulary. Every id but `zip` has a reader today.
+ * reader changes no vocabulary. Every id has a reader today.
  */
 export const READER_IDS = [
   "edf",
@@ -279,6 +280,11 @@ export interface ReaderResult {
   /** Informational notes, one per kind per file (see {@link READER_NOTES}). */
   notes?: ReaderNote[];
   /**
+   * Recording data inside the file that no reader read, by format name: an archive's entries as
+   * `zip:<ext>`. The caller counts them as unscreened, as it counts `not-applicable` files.
+   */
+  unscreened?: Record<string, number>;
+  /**
    * Companions the file's content names that must sit beside it (EEGLAB's `.fdt`, named by the
    * `.set`; card A5, lead ruling 2026-11-25). Bare file names only: each is resolved in the
    * recording's own directory and never anywhere else, and a name with a path separator or
@@ -343,6 +349,23 @@ export const EDF_READER: FormatReader = {
   },
 };
 
+/**
+ * ZIP archives (`shared/readers/zip.ts`). Its entries are read by every other registered reader:
+ * nesting is followed one level only. The kit hands the reader the registry's functions, so the
+ * reader module imports none at runtime (no module cycle); `READERS` is read at scan time.
+ */
+export const ZIP_READER: FormatReader = createZipReader({
+  inner: () => READERS.filter((r) => r.id !== "zip"),
+  cachedSource,
+  limitsFor,
+  readerMatch,
+  companionsOf,
+  formatCoverage,
+  namedCompanionsMissing,
+  limitExceeded: () => new LimitExceeded(),
+  pageBytes: PAGE_BYTES,
+});
+
 /** The registry. A reader registered here is what makes its extension screened. */
 export const READERS: readonly FormatReader[] = [
   EDF_READER,
@@ -353,6 +376,7 @@ export const READERS: readonly FormatReader[] = [
   EEGLAB_READER,
   HOMER_NIRS_READER,
   MAT_GENERIC_READER,
+  ZIP_READER,
 ];
 
 /** The limits a reader reads one path under: its extension's own, else the reader's. */

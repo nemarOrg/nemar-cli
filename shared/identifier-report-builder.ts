@@ -160,8 +160,9 @@ export interface RecordingsOutcome {
   /** Files whose header names a companion other than its own base name (a note; never gating). */
   companionNameMismatch: number;
   /**
-   * Files a reader found not to be its format (`not-applicable`), by the extension it matched:
-   * the caller counts them as unscreened. They are in no tally.
+   * Files a reader found not to be its format (`not-applicable`), by the extension it matched,
+   * and recording data inside a file that its reader did not read (an archive's `zip:<ext>`
+   * entries): the caller counts them as unscreened. A not-applicable file is in no tally.
    */
   notApplicable: Record<string, number>;
   /** EDF/BDF only: the statistics the fleet scan has always kept. */
@@ -336,6 +337,9 @@ export async function readRecordings<E extends RecordingEntry>(
       return;
     }
     for (const f of result.findings) out.findings.push(f);
+    for (const [key, n] of Object.entries(result.unscreened ?? {})) {
+      out.notApplicable[key] = (out.notApplicable[key] ?? 0) + n;
+    }
     if (result.notes?.includes("companion-name-mismatch")) out.companionNameMismatch++;
     // Companions the content names (an EEGLAB `.set`'s `.fdt`), checked against the same paths.
     const lacking =

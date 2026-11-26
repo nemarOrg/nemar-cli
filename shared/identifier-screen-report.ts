@@ -75,6 +75,7 @@ const KIND_TABLE: Record<FindingKind, true> = {
   "brainvision-comment-name": true,
   "brainvision-segment-date": true,
   "nirx-subject-name": true,
+  "nirx-subject-freetext": true,
   "nirx-demographics": true,
   "nirx-header-date": true,
   "nirx-freetext": true,

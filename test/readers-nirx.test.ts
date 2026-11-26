@@ -84,6 +84,29 @@ describe("nirx-subject-name", () => {
     const other = encode(base.replace('Name="No_saturation"', 'Name="Hollberry"'));
     expect(kinds(await scan(other, "sourcedata/sub-01/x.inf"))).toEqual(["nirx-subject-name"]);
   });
+
+  // Lead ruling on #2392: the subject's Name= is read by `readSubjectId`, the rule SNIRF's
+  // SubjectID and EEGLAB's subject share. A participant and session code joined by underscores
+  // (shape A99_A9_A9_A+9, seen in a public NIRx archive) is review, never an identifier.
+  test("an underscore-joined participant and session code in Name= is review, not a name", async () => {
+    const base = text(CLEAN_INF);
+    const named = (name: string) =>
+      scan(
+        encode(base.replace('Name="No_saturation"', `Name="${name}"`)),
+        "sourcedata/sub-01/x.inf",
+      );
+    const code = await named("P04_D2_S2_Hollberry2");
+    expect(code.findings.map((f): string[] => [f.kind, f.severity, f.shape])).toEqual([
+      ["nirx-subject-freetext", "review", "A99_A9_A9_Aa+9"],
+    ]);
+    expect(DIRECT_KINDS.has("nirx-subject-freetext")).toBe(false);
+    // Letters fused with digits are review too; a name of letters only stays an identifier.
+    expect(kinds(await named("Hollberry2"))).toEqual(["nirx-subject-freetext"]);
+    expect(kinds(await named("Quintavius Hollberry"))).toEqual(["nirx-subject-name"]);
+    // An operator is not the subject: its rule is unchanged.
+    const operator = encode(base.replace('Name="No_saturation"', 'Name=""\nOperator="Hollberry2"'));
+    expect(kinds(await scan(operator, "sourcedata/sub-01/x.inf"))).toEqual(["nirx-subject-name"]);
+  });
 });
 
 describe("nirx-demographics: birth dates by precision; an age alone is nothing", () => {
