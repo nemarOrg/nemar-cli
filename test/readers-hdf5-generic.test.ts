@@ -111,7 +111,8 @@ describe("person fields", () => {
     for (const w of PERSON_FIELDS.person) {
       // Alone, except a bare `name` (an object's own name, tested below).
       if (w !== "name") expect(isPersonField(w)).toBe(true);
-      expect(isPersonField(`Lead_${w.toUpperCase()}`)).toBe(true);
+      // A qualified `name` is a thing's (card A5 ruling): `Lead_NAME` is not a person field.
+      expect(isPersonField(`Lead_${w.toUpperCase()}`)).toBe(w !== "name");
     }
   });
 
@@ -129,9 +130,9 @@ describe("person fields", () => {
     expect(fieldTokens("PATIENTName_2b")).toEqual(["patient", "name", "b"]);
     expect(fieldTokens("experimenter-name")).toEqual(["experimenter", "name"]);
     // A thing word inside a longer word qualifies nothing.
-    expect(isPersonField("LandscapeName")).toBe(true);
-    expect(isPersonField("CommunityName")).toBe(true);
-    expect(isPersonField("HappyName")).toBe(true);
+    expect(isPersonField("LandscapeOperator")).toBe(true);
+    expect(isPersonField("CommunitySubject")).toBe(true);
+    expect(isPersonField("HappyPatient")).toBe(true);
     expect(isPersonField("CapName")).toBe(false);
     expect(isPersonField("UnitName")).toBe(false);
     expect(isPersonField("AppName")).toBe(false);
