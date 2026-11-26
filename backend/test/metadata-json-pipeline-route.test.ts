@@ -190,7 +190,7 @@ beforeEach(() => {
 });
 
 describe("pipeline extensions in metadata.json describe the promoted run", () => {
-  test("its processing entry, with stored kept, and its link are served, and the extensions validate (MUTATION: take stored from the pending row)", async () => {
+  test("its processing entry, with stored kept, and its link are served, and the extensions validate (MUTATION: stored as never made)", async () => {
     seed("nm000501");
     await endedRun("nm000501", { derivative: { retention: "catalog" } });
     const { status, body } = await get("nm000501");
@@ -205,7 +205,7 @@ describe("pipeline extensions in metadata.json describe the promoted run", () =>
     if (!validateExtensions(body?.extensions)) throw new Error(formatAjvErrors(validateExtensions));
   });
 
-  test("a run in progress shows no in_progress link and leaves the promoted run's entries standing (MUTATION: serve live links)", async () => {
+  test("a run in progress shows no in_progress link and leaves the promoted run's entries standing", async () => {
     seed("nm000502");
     await endedRun("nm000502", { derivative: { retention: "published" } });
     reporting("nm000502");
@@ -223,7 +223,7 @@ describe("pipeline extensions in metadata.json describe the promoted run", () =>
     expect(Object.keys(body?.extensions ?? {})).toEqual(["nemar"]);
   });
 
-  test("a newer unpromoted run never replaces the promoted one; a newer promoted run does, on both namespaces (MUTATION: order by stamp)", async () => {
+  test("a newer unpromoted run never replaces the promoted one; a newer promoted run does, on both namespaces", async () => {
     seed("nm000504");
     await endedRun("nm000504", {
       derivative: { retention: "catalog", storedAt: "2026-11-20 10:00:00" },
@@ -274,7 +274,7 @@ describe("pipeline extensions in metadata.json describe the promoted run", () =>
     );
   });
 
-  test("a private dataset, a concealed deposit and a withdrawn dataset get nothing (MUTATION: drop the anonymous check)", async () => {
+  test("a private dataset, a concealed deposit and a withdrawn dataset get nothing", async () => {
     seed("nm000507", { visibility: "private" });
     await endedRun("nm000507", { derivative: { retention: "catalog" } });
     expect((await get("nm000507")).status).toBe(404);

@@ -350,7 +350,7 @@ describe("a finished run", () => {
 });
 
 describe("what a public page shows: the promoted run", () => {
-  test("the promoted run's counts, with stored kept, and its link; the extensions validate (MUTATION: show stored as reconciled, still pending)", async () => {
+  test("the promoted run's counts, with stored kept, and its link; the extensions validate (MUTATION: stored as never made)", async () => {
     const d = await finished();
     await syncPipelineStamps(env);
     // The derivative is stored and promoted; its pending stored row has not been resolved yet.
@@ -381,7 +381,7 @@ describe("what a public page shows: the promoted run", () => {
     }).toEqual(shown.processing?.recipes["nemar-floor"].counts.stored);
   });
 
-  test("a run in progress, a newer canary run and a newer failed run never replace the promoted run (MUTATION: pick the newest stamp)", async () => {
+  test("a run in progress, a newer canary run and a newer failed run never replace the promoted run (MUTATION: drop the public derivative term)", async () => {
     const first = await finished();
     await syncPipelineStamps(env);
     await promote(first);
@@ -390,8 +390,10 @@ describe("what a public page shows: the promoted run", () => {
     // A newer run reporting now.
     const second = await reportingRun(first.datasetId);
     expect(await served(first.datasetId)).toEqual(before);
-    // It ends, is reconciled and stored as a canary: still not shown.
-    await finishAtTapis(fx, env, second.jobId, { outputs: floorOutputs(RECORD, TABLE) });
+    // It ends with a record of its own, is reconciled and stored as a canary: still not shown.
+    await finishAtTapis(fx, env, second.jobId, {
+      outputs: floorOutputs(recordOf({ note: "canary run" }), TABLE),
+    });
     await syncPipelineStamps(env);
     expect((await runRow(second.stampId))?.outcome).toBe("reconciled");
     await seedDerivative(env.DB, {

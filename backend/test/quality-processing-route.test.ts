@@ -346,6 +346,8 @@ describe("a recording's outcomes and link, from the current public derivative", 
     for (const recording of [
       "sub-CUCOV076/eeg/sub-cucov076_task-COVID_eeg.edf",
       "x/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf",
+      // A tail of the listed path: found only by a match that is not exact.
+      "CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf",
       "sub-CUCOV076/eeg/sub-CUCOV076_task-COV_eeg.edf",
       rec("CUCOV999"),
     ]) {
@@ -539,7 +541,7 @@ describe("the quality route's gate, paths and cache", () => {
       "UPDATE datasets SET first_published_at = NULL, anonymous = 1 WHERE dataset_id = ?",
     ],
   ] as const) {
-    test(`${name}: answers exactly as an unknown dataset (MUTATION: skip the gate for this endpoint)`, async () => {
+    test(`${name}: answers exactly as an unknown dataset`, async () => {
       await derivative();
       expect((await get(url())).status).toBe(200);
       db.run(statement, [DATASET]);
