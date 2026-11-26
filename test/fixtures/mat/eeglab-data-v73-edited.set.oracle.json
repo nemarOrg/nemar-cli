@@ -1,0 +1,2177 @@
+[
+ {
+  "path": "/#refs#/0f",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/0g",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/0h",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/0p",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/0q",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/0r",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/1f",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/1g",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/1h",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/1p",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/1q",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/1r",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/2f",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/2g",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/2h",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/2p",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/2q",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/2r",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/3f",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/3g",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/3h",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/3p",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/3q",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/3r",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/4f",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/4g",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/4h",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/4p",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/4q",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/4r",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/5f",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/5g",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/5h",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/5p",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/5q",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/5r",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/6f",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/6g",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/6h",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/6p",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/6q",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/6r",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/7f",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/7g",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/7h",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/7p",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/7q",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/7r",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/8f",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/8g",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/8h",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/8p",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/8q",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/8r",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/9f",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/9g",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/9h",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/9p",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/9q",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/9r",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Ab",
+  "value": [
+   "P8"
+  ]
+ },
+ {
+  "path": "/#refs#/Ag",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Ah",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Aq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Ar",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Bb",
+  "value": [
+   "PO7"
+  ]
+ },
+ {
+  "path": "/#refs#/Bg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Bh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Bq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Br",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Cb",
+  "value": [
+   "PO3"
+  ]
+ },
+ {
+  "path": "/#refs#/Cg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Ch",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Cq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Cr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Db",
+  "value": [
+   "POz"
+  ]
+ },
+ {
+  "path": "/#refs#/Dg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Dh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Dq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Dr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Eb",
+  "value": [
+   "PO4"
+  ]
+ },
+ {
+  "path": "/#refs#/Eg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Eh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Eq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Er",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Fb",
+  "value": [
+   "PO8"
+  ]
+ },
+ {
+  "path": "/#refs#/Fg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Fh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Fq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Fr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Gb",
+  "value": [
+   "O1"
+  ]
+ },
+ {
+  "path": "/#refs#/Gg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Gh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Gq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Gr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Hb",
+  "value": [
+   "Oz"
+  ]
+ },
+ {
+  "path": "/#refs#/Hg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Hh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Hq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Hr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Ib",
+  "value": [
+   "O2"
+  ]
+ },
+ {
+  "path": "/#refs#/Ig",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Ih",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Iq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Ir",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Jg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Jh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Jq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Jr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Kg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Kh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Kq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Kr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Lg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Lh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Lq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Lr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Mg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Mh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Mq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Mr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Ng",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Nh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Nq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Nr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Og",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Oh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Op",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Oq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Or",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Pg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Ph",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Pp",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Pq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Pr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Qg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Qh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Qp",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Qq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Qr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Rg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Rh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Rp",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Rq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Rr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Sf",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Sg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Sh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Sp",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Sq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Sr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Tf",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Tg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Th",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Tp",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Tq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Tr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Uf",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Ug",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Uh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Up",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Uq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Ur",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Vf",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Vg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Vh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Vp",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Vq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Vr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Wf",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Wg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Wh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Wp",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Wq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Wr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Xf",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Xg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Xh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Xp",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Xq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Xr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Yf",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Yg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Yh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Yp",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Yq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Yr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Zf",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Zg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Zh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Zp",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/Zq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/Zr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/ag",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/ah",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/ai",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/aq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/ar",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/as",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/bg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/bh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/bi",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/bq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/br",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/bs",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/cg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/ch",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/ci",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/cq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/cr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/cs",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/db",
+  "value": [
+   "FPz"
+  ]
+ },
+ {
+  "path": "/#refs#/dg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/dh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/di",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/dq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/dr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/ds",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/eb",
+  "value": [
+   "EOG1"
+  ]
+ },
+ {
+  "path": "/#refs#/eg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/eh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/ei",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/eq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/er",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/es",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/fb",
+  "value": [
+   "F3"
+  ]
+ },
+ {
+  "path": "/#refs#/fg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/fh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/fi",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/fq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/fr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/fs",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/gb",
+  "value": [
+   "Fz"
+  ]
+ },
+ {
+  "path": "/#refs#/gg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/gh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/gi",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/gq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/gr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/gs",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/gx",
+  "value": [
+   "Event type                   ",
+   "Here, either 'square' or 'rt'"
+  ]
+ },
+ {
+  "path": "/#refs#/hb",
+  "value": [
+   "F4"
+  ]
+ },
+ {
+  "path": "/#refs#/hg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/hh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/hi",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/hq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/hr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/hs",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/hx",
+  "value": [
+   "Stimulus position                                              ",
+   "(Here, either position 1 or 2, both in the left hemifield).    "
+  ]
+ },
+ {
+  "path": "/#refs#/ib",
+  "value": [
+   "EOG2"
+  ]
+ },
+ {
+  "path": "/#refs#/ig",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/ih",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/ii",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/iq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/ir",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/ix",
+  "value": [
+   "   Event latency                    ",
+   "in the continuous data (seconds).   "
+  ]
+ },
+ {
+  "path": "/#refs#/jb",
+  "value": [
+   "FC5"
+  ]
+ },
+ {
+  "path": "/#refs#/jg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/jh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/ji",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/jq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/jr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/kb",
+  "value": [
+   "FC1"
+  ]
+ },
+ {
+  "path": "/#refs#/kg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/kh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/ki",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/kq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/kr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/lb",
+  "value": [
+   "FC2"
+  ]
+ },
+ {
+  "path": "/#refs#/lg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/lh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/li",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/lq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/lr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/mb",
+  "value": [
+   "FC6"
+  ]
+ },
+ {
+  "path": "/#refs#/mg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/mh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/mq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/mr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/nb",
+  "value": [
+   "T7"
+  ]
+ },
+ {
+  "path": "/#refs#/ng",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/nh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/nq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/nr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/ob",
+  "value": [
+   "C3"
+  ]
+ },
+ {
+  "path": "/#refs#/og",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/oh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/oq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/or",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/pb",
+  "value": [
+   "C4"
+  ]
+ },
+ {
+  "path": "/#refs#/pg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/ph",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/pq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/pr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/qb",
+  "value": [
+   "Cz"
+  ]
+ },
+ {
+  "path": "/#refs#/qg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/qh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/qq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/qr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/rb",
+  "value": [
+   "T8"
+  ]
+ },
+ {
+  "path": "/#refs#/rg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/rh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/rq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/rr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/sb",
+  "value": [
+   "CP5"
+  ]
+ },
+ {
+  "path": "/#refs#/sg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/sh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/sq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/sr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/tb",
+  "value": [
+   "CP1"
+  ]
+ },
+ {
+  "path": "/#refs#/tg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/th",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/tq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/tr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/ub",
+  "value": [
+   "CP2"
+  ]
+ },
+ {
+  "path": "/#refs#/ug",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/uh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/uq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/ur",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/vb",
+  "value": [
+   "CP6"
+  ]
+ },
+ {
+  "path": "/#refs#/vg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/vh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/vq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/vr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/wb",
+  "value": [
+   "P7"
+  ]
+ },
+ {
+  "path": "/#refs#/wg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/wh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/wq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/wr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/xb",
+  "value": [
+   "P3"
+  ]
+ },
+ {
+  "path": "/#refs#/xg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/xh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/xq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/xr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/yb",
+  "value": [
+   "Pz"
+  ]
+ },
+ {
+  "path": "/#refs#/yg",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/yh",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/yq",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/yr",
+  "value": [
+   "square"
+  ]
+ },
+ {
+  "path": "/#refs#/zb",
+  "value": [
+   "P4"
+  ]
+ },
+ {
+  "path": "/#refs#/zg",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/zh",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/zq",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/#refs#/zr",
+  "value": [
+   "rt"
+  ]
+ },
+ {
+  "path": "/EEG/chaninfo/filecontent",
+  "value": [
+   "1\t       0\t 0.50669\t     FPz ",
+   "2\t      23\t 0.71\t    \tEOG1   ",
+   "3\t -39.947\t 0.34459\t      F3 ",
+   "4\t       0\t 0.25338\t      Fz ",
+   "5\t  39.897\t  0.3445\t      F4 ",
+   "6\t     -43\t 0.65\t    \tEOG2   ",
+   "7\t -69.332\t 0.40823\t     FC5 ",
+   "8\t -44.925\t 0.18118\t     FC1 ",
+   "9\t  44.925\t 0.18118\t     FC2 ",
+   "10\t  69.332\t 0.40823\t     FC6",
+   "11\t     -90\t 0.53318\t      T7",
+   "12\t     -90\t 0.26669\t      C3",
+   "13\t      90\t 0.26667\t      C4",
+   "14\t       0\t       0\t      Cz",
+   "15\t      90\t 0.53318\t      T8",
+   "16\t -110.67\t 0.40823\t     CP5",
+   "17\t -135.07\t 0.18118\t     CP1",
+   "18\t  135.07\t 0.18118\t     CP2",
+   "19\t  110.67\t 0.40823\t     CP6",
+   "20\t -126.09\t 0.52808\t      P7",
+   "21\t -140.05\t 0.34459\t      P3",
+   "22\t     180\t 0.25338\t      Pz",
+   "23\t   140.1\t  0.3445\t      P4",
+   "24\t  126.13\t 0.52807\t      P8",
+   "25\t -144.11\t 0.52233\t     PO7",
+   "26\t -157.54\t 0.42113\t     PO3",
+   "27\t     180\t 0.37994\t     POz",
+   "28\t  157.54\t 0.42113\t     PO4",
+   "29\t  144.14\t 0.52231\t     PO8",
+   "30\t -162.07\t 0.51499\t      O1",
+   "31\t     180\t 0.50669\t      Oz",
+   "32\t  162.07\t 0.51499\t      O2"
+  ]
+ },
+ {
+  "path": "/EEG/chaninfo/filename",
+  "value": [
+   "/data/matlab/eeglab/sample_data/eeglab_chan32.locs"
+  ]
+ },
+ {
+  "path": "/EEG/chaninfo/nosedir",
+  "value": [
+   "+X"
+  ]
+ },
+ {
+  "path": "/EEG/comments",
+  "value": [
+   "                                 EEGLAB Tutorial Dataset                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         ",
+   "                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ",
+   "During this selective visual attention experiment, stimuli  appeared briefly in any of five squares  arrayed horizontally above a central fixation cross. In each experimental block, one (target) box was differently colored from the rest  Whenever a square appeared in the target box the subject was asked to respond quickly with a right thumb button press. If the stimulus was a circular disk, he was asked to ignore it.  (Reference: Makeig et al.. J. Neurosci. 19:2665-80, 1999)                                                                                                                                                                                                                                                                                                  ",
+   "                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ",
+   "These data were constructed by concatenating three-second epochs from one subject, each containing a target square in the attended  location ('square' events, left-hemifield locations 1 or 2 only) followed by a button response ('rt' events). The data were stored in continuous data format to illustrate the process of epoch extraction from continuous data.                                                                                                                                                                                                                                                                                                                                                                                                                             ",
+   "                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 "
+  ]
+ },
+ {
+  "path": "/EEG/datfile",
+  "value": [
+   "eeglab_data.fdt"
+  ]
+ },
+ {
+  "path": "/EEG/etc/eeglabvers",
+  "value": [
+   "dev"
+  ]
+ },
+ {
+  "path": "/EEG/filename",
+  "value": [
+   "eeglab_data.set"
+  ]
+ },
+ {
+  "path": "/EEG/filepath",
+  "value": [
+   "/Users/qmarlow/studies/rest/"
+  ]
+ },
+ {
+  "path": "/EEG/history",
+  "value": [
+   "\nEEG = pop_loadset( 'filename', 'eeglab_data.set', 'filepath', '/data/common/matlab/eeglab/sample_data/');\nEEG = eeg_checkset( EEG );\nEEG = pop_loadset('filename','eeglab_data.set','filepath','/Users/arno/eeglab/sample_data/');\nEEG = eeg_checkset( EEG );\nEEG.etc.eeglabvers = 'development head'; % this tracks which version of EEGLAB is being used, you may ignore it\nEEG = pop_loadset('filename','eeglab_data.set','filepath','/data/matlab/eeglab/sample_data/');\nEEG = eeg_checkset( EEG );\nEEG=pop_chanedit(EEG, 'lookup','/data/matlab/eeglab/plugins/dipfit/standard_BESA/standard-10-5-cap385.elp','load',{'/data/matlab/eeglab/sample_data/eeglab_chan32.locs' 'filetype' 'autodetect'});\nEEG = eeg_checkset( EEG );\nEEG.etc.eeglabvers = 'dev'; % this tracks which version of EEGLAB is being used, you may ignore it"
+  ]
+ },
+ {
+  "path": "/EEG/ref",
+  "value": [
+   "common"
+  ]
+ },
+ {
+  "path": "/EEG/saved",
+  "value": [
+   "yes"
+  ]
+ },
+ {
+  "path": "/EEG/setname",
+  "value": [
+   "Continuous EEG Data"
+  ]
+ },
+ {
+  "path": "/EEG/subject",
+  "value": [
+   "Quillfeather Marlow"
+  ]
+ }
+]

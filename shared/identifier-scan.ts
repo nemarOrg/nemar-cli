@@ -68,7 +68,15 @@ export type FindingKind =
   | "nirx-demographics"
   | "nirx-header-date"
   | "nirx-freetext"
-  | "brainvision-marker-text";
+  | "brainvision-marker-text"
+  | "eeglab-subject-name"
+  | "eeglab-subject-freetext"
+  | "eeglab-event-name"
+  | "eeglab-history-name"
+  | "eeglab-setname-name"
+  | "mat-freetext"
+  | "mat-freetext-name"
+  | "mat-identifier-field";
 
 /**
  * Finding kinds that name a person or a clinical record: what must not stay public. A finding
@@ -90,6 +98,9 @@ export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "hdf5-identifier-field",
   "nirx-subject-name",
   "nirx-demographics",
+  "eeglab-subject-name",
+  "mat-freetext-name",
+  "mat-identifier-field",
 ]);
 
 /**
@@ -117,11 +128,12 @@ export interface Finding {
   /** Letters, digits and length only; never the value. */
   shape: Shape;
   /**
-   * Reader-internal: how many paths this one finding stands for, when a reader folds a path
-   * rule's hits into one (the ZIP reader, one per kind per archive). A count only, never a name.
-   * It is not reported: every count of findings counts this finding once.
+   * Reader-internal: how many hits this one finding stands for, when a reader folds repeats into
+   * one (the ZIP reader, one per kind per archive; the MATLAB readers, one per kind and field per
+   * file). A count only, never a name or a value. It is not reported: every count of findings
+   * counts this finding once.
    */
-  entries?: number;
+  count?: number;
 }
 
 /** Size of the fixed EDF/BDF header, which holds the identification fields this module reads. */

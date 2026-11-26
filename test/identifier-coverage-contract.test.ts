@@ -165,6 +165,9 @@ describe("recordings are read through the registry", () => {
       brainvision: "1",
       nirx: "1",
       snirf: "test-1",
+      eeglab: "1",
+      "homer-nirs": "1",
+      mat: "1",
       zip: "1",
     });
     // The twin: without the reader the same file is a format nobody reads.
@@ -340,9 +343,9 @@ describe("the registry and the page cache", () => {
     expect(readerFor("a.fif.gz", [fif, fifGz])?.id).toBe("zip");
     expect(readerFor("a.EDF")?.id).toBe("edf");
     expect(readerFor("a.edf.gz")).toBeNull();
-    expect(formatCoverage(["a.edf", "b.bdf", "c.set"])).toEqual({
+    expect(formatCoverage(["a.edf", "b.bdf", "c.nwb"])).toEqual({
       byReader: { edf: 2 },
-      unscreened: { ".set": 1 },
+      unscreened: { ".nwb": 1 },
     });
   });
 
@@ -387,6 +390,9 @@ describe("the registry and the page cache", () => {
       "nirx",
       "snirf",
       "hdf5",
+      "eeglab",
+      "homer-nirs",
+      "mat",
       "zip",
     ]);
   });
