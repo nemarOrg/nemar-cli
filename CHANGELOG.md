@@ -111,6 +111,8 @@ earlier releases are described only by their generated notes.
   `ViewProducedRole` in `nemar.plugin-manifest.v1` gains an optional `unit`, with the grammar and cap of a neuroschema 0.6.0 column `unit` (1 to 32 code points), so a role without `columns` still has a unit; a column's own `unit` overrides it for that column, and a `{"from": "recipe"}` role never carries one.
   Whether a generic kind's role must carry a unit (a role `unit` or `columns` with units) is the nemar-process loader's check per kind, not the schema's.
   Six manifest vectors are added and none changes; nemar-process re-copies the manifest schema and the vectors at its next pin (its phase P3).
+- **CI: until nemar-process's epic reaches its `dev`, the test workflow checks out nemar-process at `a5125c7b` (the head of `feature/issue-65-epic-pipeline-progress`), not `dev`.**
+  This epic's recipe registry (`1.0.0-b2`, the quality plugins) is ahead of nemar-process `dev`, so the recipe drift test fails against `dev`; set the checkout back to `ref: dev` once nemar-process's epic merges there, and keep that epic branch until the pin is gone from nemar-cli `main`.
 
 ## 0.10.40 - 2026-11-26
 

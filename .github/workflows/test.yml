@@ -982,6 +982,14 @@ jobs:
       # (NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT, NEMAR_REQUIRE_PROCESS_QUEUES and
       # NEMAR_REQUIRE_PROCESS_RECIPES below), which is
       # deliberate: a broken checkout must not quietly disable the comparison.
+      #
+      # PINNED, temporarily, to the head of nemar-process's epic branch
+      # feature/issue-65-epic-pipeline-progress (epic nemarOrg/nemar-cli#2324): this epic declares
+      # `nemar-floor` and `nemar-ica` `1.0.0-b2` and their quality plugins, which nemar-process `dev`
+      # does not carry until its epic merges there, so `ref: dev` fails the recipe drift test. Once
+      # nemar-process's epic is on its `dev`, set this back to `ref: dev`: the drift test then compares
+      # with `dev` again and passes, because that `dev` holds the same versions and plugins. Do not
+      # delete that epic branch before this pin is gone from nemar-cli `main`.
       - name: Check out nemar-process's observation schema and fixtures
         uses: actions/checkout@v4
         with:
@@ -995,7 +1003,7 @@ jobs:
             recipes/nemar_process/nemar_ica/steps.py
             uv.lock
           sparse-checkout-cone-mode: false
-          ref: dev
+          ref: a5125c7bf358d622f397479b9927f8064baa1d15
 
       # The deployed copies of onboard-openneuro.yml, run-pr-review.yml,
       # run-publication-review.yml and run-upstream-repull.yml, for the same reason
