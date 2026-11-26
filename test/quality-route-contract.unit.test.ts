@@ -14,7 +14,9 @@ import {
   QUALITY_PUBLIC_MAX_AGE,
   QUALITY_RECORDING_PATH_MAX,
   QUALITY_ROUTE_WORDS,
+  isQualityRecordingPath,
   qualityAdminFilePath,
+  qualityAdminForwardPath,
   qualityAdminRecordPath,
   qualityAdminRest,
   qualityCacheTag,
@@ -190,6 +192,15 @@ describe("the admin mount's grammar (epic #2324 phase B3b), which the website's 
       `views/${REC}`,
       `RECORD/${REC}`,
       `record/${"a/".repeat(600)}x_eeg.edf`,
+      // Decoded, each breaks the recording rule (the delta review of #2390).
+      "record/sub-01/eeg/sub-01_task-rest%C2%85_eeg.edf",
+      "record/sub-01/eeg/sub-01_task-rest_eeg.edf%3F",
+      "record/sub-01/eeg/sub-01_task-rest_eeg.edf%23x",
+      "record/sub-01/eeg/sub-01_task-%E2%80%AErest_eeg.edf",
+      "record/sub-01%252Feeg/sub-01_task-rest_eeg.edf",
+      "record/sub-01/eeg/sub-01_task-rest_channels.tsv",
+      "record/%20sub-01/eeg/sub-01_task-rest_eeg.edf",
+      "record/http:/eeg/sub-01_task-rest_eeg.edf",
     ]) {
       expect([rest, qualityAdminRest(rest)]).toEqual([rest, null]);
     }
@@ -209,5 +220,88 @@ describe("the admin mount's grammar (epic #2324 phase B3b), which the website's 
       method_not_allowed: 405,
       quality_unavailable: 503,
     });
+  });
+});
+
+describe("the proxy's forward path (epic #2324 phase B3b, the delta review of #2390)", () => {
+  const REC = "sub-01/eeg/sub-01_task-rest_eeg.edf";
+  const SHA = "b".repeat(64);
+
+  test("a stamp id and a rest inside the grammar give the canonical path, built from the raw strings", () => {
+    expect(qualityAdminForwardPath("7", `record/${REC}`)).toBe(
+      `/admin/compute/pipeline/runs/7/quality/record/${REC}`,
+    );
+    expect(qualityAdminForwardPath("7", `file/${SHA}/${REC}`)).toBe(
+      qualityAdminFilePath(7, SHA, REC),
+    );
+    const encoded = "record/sub-01/eeg/sub-01_task-a%20b_eeg.edf";
+    expect(qualityAdminForwardPath("12", encoded)).toBe(
+      `/admin/compute/pipeline/runs/12/quality/${encoded}`,
+    );
+  });
+
+  test("a stamp that is not a stamp id is refused", () => {
+    for (const stamp of [
+      "",
+      "0",
+      "01",
+      "-1",
+      "1e3",
+      "1.0",
+      " 1",
+      "99999999999999999",
+      "5/..",
+      "%35",
+    ]) {
+      expect([stamp, qualityAdminForwardPath(stamp, `record/${REC}`)]).toEqual([stamp, null]);
+    }
+  });
+
+  test("the reviewer's dot-segment repro: a rest that a URL parser would resolve out of the mount is refused", () => {
+    // Forwarded as is, these resolve to another admin route (`.../runs/7/users/...`) with the caller's
+    // credential; the helper refuses each before anything is forwarded.
+    for (const rest of [
+      "record/%2e%2e/%2e%2e/%2e%2e/users/x_eeg.edf",
+      "record/.%2e/.%2e/.%2e/users/x_eeg.edf",
+      "record/%2E./%2E./users/x_eeg.edf",
+      "record/../../../users/x_eeg.edf",
+      `file/${SHA}/%2e%2e/%2e%2e/%2e%2e/%2e%2e/users`,
+      "record/sub-01/./eeg/sub-01_task-rest_eeg.edf",
+      `record/${REC}?x=1`,
+      `record/${REC}?`,
+      `record/${REC}#x`,
+    ]) {
+      expect([rest, qualityAdminForwardPath("7", rest)]).toEqual([rest, null]);
+    }
+  });
+
+  test("every path the helper returns is one a URL parser leaves exactly as it is", () => {
+    for (const recording of [REC, "a/b/c (1)/sub-µ_task-x_eeg.edf", "sub-01_task-x_eeg.set"]) {
+      for (const built of [
+        qualityAdminRecordPath(3, recording),
+        qualityAdminFilePath(3, SHA, recording),
+      ]) {
+        const rest = built.slice("/admin/compute/pipeline/runs/3/quality/".length);
+        const forwarded = qualityAdminForwardPath("3", rest);
+        expect(forwarded).toBe(built);
+        const parsed = new URL(forwarded as string, "https://example.invalid");
+        expect(parsed.pathname).toBe(forwarded as string);
+        expect(parsed.search).toBe("");
+      }
+    }
+  });
+
+  test("the grammar's recording rule is the backend's: isQualityRecordingPath", () => {
+    expect(isQualityRecordingPath(REC)).toBe(true);
+    for (const bad of [
+      "",
+      "sub-01/eeg/a.tsv",
+      "sub-01/../x_eeg.edf",
+      "x\u0085_eeg.edf",
+      "x\u202e_eeg.edf",
+      `${"a".repeat(1020)}_eeg.edf`,
+    ]) {
+      expect([bad, isQualityRecordingPath(bad)]).toEqual([bad, false]);
+    }
   });
 });
