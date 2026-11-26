@@ -233,6 +233,10 @@ describe("the engine's environment", () => {
       GITHUB_TOKEN: "secret",
       AWS_SECRET_ACCESS_KEY: "secret",
       NEMAR_DEBUG: "1",
+      // The engine writes frames and plain stderr lines, never to a terminal: no color settings.
+      TERM: "xterm-256color",
+      NO_COLOR: "1",
+      FORCE_COLOR: "1",
     });
     expect(Object.keys(env).sort()).toEqual(
       [
@@ -253,6 +257,9 @@ describe("the engine's environment", () => {
     process.env.NEMAR_API_KEY = "nemar-secret";
     process.env.GITHUB_TOKEN = "gh-secret";
     process.env.NEMAR_ZARR_BASE = "http://127.0.0.1:9";
+    process.env.TERM = "xterm-256color";
+    process.env.NO_COLOR = "1";
+    process.env.FORCE_COLOR = "1";
     try {
       const c = EngineClient.start({
         cmd: [
@@ -267,10 +274,18 @@ describe("the engine's environment", () => {
       const keys = JSON.parse(c.stderr.split("\n")[0]) as string[];
       expect(keys).not.toContain("NEMAR_API_KEY");
       expect(keys).not.toContain("GITHUB_TOKEN");
+      for (const k of ["TERM", "NO_COLOR", "FORCE_COLOR"]) expect(keys).not.toContain(k);
       expect(keys).toContain("PATH");
       expect(keys).toContain("NEMAR_ZARR_BASE");
     } finally {
-      for (const k of ["NEMAR_API_KEY", "GITHUB_TOKEN", "NEMAR_ZARR_BASE"]) {
+      for (const k of [
+        "NEMAR_API_KEY",
+        "GITHUB_TOKEN",
+        "NEMAR_ZARR_BASE",
+        "TERM",
+        "NO_COLOR",
+        "FORCE_COLOR",
+      ]) {
         if (saved[k] === undefined) Reflect.deleteProperty(process.env, k);
         else process.env[k] = saved[k];
       }
