@@ -819,8 +819,8 @@ export const COMPUTE_PIPELINE_GRID_PAGE_MAX = 500;
 export const COMPUTE_PIPELINE_TREND_DAYS_DEFAULT = 30;
 export const COMPUTE_PIPELINE_TREND_DAYS_MAX = 90;
 
-/** A pipeline stamp id in a path or an argument: a whole number of up to 16 digits (and a safe integer). */
-export const COMPUTE_PIPELINE_STAMP_ID_RE = /^[1-9][0-9]{0,15}$/;
+/** A pipeline stamp id: declared in the import-free leaf `compute-stamp.ts`, re-exported here. */
+export { COMPUTE_PIPELINE_STAMP_ID_RE } from "./compute-stamp.js";
 
 /** A recipe version, as the stamps and the registry write it. */
 export const COMPUTE_PIPELINE_RECIPE_VERSION_RE = /^[0-9A-Za-z._+-]{1,64}$/;

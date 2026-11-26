@@ -19,11 +19,11 @@
  * (`quality_not_found`), so the answer never says whether a dataset exists. No refusal is cached.
  *
  * Pure: it imports only the recording-name rule (`../compute-naming.js`) and the stamp id pattern
- * (`./compute-admin.js`), so the website's proxy applies the backend's exact checks.
+ * (`./compute-stamp.js`), both import-free, so the website's proxy applies the backend's exact checks.
  */
 
 import { matchRecording } from "../compute-naming.js";
-import { COMPUTE_PIPELINE_STAMP_ID_RE } from "./compute-admin.js";
+import { COMPUTE_PIPELINE_STAMP_ID_RE } from "./compute-stamp.js";
 
 /** The reserved data-plane segment and the route's version. */
 export const QUALITY_ROUTE_SEGMENT = "quality";
