@@ -28,6 +28,10 @@ describe("rangeCeiling", () => {
   });
 
   test("every window, at every alignment, fits incompressible chunks and its footer", () => {
+    // About 27 million comparisons: each is checked in plain code and every violation is
+    // collected, then asserted once, because one expect() per comparison took over the default
+    // 5 s timeout on a CI runner.
+    const violations: string[] = [];
     for (const nChannels of [1, 3, 129]) {
       for (const chunkSamples of [1, 7, 10, 100, 1000]) {
         for (const nInner of [1, 4, 200]) {
@@ -36,7 +40,7 @@ describe("rangeCeiling", () => {
             const ceiling = rangeCeiling({ nChannels, chunkSamples, nInner, nSamples });
             const footer = nInner * 16 + 4;
             const where = JSON.stringify({ nChannels, chunkSamples, nInner, nSamples });
-            expect(ceiling, `footer ${where}`).toBeGreaterThanOrEqual(footer);
+            if (!(ceiling >= footer)) violations.push(`footer ${where}: ${ceiling} < ${footer}`);
             for (let start = 0; start < chunkSamples; start++) {
               const first = Math.floor(start / chunkSamples);
               const last = Math.floor((start + nSamples - 1) / chunkSamples);
@@ -49,14 +53,16 @@ describe("rangeCeiling", () => {
                 c = upTo + 1;
               }
               const worst = most * (nChannels * chunkSamples * 2 + BLOSC2_MAX_OVERHEAD);
-              expect(
-                ceiling,
-                `start ${start} ${where} (shard ${shardSamples})`,
-              ).toBeGreaterThanOrEqual(worst);
+              if (!(ceiling >= worst)) {
+                violations.push(
+                  `start ${start} ${where} (shard ${shardSamples}): ${ceiling} < ${worst}`,
+                );
+              }
             }
           }
         }
       }
     }
+    expect(violations).toEqual([]);
   });
 });
