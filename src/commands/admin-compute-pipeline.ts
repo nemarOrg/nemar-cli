@@ -53,6 +53,7 @@ import {
   COMPUTE_DATASET_VERSION_RE,
   formatSu,
 } from "../../shared/contract/compute.js";
+import { QUALITY_RECORDING_PATH_MAX } from "../../shared/contract/quality-route.js";
 import { failMessage, failWith, requireSignedIn } from "../lib/admin-command.js";
 import {
   computeRefusalCode,
@@ -753,16 +754,17 @@ pipelineCommand
 
 /** What each derivative word means, for the line under the stamp (a word this CLI does not know is shown as it is). */
 const QUALITY_MEANING: Record<string, string> = {
-  run_not_succeeded: "the run did not succeed, so no derivative is made of it",
+  run_in_progress: "the run has not ended yet, so there is nothing to key",
+  run_not_succeeded: "the run failed or was refused, so no derivative is made of it",
   not_keyed: "the derivative store made no derivative of it",
   awaiting_derivative: "the derivative store has not decided yet",
   failed: "its copy could not be trusted",
   expired: "its files are deleted, or about to be",
   copying: "its files are being copied",
   canary: "stored; administrators only",
-  current: "stored; the derivative public pages read",
+  current: "stored; the row public pages read while the dataset is public",
   superseded: "stored; a later catalog derivative replaced it",
-  not_current: "stored and public; a newer public derivative is the one pages read",
+  not_current: "stored; a newer row is the one public pages read while the dataset is public",
 };
 
 function printRunQuality(res: ComputeRunQualityResponse): void {
@@ -771,6 +773,11 @@ function printRunQuality(res: ComputeRunQualityResponse): void {
   );
   const meaning = QUALITY_MEANING[res.quality];
   if (meaning) say(`  ${meaning}`);
+  if (res.skip === "duplicate_key") {
+    say("  an earlier run with the same inputs holds the derivative (duplicate_key)");
+  }
+  if (res.dataset_public === false)
+    say("  the dataset is not public now, so no public page shows it");
   const d = res.derivative;
   if (d) {
     say(
@@ -791,9 +798,10 @@ function printRunQuality(res: ComputeRunQualityResponse): void {
 
 const QUALITY_HELP = `
 Shows where one pipeline run's derivative stands (by its stamp id, the run column of "pipeline status"),
-in one word: run_not_succeeded, not_keyed (with the store's word), awaiting_derivative, failed, expired
-(a canary 30 days after it was stored), copying, canary, current (what public pages read), superseded or
-not_current; with its retention and its dates. When its files stand, it lists the recordings that
+in one word: run_in_progress, run_not_succeeded, not_keyed (with the store's word; duplicate_key means an
+earlier run with the same inputs holds the derivative), awaiting_derivative, failed, expired (a canary 30
+days after it was stored), copying, canary, current (the row public pages read while the dataset is
+public), superseded or not_current; with its retention, its dates and whether the dataset is public now. When its files stand, it lists the recordings that
 succeeded, ${COMPUTE_RUN_QUALITY_PAGE_SIZE} a page in path order; --after <path> (the "more" line) shows the next page. Read only.
 
 Admin or owner. --json prints the Worker's answer as it is.
@@ -820,7 +828,7 @@ pipelineCommand
       });
       return;
     }
-    if (o.after !== undefined && (o.after === "" || o.after.length > 1024)) {
+    if (o.after !== undefined && (o.after === "" || o.after.length > QUALITY_RECORDING_PATH_MAX)) {
       failMessage("--after is a recording path, the one a page's more line names.", {
         json,
         answered: true,

@@ -802,6 +802,7 @@ describe("quality <stamp-id>", () => {
       ["quality", "abc"],
       ["quality", "0"],
       ["quality", String(stamp), "--after", ""],
+      ["quality", String(stamp), "--after", `sub-01/${"x".repeat(1030)}_eeg.edf`],
     ]) {
       const r = await runCli("admin", args);
       expect([args.join(" "), r.exitCode]).toEqual([args.join(" "), 1]);
