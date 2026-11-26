@@ -37,8 +37,12 @@ import { walkForReader } from "./hdf5-incomplete";
 
 /**
  * Which field names are a person's: a canonical name (lowercase, no space, `_` or `-`) that
- * contains a `person` word and no `thing` word. `ExperimenterName` and `subject` are a person's;
- * `ManufacturerName`, `AppName` and a stimulus `name` label are not.
+ * contains a `person` word and no `thing` word, and is not one of the `own` names. A field called
+ * just `name` names its own object (a stimulus, an aux channel, a group), as SNIRF's
+ * `stim{k}/name` and countless HDF5 layouts use it, so it is not a person's (measured: on public
+ * SNIRF files read as generic HDF5, a bare `name` made 8 identifier findings per file).
+ * `ExperimenterName` and `subject` are a person's; `ManufacturerName`, `AppName` and `name` are
+ * not.
  */
 export const PERSON_FIELDS = {
   person: ["name", "subject", "patient", "operator", "experimenter", "participant"],
@@ -59,12 +63,14 @@ export const PERSON_FIELDS = {
     "task",
     "condition",
   ],
+  own: ["name"],
 } as const;
 
 /** Is this field name (any spelling) a person's? */
 export function isPersonField(name: string): boolean {
   const c = canonical(name);
   return (
+    !(PERSON_FIELDS.own as readonly string[]).includes(c) &&
     PERSON_FIELDS.person.some((w) => c.includes(w)) &&
     !PERSON_FIELDS.thing.some((w) => c.includes(w))
   );
@@ -92,19 +98,25 @@ export function stringsOf(entry: Hdf5Entry): string[] {
   return [];
 }
 
-/** Is a name-like word anywhere in this text? */
-export function hasNameLikeWord(text: string): boolean {
-  return text.split(/\s+/).some((t) => t !== "" && isNameLike(t));
-}
+/** A whitespace token of letters only (and the `' . -` a name may hold). */
+const ALL_LETTERS = /^[\p{L}'.-]+$/u;
 
-/** How a field is checked: `label` fields (probe, stimulus, aux names) get the local-path rule only. */
-export type FieldRole = "field" | "label";
+/**
+ * How a person field's text reads: `name` when a token of letters only is name-like (`Marlow`),
+ * `freetext` when a name-like token mixes letters and digits (`john3`, a cohort code), `none`
+ * otherwise. The same split as the SubjectID rule (lead ruling, 2026-11-25).
+ */
+export function readPersonText(text: string): "name" | "freetext" | "none" {
+  const tokens = text.split(/\s+/).filter((t) => t !== "" && isNameLike(t));
+  if (tokens.some((t) => ALL_LETTERS.test(t))) return "name";
+  return tokens.length > 0 ? "freetext" : "none";
+}
 
 /**
  * The text rules over one entry. `field` is the fixed word findings carry (`hdf5.attribute`,
  * `snirf.stim-name`, ...); the entry's own name decides only which rules apply.
  */
-export function scanEntryText(entry: Hdf5Entry, field: string, role: FieldRole): Finding[] {
+export function scanEntryText(entry: Hdf5Entry, field: string): Finding[] {
   const values = stringsOf(entry);
   if (values.length === 0) return [];
   const out: Finding[] = [];
@@ -113,7 +125,7 @@ export function scanEntryText(entry: Hdf5Entry, field: string, role: FieldRole):
   const key = canonical(entry.name);
   const filled = values.filter((v) => !EMPTY_VALUES.has(v.trim().toLowerCase()));
 
-  const keySeverity = role === "field" ? identifierKeySeverity(key) : null;
+  const keySeverity = identifierKeySeverity(key);
   if (keySeverity && filled.length > 0) {
     let severity: Severity = keySeverity;
     if (BIRTH_KEYS.has(key)) {
@@ -125,11 +137,14 @@ export function scanEntryText(entry: Hdf5Entry, field: string, role: FieldRole):
     }
     // The canonical key is from the scanner's closed set, so it may stand as the field.
     add("hdf5-identifier-field", severity, key, filled[0] as string);
-  } else if (role === "field" && isPersonField(entry.name)) {
-    const hit = filled.find(hasNameLikeWord);
-    if (hit !== undefined) add("hdf5-freetext-name", "identifier", field, hit);
+  } else if (isPersonField(entry.name)) {
+    const name = filled.find((v) => readPersonText(v) === "name");
+    const other = filled.find((v) => readPersonText(v) === "freetext");
+    if (name !== undefined) add("hdf5-freetext-name", "identifier", field, name);
+    else if (other !== undefined) add("hdf5-freetext", "review", field, other);
   }
   for (const v of values) {
+    if (out.some((f) => f.kind === "hdf5-freetext")) break;
     if (scanTextForLocalPaths(v).length > 0) {
       add("hdf5-freetext", "review", field, v);
       break;
@@ -144,7 +159,7 @@ const genericField = (entry: Hdf5Entry) =>
 
 /** The text rules over every entry of a walk. */
 export function scanHdf5Entries(entries: readonly Hdf5Entry[]): Finding[] {
-  return entries.flatMap((e) => scanEntryText(e, genericField(e), "field"));
+  return entries.flatMap((e) => scanEntryText(e, genericField(e)));
 }
 
 /**

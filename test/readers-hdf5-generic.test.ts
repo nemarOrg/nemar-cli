@@ -40,8 +40,8 @@ const attr = (name: string, value: string | string[]): Hdf5Entry => ({
   shape: Array.isArray(value) ? [value.length] : [],
   value,
 });
-const kindsOf = (e: Hdf5Entry, role: "field" | "label" = "field") =>
-  scanEntryText(e, "hdf5.attribute", role).map((f) => `${f.kind}/${f.severity}`);
+const kindsOf = (e: Hdf5Entry) =>
+  scanEntryText(e, "hdf5.attribute").map((f) => `${f.kind}/${f.severity}`);
 
 describe("registration", () => {
   test(".h5 and .hdf5 are read by the hdf5 reader; .snirf stays SNIRF's; .nwb and .mat by neither", () => {
@@ -105,13 +105,17 @@ describe("the file rules, through the reader", () => {
 describe("person fields", () => {
   test("each person word makes a person field", () => {
     for (const w of PERSON_FIELDS.person) {
-      expect(isPersonField(w)).toBe(true);
+      // Alone, except a bare `name` (an object's own name, tested below).
+      if (w !== "name") expect(isPersonField(w)).toBe(true);
       expect(isPersonField(`Lead_${w.toUpperCase()}`)).toBe(true);
     }
   });
 
   test("each thing word unmakes one", () => {
     for (const w of PERSON_FIELDS.thing) expect(isPersonField(`${w}Name`)).toBe(false);
+    // A field called just `name` names its own object, in any spelling.
+    for (const own of ["name", "Name", "NAME", " name "]) expect(isPersonField(own)).toBe(false);
+    expect(PERSON_FIELDS.own).toEqual(["name"]);
     expect(isPersonField("Notes")).toBe(false);
   });
 
@@ -120,6 +124,10 @@ describe("person fields", () => {
       "hdf5-freetext-name/identifier",
     ]);
     expect(kindsOf(attr("Notes", "Quillfeather Marlow"))).toEqual([]);
+    expect(kindsOf(attr("name", "Quillfeather"))).toEqual([]);
+    // Letters fused with digits in a person field are review, not a block (lead ruling).
+    expect(kindsOf(attr("SubjectCode", "john3"))).toEqual(["hdf5-freetext/review"]);
+    expect(kindsOf(attr("SubjectCode", "john3 Marlow"))).toEqual(["hdf5-freetext-name/identifier"]);
     expect(kindsOf(attr("ManufacturerName", "Quillfeather Instruments"))).toEqual([]);
     expect(kindsOf(attr("CapName", "Quillfeather Cap 128"))).toEqual([]);
     // A placeholder or a code in a person field is not a name.
@@ -127,12 +135,10 @@ describe("person fields", () => {
     expect(kindsOf(attr("participant", "sub-01"))).toEqual([]);
   });
 
-  test("labels get the local-path rule only", () => {
-    expect(kindsOf(attr("name", "Quillfeather"), "label")).toEqual([]);
-    expect(kindsOf(attr("PatientName", "Quillfeather"), "label")).toEqual([]);
-    expect(kindsOf(attr("name", "C:\\Users\\qmarlow\\x"), "label")).toEqual([
-      "hdf5-freetext/review",
-    ]);
+  test("labels (an object's own name, probe labels) get the local-path rule only", () => {
+    expect(kindsOf(attr("name", "Quillfeather"))).toEqual([]);
+    expect(kindsOf(attr("sourceLabels", ["Quillfeather", "S1"]))).toEqual([]);
+    expect(kindsOf(attr("name", "C:\\Users\\qmarlow\\x"))).toEqual(["hdf5-freetext/review"]);
   });
 });
 

@@ -13,10 +13,9 @@
  *   `snirf-subject-freetext` (review) otherwise.
  * - `MeasurementDate` at day precision: `snirf-measurement-date`, a date kind (ADR 0090): it never
  *   gates on its own.
- * - Stimulus and aux names: labels, so the local-path rule only (condition names never fire).
- *   Probe labels (`sourceLabels`, ...) need no case of their own: their field names name no
- *   person, so the generic rules give them the local-path rule only too (`S1`, `D3`, `Nz` never
- *   fire).
+ * - Stimulus and aux names and probe labels: the generic rules give them the local-path rule
+ *   only, because their field names (`name`, `sourceLabels`, ...) name no person (`S1`, `D3`,
+ *   `Nz` and condition names never fire).
  * - Everything else: the generic HDF5 text rules (`hdf5-generic.ts`).
  */
 
@@ -25,7 +24,6 @@ import type { FormatReader } from "../identifier-readers";
 import { type Finding, datePrecision, isNameLike, shapeOf } from "../identifier-scan";
 import {
   EMPTY_VALUES,
-  type FieldRole,
   HDF5_READER_LIMITS,
   readerResult,
   scanEntryText,
@@ -93,12 +91,10 @@ export function scanSubjectId(value: string, path: string): Finding[] {
   ];
 }
 
-/** The fixed field word and role of a SNIRF entry the generic rules check. */
-function roleOf(entry: Hdf5Entry): { field: string; role: FieldRole } {
-  if (entry.kind === "dataset" && STIM_OR_AUX_NAME.test(entry.path)) {
-    return { field: "snirf.stim-aux-name", role: "label" };
-  }
-  return { field: entry.kind === "attribute" ? "hdf5.attribute" : "hdf5.dataset", role: "field" };
+/** The fixed field word of a SNIRF entry the generic rules check. */
+function fieldOf(entry: Hdf5Entry): string {
+  if (entry.kind === "dataset" && STIM_OR_AUX_NAME.test(entry.path)) return "snirf.stim-aux-name";
+  return entry.kind === "attribute" ? "hdf5.attribute" : "hdf5.dataset";
 }
 
 /** The SNIRF rules over a walk's entries, for the file at `path`. */
@@ -121,8 +117,7 @@ export function scanSnirfEntries(entries: readonly Hdf5Entry[], path: string): F
       }
       continue;
     }
-    const { field, role } = roleOf(entry);
-    out.push(...scanEntryText(entry, field, role));
+    out.push(...scanEntryText(entry, fieldOf(entry)));
   }
   return out;
 }
