@@ -421,6 +421,28 @@ describe.skipIf(!awsInstalled)("the reviewed plan, before anything is written", 
     });
   });
 
+  test("an upload that fails says why in the refusal and on the row, and names no path", async () => {
+    // The refusal is recorded on the row, so it carries the failure's fixed-word detail and never
+    // its message (which names paths). Before, every cause read "Error.", which hid the stand-in
+    // storing aws-cli 2.42's chunk-encoded uploads as the objects.
+    seedMirror(XX_A);
+    const path = await makePlan(fx);
+    s3.inject("PutObject", { code: "AccessDenied", status: 403 });
+    try {
+      const err = await refusal(execute(fx, path));
+      expect(err.code).toBe("upload-failed");
+      expect(err.message).toContain("UploadFailed: aws s3 sync exited 1.");
+      const [row] = repullRows();
+      expect(row?.last_error).toContain("UploadFailed: aws s3 sync exited 1");
+      for (const text of [err.message, row?.last_error ?? ""]) {
+        expect(text).not.toContain("sub-0");
+        expect(text).not.toContain("AccessDenied");
+      }
+    } finally {
+      s3.clearFaults();
+    }
+  });
+
   test("a plan of the previous planner is refused as made under other rules", async () => {
     seedMirror(XX_A);
     const path = await makePlan(fx);
