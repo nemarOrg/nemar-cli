@@ -15,6 +15,7 @@ import { bufferSource, readerFor } from "../shared/identifier-readers";
 import type { MatEntry } from "../shared/mat-meta";
 import {
   MAT_GENERIC_READER,
+  foldFindings,
   fromHdf5,
   scanMatEntries,
   unscannedMat,
@@ -49,6 +50,8 @@ describe("the generic .mat reader", () => {
   test("every character array goes through the free-text rules, under mat.variable", () => {
     const found = scanMatEntries([
       char(["cfg", "experimenter"], "Marlow"),
+      char(["cfg", "notes"], "/home/qmarlow/raw"),
+      // A location field is not read.
       char(["cfg", "datadir"], "/home/qmarlow/raw"),
       char(["cfg", "task"], "oddball"),
     ]);
@@ -82,6 +85,23 @@ describe("the generic .mat reader", () => {
     expect((await walkMatForReader(bufferSource(v4), LIMITS)).incomplete).toBe(
       "unsupported-version",
     );
+  });
+});
+
+describe("one finding per kind and field per file", () => {
+  test("repeats fold into the first, with their count and no value", () => {
+    const shapeOnly = scanMatEntries([char(["a", "experimenter"], "Marlow")])[0];
+    const folded = foldFindings([
+      ...scanMatEntries([char(["a", "experimenter"], "Marlow")]),
+      ...scanMatEntries([char(["b", "operator"], "Quillfeather")]),
+      ...scanMatEntries([char(["c", "notes"], "/home/qmarlow/x")]),
+    ]);
+    expect(folded).toEqual([
+      { ...shapeOnly, occurrences: 2 } as never,
+      expect.objectContaining({ kind: "mat-freetext" }),
+    ]);
+    expect(folded[1]?.occurrences).toBeUndefined();
+    expect(JSON.stringify(folded)).not.toContain("Marlow");
   });
 });
 

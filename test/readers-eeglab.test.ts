@@ -36,7 +36,7 @@ import {
   scanEeglabEntries,
   withoutPaths,
 } from "../shared/readers/eeglab";
-import { MAT_READER_LIMITS, walkMatForReader } from "../shared/readers/mat-generic";
+import { MAT_READER_LIMITS, matResult, walkMatForReader } from "../shared/readers/mat-generic";
 import { screenLocalDataset } from "../src/lib/dataset-screen";
 import { Repo, cleanScratch } from "./helpers/dataset-screen-fixture";
 
@@ -116,6 +116,14 @@ describe("real files", () => {
         }),
       ]);
     }
+  });
+
+  test("a finding repeated across an event table is one finding with its count", async () => {
+    const entries = Array.from({ length: 5 }, () => char(["event", "type"], "Quillfeather Marlow"));
+    const result = matResult(scanEeglabEntries(entries, PATH), { format: "v5", entries });
+    expect(result.findings).toEqual([
+      expect.objectContaining({ kind: "eeglab-event-name", occurrences: 5 }),
+    ]);
   });
 
   test("findings carry shapes and fixed field words, never a value", async () => {
@@ -266,10 +274,16 @@ describe("the EEGLAB field rules", () => {
     expect(types("square", "rt", "boundary", "S  1", "Stimulus/S 12", "12", "Target")).toEqual([]);
     // One capitalized word beside a lowercase one is not a name.
     expect(types("Target onset", "left Hand")).toEqual([]);
-    // Once per file, however many events hold it.
-    expect(types("Quillfeather Marlow", "Quillfeather Marlow")).toEqual([
+    // Every column of the event tables gets the same rule, and only it (no path, no person field).
+    const column = (fields: string[], v: string) =>
+      kinds(scanEeglabEntries([char(fields, v)], path));
+    expect(column(["urevent", "Subject"], "go")).toEqual([]);
+    expect(column(["epoch", "eventhistory"], "/Users/qmarlow/x")).toEqual([]);
+    expect(column(["event", "experimenter"], "Quillfeather Marlow")).toEqual([
       "eeglab-event-name/review",
     ]);
+    // The twin outside the event tables: the person-field rule applies.
+    expect(column(["etc", "experimenter"], "go")).toEqual(["mat-freetext-name/identifier"]);
     expect(
       kinds(scanEeglabEntries([char(["urevent", "type"], "Quillfeather Marlow")], path)),
     ).toEqual(["eeglab-event-name/review"]);

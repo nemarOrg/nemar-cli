@@ -47,6 +47,7 @@ import {
 } from "../mat-meta";
 import { scanEntryText } from "./hdf5-generic";
 import { WALK_TIME_SHARE, walkForReader } from "./hdf5-incomplete";
+import { isLocationField } from "./person-fields";
 import { FREE_TEXT_MAX_CHARS } from "./text-header";
 
 /**
@@ -296,6 +297,8 @@ export function scanMatText(
   options: { personFields?: boolean } = {},
 ): Finding[] {
   const leaf = leafName(entry);
+  // A location field records where the researcher kept a file: not read (lead ruling).
+  if (isLocationField(leaf)) return [];
   // The name the rules see: the field's own, unless the person-field rule must not apply to it,
   // when a neutral one leaves the identifier-key, path and contact rules.
   const personRule = options.personFields !== false;
@@ -321,11 +324,28 @@ export function scanMatText(
   return scanEntryText(asHdf5, field).map((f) => ({ ...f, kind: MAT_KIND[f.kind] ?? f.kind }));
 }
 
-/** Build a MATLAB reader's result from its findings and its walk. */
-export function matResult(findings: Finding[], walk: MatReaderWalk): ReaderResult {
+/**
+ * One finding per kind and field per file, the first of each standing for the rest, with the
+ * count in `occurrences` (lead ruling, card A5): a struct array of thousands of events cannot
+ * multiply a finding.
+ */
+export function foldFindings(findings: readonly Finding[]): Finding[] {
+  const byKey = new Map<string, Finding>();
+  for (const f of findings) {
+    const key = `${f.kind}\u0000${f.field}`;
+    const held = byKey.get(key);
+    if (held) held.occurrences = (held.occurrences ?? 1) + 1;
+    else byKey.set(key, { ...f });
+  }
+  return [...byKey.values()];
+}
+
+/** Build a MATLAB reader's result from its findings and its walk, the findings folded. */
+export function matResult(raw: Finding[], walk: MatReaderWalk): ReaderResult {
   if (walk.format === "other" && walk.incomplete === undefined) {
     return { findings: [], coverage: "not-applicable" };
   }
+  const findings = foldFindings(raw);
   return walk.incomplete === undefined
     ? { findings, coverage: "complete" }
     : { findings, coverage: "partial", incomplete: walk.incomplete };

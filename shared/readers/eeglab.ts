@@ -10,13 +10,13 @@
  * - `subject`: SNIRF's `SubjectID` rule ({@link readSubjectId}): `eeglab-subject-name`
  *   (identifier) for a name-like word of letters only, `eeglab-subject-freetext` (review) for
  *   other text; nothing for a placeholder, the BIDS subject label or a short code.
- * - `filepath`, and the other fields that hold a file's location on the researcher's machine
- *   (`chaninfo.filename`, `splinefile`, `icasplinefile`, `dipfit.*file`): not scanned. They record
+ * - `filepath`, and every other location field (`isLocationField`, shared by every format:
+ *   `chaninfo.filename`, `splinefile`, `dipfit.hdmfile`, `etc.original_mff`, ...): not scanned. They record
  *   where the researcher kept the file and name no participant.
  * - `history`: the person-name rule only ({@link personNameIn}), as `eeglab-history-name`
  *   (review); never the path rule.
- * - Event types (`event.type`, `urevent.type`): the person-name rule only, as
- *   `eeglab-event-name` (review); numeric and code-like types never fire.
+ * - The event tables (`event`, `urevent`, `epoch`), every column: the person-name rule only,
+ *   as `eeglab-event-name` (review); numeric and code-like values never fire.
  * - Channel labels never fire.
  * - `datfile` (or `data` as text): the `.fdt` file holding the signal, which must sit beside the
  *   `.set` ({@link ReaderResult.needs}); a miss is a missing companion, not a finding. The
@@ -42,6 +42,7 @@ import {
   textOf,
   walkMatForReader,
 } from "./mat-generic";
+import { isLocationField } from "./person-fields";
 import { readSubjectId } from "./snirf";
 import { pairByName, stem } from "./text-header";
 
@@ -70,21 +71,8 @@ const NAMED_FIELDS: ReadonlySet<string> = new Set([
   "BIDS",
 ]);
 
-/** Fields that hold where the researcher kept a file (the `filepath` ruling): never scanned. */
-const LOCATION_FIELDS: readonly (readonly string[])[] = [
-  ["filepath"],
-  ["chaninfo", "filename"],
-  ["splinefile"],
-  ["icasplinefile"],
-];
-
-/** A location field (lead ruling 3): the list above, or any `dipfit.*file` field. */
-function isLocationField(fields: readonly string[]): boolean {
-  if (fields[0] === "dipfit" && fields.length === 2 && /file$/i.test(fields[1] as string)) {
-    return true;
-  }
-  return LOCATION_FIELDS.some((p) => startsWith(fields, p));
-}
+/** The event tables: one struct element per event or epoch, one field per column. */
+const EVENT_TABLES: ReadonlySet<string> = new Set(["event", "urevent", "epoch"]);
 
 /** The EEGLAB fields an array sits under: the `EEG` variable's name dropped when it has one. */
 export function eeglabFields(entry: MatEntry): string[] {
@@ -147,12 +135,13 @@ export function fdtNamed(entries: readonly MatEntry[]): string | null {
 /** The EEGLAB rules over a walk's arrays, for the file at `path`. */
 export function scanEeglabEntries(entries: readonly MatEntry[], path: string): Finding[] {
   const out: Finding[] = [];
-  let eventFired = false;
   let historyFired = false;
   for (const entry of entries) {
     const f = eeglabFields(entry);
     const top = f[0] ?? "";
-    if (isLocationField(f)) continue;
+    // Where the researcher kept a file (`filepath`, `chaninfo.filename`, the spline and dipfit
+    // files): never scanned, by the one shared rule.
+    if (isLocationField(f[f.length - 1] ?? "")) continue;
     if (f.length === 1 && (top === "datfile" || top === "data")) continue;
     if ((top === "chanlocs" || top === "urchanlocs") && f[1] === "labels") continue;
     if (startsWith(f, ["chaninfo", "nodatchans", "labels"])) continue;
@@ -186,15 +175,16 @@ export function scanEeglabEntries(entries: readonly MatEntry[], path: string): F
       }
       continue;
     }
-    if ((top === "event" || top === "urevent") && f[1] === "type" && f.length === 2) {
-      if (eventFired || entry.class !== "char") continue;
+    // The event tables' columns (lead rulings: types, then every column): the person-name rule
+    // only, never the path or person-field rules; numbers and codes never fire.
+    if (EVENT_TABLES.has(top) && f.length >= 2) {
+      if (entry.class !== "char") continue;
       const hit = personNameIn(textOf(entry));
       if (hit) {
-        eventFired = true;
         out.push({
           kind: "eeglab-event-name",
           severity: "review",
-          field: "eeglab.event.type",
+          field: f[1] === "type" && f.length === 2 ? "eeglab.event.type" : "eeglab.event.field",
           shape: shapeOf(hit),
         });
       }
