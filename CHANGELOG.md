@@ -184,8 +184,9 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
   `GET /admin/compute/pipeline/runs/:stamp/quality/record/<recording>` and `.../quality/file/<sha256>/<recording>` answer what the public quality route answers, of the run's own derivative: canary, catalog or published, superseded included, while it is `stored` and not past `expires_at`.
   Otherwise the answer is one word with no store read: `stamp_not_found`, `derivative_not_keyed`, `derivative_copying`, `derivative_failed` or `views_expired`.
   The record and file checks are the public route's own code (`services/quality-serve.ts`): the whole schema, recording scope, the record's own dataset and recording, the row's `quality_plugins`, declared files only, the size bounds and a re-hash.
-  There is no dataset gate, so the mount never reads or writes the edge cache; every answer is `no-store`, with no `Cache-Tag` and no `ETag`.
-  The path must be `record/<recording>` or `file/<64 hex>/<recording>`, with no `.` or `..` segment, no encoded `/`, `\` or `.`, and no query string, and the method must be GET (`qualityAdminRest` in `shared/contract/quality-route.ts`, which the website's proxy also enforces).
+  There is no dataset gate, so the mount never reads or writes the edge cache; every answer the handler gives is `no-store`, with no `Cache-Tag` and no `ETag` (a refusal from the router's middleware or the rate limiter is the website proxy's to make `no-store`).
+  The path must be `record/<recording>` or `file/<64 hex>/<recording>`, with no `.` or `..` segment, no encoded `/`, `\` or `.`, a decoded recording that passes the one shared recording rule (`isQualityRecordingPath`, which the public route and the run-quality listing now use too), and no `?` anywhere, and the method must be GET.
+  The website's proxy builds its upstream path with `qualityAdminForwardPath(stamp, rest)` in `shared/contract/quality-route.ts`, whose docblock lists the proxy's obligations; every log line of the mount leads with `stamp=<id>`.
 
 ### Changed
 
