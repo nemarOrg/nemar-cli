@@ -116,6 +116,11 @@ export interface Finding {
   field: string;
   /** Letters, digits and length only; never the value. */
   shape: Shape;
+  /**
+   * How many paths this one finding stands for, when a reader folds a path rule's hits into one
+   * (the ZIP reader, one per kind per archive). A count only, never a name.
+   */
+  entries?: number;
 }
 
 /** Size of the fixed EDF/BDF header, which holds the identification fields this module reads. */

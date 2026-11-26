@@ -347,6 +347,28 @@ describe("which inner entries are read", () => {
     expect(result.incomplete).toBe("corrupt");
   });
 
+  test("path rules inside an archive give one finding per kind, with the entries it stands for", async () => {
+    const { result } = await scan(
+      buildZip([
+        ...Array.from({ length: 5 }, (_, i) => ({ name: `figures/fig${i}.png` })),
+        { name: "notes/consent.pdf" },
+        { name: "code/.DS_Store" },
+        { name: "code/__pycache__/a.pyc" },
+        { name: "sub-Marlow/a.txt" },
+        { name: "sub-Quintavius/a.txt" },
+      ]).bytes,
+    );
+    const path = result.findings.map((f) => [f.kind, f.entries]);
+    expect(path).toEqual([
+      ["image-or-document-file", 6],
+      ["tooling-debris", 2],
+      ["path-subject-label", 2],
+    ]);
+    // A count only: no entry name rides in a finding.
+    expect(JSON.stringify(result)).not.toContain("consent");
+    expect(JSON.stringify(result)).not.toContain("Marlow");
+  });
+
   test("macOS resource forks are screened by name and never read as recordings", async () => {
     const { result } = await scan(
       buildZip([{ name: "__MACOSX/sub-01/._sub-01_eeg.edf", data: new Uint8Array(300) }]).bytes,

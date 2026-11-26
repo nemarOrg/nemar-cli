@@ -9,7 +9,9 @@
  * {@link ZIP_DIRECTORY_MAX_BYTES} and {@link ZIP_DIRECTORY_MAX_ENTRIES}; past either the read is
  * `partial`, `limit`), and the entries a reader reads. Nothing is extracted to disk.
  *
- * - **Names.** Every entry name goes through `scanPaths` as `<archive>!/<entry>`.
+ * - **Names.** Every entry name goes through `scanPaths` as `<archive>!/<entry>`. The path rules'
+ *   hits are folded to one finding per kind per archive, with the number of entries it stands for
+ *   in `entries` (lead ruling on #2392): an archive of 500 figures is one `image-or-document-file`.
  * - **Inner recordings.** An entry is read when its extension has a reader, its method is stored
  *   (0) or deflate (8), its uncompressed size is at most {@link ZIP_ENTRY_MAX_BYTES} and it is
  *   not encrypted. A deflated entry is inflated lazily with `DecompressionStream("deflate-raw")`,
@@ -532,6 +534,17 @@ const isResourceFork = (name: string) =>
  */
 const RAW = "sourcedata/";
 
+/** One finding per kind, the first one's shape, with the number of hits it stands for. */
+export function foldPathFindings(findings: readonly Finding[]): Finding[] {
+  const byKind = new Map<string, Finding>();
+  for (const f of findings) {
+    const seen = byKind.get(f.kind);
+    if (seen) seen.entries = (seen.entries ?? 1) + 1;
+    else byKind.set(f.kind, { ...f, entries: 1 });
+  }
+  return [...byKind.values()];
+}
+
 /** Scan one archive. */
 export async function scanZip(
   src: RangeSource,
@@ -557,7 +570,9 @@ export async function scanZip(
   const directory = await readZipDirectory(src, kit.pageBytes);
   if (directory.incomplete) reason(directory.incomplete);
   const { entries } = directory;
-  for (const f of scanPaths(entries.map((e) => `${path}!/${e.name}`))) findings.push(f);
+  for (const f of foldPathFindings(scanPaths(entries.map((e) => `${path}!/${e.name}`)))) {
+    findings.push(f);
+  }
 
   const inner = kit.inner();
   const files = entries.filter((e) => !e.directory && !isResourceFork(e.name));
