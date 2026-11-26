@@ -401,7 +401,7 @@ describe("with the review off, the mail is what it was before the review existed
   // changed by not one byte (whitespace included) when there is no review to add. A deliberate
   // edit to the mail updates these hashes in the same commit and says so.
   // Re-pinned when the admin tree renamed `admin repo` to `admin dataset` (ADR 0135): the mail
-  // with `admin dataset publish` put back to `admin dataset publish` hashes to the previous pins
+  // with `admin dataset publish` put back to `admin repo publish` hashes to the previous pins
   // exactly, so the command text is the only change.
   const MAIL_BEFORE_THE_REVIEW: Array<{
     name: string;

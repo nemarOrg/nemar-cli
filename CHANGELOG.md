@@ -19,8 +19,9 @@ earlier releases are described only by their generated notes.
 
 **Release note.**
 Publication requests can now be decided at scale with evidence that the depositor can check.
-Deploy the Worker and the review script together. Reviews that start between the two report `inputs_unavailable`; restart them with `nemar admin dataset publish start <id>`.
-Two switches stay off until the owner turns them on: `PUBLICATION_REVIEW_ENABLED` in production (a separate change, #2370) and `PUBLICATION_AUTO_DENY_MODE` (`off`, `shadow` or `on`, with `PUBLICATION_AUTO_DENY_DAILY_CAP`).
+Deploy the Worker and the review script together.
+Reviews that start between the two report `inputs_unavailable`; restart them with `nemar admin dataset publish start <id>`.
+Two switches stay off until the owner turns them on, each in a reviewed change: `PUBLICATION_REVIEW_ENABLED` in production (pull request #2370), and `PUBLICATION_AUTO_DENY_MODE` (`off`, `shadow` or `on`) with its owner-set `PUBLICATION_AUTO_DENY_DAILY_CAP`; neither may appear in `backend/wrangler-sccn.toml` except through such a change.
 
 - **Upstream license lineage.** `nemar dataset license-check <path>` and `nemar admin dataset publish license-lineage <id>` find a dataset's upstream sources and read each license from DataCite, Crossref, OpenAlex, or OpenNeuro's and PhysioNet's own records. They return one outcome: compatible, attribution, NC, share-alike mismatch, needs permission, redistribution prohibited, source is a publication, no upstream declared, or unresolved. Unresolved is never compatible.
 - **License permission workflow.** When lineage needs permission, the depositor is told to send evidence from the original authors to support@nemar.org. `nemar admin dataset publish license-permission <id> --ticket <n>` records it against the support ticket. A recorded permission clears only the license reason.
