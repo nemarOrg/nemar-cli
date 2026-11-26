@@ -509,16 +509,79 @@ describe("the file checks of the public route", () => {
     });
     expect(lines.join("\n")).toContain("[quality-admin] view_data_corrupt");
     expect(lines.join("\n")).toContain("reason=digest");
+    // One byte longer: refused by its size, before it is hashed.
     await bucket.put(`d/${key}/${location}`, new Uint8Array([...original, 10]));
-    expectWord(await file(stampId, sha), "view_data_corrupt");
+    const longer = await logged(async () => {
+      expectWord(await file(stampId, sha), "view_data_corrupt");
+    });
+    expect(longer.join("\n")).toContain("reason=size");
     await bucket.delete(`d/${key}/${location}`);
     expectWord(await file(stampId, sha), "view_data_missing");
   });
 
   test("a record over the bound is never read whole and is record_unreadable", async () => {
     const { stampId, key } = await derivative();
-    await bucket.put(`d/${key}/${RECORD_PATH}`, "x".repeat(512 * 1024 + 1));
-    expectWord(await record(stampId), "record_unreadable");
+    // Valid JSON one byte over the bound, so only the bound refuses it.
+    const padded = JSON.stringify({ ...RECORD, pad: "" });
+    const over = 512 * 1024 + 1 - new TextEncoder().encode(padded).byteLength;
+    await bucket.put(
+      `d/${key}/${RECORD_PATH}`,
+      JSON.stringify({ ...RECORD, pad: "x".repeat(over) }),
+    );
+    const lines = await logged(async () => {
+      expectWord(await record(stampId), "record_unreadable");
+    });
+    expect(lines.join("\n")).toContain("reason=record_too_large");
+  });
+
+  const edited = (edit: (r: Loose) => void): string => {
+    const copy = structuredClone(RECORD);
+    edit(copy);
+    return JSON.stringify(copy);
+  };
+
+  test("the record is checked whole: the schema, plugin sources, scope and its own recording", async () => {
+    const cases: [string, (r: Loose) => void, string][] = [
+      ["schema", (r) => void (r.extensions.nemar.views[4].caption = ""), "declaration_invalid"],
+      [
+        "plugin source",
+        (r) => void (r.extensions.nemar.views[4].source.plugin.name = "nemar-other"),
+        "",
+      ],
+      [
+        "scope",
+        (r) => {
+          r.extensions.nemar.views[3].scope = "subject";
+          r.extensions.nemar.views[3].sources = [{ record_sha256: "a".repeat(64) }];
+        },
+        "view_scope_reserved",
+      ],
+      [
+        "identity",
+        (r) => {
+          const text = JSON.stringify(r).replaceAll(
+            "sub-CUCOV076_task-COVID",
+            "sub-CUCOV077_task-COVID",
+          );
+          Object.assign(r, JSON.parse(text));
+        },
+        "record_elsewhere",
+      ],
+    ];
+    for (const [name, edit, reason] of cases) {
+      const { stampId, key } = await derivative();
+      await bucket.put(`d/${key}/${RECORD_PATH}`, edited(edit));
+      const lines = await logged(async () => {
+        const answer = await record(stampId);
+        expect([name, answer.body.error]).toEqual([name, "record_unreadable"]);
+        expectWord(await file(stampId, SPECTRUM[0]), "record_unreadable");
+      });
+      if (reason !== "")
+        expect([name, lines.join("\n")]).toEqual([
+          name,
+          expect.stringContaining(`reason=${reason}`),
+        ]);
+    }
   });
 });
 
