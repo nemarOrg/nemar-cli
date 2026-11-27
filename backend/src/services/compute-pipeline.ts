@@ -835,7 +835,8 @@ export const SERVING_INDEX_DEFERRED_WORD = "serving_index_deferred";
  * Whole minutes (whole seconds divided by 60, so the 24-hour boundary is exact) since the FIRST deferral of a tuple's current run (`?1` dataset, `?2` version, `?3` recipe, `?4`
  * recipe version, `?5` engine, `?6` input), on SQLite's clock: the oldest deferred stamp newer than the
  * tuple's newest stamp of any other kind, so an earlier run's deferrals never shorten a later run's wait.
- * NULL when the run was never deferred.
+ * A deferral of the run's commit ({@link SOURCE_COMMIT_DEFERRED_WORD}, ADR 0143) is a pause of the same run,
+ * not another kind: it does not restart the 24 hours. NULL when the run was never deferred.
  */
 export const SERVING_INDEX_DEFERRAL_AGE_SQL = `SELECT (CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', MIN(d.created_at)) AS INTEGER)) / 60 AS minutes
   FROM compute_pipeline_stamps d
@@ -846,7 +847,8 @@ export const SERVING_INDEX_DEFERRAL_AGE_SQL = `SELECT (CAST(strftime('%s', 'now'
                          WHERE o.dataset_id = ?1 AND o.version = ?2 AND o.recipe = ?3
                            AND o.recipe_version = ?4 AND o.engine = ?5 AND o.input = ?6
                            AND NOT (o.state = 'refused'
-                                    AND o.refusal_code = '${SERVING_INDEX_DEFERRED_WORD}')), 0)`;
+                                    AND o.refusal_code IN ('${SERVING_INDEX_DEFERRED_WORD}',
+                                                           '${SOURCE_COMMIT_DEFERRED_WORD}'))), 0)`;
 
 export type ServingIndexDecision =
   | { kind: "run"; servingIndex: StagedServingIndex }
@@ -1593,7 +1595,9 @@ export function pipelineCandidatesSql(env: Pick<Bindings, "ENVIRONMENT">): strin
  * caught up with is not a candidate: its open stamp holds the tuple. A tuple whose stamp FAILED is not a
  * candidate for {@link RETRY_COOLDOWN_DAYS} days after the failure, nor once it has failed
  * {@link MAX_FAILED_ATTEMPTS} times (a refusal is not a failure: the pool's word is not the dataset's),
- * decided in the SQL so that failing datasets at the head of the order do not fill the page.
+ * decided in the SQL so that failing datasets at the head of the order do not fill the page. A dataset that is
+ * refused or deferred only at dispatch, when its tag's commit is read (ADR 0143), is still a candidate: the
+ * queue asks for {@link PIPELINE_RUN_EXTRA_TRIES} more than its room and passes over it.
  *
  * Which predicate is the environment's: the production one unless `env.ENVIRONMENT` is recognized as not
  * production, where the compute fixture is let through as well (plan S1); the statement and the re-check
@@ -2102,9 +2106,35 @@ const STOPS_A_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusal>([
   // The tenant ceiling is full for the pipelines' class: the next dataset meets the same count.
   "platform_busy",
   "create_failed",
-  // GitHub or its credentials could not give a tag's commit: the next dataset meets the same fault (ADR 0143).
-  "source_commit_deferred",
 ]);
+
+/**
+ * The faults reading a tag's commit that every dataset meets alike, because they are the Worker's credentials and
+ * not a repository's (ADR 0143): a run over the queue stops at the first. `github_unreadable` can be one
+ * repository's (a renamed or empty one, an answer it alone gives), so the queue defers that dataset and moves on.
+ */
+export const SOURCE_COMMIT_CREDENTIAL_FAULTS: readonly string[] = Object.freeze([
+  "no_github_credentials",
+  "token_mint_failed",
+]);
+
+/** Whether a refusal would repeat for the next dataset, so a run over the queue stops at it. */
+function stopsTheRun(result: Extract<DispatchResult, { ok: false }>): boolean {
+  if (result.code === "source_commit_deferred") {
+    return SOURCE_COMMIT_CREDENTIAL_FAULTS.includes(result.reason ?? "");
+  }
+  return STOPS_A_RUN.has(result.code);
+}
+
+/**
+ * How many candidates beyond its room a run over the queue may try. A dataset refused or deferred at dispatch
+ * (a tag the repository lacks, `version_tag_absent`; one repository GitHub cannot answer, `source_commit_deferred`)
+ * stays a candidate (ADR 0143 decision 3) and sorts where it sorts, so a run passes over it and tries the next
+ * instead of counting it against its room; this bounds what one run spends on them (each costs a GitHub tag
+ * lookup and a few statements). More refused datasets than this at the head of the order would still hold a
+ * run, and each one is logged by name.
+ */
+export const PIPELINE_RUN_EXTRA_TRIES = 10;
 
 export interface EligibleRun {
   results: DispatchResult[];
@@ -2182,10 +2212,12 @@ export async function dispatchEligible(
     return run;
   }
   try {
+    // The room's worth of candidates and a bounded number more, tried until the room is filled: a dataset
+    // refused or deferred at dispatch does not take a place of the room (ADR 0143).
     for (const candidate of await pipelineCandidates(
       env,
       recipe,
-      room.attempts,
+      room.attempts + PIPELINE_RUN_EXTRA_TRIES,
       input.after,
       recipeInput,
     )) {
@@ -2201,7 +2233,7 @@ export async function dispatchEligible(
       run.results.push(result);
       if (result.ok) {
         run.dispatched++;
-      } else if (STOPS_A_RUN.has(result.code)) {
+      } else if (stopsTheRun(result)) {
         run.stoppedBy = result.code;
         break;
       }
