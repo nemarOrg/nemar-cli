@@ -45,6 +45,7 @@ import {
   approvalInFlightSql,
 } from "../../services/approval-dispatch";
 import { isValidDatasetId } from "../../services/datasetId";
+import { testS3EndpointOverride } from "../../services/environment";
 import { isExemplarPublishAllowed } from "../../services/exemplar";
 import {
   checkWorkflowExists,
@@ -1508,6 +1509,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           region: c.env.AWS_REGION,
           accessKeyId: c.env.AWS_ACCESS_KEY_ID,
           secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          endpointUrl: testS3EndpointOverride(c.env),
         },
         datasetId,
       );
@@ -1570,11 +1572,13 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
             region: c.env.AWS_REGION,
             accessKeyId: c.env.AWS_ACCESS_KEY_ID,
             secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+            endpointUrl: testS3EndpointOverride(c.env),
           },
           datasetId,
         );
         s3Reverted = true;
       } catch (s3RevertError) {
+        await alertIfPolicyFull(c.env, s3RevertError);
         console.error(`S3 policy revert failed for ${datasetId}:`, s3RevertError);
       }
 

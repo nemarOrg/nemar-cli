@@ -34,6 +34,7 @@ import { preflightRecording, takePreflight } from "../../services/identifier-pre
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { generateDatasetUploadUrls, getBucketPolicy, markDatasetPrivate } from "../../services/s3";
 import {
+  alertIfPolicyFull,
   notifyIfPolicyNearCap,
   notifyStoragePolicyAlert,
 } from "../../services/storage-policy-alert";
@@ -550,11 +551,13 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               region: c.env.AWS_REGION,
               accessKeyId: c.env.AWS_ACCESS_KEY_ID,
               secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+              endpointUrl: testS3EndpointOverride(c.env),
             },
             datasetId,
           );
           await notifyIfPolicyNearCap(c.env, written);
         } catch (s3Error) {
+          await alertIfPolicyFull(c.env, s3Error);
           const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
           console.error(`Failed to mark resumed dataset ${datasetId} private:`, s3Msg);
           return c.json(
@@ -831,6 +834,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       try {
         await notifyIfPolicyNearCap(c.env, await markDatasetPrivate(createS3Options, datasetId));
       } catch (s3Error) {
+        await alertIfPolicyFull(c.env, s3Error);
         const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
         console.error(`Failed to mark new dataset ${datasetId} private:`, s3Msg);
         const leftovers = await rollBackNewDataset(

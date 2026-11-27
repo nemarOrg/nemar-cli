@@ -32,7 +32,9 @@ import {
   PUBLIC_ACCESS_SID,
   buildPublicAccessPolicy,
   isDatasetPrivate,
+  policyByteSize,
   prefixArn,
+  removePrivateDataset,
 } from "../src/services/bucket-policy";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -44,6 +46,7 @@ const BUCKET = "nemar";
 const API_KEY = "policyrollback-key-0123456789abcdef0123456789abcd";
 const PAT = "ghp_standin_only_never_real";
 const ADMIN_EMAIL = "policy-admin@example.org";
+const ADMIN_KEY = "policyadmin-key-0123456789abcdef0123456789abcdef00";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
@@ -100,6 +103,15 @@ async function seedUser(): Promise<void> {
     `INSERT INTO users (username, email, password_hash, status, role, email_verified)
      VALUES ('policyadmin', ?, 'x', 'approved', 'admin', 1)`,
     [ADMIN_EMAIL],
+  );
+  const admin = db
+    .query<{ id: number }, []>("SELECT id FROM users WHERE username = 'policyadmin'")
+    .get();
+  if (!admin) throw new Error("seed admin failed");
+  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+    admin.id,
+    await hashApiKey(ADMIN_KEY),
+    ADMIN_KEY.slice(0, 8),
   );
   db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
     row.id,
@@ -415,5 +427,100 @@ describe("POST /datasets: admin alerts (#2497)", () => {
       expect((await create()).status).toBeLessThan(300);
       expect(adminSubjects(calls)).toEqual([]);
     });
+  });
+});
+
+/**
+ * A policy that carves out `id` and is just OVER the cap, as a concurrent
+ * growth (or a hand edit) can leave it: removing `id` fits, adding it back
+ * does not.
+ */
+function overCapWith(id: string): BucketPolicy {
+  const pad: string[] = [];
+  const build = () => buildPublicAccessPolicy(BUCKET, [id, ...pad]);
+  while (JSON.stringify(build()).length <= MAX_BUCKET_POLICY_BYTES) {
+    pad.push(`on${String(pad.length * 10).padStart(6, "0")}`);
+  }
+  return build();
+}
+
+describe("a make-private refused at the cap fails closed and alerts (#2497)", () => {
+  test("publish revert: the carve-out cannot be restored, s3_reverted is false, admins are mailed", async () => {
+    const id = "nm000280";
+    db.query(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, is_sandbox, visibility, status)
+       VALUES (?, 'Revert Fixture', ?, ?, 0, 'private', 'active')`,
+    ).run(id, userId, `nemarDatasets/${id}`);
+    const policy = overCapWith(id);
+    // Publishing fits (one entry fewer); the revert's re-add does not.
+    expect(policyByteSize(removePrivateDataset(policy, BUCKET, id))).toBeLessThanOrEqual(
+      MAX_BUCKET_POLICY_BYTES,
+    );
+    s3.setBucketPolicy(policy);
+    db.run(
+      "CREATE TRIGGER fail_publish BEFORE UPDATE OF visibility ON datasets BEGIN SELECT RAISE(ABORT, 'injected'); END",
+    );
+    await withAdminMail(async (calls) => {
+      const res = await app.request(
+        `/datasets/${id}/publish`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${ADMIN_KEY}`, "X-CLI-Version": "99.0.0" },
+        },
+        env(),
+      );
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as { s3_reverted?: boolean };
+      expect(body.s3_reverted).toBe(false);
+      expect(adminSubjects(calls)).toContain(
+        "[NEMAR] ALERT: bucket policy full, dataset creation refused",
+      );
+    });
+  });
+
+  test("resume: an over-cap carve-out issues no upload URL and mails the admins", async () => {
+    // An incomplete dataset of this user, so POST /datasets resumes it.
+    db.query(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, is_sandbox, visibility)
+       VALUES ('xx090500', 'Policy Rollback Fixture', ?, 'nemarDatasets/xx090500', 1, 'private')`,
+    ).run(userId);
+    s3.setBucketPolicy(overCapWith("on999990"));
+    await withAdminMail(async (calls) => {
+      const res = await create();
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as { error?: string; upload_urls?: unknown };
+      expect(body.error).toBe("Failed to secure dataset storage");
+      expect(body.upload_urls).toBeUndefined();
+      expect(s3.log.some((r) => r.method === "PUT")).toBe(false);
+      expect(adminSubjects(calls)).toEqual([
+        "[NEMAR] ALERT: bucket policy full, dataset creation refused",
+      ]);
+    });
+  });
+});
+
+describe("POST /datasets: a failed final row write rolls back (#2497)", () => {
+  test("the github_repo UPDATE aborts: repository deleted, permission and row removed", async () => {
+    s3.setBucketPolicy(buildPublicAccessPolicy(BUCKET, ["nm000111"]));
+    db.run(
+      "CREATE TRIGGER fail_repo BEFORE UPDATE OF github_repo ON datasets BEGIN SELECT RAISE(ABORT, 'injected'); END",
+    );
+    const res = await create();
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as {
+      error?: string;
+      dataset_id?: string;
+      rolled_back?: boolean;
+      upload_urls?: unknown;
+    };
+    expect(body.error).toBe("Failed to create dataset");
+    expect(body.rolled_back).toBe(true);
+    expect(body.upload_urls).toBeUndefined();
+    expect(githubLog).toContainEqual({
+      method: "DELETE",
+      path: `/repos/nemarDatasets/${body.dataset_id}`,
+    });
+    expect(datasetRows()).toBe(0);
+    expect(permissionRows()).toBe(0);
   });
 });
