@@ -1140,6 +1140,8 @@ describe("again: an administrator's re-review of a reported review", () => {
     ["a number", { again: 1 }, false],
     ["null", { again: null }, false],
     ["a body that is not an object", [true], false],
+    ["a misspelled key", { agian: true }, false],
+    ["a key beside again", { again: true, force: true }, false],
     ["text that is not JSON", "again=true", true],
   ] as const) {
     test(`${why} is refused 400 invalid_body, and nothing is written`, async () => {

@@ -60,8 +60,8 @@ function refuse(
 
 /**
  * The start's optional JSON body, read strictly: nothing at all (what a start without options
- * sends) is the default, and anything else must be an object whose `again`, when present, is a
- * boolean. Null for a body that is not.
+ * sends) is the default, and anything else must be an object with no key but `again`, which, when
+ * present, is a boolean. Null for a body that is not.
  */
 async function readStartBody(c: Context): Promise<StartPublicationReviewBody | null> {
   const text = await c.req.text();
@@ -73,6 +73,8 @@ async function readStartBody(c: Context): Promise<StartPublicationReviewBody | n
     return null;
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  // Only `again` is a key: a misspelling must not read as "no option" and start a review as usual.
+  if (Object.keys(parsed).some((k) => k !== "again")) return null;
   const again = (parsed as Record<string, unknown>).again;
   if (again !== undefined && typeof again !== "boolean") return null;
   return again === undefined ? {} : { again };
