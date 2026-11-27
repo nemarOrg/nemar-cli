@@ -69,7 +69,8 @@ export function startGithubTags(): GithubTags {
       if (!m) return Response.json({ message: "Not Found" }, { status: 404 });
       const dataset = m[1] as string;
       const tag = decodeURIComponent(m[2] as string);
-      const set = answers.get(`${dataset}/${tag}`);
+      // An answer is the version's whichever name is asked: the lookup asks `v1.0.0`, then `1.0.0` after a 404.
+      const set = answers.get(`${dataset}/${tag.replace(/^v/, "")}`);
       if (set === "absent") return Response.json({ message: "Not Found" }, { status: 404 });
       if (set !== undefined && typeof set !== "string")
         return new Response("{}", { status: set.http });
@@ -85,7 +86,8 @@ export function startGithubTags(): GithubTags {
   return {
     url,
     log,
-    answer: (dataset, tag, answer) => void answers.set(`${dataset}/${tag}`, answer),
+    answer: (dataset, tag, answer) =>
+      void answers.set(`${dataset}/${tag.replace(/^v/, "")}`, answer),
     reset() {
       answers.clear();
       log.length = 0;
