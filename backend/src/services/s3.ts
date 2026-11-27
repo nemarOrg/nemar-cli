@@ -11,8 +11,10 @@ import { escapeXml, unescapeXml } from "../lib/escape.js";
 import {
   type BucketPolicy,
   MAX_BUCKET_POLICY_BYTES,
+  POLICY_NEAR_CAP_TAG,
   addPrivateDataset,
   isDatasetPrivate,
+  isPolicyNearCap,
   policyByteSize,
   removePrivateDataset,
 } from "./bucket-policy.js";
@@ -1668,17 +1670,26 @@ export async function getBucketPolicy(options: PresignedUrlOptions): Promise<Buc
 async function putBucketPolicy(options: PresignedUrlOptions, policy: BucketPolicy): Promise<void> {
   const size = policyByteSize(policy);
   if (size > MAX_BUCKET_POLICY_BYTES) {
-    // Should be unreachable in the deny-list model (the policy scales with the
-    // small private set), but guard so we fail loudly rather than let AWS
-    // reject the PUT with an opaque MalformedPolicy error.
+    // Reached in production on 2026-11-27 (#2497): the private set grew to
+    // 628 entries. The policy is now compacted (bucket-policy.ts), and the
+    // create route checks headroom before claiming an id; this guard still
+    // fails loudly rather than letting AWS reject the PUT with an opaque
+    // MalformedPolicy error.
     throw new Error(
       `Bucket policy would be ${size} bytes, exceeding the ${MAX_BUCKET_POLICY_BYTES}-byte limit`,
     );
   }
 
-  const { bucket, region } = options;
+  const { bucket, region, endpointUrl } = options;
   const aws = createS3Client(options);
-  const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
+  // Same test-only origin override `getBucketPolicy` honors; callers pass it
+  // only through `testS3EndpointOverride`, so production always writes to the
+  // real bucket host.
+  const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
+    /\/+$/,
+    "",
+  );
+  const url = `${origin}/?policy`;
 
   const signed = await aws.sign(url, {
     method: "PUT",
@@ -1690,6 +1701,12 @@ async function putBucketPolicy(options: PresignedUrlOptions, policy: BucketPolic
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`Failed to update bucket policy: HTTP ${response.status} - ${errorText}`);
+  }
+  if (isPolicyNearCap(size)) {
+    console.error(
+      `${POLICY_NEAR_CAP_TAG} bucket ${bucket} policy is ${size} of ${MAX_BUCKET_POLICY_BYTES} bytes ` +
+        `(${Math.round((size / MAX_BUCKET_POLICY_BYTES) * 100)}%); new private datasets will be refused at the cap (#2497)`,
+    );
   }
 }
 
