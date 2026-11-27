@@ -24,6 +24,7 @@ import {
   dataciteLicenses,
   declaredLicenseWords,
   extractSources,
+  figshareArticleOfUrl,
   isCutDoiCandidate,
   isOsfProject,
   isValidCachedRecord,
@@ -73,7 +74,7 @@ const count = (part: string) => standIn.requests.filter((k) => k.includes(part))
 
 describe("resolver version", () => {
   test("is 5, since outcomes change", () => {
-    expect(RESOLVER_VERSION).toBe("license-lineage/5");
+    expect(RESOLVER_VERSION).toBe("license-lineage/6");
   });
 });
 
@@ -1119,6 +1120,165 @@ describe("data containers are data; publications stay publications", () => {
         relation: { "is-component-of": [{ "id-type": "doi", id: "10.9999/Parent" }] },
       }),
     ).toBeNull();
+  });
+});
+
+describe("figshare article URLs are read from figshare", () => {
+  // nm000830 (2026-11-27): SourceDatasets names the PLOS figshare dataset by URL.
+  const NM000830_URL =
+    "https://plos.figshare.com/articles/dataset/Frequency-resolved_analysis_of_coherent_oscillations_of_local_cerebral_blood_volume_measured_with_near-infrared_spectroscopy_and_systemic_arterial_pressure_in_healthy_human_subjects/7708514";
+  const PAPER = "10.1371/journal.pone.0211710";
+  const ARTICLE_FIXTURE = `${import.meta.dir}/fixtures/license-lineage/62-figshare-article-7708514.json`;
+  const withType = async (type: string, license?: unknown) => {
+    const a = await Bun.file(ARTICLE_FIXTURE).json();
+    a.defined_type_name = type;
+    if (license !== undefined) a.license = license;
+    standIn.override("figshare /v2/articles/7708514?", { status: 200, body: JSON.stringify(a) });
+  };
+
+  test.each([
+    [NM000830_URL, "7708514", null],
+    ["https://figshare.com/articles/7708514/2", "7708514", "2"],
+    ["https://figshare.com/articles/dataset/some_slug/7708514/3?file=1", "7708514", "3"],
+    ["https://figshare.com/articles/7708514", "7708514", null],
+    [
+      "https://springernature.figshare.com/articles/journal_contribution/slug/12345/",
+      "12345",
+      null,
+    ],
+  ])("%s -> article %s version %p", (url, id, version) => {
+    expect(figshareArticleOfUrl(url)).toEqual({ id, version });
+  });
+
+  test.each([
+    ["https://figshare.com/collections/slug/123"],
+    ["https://figshare.com/articles/dataset/no-id"],
+    ["https://notfigshare.com/articles/123"],
+  ])("%s is not a figshare article", (url) => {
+    expect(figshareArticleOfUrl(url)).toBeNull();
+  });
+
+  test("nm000830: a figshare dataset under CC BY 4.0, named by its DOI, never read as the article", async () => {
+    const r = await run(inputs("CC-BY-4.0", [{ URL: NM000830_URL }]));
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(r.sources).toHaveLength(1);
+    expect(r.sources[0]).toMatchObject({
+      id: PAPER,
+      resolver: "figshare",
+      resource_type: "dataset",
+      status: "resolved",
+      license: "cc-by",
+      license_version: "4.0",
+    });
+    expect(count("crossref")).toBe(0);
+    expect(count("datacite")).toBe(0);
+    expect(standIn.misses).toEqual([]);
+  });
+
+  test("a versioned URL reads that version", async () => {
+    const r = await run(
+      inputs("CC-BY-4.0", [{ URL: "https://plos.figshare.com/articles/dataset/x/7708514/1" }]),
+    );
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(count("/v2/articles/7708514/versions/1")).toBe(1);
+  });
+
+  test("a paper-like type is a publication; any other type, or a dataset with no license, is unresolved", async () => {
+    await withType("journal contribution");
+    expect((await run(inputs("CC-BY-4.0", [{ URL: NM000830_URL }]))).outcome).toBe(
+      "source_is_publication",
+    );
+    for (const [type, license] of [
+      ["figure", undefined],
+      ["software", undefined],
+      ["dataset", null],
+    ] as const) {
+      standIn.stop();
+      standIn = startStandIn();
+      await withType(type, license);
+      const r = await run(inputs("CC-BY-4.0", [{ URL: NM000830_URL }]));
+      expect(r.outcome).toBe("unresolved");
+      expect(r.sources[0].license).toBeNull();
+    }
+  });
+
+  test("a figshare article that is missing or does not answer is unresolved", async () => {
+    standIn.override("figshare /v2/articles/7708514?", { status: 404 });
+    const missing = await run(inputs("CC-BY-4.0", [{ URL: NM000830_URL }]));
+    expect(missing.sources[0].status).toBe("not_found");
+    expect(missing.outcome).toBe("unresolved");
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("figshare /v2/articles/7708514?", { status: 503 });
+    const down = await run(inputs("CC-BY-4.0", [{ URL: NM000830_URL }]), { retry: NO_RETRY });
+    expect(down.sources[0].status).toBe("fetch_failed");
+    expect(down.outcome).toBe("unresolved");
+  });
+});
+
+describe("a stale enrichment relation is not a source", () => {
+  const PAPER = "10.1371/journal.pone.0211710";
+  const NM000830_URL = "https://plos.figshare.com/articles/dataset/slug/7708514";
+  const metadataWith = (identifier: string, relation = "IsDerivedFrom") =>
+    JSON.stringify({
+      version: "2.0",
+      related_identifiers: [
+        { identifier, identifier_type: "DOI", relation_type: relation },
+        {
+          identifier: "https://github.com/nemarDatasets/nm000830",
+          identifier_type: "URL",
+          relation_type: "IsSupplementTo",
+        },
+      ],
+    });
+  const withMetadata = (license: string, sources: unknown[], metadata: string) => ({
+    ...inputs(license, sources),
+    nemarMetadata: metadata,
+  });
+
+  test("nm000830's shape: the stale IsDerivedFrom paper is the figshare source's DOI, so only the source stands", async () => {
+    const r = await run(withMetadata("CC-BY-4.0", [{ URL: NM000830_URL }], metadataWith(PAPER)));
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(r.sources.map((s) => [s.id, s.origin])).toEqual([[PAPER, "source_datasets"]]);
+    // The relation is the source itself, not a stale one.
+    expect(r.skipped_stale_relations).toBe(0);
+  });
+
+  test("a publication relation SourceDatasets does not name is skipped and counted", async () => {
+    const r = await run(withMetadata("CC-BY-4.0", [ZENODO_BY], metadataWith(PAPER)));
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(r.sources.map((s) => s.id)).toEqual(["10.5281/zenodo.24539621"]);
+    expect(r.skipped_stale_relations).toBe(1);
+    expect(lineageLines(r)).toContain(
+      "Skipped: 1 publication(s) listed as IsDerivedFrom in .nemar/metadata.json that SourceDatasets does not name (stale enrichment, not sources).",
+    );
+    // Alone, it leaves nothing declared.
+    const alone = await run(withMetadata("CC-BY-4.0", [], metadataWith(PAPER)));
+    expect(alone.sources).toEqual([]);
+    expect(alone.outcome).toBe("no_upstream_declared");
+    expect(alone.skipped_stale_relations).toBe(1);
+  });
+
+  test("a paper SourceDatasets names still is a publication; a dataset relation is still a source", async () => {
+    const named = await run(withMetadata("CC-BY-4.0", [{ DOI: PAPER }], metadataWith(PAPER)));
+    expect(named.outcome).toBe("source_is_publication");
+    expect(named.skipped_stale_relations).toBe(0);
+    const dataset = await run(
+      withMetadata("CC-BY-4.0", [], metadataWith("10.5281/zenodo.24539621")),
+    );
+    expect(dataset.sources.map((s) => [s.id, s.origin])).toEqual([
+      ["10.5281/zenodo.24539621", "related_identifiers"],
+    ]);
+    expect(dataset.skipped_stale_relations).toBe(0);
+  });
+
+  test("a relation that cannot be read is not skipped: it stays unresolved", async () => {
+    standIn.override("crossref /works/10.1371/journal.pone.0211710", { status: 503 });
+    const r = await run(withMetadata("CC-BY-4.0", [ZENODO_BY], metadataWith(PAPER)), {
+      retry: NO_RETRY,
+    });
+    expect(r.outcome).toBe("unresolved");
+    expect(r.skipped_stale_relations).toBe(0);
   });
 });
 

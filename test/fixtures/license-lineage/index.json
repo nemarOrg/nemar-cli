@@ -597,5 +597,45 @@
     "status": 200,
     "file": "61-figshare-article-3563028.json",
     "fetched_at": "2026-11-27T17:30:35Z"
+  },
+  {
+    "case": "figshare-article-url",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/articles/7708514",
+    "url": "https://api.figshare.com/v2/articles/7708514",
+    "status": 200,
+    "file": "62-figshare-article-7708514.json",
+    "fetched_at": "2026-11-27T19:19:07Z"
+  },
+  {
+    "case": "figshare-article-url",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/articles/7708514/versions/1",
+    "url": "https://api.figshare.com/v2/articles/7708514/versions/1",
+    "status": 200,
+    "file": "63-figshare-article-7708514-v1.json",
+    "fetched_at": "2026-11-27T19:19:19Z"
+  },
+  {
+    "case": "stale-paper-relation",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.1371%2Fjournal.pone.0211710",
+    "url": "https://api.datacite.org/dois/10.1371%2Fjournal.pone.0211710",
+    "status": 404,
+    "file": "64-datacite-plos-article-0211710.json",
+    "fetched_at": "2026-11-27T19:19:19Z"
+  },
+  {
+    "case": "stale-paper-relation",
+    "registry": "crossref",
+    "method": "GET",
+    "path": "/works/10.1371%2Fjournal.pone.0211710",
+    "url": "https://api.crossref.org/works/10.1371%2Fjournal.pone.0211710",
+    "status": 200,
+    "file": "65-crossref-plos-article-0211710.json",
+    "fetched_at": "2026-11-27T19:19:20Z"
   }
 ]

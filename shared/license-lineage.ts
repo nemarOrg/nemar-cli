@@ -41,10 +41,12 @@ import { normalizeDoiKey } from "./never-data-paper.js";
  * `resolved_at`, ADR 0142 decision 3; version 4: README DOIs that prefix another declared DOI
  * dropped, and DANDI's license spellings read, ADR 0142 decision 3, amendment of 2026-11-27;
  * version 5: README DOIs cut by an ellipsis dropped, and data containers (collections, OSF
- * projects, Crossref components) read as data, ADR 0139 decision 7, amendment of 2026-11-27);
+ * projects, Crossref components) read as data, ADR 0139 decision 7, amendment of 2026-11-27;
+ * version 6: figshare article URLs read through figshare's API, and stale enrichment relations
+ * that are publications skipped, the same ADR, amendment of 2026-11-27 (third));
  * the cache key carries it, so a record of an older version is never served.
  */
-export const RESOLVER_VERSION = "license-lineage/5";
+export const RESOLVER_VERSION = "license-lineage/6";
 
 /** The User-Agent of every registry request. It carries no contact details on purpose. */
 export const LICENSE_CHECK_USER_AGENT = "nemar-license-check/1";
@@ -232,7 +234,7 @@ export const RESOLVER_READ: Record<Resolver, string> = {
     "PhysioNet: the published project's license name, access policy and title, read through its API.",
   osf: "OSF: the node's license (name and URL) and title, and each child component's license, read through its API when DataCite holds no DOI or no rights for it, or registers it as a project.",
   figshare:
-    "figshare: for a figshare collection, each member article's license, read through its API (the collection's own license is not the data's).",
+    "figshare: for a figshare collection, each member article's license, read through its API (the collection's own license is not the data's); for a figshare article URL, the article's type and license.",
 };
 
 const READ_SOURCES = `The upstream sources declared in dataset_description.json (SourceDatasets), .nemar/metadata.json (IsDerivedFrom and IsIdenticalTo), the deposit attestation and the README (data-repository DOIs and OpenNeuro, Zenodo, PhysioNet or OSF URLs only; a DOI cut short in the text is dropped). Then, per source: ${Object.values(
@@ -634,6 +636,7 @@ export type SourceRef =
   | { kind: "doi"; doi: string; origin: SourceOrigin }
   | { kind: "openneuro_latest"; ds: string; origin: SourceOrigin }
   | { kind: "physionet"; slug: string; version: string | null; origin: SourceOrigin }
+  | { kind: "figshare_article"; id: string; version: string | null; origin: SourceOrigin }
   | { kind: "url"; url: string; origin: SourceOrigin };
 
 /** NEMAR's own DOI prefix (EZID shoulder `doi:10.82901/NEMAR.`, backend/src/services/ezid.ts). */
@@ -675,6 +678,24 @@ const OSF_RESERVED_PATHS: ReadonlySet<string> = new Set([
 ]);
 const KNOWN_URLS_IN_TEXT =
   /https?:\/\/(?:www\.)?(?:openneuro\.org\/datasets\/ds\d{6}(?:\/versions\/[0-9][\w.-]*)?|zenodo\.org\/(?:records?|deposit)\/\d+|physionet\.org\/(?:content|files)\/[a-z0-9][a-z0-9-]*(?:\/\d[\w.]*)?|osf\.io\/[a-z0-9]{5}(?![a-z0-9]))/gi;
+
+/**
+ * A figshare article URL on any figshare host (`https://plos.figshare.com/articles/dataset/<slug>/
+ * 7708514`, `https://figshare.com/articles/7708514/2`): its article id and version, or null. The
+ * id is the last all-digit path segment after `articles/`, unless the last two are digits, which
+ * are then the id and the version.
+ */
+export function figshareArticleOfUrl(url: string): { id: string; version: string | null } | null {
+  const m = /^https?:\/\/(?:[a-z0-9-]+\.)*figshare\.com\/articles\/([^?#]+)/i.exec(url.trim());
+  if (!m) return null;
+  const segs = m[1].split("/").filter((x) => x !== "");
+  const digits = (x: string | undefined) => x !== undefined && /^\d{1,12}$/.test(x);
+  const n = segs.length;
+  if (n >= 2 && digits(segs[n - 1]) && digits(segs[n - 2])) {
+    return { id: segs[n - 2], version: segs[n - 1] };
+  }
+  return digits(segs[n - 1]) ? { id: segs[n - 1], version: null } : null;
+}
 
 /** The DataCite DOI of an OSF node URL (`https://osf.io/rmafj` -> `10.17605/osf.io/rmafj`), or null. */
 export function osfDoiOfUrl(url: string): string | null {
@@ -718,6 +739,8 @@ export function refFromIdentifier(
   if (osf) return { kind: "doi", doi: osf, origin };
   const zenDoi = /zenodo\.org\/doi\/(10\.\d{4,9}\/\S+)/i.exec(t);
   if (zenDoi) return doiRef(zenDoi[1], origin);
+  const fs = figshareArticleOfUrl(t);
+  if (fs) return { kind: "figshare_article", ...fs, origin };
   const pn = PHYSIONET_URL.exec(t);
   if (pn) {
     return {
@@ -817,6 +840,8 @@ export function refKey(ref: SourceRef): string {
       return `openneuro:${ref.ds}`;
     case "physionet":
       return `physionet:${ref.slug}:${ref.version ?? ""}`;
+    case "figshare_article":
+      return `figshare:${ref.id}:${ref.version ?? ""}`;
     case "url":
       return `url:${ref.url}`;
   }
@@ -1573,6 +1598,99 @@ async function resolveComponent(
   );
 }
 
+/**
+ * figshare `defined_type_name`s that hold data (ADR 0139 decision 7, amendment of 2026-11-27):
+ * `dataset` only. figshare calls its data items datasets; `figure` and `media` can be recordings
+ * or illustrations, and `software`, `model` and `workflow` are code, so they are not known to be
+ * data and are `unresolved` (an administrator decides).
+ */
+export const FIGSHARE_DATA_TYPES: ReadonlySet<string> = new Set(["dataset"]);
+
+/**
+ * figshare types that are publications: an article's license is not the data's. Any type in
+ * neither set is `unresolved`.
+ */
+export const FIGSHARE_PAPER_TYPES: ReadonlySet<string> = new Set([
+  "journal contribution",
+  "preprint",
+  "thesis",
+  "book",
+  "chapter",
+  "conference contribution",
+  "poster",
+  "presentation",
+  "report",
+  "monograph",
+  "peer review",
+  "educational resource",
+]);
+
+/**
+ * A figshare article URL, read from figshare's API (`/v2/articles/<id>`, or its version): the
+ * figshare record decides what it is (ADR 0139 decision 7, amendment of 2026-11-27). A `dataset`
+ * with a license is a dataset under that license; a paper-like type is a publication; any other
+ * type, or a dataset with no license, is `unresolved`. The record's DOI names the source (a PLOS
+ * figshare dataset shares its article's DOI, `10.1371/journal.pone.0211710`), and that DOI is
+ * never then read from Crossref, which would call it the journal article.
+ */
+async function resolveFigshareArticle(
+  id: string,
+  version: string | null,
+  o: FetchContext,
+): Promise<SourceRecord> {
+  const url = `${o.bases.figshare}/v2/articles/${id}${version ? `/versions/${version}` : ""}`;
+  const fallbackId = `figshare:${id}${version ? `:${version}` : ""}`;
+  const got = await o.get(url);
+  if (got.kind === "failed") return failedRecord(fallbackId, got.status, url);
+  if (got.kind === "absent") return failedRecord(fallbackId, "not_found", url);
+  const a = got.body;
+  if (!isRecord(a)) return failedRecord(fallbackId, "unparseable", url);
+  const doi =
+    typeof a.doi === "string" && /^10\.\d{4,9}\//.test(a.doi.trim())
+      ? normalizeDoiKey(a.doi)
+      : fallbackId;
+  const type = typeof a.defined_type_name === "string" ? a.defined_type_name.toLowerCase() : null;
+  const authors = Array.isArray(a.authors)
+    ? a.authors
+        .map((x) => (isRecord(x) ? text(x.full_name) : null))
+        .filter((x): x is string => x !== null)
+        .slice(0, MAX_CREATORS)
+    : [];
+  const base = {
+    id: doi,
+    resolver: "figshare" as const,
+    resource_type: type,
+    title: text(a.title),
+    creators: authors,
+    publisher: "figshare",
+    evidence_url: url,
+  };
+  if (type === null || (!FIGSHARE_DATA_TYPES.has(type) && !FIGSHARE_PAPER_TYPES.has(type))) {
+    return unknownLicense(base);
+  }
+  const lic = isRecord(a.license) ? a.license : null;
+  const texts = [lic?.url, lic?.name].filter(
+    (t): t is string => typeof t === "string" && t.trim() !== "",
+  );
+  if (texts.length === 0) {
+    return FIGSHARE_DATA_TYPES.has(type)
+      ? unknownLicense(base)
+      : withLicense(base, [], [], false, []);
+  }
+  let value = normalizeLicense(texts[0]);
+  for (const t of texts.slice(1)) {
+    if (value.license !== "other") break;
+    value = normalizeLicense(t);
+  }
+  return withLicense(
+    base,
+    [value],
+    [texts[0]],
+    FIGSHARE_DATA_TYPES.has(type),
+    declaredList([declared(lic?.name, lic?.url)]),
+  );
+}
+
 async function resolveOpenNeuro(
   id: string,
   ds: string,
@@ -1977,6 +2095,10 @@ async function resolveRef(
       return cached(`doi:${ref.doi}`, cache, () => resolveDoiUncached(ref.doi, o));
     case "url":
       return failedRecord(ref.url, "no_doi", null);
+    case "figshare_article":
+      return cached(`figshare:${ref.id}:${ref.version ?? ""}`, cache, () =>
+        resolveFigshareArticle(ref.id, ref.version, o),
+      );
     case "physionet": {
       const id = `https://physionet.org/content/${ref.slug}/${ref.version ? `${ref.version}/` : ""}`;
       return cached(`physionet:${ref.slug}:${ref.version ?? ""}`, cache, () =>
@@ -2114,6 +2236,12 @@ export interface LineageResult {
    * ({@link isCutDoiCandidate}): counted, never sources.
    */
   dropped_doi_candidates: number;
+  /**
+   * Enrichment relations skipped as stale: publications listed as IsDerivedFrom or IsIdenticalTo
+   * in `.nemar/metadata.json` that SourceDatasets does not name ({@link dropStaleRelations}).
+   * Absent from a result of resolver version 5 or older.
+   */
+  skipped_stale_relations?: number;
   resolver_version: string;
   /**
    * When this lineage was resolved (an instant, ISO 8601): the review's lineage and the decision
@@ -2168,6 +2296,7 @@ export async function resolveLicenseLineage(
       target_license_raw: null,
       sources: unreadable,
       dropped_doi_candidates: 0,
+      skipped_stale_relations: 0,
       resolver_version: RESOLVER_VERSION,
       resolved_at: at,
       fetched_at: at,
@@ -2188,14 +2317,13 @@ export async function resolveLicenseLineage(
       }
     }),
   );
-  const sources: LineageSource[] = [
-    ...records.map((rec, i) => ({
-      ...rec,
-      origin: refs[i].origin,
-      outcome: sourceOutcome(rec, target),
-    })),
-    ...unreadable,
-  ];
+  const resolved: LineageSource[] = records.map((rec, i) => ({
+    ...rec,
+    origin: refs[i].origin,
+    outcome: sourceOutcome(rec, target),
+  }));
+  const { kept, skipped } = dropStaleRelations(resolved, refs);
+  const sources: LineageSource[] = [...kept, ...unreadable];
   const at = now().toISOString();
   return {
     // A README that names a source only as a DOI cut short has declared one: `unresolved` (the
@@ -2206,10 +2334,47 @@ export async function resolveLicenseLineage(
     target_license_raw: targetRaw,
     sources,
     dropped_doi_candidates: dropped,
+    skipped_stale_relations: skipped,
     resolver_version: RESOLVER_VERSION,
     resolved_at: at,
     fetched_at: at,
   };
+}
+
+/**
+ * The resolved sources less what stale or repeated metadata adds (ADR 0139 decision 7, amendment
+ * of 2026-11-27, resolver version 6):
+ *
+ *  - a source from another input that resolves to the same record as a SourceDatasets entry is
+ *    that entry (a figshare URL in SourceDatasets resolves to its DOI, which the enrichment may
+ *    also list), so the SourceDatasets entry alone stands;
+ *  - an enrichment relation (`.nemar/metadata.json` IsDerivedFrom or IsIdenticalTo) that is a
+ *    publication and that SourceDatasets does not name is skipped and counted: NEMAR's own
+ *    metadata may still carry a paper a depositor has since moved to ReferencesAndLinks, until the
+ *    next enrichment drops it, and it must not block the request meanwhile.
+ */
+function dropStaleRelations(
+  sources: LineageSource[],
+  refs: SourceRef[],
+): { kept: LineageSource[]; skipped: number } {
+  const named = new Set<string>();
+  sources.forEach((s, i) => {
+    if (s.origin !== "source_datasets") return;
+    named.add(s.id.toLowerCase());
+    const ref = refs[i];
+    if (ref.kind === "doi") named.add(ref.doi.toLowerCase());
+  });
+  let skipped = 0;
+  const kept = sources.filter((s) => {
+    if (s.origin === "source_datasets") return true;
+    if (named.has(s.id.toLowerCase())) return false;
+    if (s.origin === "related_identifiers" && s.status === "publication") {
+      skipped++;
+      return false;
+    }
+    return true;
+  });
+  return { kept, skipped };
 }
 
 /** A source's declared licenses as one line's words: each text and URL, or that it declares none. */
@@ -2272,6 +2437,11 @@ export function lineageLines(result: LineageResult): string[] {
     if (s.status !== "resolved") lines.push(`      remedy: ${SOURCE_STATUS_COPY[s.status].remedy}`);
   }
   // `?? 0` and `?? fetched_at`: a Worker of resolver version 2 sends neither field.
+  if ((result.skipped_stale_relations ?? 0) > 0) {
+    lines.push(
+      `Skipped: ${result.skipped_stale_relations} publication(s) listed as IsDerivedFrom in .nemar/metadata.json that SourceDatasets does not name (stale enrichment, not sources).`,
+    );
+  }
   if ((result.dropped_doi_candidates ?? 0) > 0) {
     lines.push(
       `Dropped: ${result.dropped_doi_candidates} DOI candidate(s) cut short in the README or attestation (not sources).`,

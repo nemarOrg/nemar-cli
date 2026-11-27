@@ -15,6 +15,7 @@ Files 33 to 35 were fetched on 2026-11-27 for resolver version 4 (ADR 0142 decis
 Files 36 to 42 were fetched on 2026-11-27 for resolver version 5 (ADR 0139 decision 7, amendment of 2026-11-27), the same way, with no edits; they hold no email address.
 Files 43 to 61 were fetched on 2026-11-27 for the review of resolver version 5 from the figshare and OSF APIs and DataCite, the same way, with no edits; they hold no email address.
 The OSF children lists (45, 47 to 49, 52, 55, 57) were fetched again the same day with `related_counts=children`, so each child says how many children it has.
+Files 62 to 65 were fetched on 2026-11-27 for resolver version 6, the same way, with no edits; they hold no email address.
 `index.json` lists every recording with its method, URL, HTTP status, file and fetch time;
 `stand-in.ts` serves them to the tests from a local server.
 
@@ -65,6 +66,9 @@ The OSF children lists (45, 47 to 49, 52, 55, 57) were fetched again the same da
 - **OSF projects read through OSF with their children:** `10.17605/osf.io/c5zbq` is `Text` / `Project` with an empty `rightsList`, no node license and seven child components, one CC BY-NC 4.0 and six with none;
   `10.17605/osf.io/yb3pq` is `Text` / `Project`, CC BY-NC-SA 4.0, with nine children, one of them CC BY 4.0, and three of them with children of their own;
   `f8sq3`, `wpkrz`, `rmafj`, `j3s7g` and `j7as8` have no children.
+- **A figshare article URL (nm000830):** `https://plos.figshare.com/articles/dataset/<slug>/7708514`;
+  figshare's API gives `defined_type_name` `dataset`, CC BY 4.0 and the DOI `10.1371/journal.pone.0211710`, which PLOS figshare datasets share with their article.
+  That DOI is a `journal-article` on Crossref (DataCite answers 404), the paper nm000830's enrichment still lists as IsDerivedFrom.
 - **Genuine publications in data repositories:** `10.5281/zenodo.6529724` (`JournalArticle`, nm000661's source) and `10.6084/m9.figshare.28309157` (`JournalArticle`, resourceType `Journal contribution`).
 
 ## Recordings
@@ -130,6 +134,10 @@ The OSF children lists (45, 47 to 49, 52, 55, 57) were fetched again the same da
 | `59-figshare-article-3563034.json` | figshare-collection | figshare | GET https://api.figshare.com/v2/articles/3563034 | 200 | 2026-11-27 |
 | `60-figshare-article-3563031.json` | figshare-collection | figshare | GET https://api.figshare.com/v2/articles/3563031 | 200 | 2026-11-27 |
 | `61-figshare-article-3563028.json` | figshare-collection | figshare | GET https://api.figshare.com/v2/articles/3563028 | 200 | 2026-11-27 |
+| `62-figshare-article-7708514.json` | figshare-article-url | figshare | GET https://api.figshare.com/v2/articles/7708514 | 200 | 2026-11-27 |
+| `63-figshare-article-7708514-v1.json` | figshare-article-url | figshare | GET https://api.figshare.com/v2/articles/7708514/versions/1 | 200 | 2026-11-27 |
+| `64-datacite-plos-article-0211710.json` | stale-paper-relation | datacite | GET https://api.datacite.org/dois/10.1371%2Fjournal.pone.0211710 | 404 | 2026-11-27 |
+| `65-crossref-plos-article-0211710.json` | stale-paper-relation | crossref | GET https://api.crossref.org/works/10.1371%2Fjournal.pone.0211710 | 200 | 2026-11-27 |
 
 The two OpenNeuro POSTs carry the GraphQL query recorded in `index.json` (`body`).
 
