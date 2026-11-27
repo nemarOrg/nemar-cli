@@ -454,8 +454,9 @@ const partitionOf = (recipe: ComputeRecipe) => recipe.partition as PartitionName
  * list.
  *
  * A `bids` run is handed the commit of its version's tag (`sourceCommit`, `--source-commit`, ADR 0143), which its
- * record states as the `git:` input digest its derivative is keyed by: with a staged serving index as the index's
- * own arguments end (ADR 0141), and alone otherwise. A `bids` run with no commit is a programming error here.
+ * record states as the `git:` input digest its derivative is keyed by: alone when no serving index was staged, and
+ * with a staged index as the index's own arguments end (ADR 0141), with the INDEX's commit, which is the tag's or
+ * one ahead of it by NEMAR-owned metadata only (ADR 0144). A `bids` run with no commit is a programming error.
  */
 export function recipeJobSpec(
   recipe: ComputeRecipe,
@@ -510,12 +511,13 @@ export function recipeJobSpec(
             tag: input.tag,
             imageDigest: input.image.digest,
           }),
-          // The tag's commit, always (ADR 0143): after the staged index's file when one was staged (ADR 0141), whose
-          // commit is the tag's, and alone otherwise.
+          // The tag's commit alone when no index was staged (ADR 0143); with a staged index, its file and the
+          // index's own commit (ADR 0141), which is the tag's or one ahead of it by NEMAR-owned metadata only
+          // (ADR 0144): the recipe uses a row only when the two agree.
           ...(staged?.staged === true
             ? recipeServingIndexArguments({
                 path: SERVING_INDEX_CONTAINER_PATH,
-                sourceCommit: input.sourceCommit as string,
+                sourceCommit: staged.sourceCommit,
               })
             : recipeSourceCommitArguments(input.sourceCommit as string)),
         ],
@@ -523,7 +525,19 @@ export function recipeJobSpec(
       ? {}
       : {
           serving_index: staged.staged
-            ? { sha256: staged.sha256, size: staged.size }
+            ? {
+                sha256: staged.sha256,
+                size: staged.size,
+                ...(staged.ahead === undefined
+                  ? {}
+                  : {
+                      ahead_of_tag: {
+                        tag_commit: staged.ahead.tagCommit,
+                        index_commit: staged.ahead.indexCommit,
+                        changed_paths: staged.ahead.changedPaths,
+                      },
+                    }),
+              }
             : { reason: staged.reason },
         }),
     datasets: zarr ? [] : [{ id: input.datasetId, version: input.tag }],

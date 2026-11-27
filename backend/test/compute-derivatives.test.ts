@@ -2605,7 +2605,8 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     if (commit.kind !== "commit") throw new Error(`no commit: ${commit.kind}`);
     const decided = await servingIndexForRun(env, ica, "bids", id, "v1.0.0", commit.commit);
     if (decided.kind !== "run") throw new Error(`not run: ${decided.kind}`);
-    expect(decided.servingIndex).toMatchObject({ staged: false, reason: "source_commit_differs" });
+    // GitHub shows no comparison of the two commits here: not on the tag's line, so not admitted (ADR 0144).
+    expect(decided.servingIndex).toMatchObject({ staged: false, reason: "index_diverged" });
     const image = { ref: RUNTIME_IMAGE, digest: RUNTIME_IMAGE_DIGEST };
     const spec = recipeJobSpec(ica, {
       datasetId: id,
@@ -2661,6 +2662,81 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     expect(await skipWord(env, made.stampId)).toBeUndefined();
   });
 
+  test("a run handed an index admitted ahead of its tag (ADR 0144) is handed the index's commit, and is keyed by the index's digest and that commit (MUTATION: hand the tag's commit with an admitted index)", async () => {
+    const env = envOf();
+    const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
+    const id = await dataset();
+    // Built from SOURCE, ahead of the tag (COMMIT) by NEMAR's own metadata only.
+    github.index(id, { source_commit: SOURCE, store_count: 0, stores: [] });
+    github.compare(id, COMMIT, SOURCE, {
+      status: "ahead",
+      behind_by: 0,
+      ahead_by: 2,
+      files: [
+        { filename: ".nemar/metadata.json", status: "modified" },
+        { filename: ".gitattributes", status: "modified" },
+      ],
+    });
+    const commit = await sourceCommitForRun(env, ica, "bids", id, "v1.0.0");
+    if (commit.kind !== "commit") throw new Error(`no commit: ${commit.kind}`);
+    const decided = await servingIndexForRun(env, ica, "bids", id, "v1.0.0", commit.commit);
+    if (decided.kind !== "run" || !decided.servingIndex.staged) throw new Error("not staged");
+    const spec = recipeJobSpec(ica, {
+      datasetId: id,
+      tag: "v1.0.0",
+      input: "bids",
+      image: { ref: RUNTIME_IMAGE, digest: RUNTIME_IMAGE_DIGEST },
+      env: { ENVIRONMENT: "development" },
+      sourceCommit: commit.commit,
+      servingIndex: decided.servingIndex,
+    });
+    const base = recipeArguments({
+      datasetId: id,
+      tag: "v1.0.0",
+      imageDigest: RUNTIME_IMAGE_DIGEST,
+    });
+    const added = spec.args.slice(base.length);
+    expect(added).toEqual([
+      "--serving-index",
+      SERVING_INDEX_CONTAINER_PATH,
+      RECIPE_SOURCE_COMMIT_FLAG,
+      SOURCE,
+    ]);
+    // The recipe states the commit it is handed, the index's (nemar-process `identity.source_commit`).
+    const made = await icaBidsJob({
+      id,
+      sourceCommit: SOURCE,
+      recorded: { serving_index: spec.serving_index, args: added },
+    });
+    expect(await syncAll(env)).toMatchObject({
+      created: 1,
+      stored: 1,
+      derivative_unkeyable: {},
+      errored: 0,
+    });
+    const row = (await one(env)) as Der & { serving_index: string | null };
+    const index = `sha256:${decided.servingIndex.sha256}`;
+    expect([row.serving_index, row.input_digest]).toEqual([index, `git:${SOURCE}`]);
+    const stamp = await env.DB.prepare(
+      "SELECT version, recipe_version, engine FROM compute_pipeline_stamps WHERE id = ?1",
+    )
+      .bind(made.stampId)
+      .first<Record<string, string>>();
+    expect(row.key).toBe(
+      await derivativeKey({
+        dataset: id,
+        version: stamp?.version as string,
+        recipe: "nemar-ica",
+        recipe_version: stamp?.recipe_version as string,
+        engine: stamp?.engine as string,
+        input: "bids",
+        profile: "archive",
+        input_digest: `git:${SOURCE}`,
+        serving_index: index,
+      }),
+    );
+  });
+
   test("a run recorded with no index staged is keyed none, and the word does not reach the key", async () => {
     const env = envOf();
     await icaBidsJob({
@@ -2694,6 +2770,21 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
       {
         serving_index: { reason: "no_index" },
         args: ["--serving-index", SERVING_INDEX_CONTAINER_PATH],
+      },
+    ],
+    [
+      "an index admitted ahead of its tag handed with another commit than the admitted one (ADR 0144)",
+      {
+        serving_index: {
+          sha256: STAGED_HEX,
+          size: 812,
+          ahead_of_tag: {
+            tag_commit: "7".repeat(40),
+            index_commit: "8".repeat(40),
+            changed_paths: 1,
+          },
+        },
+        args: STAGED_ARGS,
       },
     ],
   ] as const) {

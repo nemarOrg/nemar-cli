@@ -509,6 +509,101 @@ async function metadataOnlyDelta(
   return { ok: true, deltaPaths: paths };
 }
 
+// --- A serving index ahead of its tag (ADR 0144) ---------------------------------------------------------------
+
+/**
+ * Whether a changed path is NEMAR-owned metadata, which NEMAR changes without a new tag (ADR 0144): anything under
+ * `.nemar/` (NEMAR's own records) or `.github/` (NEMAR's workflows), or a `.gitattributes` file at any depth, which
+ * NEMAR's annex policy rewrites across the fleet (`src/lib/fleet-annex-policy.ts`, ADR 0060) and which governs how
+ * git stores a file, never its bytes. A data file, a BIDS file (`participants.tsv`, `README`, a sidecar) and
+ * `.bidsignore`, which the dataset's authors own too, are not; neither is a path that is not a plain path.
+ */
+export function isNemarOwnedMetadataPath(path: string): boolean {
+  if (path === "" || path.length > ZARR_SOURCE_DELTA_PATH_MAX) return false;
+  for (let i = 0; i < path.length; i++) {
+    const code = path.charCodeAt(i);
+    if (code < 32 || code === 127) return false;
+  }
+  const parts = path.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === "..")) return false;
+  return (
+    path.startsWith(".nemar/") || path.startsWith(".github/") || parts.at(-1) === ".gitattributes"
+  );
+}
+
+/** Why an index built from another commit than its tag's is not admitted (fixed words of the serving index). */
+export type ServingIndexAheadRefusal =
+  | "index_behind_tag"
+  | "index_diverged"
+  | "index_content_changed"
+  | "index_delta_unlisted";
+
+/**
+ * Whether the serving index's commit `indexCommit` is ahead of the version's tag `tagCommit` by NEMAR-owned
+ * metadata only (ADR 0144), from ONE GitHub compare of `tagCommit...indexCommit` (the same request, timeout and
+ * bound as the Zarr check's): `ahead`, `behind_by` 0, fewer than 300 files listed, and every changed path (and a
+ * renamed file's previous path) {@link isNemarOwnedMetadataPath}. A compare that lists no file at all (commits
+ * that change nothing) is admitted. A compare GitHub could not answer is `github_unreadable`, a fault: the
+ * caller defers, and never stages an index it could not show to be the tag's data. Never throws.
+ */
+export async function servingIndexAheadOfTag(
+  repo: string,
+  tagCommitSha: string,
+  indexCommit: string,
+  access: GithubAccess & { ok: true },
+): Promise<
+  | { ok: true; changedPaths: number }
+  | { ok: false; reason: ServingIndexAheadRefusal | "github_unreadable" }
+> {
+  try {
+    const got = await getJson(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${ref(repo)}/compare/${tagCommitSha}...${indexCommit}?per_page=${ZARR_SOURCE_COMPARE_PAGE}`,
+      githubHeaders(access),
+      ZARR_SOURCE_GITHUB_TIMEOUT_MS,
+      ZARR_SOURCE_COMPARE_MAX_BYTES,
+      true,
+      access.onUnauthorized,
+    );
+    // The tag's commit was just read, so a 404 or 422 says the repository does not have the index's commit or
+    // shares no history with it: the copy was not built on this version's line.
+    if (got.kind === "absent") return { ok: false, reason: "index_diverged" };
+    if (got.kind !== "ok" || !isRecord(got.body)) return { ok: false, reason: "github_unreadable" };
+    const body = got.body;
+    if (body.status === "behind") return { ok: false, reason: "index_behind_tag" };
+    if (body.status === "diverged") return { ok: false, reason: "index_diverged" };
+    if (body.status !== "ahead" || typeof body.behind_by !== "number") {
+      return { ok: false, reason: "github_unreadable" };
+    }
+    if (body.behind_by !== 0) return { ok: false, reason: "index_diverged" };
+    const files = body.files;
+    if (!Array.isArray(files)) return { ok: false, reason: "github_unreadable" };
+    if (files.length >= ZARR_SOURCE_COMPARE_FILES_LIMIT) {
+      return { ok: false, reason: "index_delta_unlisted" };
+    }
+    const paths = new Set<string>();
+    for (const file of files) {
+      if (!isRecord(file) || typeof file.filename !== "string") {
+        return { ok: false, reason: "github_unreadable" };
+      }
+      // A rename out of a data path is a deletion of data, whatever the new name is.
+      const names = [file.filename];
+      if (file.previous_filename !== undefined) {
+        if (typeof file.previous_filename !== "string") {
+          return { ok: false, reason: "github_unreadable" };
+        }
+        names.push(file.previous_filename);
+      }
+      for (const name of names) {
+        if (!isNemarOwnedMetadataPath(name)) return { ok: false, reason: "index_content_changed" };
+        paths.add(name);
+      }
+    }
+    return { ok: true, changedPaths: paths.size };
+  } catch {
+    return { ok: false, reason: "github_unreadable" };
+  }
+}
+
 // --- The verdict -------------------------------------------------------------------------------------------
 
 /**

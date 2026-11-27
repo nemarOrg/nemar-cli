@@ -80,9 +80,38 @@ describe("what a job's specification records of the serving index", () => {
       "no_github_credentials",
       "token_mint_failed",
       "index_not_stored",
+      "index_behind_tag",
+      "index_diverged",
+      "index_content_changed",
+      "index_delta_unlisted",
     ]);
     expect(COMPUTE_SERVING_INDEX_MAX_BYTES).toBe(64 * 1024 * 1024);
     expect(SERVING_INDEX_MAX_BYTES).toBe(COMPUTE_SERVING_INDEX_MAX_BYTES);
+  });
+
+  test("a staged index ahead of its tag records both commits and the changed paths, and nothing else (ADR 0144)", () => {
+    const ahead = { tag_commit: COMMIT, index_commit: "c".repeat(40), changed_paths: 5 };
+    expect(
+      JobSpecSchema.safeParse(recipeJob({ sha256: HEX, size: 812, ahead_of_tag: ahead })).success,
+    ).toBe(true);
+    for (const bad of [
+      { ...ahead, index_commit: COMMIT },
+      { ...ahead, tag_commit: "abc" },
+      { ...ahead, index_commit: "C".repeat(40) },
+      { ...ahead, changed_paths: -1 },
+      { ...ahead, changed_paths: 601 },
+      { ...ahead, paths: [".nemar/x"] },
+      { tag_commit: COMMIT, index_commit: "c".repeat(40) },
+    ]) {
+      expect(
+        JobSpecSchema.safeParse(recipeJob({ sha256: HEX, size: 812, ahead_of_tag: bad })).success,
+        JSON.stringify(bad),
+      ).toBe(false);
+    }
+    // A refusal never carries it.
+    expect(
+      JobSpecSchema.safeParse(recipeJob({ reason: "no_index", ahead_of_tag: ahead })).success,
+    ).toBe(false);
   });
 
   test("a job that is not a recipe's is refused a serving index, naming the field", () => {

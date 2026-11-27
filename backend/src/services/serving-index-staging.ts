@@ -8,11 +8,15 @@
  * bucket (`servingIndexKey`, named by their SHA-256), and the job's specification records the digest and size.
  * The launcher fetches the copy with the job token before the fence, checks both, and places it read-only.
  *
- * THE COMMIT MUST MATCH EXACTLY. The index is staged only when its own `source_commit` is the commit of the
- * version's tag. An index built from any other commit is refused (`source_commit_differs`), including one that
- * differs from the tag by metadata only: the Zarr input's `metadata_only` attestation is never asked for here,
- * because the recipe uses a row of the index only when the index's commit is its `--source-commit`, and the
- * commit it is given is the tag's.
+ * THE COMMIT IS THE TAG'S, OR AHEAD OF IT BY NEMAR'S OWN METADATA ONLY (ADR 0144, refining ADR 0141 decision 2). An
+ * index whose own `source_commit` is the commit of the version's tag is staged. An index built from another commit
+ * is staged only when one GitHub compare (`servingIndexAheadOfTag`) shows that commit AHEAD of the tag and every
+ * path between them NEMAR-owned metadata, which changes without a new tag (`.nemar/`, `.github/`, `.gitattributes`):
+ * the files the recipe reads are then the tag's, byte for byte. Such an index is recorded with what was admitted
+ * (`ahead`: both commits and the number of changed paths), and the run is handed the INDEX's commit as
+ * `--source-commit`, because the recipe uses a row only when the index's commit is its `--source-commit`. An index
+ * behind the tag, diverged from it, or ahead by any other path is refused with the word that says which; a compare
+ * GitHub could not answer is a fault (`github_unreadable`), which defers the run: nothing is staged blind.
  *
  * A FAULT DEFERS, ANYTHING ELSE DISPATCHES WITHOUT (ADR 0141, amended). When the index cannot be read, or the
  * copy cannot be kept (`SERVING_INDEX_FAULT_REASONS`), the dispatcher defers the run for up to 24 hours
@@ -23,10 +27,11 @@
  * handed an index it would refuse.
  *
  * THE TAG'S COMMIT IS THE DISPATCHER'S, READ FIRST (ADR 0143). Every Worker-dispatched run of the archive is handed
- * the commit of its version's tag (`--source-commit`), staged index or not, so its record states the commit its
- * files were read at, the `git:` input digest a BIDS derivative is keyed by (ADR 0123 decision 3). The dispatcher
- * reads it before anything here (`versionTagCommit`), defers a run whose commit GitHub could not give and refuses
- * one whose tag is absent, and hands staging the commit it read: staging reads only the index.
+ * the commit of its version's tag (`--source-commit`), or, with an index admitted ahead of it, that index's commit
+ * (ADR 0144), so its record states the commit whose files it read, the `git:` input digest a BIDS derivative is
+ * keyed by (ADR 0123 decision 3). The dispatcher reads the tag's commit before anything here (`versionTagCommit`),
+ * defers a run whose commit GitHub could not give and refuses one whose tag is absent, and hands staging the
+ * commit it read: staging reads the index, and asks GitHub only to compare an index of another commit.
  *
  * THE BOUNDS are `checkZarrSource`'s: one index read abandoned after `ZARR_SOURCE_INDEX_TIMEOUT_MS` and read to at
  * most `COMPUTE_SERVING_INDEX_MAX_BYTES` (the recipe's own bound), and one create-only write. The test seam
@@ -43,7 +48,12 @@ import type { Bindings } from "../types/bindings.js";
 import { putServingIndexCopy, sha256Hex } from "./compute-records.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getZarrIndexResponse } from "./s3.js";
-import { ZARR_SOURCE_INDEX_TIMEOUT_MS, ZARR_SOURCE_LOCAL_USER_AGENT } from "./zarr-source-check.js";
+import {
+  ZARR_SOURCE_INDEX_TIMEOUT_MS,
+  ZARR_SOURCE_LOCAL_USER_AGENT,
+  githubAccess,
+  servingIndexAheadOfTag,
+} from "./zarr-source-check.js";
 
 export type StagedServingIndex =
   | {
@@ -51,8 +61,13 @@ export type StagedServingIndex =
       /** The SHA-256 (lowercase hex) of the index's bytes, as kept. */
       sha256: string;
       size: number;
-      /** The index's `source_commit`, which is the tag's commit: the run's `--source-commit`. */
+      /**
+       * The index's `source_commit`: the tag's commit, or a commit ahead of it by NEMAR-owned metadata only
+       * (`ahead`). The run's `--source-commit` either way, because the recipe uses a row only when they agree.
+       */
       sourceCommit: string;
+      /** Present when the index's commit is not the tag's: what was admitted (ADR 0144). */
+      ahead?: { tagCommit: string; indexCommit: string; changedPaths: number };
     }
   | { staged: false; reason: ServingIndexAbsentReason };
 
@@ -320,8 +335,16 @@ export async function stageServingIndex(
     if (!index.ok) return absent(index.reason);
     const source = indexSourceCommit(index.bytes);
     if (!source.ok) return absent(source.reason);
-    // Exactly the tag's commit: never a metadata-only difference (ADR 0141).
-    if (source.commit !== tagCommit) return absent("source_commit_differs");
+    // The tag's commit, or one ahead of it by NEMAR-owned metadata only, shown by one compare (ADR 0144).
+    let ahead: { tagCommit: string; indexCommit: string; changedPaths: number } | undefined;
+    if (source.commit !== tagCommit) {
+      const access = await githubAccess(env);
+      if (!access.ok) return absent(access.reason);
+      const compared = await servingIndexAheadOfTag(datasetId, tagCommit, source.commit, access);
+      if (!compared.ok) return absent(compared.reason);
+      ahead = { tagCommit, indexCommit: source.commit, changedPaths: compared.changedPaths };
+      console.log(`[serving-index] index_ahead_admitted changed_paths=${compared.changedPaths}`);
+    }
     const sha256 = await sha256Hex(index.bytes);
     let kept: boolean;
     try {
@@ -335,7 +358,13 @@ export async function stageServingIndex(
       console.error(`[serving-index] copy_conflict sha256=${sha256}`);
       return absent("index_not_stored");
     }
-    return { staged: true, sha256, size: index.bytes.byteLength, sourceCommit: source.commit };
+    return {
+      staged: true,
+      sha256,
+      size: index.bytes.byteLength,
+      sourceCommit: source.commit,
+      ...(ahead === undefined ? {} : { ahead }),
+    };
   } catch (err) {
     // A throw here is a defect, not a service: the error's name (never its message) is for the operator.
     console.error(`[serving-index] stage_threw error=${errorName(err)}`);

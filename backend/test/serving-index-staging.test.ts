@@ -59,6 +59,7 @@ import {
   isServingIndexFault,
   stageServingIndex,
 } from "../src/services/serving-index-staging";
+import { isNemarOwnedMetadataPath } from "../src/services/zarr-source-check";
 import type { Bindings } from "../src/types/bindings";
 import {
   CALLBACK_SECRET,
@@ -169,32 +170,38 @@ describe("the index is staged only when it was built from the tag's own commit",
     expect(compareRequests()).toEqual([]);
   });
 
-  test("an index of another commit is not staged, and nothing is kept (MUTATION: accept any commit)", async () => {
+  test("an index of another commit that GitHub does not show on the tag's line is index_diverged, and nothing is kept (MUTATION: accept any commit)", async () => {
     github.tag(ID, TAG, T);
     github.index(ID, indexText(S));
     expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
       staged: false,
-      reason: "source_commit_differs",
+      reason: "index_diverged",
     });
     expect(await servingCopies()).toEqual([]);
   });
 
-  test("an index that differs from the tag by metadata only is refused too: metadata_only is never asked (MUTATION: fall back to checkZarrSource's allowance)", async () => {
+  test("an index ahead of the tag by NEMAR-owned metadata only is staged, with what was admitted, from one compare (ADR 0144; MUTATION: refuse every other commit)", async () => {
+    const text = indexText(S);
     github.tag(ID, TAG, T);
-    github.index(ID, indexText(S));
-    // What GitHub would answer: S is ahead of T by a metadata path only, which the Zarr input accepts.
+    github.index(ID, text);
     github.compare(ID, T, S, {
       status: "ahead",
       behind_by: 0,
       ahead_by: 1,
       files: [{ filename: ".nemar/zarr.json", status: "modified" }],
     });
+    const bytes = new TextEncoder().encode(text);
     expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
-      staged: false,
-      reason: "source_commit_differs",
+      staged: true,
+      sha256: sha(bytes),
+      size: bytes.length,
+      sourceCommit: S,
+      ahead: { tagCommit: T, indexCommit: S, changedPaths: 1 },
     });
-    expect(compareRequests()).toEqual([]);
-    expect(await servingCopies()).toEqual([]);
+    expect(compareRequests().map((r) => r.path)).toEqual([
+      `/repos/nemarDatasets/${ID}/compare/${T}...${S}`,
+    ]);
+    expect(await servingCopies()).toEqual([servingIndexKey(sha(bytes))]);
   });
 });
 
@@ -497,7 +504,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
         github.tag(ID, TAG, T);
         github.index(ID, indexText(S));
       },
-      "source_commit_differs",
+      "index_diverged",
     ],
     [
       "an index the recipe cannot use",
@@ -980,27 +987,219 @@ const tokenOf = async (env: Bindings, jobId: string) =>
   );
 
 describe("an index built from another commit than the tag's (on007823 in the local run of 2026-11-27)", () => {
-  test("the run is dispatched at once with the tag's commit and no index, and the launch carries both (MUTATION: hand --source-commit only with a staged index)", async () => {
+  /** on007823's delta between its tag and its index's commit, as GitHub's compare lists it. */
+  const ON007823_DELTA = [
+    ".gitattributes",
+    ".github/workflows/bids-validation.yml",
+    ".github/workflows/version-check.yml",
+    ".nemar/availability-report.json",
+    ".nemar/metadata.json",
+  ].map((filename) => ({ filename, status: "modified" }));
+
+  test("ahead by NEMAR's own metadata (on007823's delta): staged, recorded with both commits, and the run is handed the index's commit (MUTATION: hand the tag's commit with an admitted index)", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
     github.tag(ID, TAG, T);
     github.index(ID, indexText(S));
+    github.compare(ID, T, S, { status: "ahead", behind_by: 0, ahead_by: 6, files: ON007823_DELTA });
     const decided = await servingIndexForRun(env, ica, "bids", ID, TAG, T);
-    if (decided.kind !== "run") throw new Error(`not run: ${decided.kind}`);
-    expect(decided.servingIndex).toEqual({
-      staged: false,
-      reason: "source_commit_differs",
+    if (decided.kind !== "run" || !decided.servingIndex.staged) throw new Error("not staged");
+    const spec = icaSpec(decided.servingIndex);
+    expect(spec.serving_index).toEqual({
+      sha256: decided.servingIndex.sha256,
+      size: decided.servingIndex.size,
+      ahead_of_tag: { tag_commit: T, index_commit: S, changed_paths: 5 },
     });
+    // The recipe uses a row only when the index's commit is its --source-commit: the index's commit, S.
+    expect(spec.args.slice(-4)).toEqual([
+      RECIPE_SERVING_INDEX_FLAG,
+      SERVING_INDEX_CONTAINER_PATH,
+      RECIPE_SOURCE_COMMIT_FLAG,
+      S,
+    ]);
+    expect(spec.args).not.toContain(T);
     const job = await icaJob(env, decided.servingIndex);
     const launch = await launchOf(env, job.id);
-    const args = launch.args as string[];
-    // The commit the recipe records as extensions.nemar.dataset.source_commit: the TAG's, never the index's.
+    // The launch carries the digest and size only: the launcher's schema is closed (ADR 0141 decision 1).
+    expect(launch.serving_index).toEqual({
+      sha256: decided.servingIndex.sha256,
+      size: decided.servingIndex.size,
+    });
+  });
+
+  test("ahead by a dataset file as well: refused as index_content_changed, and the run is handed the tag's commit and no index (MUTATION: admit any path)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      ahead_by: 7,
+      files: [...ON007823_DELTA, { filename: "participants.tsv", status: "modified" }],
+    });
+    const decided = await servingIndexForRun(env, ica, "bids", ID, TAG, T);
+    expect(decided).toEqual({
+      kind: "run",
+      servingIndex: { staged: false, reason: "index_content_changed" },
+    });
+    if (decided.kind !== "run") throw new Error("not run");
+    const job = await icaJob(env, decided.servingIndex);
+    const args = (await launchOf(env, job.id)).args as string[];
     expect(args.slice(-2)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, T]);
-    expect(args.filter((a) => a === RECIPE_SOURCE_COMMIT_FLAG)).toHaveLength(1);
-    expect(args).not.toContain(S);
     expect(args).not.toContain(RECIPE_SERVING_INDEX_FLAG);
-    expect("serving_index" in launch).toBe(false);
     expect(await servingCopies()).toEqual([]);
+  });
+});
+
+describe("what an index ahead of its tag is admitted for, and the word for what is not (ADR 0144)", () => {
+  const files = (...names: string[]) => names.map((filename) => ({ filename, status: "modified" }));
+  const cases: Array<[string, unknown, string | number]> = [
+    ["only .nemar/", { status: "ahead", behind_by: 0, files: files(".nemar/metadata.json") }, 1],
+    [
+      ".github/ and a root .gitattributes",
+      { status: "ahead", behind_by: 0, files: files(".github/workflows/x.yml", ".gitattributes") },
+      2,
+    ],
+    [
+      "nested .gitattributes (DataLad's and a subject's), which NEMAR's annex policy rewrites",
+      {
+        status: "ahead",
+        behind_by: 0,
+        files: files(".datalad/.gitattributes", "sub-01/.gitattributes"),
+      },
+      2,
+    ],
+    ["commits that change no file", { status: "ahead", behind_by: 0, files: [] }, 0],
+    [
+      "the tag ahead of the index",
+      { status: "behind", behind_by: 2, files: [] },
+      "index_behind_tag",
+    ],
+    ["histories that diverged", { status: "diverged", behind_by: 1, files: [] }, "index_diverged"],
+    [
+      "ahead but also behind",
+      { status: "ahead", behind_by: 1, files: files(".nemar/x.json") },
+      "index_diverged",
+    ],
+    [
+      "a BIDS file",
+      { status: "ahead", behind_by: 0, files: files(".nemar/x.json", "participants.tsv") },
+      "index_content_changed",
+    ],
+    [
+      "a data file",
+      { status: "ahead", behind_by: 0, files: files("sub-01/eeg/sub-01_task-rest_eeg.edf") },
+      "index_content_changed",
+    ],
+    [
+      ".bidsignore, which the dataset's authors own too",
+      { status: "ahead", behind_by: 0, files: files(".bidsignore") },
+      "index_content_changed",
+    ],
+    [
+      "a data file renamed into .nemar/",
+      {
+        status: "ahead",
+        behind_by: 0,
+        files: [
+          {
+            filename: ".nemar/old.edf",
+            previous_filename: "sub-01/eeg/old.edf",
+            status: "renamed",
+          },
+        ],
+      },
+      "index_content_changed",
+    ],
+    [
+      "a path that is not a plain path",
+      { status: "ahead", behind_by: 0, files: files(".nemar/../participants.tsv") },
+      "index_content_changed",
+    ],
+    [
+      "300 files, more than GitHub lists",
+      {
+        status: "ahead",
+        behind_by: 0,
+        files: Array.from({ length: 300 }, (_, i) => ({
+          filename: `.nemar/f${i}.json`,
+          status: "added",
+        })),
+      },
+      "index_delta_unlisted",
+    ],
+    ["an answer that is not a comparison", { status: "weird" }, "github_unreadable"],
+  ];
+  for (const [label, answer, expected] of cases) {
+    test(`${label}: ${typeof expected === "number" ? `staged, ${expected} changed paths` : expected}`, async () => {
+      github.tag(ID, TAG, T);
+      github.index(ID, indexText(S));
+      github.compare(ID, T, S, answer as never);
+      const staged = await stageServingIndex(devEnv(), ID, T);
+      if (typeof expected === "number") {
+        expect(staged).toMatchObject({
+          staged: true,
+          sourceCommit: S,
+          ahead: { tagCommit: T, indexCommit: S, changedPaths: expected },
+        });
+      } else {
+        expect(staged).toEqual({ staged: false, reason: expected });
+        expect(await servingCopies()).toEqual([]);
+      }
+    });
+  }
+
+  test("a compare GitHub cannot answer is a fault: the run is deferred, and nothing is staged blind (MUTATION: stage on an unread compare)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, { http: 502 });
+    expect(await stageServingIndex(env, ID, T)).toEqual({
+      staged: false,
+      reason: "github_unreadable",
+    });
+    expect(await servingIndexForRun(env, ica, "bids", ID, TAG, T)).toMatchObject({
+      kind: "deferred",
+      reason: "github_unreadable",
+    });
+    expect(await servingCopies()).toEqual([]);
+  });
+
+  test("an index of the tag's own commit asks no compare and records nothing admitted", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(T));
+    const staged = await stageServingIndex(devEnv(), ID, T);
+    expect(staged.staged && "ahead" in staged).toBe(false);
+    expect(compareRequests()).toEqual([]);
+    expect(icaSpec(staged).serving_index).not.toHaveProperty("ahead_of_tag");
+  });
+
+  test("the path rule: NEMAR's own metadata only", () => {
+    for (const path of [
+      ".nemar/a.json",
+      ".github/workflows/x.yml",
+      ".gitattributes",
+      "a/b/.gitattributes",
+    ]) {
+      expect([path, isNemarOwnedMetadataPath(path)]).toEqual([path, true]);
+    }
+    for (const path of [
+      "participants.tsv",
+      "README",
+      ".bidsignore",
+      "sub-01/eeg/x.json",
+      ".nemarx/a",
+      ".gitattributes/x",
+      "",
+      ".nemar//a",
+      "./.nemar/a",
+      ".nemar/\u0001",
+      `.nemar/${"a".repeat(600)}`,
+    ]) {
+      expect([path, isNemarOwnedMetadataPath(path)]).toEqual([path, false]);
+    }
   });
 });
 
