@@ -116,6 +116,19 @@ export function decisionCardLines(card: unknown): string[] {
   const others = Array.isArray(lic.reasons) ? lic.reasons.slice(1) : [];
   for (const r of others) out.push(`    Also: ${plain(r)}`);
 
+  // The name rule's panel; a card from a Worker before the rule has none.
+  const n = isRecord(card.upstream_name) ? card.upstream_name : null;
+  if (n !== null) {
+    const ncue = plain(n.cue);
+    out.push(`  Name: ${(CUE[ncue] ?? chalk.yellow)(ncue.toUpperCase())}  ${plain(n.line)}`);
+    const t = isRecord(n.titles) ? n.titles : null;
+    const titles = joined(t?.titles);
+    if (titles !== "") {
+      const label = typeof t?.label === "string" ? plain(t.label) : REGISTRY_TEXT_LABEL;
+      out.push(`    Upstream title (${label}): ${titles}`);
+    }
+  }
+
   // The dataset's own words, side by side.
   const m = card.metadata;
   out.push(`  The dataset's own words (${plain(m.label)})${m.as_reviewed ? ", as reviewed" : ""}:`);

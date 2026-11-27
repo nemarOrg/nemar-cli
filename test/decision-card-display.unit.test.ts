@@ -44,6 +44,7 @@ function fixtureCard() {
       },
       lineage: { outcome: "unresolved", credited: false, resolved_at: "2026-11-20 09:00:00" },
       placeholder_authors: 1,
+      name_upstream: "matches",
     },
     {
       questions: {
@@ -85,6 +86,7 @@ function fixtureCard() {
       credited: false,
       resolved_at: "2026-11-27T13:00:00.000Z",
       declared_licenses: ["10.5281/zenodo.123456: Creative Commons Attribution 4.0 International"],
+      upstream_titles: ["Resting EEG"],
     },
   });
 }
@@ -100,6 +102,8 @@ const GOLDEN = `Decision card
     Lineage (now, resolved 2026-11-27T13:00:00.000Z): compatible
       Declared (as the source's registry declares it): 10.5281/zenodo.123456: Creative Commons Attribution 4.0 International
     Also: The upstream data's license could not be read.
+  Name: GREEN  The Name starts with the upstream dataset's title.
+    Upstream title (as the source's registry declares it): Resting EEG
   The dataset's own words (written by the depositor), as reviewed:
    .nemar/metadata.json:
     Title        Resting EEG in sixty adults

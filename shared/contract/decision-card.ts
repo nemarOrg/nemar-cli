@@ -19,6 +19,7 @@
 
 import type { LicenseFileFact } from "../license-file.js";
 import type { LineageOutcome } from "../license-lineage.js";
+import type { NameUpstreamResult } from "../name-follows-upstream.js";
 import type { Answer, Question } from "../publication-review.js";
 
 /** The card's own version: a field is added, never changed in meaning, within one version. */
@@ -131,6 +132,22 @@ export interface CardLineage {
   permission_covers: boolean;
 }
 
+/**
+ * Whether the dataset's Name follows its upstream dataset's title (the owner's rule of 2026-11-27,
+ * `shared/name-follows-upstream.ts`): the review's closed word, the cue, NEMAR's line for it, and
+ * the upstream dataset titles under {@link REGISTRY_TEXT_LABEL}.
+ */
+export interface CardUpstreamName {
+  /** The review's word, or null when no review on record compared them (one made before the rule). */
+  result: NameUpstreamResult | null;
+  /** `red` for `differs`, `amber` for `unknown` or no word, `green` otherwise. */
+  cue: LicenseCue;
+  /** Web-safe. */
+  line: string;
+  /** The titles of the upstream dataset sources as their registries give them; empty when none was read. */
+  titles: { label: string; titles: string[] };
+}
+
 /** The license panel (ADR 0142, decision 4). */
 export interface CardLicensePanel {
   cue: LicenseCue;
@@ -227,6 +244,8 @@ export interface DecisionCard {
     head: HeadCheck;
     head_line: string | null;
   };
+  /** The name rule's panel. */
+  upstream_name: CardUpstreamName;
   /** Null when the automatic denial has not acted on the review in force. */
   auto_deny: CardAutoDeny | null;
   next_action: CardNextAction;

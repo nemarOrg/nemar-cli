@@ -903,6 +903,7 @@
     "test/profile-gaps-matrix.test.ts": 13,
     "test/progress.test.ts": 12,
     "test/publication-auto-deny.unit.test.ts": 36,
+    "test/publication-name-upstream.unit.test.ts": 22,
     "test/publication-review-approve.unit.test.ts": 33,
     "test/publication-review-calibration.test.ts": 1172,
     "test/publication-review-callback-token.test.ts": 67,

@@ -34,6 +34,7 @@ import {
   type CardMetadata,
   type CardNextAction,
   type CardQuestion,
+  type CardUpstreamName,
   DECISION_CARD_VERSION,
   DEPOSITOR_TEXT_LABEL,
   type DecisionAction,
@@ -52,6 +53,11 @@ import {
   type LineageResult,
   normalizeLicense,
 } from "../../../shared/license-lineage.js";
+import {
+  NAME_UPSTREAM_RESULTS,
+  type NameUpstreamResult,
+  upstreamDatasetTitles,
+} from "../../../shared/name-follows-upstream.js";
 import { AUTO_DENY_STATES, AUTO_DENY_STATE_COPY } from "../../../shared/publication-auto-deny.js";
 import {
   COMMAND_ACKNOWLEDGE,
@@ -192,11 +198,21 @@ export interface ServedLineage {
   dropped_doi_candidates?: number;
   /** Enrichment relations skipped as stale publications (license-lineage/6); absent when none. */
   skipped_stale_relations?: number;
+  /**
+   * The titles of the upstream dataset sources (`upstreamDatasetTitles`), which the name rule
+   * compares the Name with; absent on a snapshot written before the rule, and when there is none.
+   */
+  upstream_titles?: string[];
 }
 
 /** A lineage result as the card keeps it. */
 export function cardLineageOf(result: LineageResult): ServedLineage {
   const declared: string[] = [];
+  const titles = list(
+    upstreamDatasetTitles(result.sources),
+    (t) => clean(t, MAX_TITLE),
+    MAX_DECLARED,
+  );
   for (const s of result.sources) {
     for (const d of s.declared_licenses ?? []) {
       if (declared.length >= MAX_DECLARED) break;
@@ -216,6 +232,7 @@ export function cardLineageOf(result: LineageResult): ServedLineage {
     ...((result.skipped_stale_relations ?? 0) > 0
       ? { skipped_stale_relations: result.skipped_stale_relations }
       : {}),
+    ...(titles.length > 0 ? { upstream_titles: titles } : {}),
   };
 }
 
@@ -308,6 +325,8 @@ function readLineage(v: unknown): ServedLineage | null | undefined {
   if (skipped !== undefined && !(Number.isInteger(skipped) && (skipped as number) >= 0)) {
     return undefined;
   }
+  const titles = v.upstream_titles === undefined ? [] : strings(v.upstream_titles);
+  if (titles === null) return undefined;
   return {
     outcome: v.outcome as LineageOutcome,
     credited: v.credited,
@@ -315,6 +334,7 @@ function readLineage(v: unknown): ServedLineage | null | undefined {
     declared_licenses: declared,
     ...(typeof dropped === "number" && dropped > 0 ? { dropped_doi_candidates: dropped } : {}),
     ...(typeof skipped === "number" && skipped > 0 ? { skipped_stale_relations: skipped } : {}),
+    ...(titles.length > 0 ? { upstream_titles: titles } : {}),
   };
 }
 
@@ -612,7 +632,43 @@ const ADMINISTRATOR_READS: readonly ReasonCode[] = [
   "text_withheld",
   "question_unknown",
   "bids_unconcluded_at_review",
+  "name_upstream_unconfirmed",
 ];
+
+/**
+ * The only review fail is the model's name question, and the Name follows the upstream's title
+ * (`name_upstream` is `matches`): the name came from the upstream, not from the depositor.
+ */
+export function nameFailOnlyFromUpstream(d: CardDetail): boolean {
+  if (d.review?.evidence?.name_upstream !== "matches") return false;
+  const fails = d.reasons.filter((r) => REVIEW_FAIL.includes(r.code));
+  return (
+    fails.length > 0 &&
+    fails.every((r) => r.code === "question_failed" && r.detail === "name_adequate")
+  );
+}
+
+/**
+ * The card asks the depositor to fix the Name and nothing harder: `name_differs_from_upstream`
+ * stands, and none of the conditions that send the card to the depositor first does.
+ */
+export function askedForNameOnly(d: CardDetail): boolean {
+  const codes = new Set(d.reasons.map((r) => r.code));
+  return (
+    codes.has("name_differs_from_upstream") &&
+    !DEPOSITOR_HARD.some((c) => codes.has(c)) &&
+    d.screen_gate !== "blocks" &&
+    d.request_status !== "blocked" &&
+    (d.block_reason === null || d.block_reason === undefined)
+  );
+}
+
+/**
+ * The `ask_depositor` sentence when the name rule is what the depositor is asked to fix (the
+ * owner's rule of 2026-11-27): the rule itself, in words. Web-safe.
+ */
+export const ASK_DEPOSITOR_NAME_SENTENCE =
+  "Ask the depositor to change the Name: it should start with the upstream dataset's title, as its registry gives it, and an author and year may follow it.";
 /** The automatic-denial states in which a confirming run agreed that the request fails. */
 const AUTO_DENY_AGREED: readonly string[] = ["would_deny", "capped"];
 
@@ -679,12 +735,16 @@ export function nextActionOf(
   if (any(REVIEW_WAIT)) return "wait";
   if (any(REVIEW_START)) return "start_review";
   if (o.freshBetter) return "review_again";
-  if (
-    any(REVIEW_FAIL) ||
-    (o.autoDenyState !== null && AUTO_DENY_AGREED.includes(o.autoDenyState))
-  ) {
-    return "deny";
-  }
+  const agreed = o.autoDenyState !== null && AUTO_DENY_AGREED.includes(o.autoDenyState);
+  // A Name the model failed that is the upstream's own title (the owner's rule: not the depositor's
+  // doing, so neither grounds for a denial nor the depositor's to cure): that fail is set aside for
+  // the tiers below, and an administrator reads it when nothing else decides.
+  const upstreamName = !agreed && nameFailOnlyFromUpstream(d);
+  if (upstreamName) codes.delete("question_failed");
+  if (any(REVIEW_FAIL) || agreed) return "deny";
+  // The name rule: grounds for a denial or a request for an update (the owner's words); a platform
+  // fact only the depositor cures, so the card asks them, in the sentence that names the rule.
+  if (codes.has("name_differs_from_upstream")) return "ask_depositor";
   if (codes.has("license_lineage_unconfirmed")) {
     // An unresolved lineage is NEMAR's failure to read a registry, not the depositor's to cure
     // (ADR 0139 decision 7, amendment of 2026-11-27: no depositor mail): an administrator reads it.
@@ -693,7 +753,7 @@ export function nextActionOf(
   if (any(ADMINISTRATOR_READS)) return "administrator_reads";
   const left = [...codes].filter((c) => c !== "identifier_screen_needs_acknowledgment");
   if (left.length > 0) return "ask_depositor";
-  if (o.cue === "red") return "administrator_reads";
+  if (upstreamName || o.cue === "red") return "administrator_reads";
   if (codes.has("identifier_screen_needs_acknowledgment") || d.screen_gate === "acknowledge") {
     return "acknowledge_screen";
   }
@@ -829,6 +889,9 @@ function reviewLineageOf(
     ...(snapshot?.lineage?.skipped_stale_relations
       ? { skipped_stale_relations: snapshot.lineage.skipped_stale_relations }
       : {}),
+    ...(snapshot?.lineage?.upstream_titles
+      ? { upstream_titles: snapshot.lineage.upstream_titles }
+      : {}),
   };
 }
 
@@ -935,6 +998,34 @@ function autoDenyOf(state: string | null): DecisionCard["auto_deny"] {
   };
 }
 
+/** What the card says of each name-rule word; `none` is a review on record that made no comparison. */
+export const UPSTREAM_NAME_LINE: Record<NameUpstreamResult | "none", string> = {
+  matches: "The Name starts with the upstream dataset's title.",
+  differs:
+    "The Name does not start with the upstream dataset's title; it should, and an author and year may follow it.",
+  not_applicable:
+    "No upstream dataset with a title is declared, so there is no upstream title for the Name to follow.",
+  unknown:
+    "Whether the Name follows the upstream dataset's title could not be determined; an administrator compares them.",
+  none: "No review on record compared the Name with the upstream dataset's title.",
+};
+
+/** The name rule's panel: the review's word, its cue and line, and the titles it was compared with. */
+function upstreamNameOf(input: DecisionCardInput): CardUpstreamName {
+  const raw: unknown = input.detail.review?.evidence?.name_upstream;
+  const result = (NAME_UPSTREAM_RESULTS as readonly unknown[]).includes(raw)
+    ? (raw as NameUpstreamResult)
+    : null;
+  const titles =
+    input.snapshot?.lineage?.upstream_titles ?? input.freshLineage?.upstream_titles ?? [];
+  return {
+    result,
+    cue: result === "differs" ? "red" : result === "unknown" || result === null ? "amber" : "green",
+    line: UPSTREAM_NAME_LINE[result ?? "none"],
+    titles: { label: REGISTRY_TEXT_LABEL, titles },
+  };
+}
+
 /** The decision card of one request. Pure. */
 export function buildDecisionCard(input: DecisionCardInput): DecisionCard {
   const { detail } = input;
@@ -947,9 +1038,11 @@ export function buildDecisionCard(input: DecisionCardInput): DecisionCard {
     unresolved: license.lineage?.outcome === "unresolved",
     ...input.gate,
   });
+  // The name rule's own sentence when it is what the depositor is asked to fix and nothing harder is.
+  const nameOnly = action === "ask_depositor" && askedForNameOnly(detail);
   const next: CardNextAction = {
     action,
-    sentence: ACTION_SENTENCE[action],
+    sentence: nameOnly ? ASK_DEPOSITOR_NAME_SENTENCE : ACTION_SENTENCE[action],
     command: ACTION_COMMAND[action].replaceAll("<dataset>", detail.dataset_id),
   };
   return {
@@ -964,6 +1057,7 @@ export function buildDecisionCard(input: DecisionCardInput): DecisionCard {
       head: input.gate.head,
       head_line: HEAD_LINE[input.gate.head],
     },
+    upstream_name: upstreamNameOf(input),
     auto_deny: autoDenyOf(input.autoDenyState),
     next_action: next,
   };
