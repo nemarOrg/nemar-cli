@@ -98,15 +98,20 @@ function build(body: ReviewInputsBody) {
     summary: SUMMARY,
     inputs: {
       presend,
-      lineage: { outcome: body.lineage.outcome, credited: lineageCredited(body.lineage.sources) },
+      lineage: {
+        outcome: body.lineage.outcome,
+        credited: lineageCredited(body.lineage.sources),
+        resolved_at: body.lineage.resolved_at,
+      },
     },
   });
 }
 
 /** The user message the model would be sent for `body`. */
 function userOf(body: ReviewInputsBody): string {
-  const { facts, cleared, clearedInputs } = build(body);
-  return buildPublicationReviewMessages({ facts, cleared, clearedInputs, nonce: NONCE }).user;
+  const { facts, cleared, clearedInputs, license } = build(body);
+  return buildPublicationReviewMessages({ facts, cleared, clearedInputs, license, nonce: NONCE })
+    .user;
 }
 
 const ALL_PASS = {
@@ -163,14 +168,26 @@ describe("each new section is fenced and scanned", () => {
   });
 
   test("the prompt builder refuses a section the pre-send module did not clear", () => {
-    const { facts, cleared, clearedInputs } = build(fullInputs());
+    const { facts, cleared, clearedInputs, license } = build(fullInputs());
     const forged = { ...clearedInputs, resubmission_note: clearedInputs.lineage };
     expect(() =>
-      buildPublicationReviewMessages({ facts, cleared, clearedInputs: forged, nonce: NONCE }),
+      buildPublicationReviewMessages({
+        facts,
+        cleared,
+        clearedInputs: forged,
+        license,
+        nonce: NONCE,
+      }),
     ).toThrow("an input was not cleared by pre-send");
     const { coverage: _dropped, ...missing } = clearedInputs;
     expect(() =>
-      buildPublicationReviewMessages({ facts, cleared, clearedInputs: missing, nonce: NONCE }),
+      buildPublicationReviewMessages({
+        facts,
+        cleared,
+        clearedInputs: missing,
+        license,
+        nonce: NONCE,
+      }),
     ).toThrow("cleared inputs disagree with the facts");
   });
 });
@@ -249,8 +266,8 @@ describe("a section holding a path or a name-like value is withheld and recorded
 
 describe("the input digest", () => {
   const digest = (body: ReviewInputsBody) => {
-    const { facts, cleared, clearedInputs } = build(body);
-    return publicationInputDigest({ facts, cleared, clearedInputs });
+    const { facts, cleared, clearedInputs, license } = build(body);
+    return publicationInputDigest({ facts, cleared, clearedInputs, license });
   };
 
   test("is stable for identical inputs, whatever the run's nonce", () => {
@@ -277,8 +294,8 @@ describe("the input digest", () => {
 
   test("is the one the assembled report records", async () => {
     const body = fullInputs();
-    const { facts, cleared, clearedInputs } = build(body);
-    const d = publicationInputDigest({ facts, cleared, clearedInputs });
+    const { facts, cleared, clearedInputs, license } = build(body);
+    const d = publicationInputDigest({ facts, cleared, clearedInputs, license });
     const report = assemblePublicationReport(
       {
         questions: ALL_PASS,
@@ -293,11 +310,12 @@ describe("the input digest", () => {
     );
     expect(report.v).toBe(PUBLICATION_REPORT_VERSION);
     expect(report.record).toEqual({
-      prompt_version: "publication-review-prompt/2",
+      prompt_version: "publication-review-prompt/3",
       models: [{ model: "claude-haiku-5-5", effort: "max" }],
       input_digest: d,
       resolver_version: body.lineage.resolver_version,
       enrichment_source: null,
+      license_matcher: "unavailable",
     });
   });
 });
@@ -523,7 +541,13 @@ describe("the job never reviews on part of its inputs", () => {
 describe("a stored version-1 report reads as it always did", () => {
   test("its evidence has no inputs and no lineage, and it reads back after a store", () => {
     const facts = build(emptyInputs()).facts;
-    const { inputs: _inputs, lineage: _lineage, ...v1Evidence } = facts;
+    const {
+      inputs: _inputs,
+      lineage: _lineage,
+      license_file: _licenseFile,
+      description_keys_not_shown_names: _names,
+      ...v1Evidence
+    } = facts;
     const parsed = parsePublicationReviewEvidence(v1Evidence) as PublicationReviewEvidence;
     expect(parsed.inputs).toBeNull();
     expect(parsed.lineage).toBeNull();

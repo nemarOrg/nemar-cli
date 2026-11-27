@@ -637,7 +637,7 @@ describe("a request whose review passes", () => {
       // Worker's own copy of the screen report.
       expect(reviews()[0]).toMatchObject({
         scanner_id: "identifier-scan@abcdef1",
-        prompt_version: "publication-review-prompt/2",
+        prompt_version: "publication-review-prompt/3",
         resolver_version: RESOLVER_VERSION,
         models: JSON.stringify([{ model: "claude-haiku-5-5", effort: "max" }]),
       });
@@ -733,7 +733,7 @@ describe("a request whose submission minimum failed at the reviewed commit", () 
       expect(shown.review_record).toMatchObject({
         head_sha: ds.head,
         scanner_id: "identifier-scan@abcdef1",
-        prompt_version: "publication-review-prompt/2",
+        prompt_version: "publication-review-prompt/3",
       });
       expect(shown.review_record_lines).toContain(`Reviewed commit: ${ds.head}`);
 

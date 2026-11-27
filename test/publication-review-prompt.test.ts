@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import type { LicenseView } from "../scripts/ci/publication-review-evidence";
 import * as presendModule from "../scripts/ci/publication-review-presend";
 import { isCleared, presend } from "../scripts/ci/publication-review-presend";
 import {
@@ -18,6 +19,7 @@ import {
   assemblePublicationReport,
   buildPublicationReviewMessages,
   modelFacts,
+  publicationInputDigest,
 } from "../scripts/ci/publication-review-prompt";
 import {
   type ClearedDocuments,
@@ -87,9 +89,18 @@ function evidence(over: Partial<PublicationReviewEvidence> = {}): PublicationRev
       previous_denial: "absent",
     },
     lineage: null,
+    description_keys_not_shown_names: ["Version"],
+    license_file: { state: "unreadable", spdx: null, additions: false, expression: null },
     ...over,
   };
 }
+
+/** How LICENSE is shown beside {@link evidence}'s default: the file, no matcher. */
+const VIEW: LicenseView = {
+  text: "file",
+  field: "cc0",
+  matcher: "unavailable",
+};
 
 const facts = (over: Partial<PublicationReviewEvidence> = {}) =>
   parsePublicationReviewEvidence(evidence(over));
@@ -107,6 +118,7 @@ const cleared = () => presend(DOCS).cleared;
 describe("the builder takes cleared text and evidence, and nothing else", () => {
   test("a plain string is not cleared text (checked by `bun run typecheck`)", () => {
     const { user } = buildPublicationReviewMessages({
+      license: VIEW,
       facts: facts(),
       // @ts-expect-error a string that pre-send did not examine is not ClearedText
       cleared: { readme: "a plain string", ...cleared() },
@@ -117,6 +129,7 @@ describe("the builder takes cleared text and evidence, and nothing else", () => 
 
   test("evidence the parser did not produce is not facts (checked by `bun run typecheck`)", () => {
     const { user } = buildPublicationReviewMessages({
+      license: VIEW,
       // @ts-expect-error an object literal is not ReviewFacts
       facts: evidence(),
       cleared: cleared(),
@@ -129,6 +142,7 @@ describe("the builder takes cleared text and evidence, and nothing else", () => 
     // The facts say the README was withheld, but its text is offered: it must not be sent.
     expect(() =>
       buildPublicationReviewMessages({
+        license: VIEW,
         facts: facts({
           documents: { ...evidence().documents, readme: "withheld_finding" },
           withheld_findings: { "local-user-path": 1 },
@@ -140,7 +154,12 @@ describe("the builder takes cleared text and evidence, and nothing else", () => 
     // The facts say it was shown, but there is no text: the model would be told it saw one.
     const { readme: _dropped, ...rest } = cleared();
     expect(() =>
-      buildPublicationReviewMessages({ facts: facts(), cleared: rest, nonce: NONCE }),
+      buildPublicationReviewMessages({
+        license: VIEW,
+        facts: facts(),
+        cleared: rest,
+        nonce: NONCE,
+      }),
     ).toThrow("cleared documents disagree with the facts");
   });
 });
@@ -150,7 +169,7 @@ describe("the builder checks at run time that pre-send cleared each string, what
   // builder a string no rule examined; at run time each one reaches the builder and is refused.
   const UNCLEARED = "Unexamined text that names /Users/jsmith/data";
   const build = (cleared: ClearedDocuments) =>
-    buildPublicationReviewMessages({ facts: facts(), cleared, nonce: NONCE });
+    buildPublicationReviewMessages({ license: VIEW, facts: facts(), cleared, nonce: NONCE });
   /** The legitimate documents the string is slipped in among, so the facts and the others agree. */
   const real = () => cleared();
 
@@ -286,6 +305,7 @@ describe("what the model is shown", () => {
   test("one fenced block per cleared document, named by its closed word and in a fixed order", () => {
     const docs = cleared();
     const { user } = buildPublicationReviewMessages({
+      license: VIEW,
       facts: facts(),
       cleared: docs,
       nonce: NONCE,
@@ -320,6 +340,7 @@ describe("what the model is shown", () => {
       withheld_findings: { "local-user-path": 1 },
     });
     const { user } = buildPublicationReviewMessages({
+      license: VIEW,
       facts: f,
       cleared: docs.cleared,
       nonce: NONCE,
@@ -370,6 +391,7 @@ describe("what the model is shown", () => {
 
   test("the facts sit outside every fence, ahead of the documents", () => {
     const { user } = buildPublicationReviewMessages({
+      license: VIEW,
       facts: facts(),
       cleared: cleared(),
       nonce: NONCE,
@@ -388,6 +410,7 @@ describe("what the model is shown", () => {
       ),
     }).cleared;
     const { user } = buildPublicationReviewMessages({
+      license: VIEW,
       facts: facts(),
       cleared: hostile,
       nonce: NONCE,
@@ -409,6 +432,7 @@ describe("what the model is shown", () => {
     ].join("\n");
     const hostile = presend({ ...DOCS, readme: present(forged, "README.md") }).cleared;
     const { user } = buildPublicationReviewMessages({
+      license: VIEW,
       facts: facts(),
       cleared: hostile,
       nonce: NONCE,
@@ -455,6 +479,7 @@ describe("what the model is shown", () => {
     // What it says the block holds is what the block holds: a count, and a long name, a description
     // and units per column (the fields pre-send keeps), and nothing else.
     const { user } = buildPublicationReviewMessages({
+      license: VIEW,
       facts: facts(),
       cleared: presend({
         ...DOCS,
@@ -494,8 +519,14 @@ describe("what the model is shown", () => {
   });
 
   test("the system prompt is static: nothing about a dataset can be in it", () => {
-    const a = buildPublicationReviewMessages({ facts: facts(), cleared: cleared(), nonce: NONCE });
+    const a = buildPublicationReviewMessages({
+      license: VIEW,
+      facts: facts(),
+      cleared: cleared(),
+      nonce: NONCE,
+    });
     const b = buildPublicationReviewMessages({
+      license: VIEW,
       facts: facts({ anonymous: true, name_length: 3 }),
       cleared: cleared(),
       nonce: "f".repeat(32),
@@ -560,7 +591,7 @@ describe("the output schema and the assembled report", () => {
       f,
     );
     expect(report.model).toBe(PUBLICATION_REVIEW_MODEL);
-    expect(report.v).toBe(2);
+    expect(report.v).toBe(3);
     expect(report.evidence).toEqual(f);
     expect(Object.keys(report).sort()).toEqual(
       [
@@ -849,5 +880,144 @@ describe("the output schema and the assembled report", () => {
       "claude-opus-5-5",
     ]);
     expect(PUBLICATION_REVIEW_MODEL).toBe("claude-haiku-5-5");
+  });
+});
+
+describe("LICENSE in prompt version 3 (ADR 0142)", () => {
+  const PASS = {
+    questions: {
+      complete_and_honest: "pass",
+      meets_standards: "pass",
+      authors_and_license: "pass",
+      name_adequate: "pass",
+    },
+    findings: [],
+    summary: "A dataset.",
+    steering: false,
+  };
+  const MATCHES = { state: "matches", spdx: "CC-BY-4.0", additions: false, expression: null };
+  const identified = () =>
+    facts({
+      documents: { ...evidence().documents, license: "absent" },
+      license_file: { ...MATCHES } as PublicationReviewEvidence["license_file"],
+    });
+  const { license: _license, ...withoutLicense } = DOCS;
+  const noLicense = () =>
+    presend({ ...withoutLicense, license: { name: "LICENSE", state: "absent", text: null } })
+      .cleared;
+  const NONE: LicenseView = {
+    text: "none",
+    field: "cc-by-4.0",
+    matcher: "scancode-32.5.0+spdx-3.27",
+  };
+  const factsOf = (user: string) =>
+    JSON.parse(
+      new RegExp(`<facts-${NONCE}>\\n([\\s\\S]*?)\\n</facts-${NONCE}>`).exec(user)?.[1] ?? "null",
+    );
+
+  test("a conclusive LICENSE with nothing added sends no text; the facts name it", () => {
+    const { user } = buildPublicationReviewMessages({
+      facts: identified(),
+      cleared: noLicense(),
+      license: NONE,
+      nonce: NONCE,
+    });
+    expect(user).not.toContain('kind="license"');
+    const shown = factsOf(user);
+    expect(shown.documents.license).toBe("identified");
+    expect(shown.license_file).toEqual({ state: "matches", spdx: "CC-BY-4.0", text: "none" });
+    expect(shown.license_field).toBe("cc-by-4.0");
+    expect(shown.license_matcher).toBe("scancode-32.5.0+spdx-3.27");
+  });
+
+  test("an identification that is not conclusive is one word: the model is never told why", () => {
+    for (const state of ["unrecognized", "unreadable", "annexed"] as const) {
+      const f = facts({
+        documents: {
+          ...evidence().documents,
+          license: state === "annexed" ? "withheld_annexed" : "sent",
+        },
+        license_file: { state, spdx: null, additions: false, expression: null },
+      });
+      const docs =
+        state === "annexed"
+          ? presend({ ...DOCS, license: { name: "LICENSE", state: "annexed", text: null } }).cleared
+          : cleared();
+      const { user } = buildPublicationReviewMessages({
+        facts: f,
+        cleared: docs,
+        license: VIEW,
+        nonce: NONCE,
+      });
+      expect(factsOf(user).license_file).toEqual({
+        state: "not_identified",
+        spdx: null,
+        text: "file",
+      });
+      expect(user).not.toMatch(/annex|unreadable|unrecognized/i);
+    }
+  });
+
+  test("a view that disagrees with the identification is refused, in every direction", () => {
+    const build =
+      (f: ReturnType<typeof facts>, license: LicenseView | undefined, c = cleared()) =>
+      () =>
+        buildPublicationReviewMessages({ facts: f, cleared: c, license, nonce: NONCE });
+    const refused = "the license view disagrees with the facts";
+    // A version-3 block needs a view, and nothing else may have one.
+    expect(build(facts(), undefined)).toThrow(refused);
+    const { license_file: _lf, description_keys_not_shown_names: _n, ...v2 } = evidence();
+    expect(build(parsePublicationReviewEvidence(v2), VIEW)).toThrow(refused);
+    // Nothing sent is only for a conclusive file with nothing added, whose document is absent.
+    expect(build(facts(), { ...VIEW, text: "none" })).toThrow(refused);
+    expect(build(facts(), { ...VIEW, text: "additions_only" })).toThrow(refused);
+    expect(build(identified(), VIEW, noLicense())).toThrow(refused);
+    expect(build(identified(), { ...NONE, text: "additions_only" }, noLicense())).toThrow(refused);
+    const added = facts({ license_file: { ...MATCHES, additions: true } as never });
+    expect(build(added, NONE)).toThrow(refused);
+    // And each agreeing pair is built.
+    expect(build(added, { ...NONE, text: "additions_only" })).not.toThrow();
+    expect(build(added, { ...NONE, text: "file" })).not.toThrow();
+    expect(build(identified(), NONE, noLicense())).not.toThrow();
+  });
+
+  test("the digest covers the identification, the field and the matcher", () => {
+    const digest = (license: LicenseView) =>
+      publicationInputDigest({ facts: identified(), cleared: noLicense(), license });
+    const a = digest(NONE);
+    expect(digest(NONE)).toBe(a);
+    expect(digest({ ...NONE, field: "cc-by" })).not.toBe(a);
+    expect(digest({ ...NONE, matcher: "unavailable" })).not.toBe(a);
+  });
+
+  test("question 3 says to trust the identification, and that matches_other is license_inconsistent", () => {
+    const q3 = PUBLICATION_SYSTEM_PROMPT.split("\n\n").find((p) =>
+      p.startsWith("3. authors_and_license"),
+    );
+    expect(q3).toContain("trust the identification");
+    expect(q3).toMatch(/"matches_other" means[^.]*different license/);
+    expect(q3).toContain('code "license_inconsistent"');
+    for (const word of ['"none"', '"additions_only"', '"file"', '"not_identified"', '"identified"'])
+      expect(q3).toContain(word);
+  });
+
+  test("the record names the prompt version and the matcher; a scanned file needs the matcher", () => {
+    const report = assemblePublicationReport(PASS, identified(), undefined, {
+      inputDigest: "a".repeat(64),
+      resolverVersion: null,
+      licenseMatcher: "scancode-32.5.0+spdx-3.27",
+    });
+    expect(report.v).toBe(3);
+    expect(report.record?.prompt_version).toBe("publication-review-prompt/3");
+    expect(report.record?.license_matcher).toBe("scancode-32.5.0+spdx-3.27");
+    // No matcher word is unavailable, which the parser refuses beside a scanned identification.
+    let thrown: unknown;
+    try {
+      assemblePublicationReport(PASS, identified());
+    } catch (e) {
+      thrown = e;
+    }
+    expect((thrown as PublicationReviewReportError).code).toBe("bad_record");
+    expect(assemblePublicationReport(PASS, facts()).record?.license_matcher).toBe("unavailable");
   });
 });

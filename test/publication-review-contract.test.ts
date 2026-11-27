@@ -3559,7 +3559,7 @@ describe("version 3 of the report (ADR 0142, decision 2)", () => {
   });
 
   test("the job still writes version 2, and the parser reads versions 1, 2 and 3", () => {
-    expect(PUBLICATION_REPORT_VERSION).toBe(2);
+    expect(PUBLICATION_REPORT_VERSION).toBe(3);
     expect([...PUBLICATION_REPORT_VERSIONS]).toEqual([1, 2, 3]);
   });
 
