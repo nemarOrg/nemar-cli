@@ -38,7 +38,12 @@ import {
   seedScreenedRequest,
   seedUser,
 } from "./helpers/publication-review";
-import { PROD_DATASET, createHarness, reportFor } from "./helpers/publication-review-harness";
+import {
+  PROD_DATASET,
+  createHarness,
+  hookedD1,
+  reportFor,
+} from "./helpers/publication-review-harness";
 
 const h = createHarness();
 
@@ -366,6 +371,31 @@ describe("again is exact about what it replaces", () => {
       ),
     ).rejects.toThrow("administrator");
     expect(h.reviews()).toHaveLength(1);
+    expect(h.dispatches()).toHaveLength(0);
+  });
+
+  test("a review that stops having reported between the read and the write is not replaced", async () => {
+    const { admin, requestId, oldId } = await reportedRequest();
+    // Another writer takes the row back to a running attempt just before the batch begins.
+    let moved = false;
+    const db = hookedD1(realD1(h.db), {
+      batch: (sqls) => {
+        if (moved || !sqls.some((q) => q.includes("SET superseded_at"))) return;
+        moved = true;
+        h.db.run(
+          `UPDATE publication_reviews
+              SET state = 'dispatched', verdict = NULL, report = NULL, decided_at = NULL,
+                  nonce = 'live', created_at = datetime('now')
+            WHERE id = ?`,
+          [oldId],
+        );
+      },
+    });
+    const out = await again(requestId, admin, { env: h.env({ DB: db }) });
+    expect(moved).toBe(true);
+    expect(out).toMatchObject({ started: false, reason: "running", reviewId: oldId });
+    expect(h.reviews()).toHaveLength(1);
+    expect(columnsOf(oldId)).toMatchObject({ state: "dispatched", superseded_at: null });
     expect(h.dispatches()).toHaveLength(0);
   });
 
