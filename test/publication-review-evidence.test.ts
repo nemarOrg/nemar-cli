@@ -63,6 +63,7 @@ import {
   MAX_COUNT,
   MAX_SAMPLING_RATE_HZ,
   MAX_SUMMARY_VALUES,
+  PUBLICATION_REVIEW_EFFORT,
   type PublicationReviewReport,
   PublicationReviewReportError,
   REVIEW_FORMATS,
@@ -74,6 +75,7 @@ import {
   verdictOf,
 } from "../shared/publication-review";
 import { fence } from "../shared/untrusted-text";
+import { type StandInMessage, replyFor, standInMessage } from "./helpers/anthropic-sse";
 import { emptyInputs } from "./helpers/review-inputs";
 
 let root: string;
@@ -212,18 +214,12 @@ const STAND_IN_OUTPUT = {
   steering: false,
 };
 
-/** A Messages API reply whose one text block holds `text`. */
-function messageReply(text: string, stopReason = "end_turn"): Response {
-  return Response.json({
-    id: "msg_stand_in",
-    type: "message",
-    role: "assistant",
-    model: "claude-haiku-5-5",
-    content: [{ type: "text", text }],
-    stop_reason: stopReason,
-    stop_sequence: null,
-    usage: { input_tokens: 10, output_tokens: 10 },
-  });
+/**
+ * A Messages API answer whose one text block holds `text`. The job streams, so the server below
+ * sends it as server-sent events (`replyFor` checks the request's `stream: true`).
+ */
+function messageReply(text: string, stopReason = "end_turn"): StandInMessage {
+  return standInMessage(text, { stop_reason: stopReason });
 }
 
 /** A failure the SDK must not retry, so a test is not slowed by its backoff. */
@@ -234,7 +230,7 @@ function failureReply(status: number, message: string): Response {
   });
 }
 
-let modelReply: (req: ModelRequest) => Response = () =>
+let modelReply: (req: ModelRequest) => StandInMessage | Response = () =>
   messageReply(JSON.stringify(STAND_IN_OUTPUT));
 let modelServer: ReturnType<typeof Bun.serve>;
 const SDK_ENV = [
@@ -264,7 +260,7 @@ beforeAll(() => {
         body: JSON.parse(raw || "{}") as Record<string, unknown>,
       };
       modelRequests.push(request);
-      return modelReply(request);
+      return replyFor(request.body, modelReply(request));
     },
   });
   for (const k of SDK_ENV) {
@@ -1345,7 +1341,7 @@ describe("runPublicationReview: the job around the model call", () => {
     });
   });
 
-  test("the request is Haiku 5.5 at high effort with the output schema, and offers the model no tools", async () => {
+  test("the request is Haiku 5.5, streamed, at max effort with the output schema, and offers the model no tools", async () => {
     const ds = newDataset("run-request");
     await reviewOf(ds);
     const [req] = modelRequests as [ModelRequest];
@@ -1354,8 +1350,11 @@ describe("runPublicationReview: the job around the model call", () => {
     expect(req.body.model).toBe("claude-haiku-5-5");
     expect(req.body.model).toBe(PUBLICATION_REVIEW_MODEL);
     expect(req.body.max_tokens).toBe(MAX_TOKENS);
+    expect(req.body.max_tokens).toBe(128_000);
+    expect(req.body.stream).toBe(true);
     const config = req.body.output_config as { effort: string; format: Record<string, unknown> };
-    expect(config.effort).toBe("high");
+    expect(config.effort).toBe("max");
+    expect(config.effort).toBe(PUBLICATION_REVIEW_EFFORT);
     expect(config.format.type).toBe("json_schema");
     expect(config.format.schema).toEqual(PUBLICATION_OUTPUT_SCHEMA);
     expect(req.body).not.toHaveProperty("tools");
@@ -1395,17 +1394,10 @@ describe("runPublicationReview: the job around the model call", () => {
   });
 
   test("an answer with no text in it is model_invalid", async () => {
-    modelReply = () =>
-      Response.json({
-        id: "msg_x",
-        type: "message",
-        role: "assistant",
-        model: "claude-haiku-5-5",
-        content: [],
-        stop_reason: "end_turn",
-        stop_sequence: null,
-        usage: { input_tokens: 1, output_tokens: 1 },
-      });
+    modelReply = () => ({
+      ...standInMessage("", { usage: { input_tokens: 1, output_tokens: 1 } }),
+      content: [],
+    });
     const err = await callPublicationReviewModel("s", "u").then(
       () => null,
       (e) => e,
@@ -1681,15 +1673,16 @@ describe("main: the whole script, from git to the callback", () => {
 
   test("every error the script posts is a word a job may post, and each arrives as itself", async () => {
     const ds = newDataset("main-errors");
-    const scenarios: [string, (() => Response) | null, Record<string, string>][] = [
-      ["stale_head", null, { "fetched-head": "e".repeat(40) }],
-      ["model_refused", () => messageReply("{}", "refusal"), {}],
-      ["model_truncated", () => messageReply("{}", "max_tokens"), {}],
-      ["model_unavailable", () => failureReply(500, "x"), {}],
-      ["model_invalid", () => messageReply("prose"), {}],
-      ["auth_failed", () => failureReply(401, "x"), {}],
-      ["evidence_unavailable", null, { "tags-file": join(root, "no-such-file") }],
-    ];
+    const scenarios: [string, (() => StandInMessage | Response) | null, Record<string, string>][] =
+      [
+        ["stale_head", null, { "fetched-head": "e".repeat(40) }],
+        ["model_refused", () => messageReply("{}", "refusal"), {}],
+        ["model_truncated", () => messageReply("{}", "max_tokens"), {}],
+        ["model_unavailable", () => failureReply(500, "x"), {}],
+        ["model_invalid", () => messageReply("prose"), {}],
+        ["auth_failed", () => failureReply(401, "x"), {}],
+        ["evidence_unavailable", null, { "tags-file": join(root, "no-such-file") }],
+      ];
     for (const [word, reply, over] of scenarios) {
       received.length = 0;
       modelRequests.length = 0;

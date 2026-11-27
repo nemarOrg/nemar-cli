@@ -1170,3 +1170,12 @@ It is refused while the automatic denial is confirming that review or has acted 
 The re-review also counts in the depositor's 24-hour tally (`DEPOSITOR_RANK_SQL`), so repeated comparisons can decline that depositor's next screen-started review with `depositor_limit`; an administrator's own start is not held by it.
 If the new run cannot be handed over or is declined, the old review stays superseded and the approval gate blocks until the new review is restarted (`start <dataset-id>` restarts it); nothing is rolled back.
 Where section 8 says a reported review is never started again, this is the later text for an administrator who passes `again`; every start without it is unchanged.
+
+## Amendment 2026-11-27 (owner): the review calls Haiku 5.5 at max effort
+
+The owner compared three settings on the same 37 queue requests at the same commits: Haiku 5.5 at `high`, Haiku 5.5 at `max` and Opus 5.5 at `medium`.
+Haiku at `max` gave the same verdict as Opus on all 37 (Haiku at `high` differed on one), at a small fraction of the price, so the review now calls Haiku 5.5 at `max`.
+Thinking counts toward the output budget, so the call streams with the model's whole 128,000 tokens and the confirming run's 12-minute deadline; 64,000 cut a review off before it answered.
+The confirming run (ADR 0139) gets the same 128,000 tokens, since it also thinks at `max`.
+The 12-minute call deadline now applies to every first run; a job that still passes the workflow's 20-minute limit is cancelled and reports `workflow_failed`, with the 30-minute watchdog behind it.
+Where this differs from the model decision above (`claude-haiku-5-5` at effort `high`), from call 6, and from the earlier 2026-11-27 amendment that says the review "still calls Haiku 5.5 at high effort", this is the later text.
