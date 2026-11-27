@@ -15,6 +15,12 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Fixed
+
+- **License lineage reads figshare article URLs and ignores stale IsDerivedFrom relations (resolver version 6; ADR 0139 decision 7 and ADR 0142 decision 3, amendments of 2026-11-27).**
+  A `https://<host>.figshare.com/articles/.../<id>` source is read from figshare's API: a dataset with a license is data under it, a paper-like type is a publication, anything else is `unresolved` for an administrator; its DOI is never re-read from Crossref as the journal article (nm000830).
+  Enrichment no longer carries an IsDerivedFrom forward once SourceDatasets stops naming it, and the resolver skips (and counts) an enrichment relation that is a publication SourceDatasets does not name, so a stale relation cannot hold a request.
+
 ## 0.10.53 - 2026-11-27
 
 ### Added
