@@ -904,35 +904,45 @@ const WRAP_GAP = String.raw`[>"'*_\`~]*\s[\s>"'*_\`~]*`;
 
 const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
-/**
- * Whether the README text itself rebuilds `longer` from its cut copy `short`: `short`, then
- * whitespace (a line break, with any quote or emphasis markup around it), then the rest of
- * `longer`, as `10.5281/zenodo.2231\n4785` does. Case is ignored (DOIs are compared lowercased).
- */
-function readmeRebuilds(readme: string, short: string, longer: string): boolean {
-  const rest = longer.slice(short.length);
-  return new RegExp(`${escapeRegExp(short)}${WRAP_GAP}${escapeRegExp(rest)}`, "i").test(readme);
-}
-
 /** An ellipsis that marks text cut by an editor or a tool: `[...]`, `[…]`, `...` or `…`. */
 const ELLIPSIS = String.raw`\s*(?:\[(?:\.\.\.|…)\]|\.\.\.|…)`;
 
+/** What follows a DOI inside a longer token: a letter, digit or `-_/`, or a dot before one. */
+const DOI_CONTINUES = /^(?:[a-z0-9\-_/]|\.[a-z0-9])/i;
+
 /**
- * Whether the README cuts `short` with an ellipsis right after it (optional whitespace between), as
- * a truncated table cell does: `https://doi.org/10.5281/zenodo.2231 [...]; N: 30`.
+ * Whether every place the README writes `short` as a DOI of its own is `longer` cut short: each
+ * occurrence (case ignored) is either continued into the rest of `longer` across whitespace (a
+ * line break, with any quote or emphasis markup around it: `10.5281/zenodo.2231\n4785`), or
+ * followed by an ellipsis (`10.5281/zenodo.2231 [...]`). An occurrence inside a longer DOI is not
+ * one of its own. One standalone occurrence (`see 10.5281/zenodo.2231.`), and `short` is a source.
  */
-function readmeCutsWithEllipsis(readme: string, short: string): boolean {
-  return new RegExp(`${escapeRegExp(short)}${ELLIPSIS}`, "i").test(readme);
+function readmeOnlyCuts(readme: string, short: string, longer: string): boolean {
+  const rest = longer.slice(short.length);
+  const wrapped = new RegExp(`^${WRAP_GAP}${escapeRegExp(rest)}`, "i");
+  const ellipsis = new RegExp(`^${ELLIPSIS}`, "i");
+  const lower = readme.toLowerCase();
+  let cuts = 0;
+  for (let at = lower.indexOf(short); at !== -1; at = lower.indexOf(short, at + 1)) {
+    const after = readme.slice(at + short.length);
+    if (DOI_CONTINUES.test(after)) continue;
+    if (wrapped.test(after) || ellipsis.test(after)) {
+      cuts++;
+      continue;
+    }
+    return false;
+  }
+  return cuts > 0;
 }
 
 /**
  * README DOIs that are another declared DOI cut short (ADR 0142 decision 3, amendment of
  * 2026-11-27): a README DOI that is a strict prefix of a DOI declared in SourceDatasets, the
- * related identifiers or the attestation, or of another README DOI, AND that the README itself
- * continues into that DOI across whitespace ({@link readmeRebuilds}: `10.5281/zenodo.2231\n4785`
- * beside a declared `10.5281/zenodo.22314785`), or that the README follows with an ellipsis
- * ({@link readmeCutsWithEllipsis}: `10.5281/zenodo.2231 [...]`, amendment of 2026-11-27, resolver
- * version 5), is that DOI wrapped or cut in the text, so it is removed.
+ * related identifiers or the attestation, or of another README DOI, AND that the README writes
+ * only as that DOI cut short ({@link readmeOnlyCuts}: every occurrence continued across a line
+ * break, `10.5281/zenodo.2231\n4785` beside a declared `10.5281/zenodo.22314785`, or followed by an
+ * ellipsis, `10.5281/zenodo.2231 [...]`; amendments of 2026-11-27, resolver version 5), is that
+ * DOI wrapped or cut in the text, so it is removed.
  * Such a cut copy still passes its repository's shape, so {@link isCutDoiCandidate} cannot see it.
  * A prefix the text does not continue is a distinct record (`zenodo.1234567` beside
  * `zenodo.12345678`) and stays. An equal DOI is not removed here: de-duplication keeps one.
@@ -946,10 +956,7 @@ function dropReadmePrefixes(refs: SourceRef[], readme: string | null): SourceRef
         r.kind === "doi" &&
         r.origin === "readme" &&
         dois.some(
-          (d) =>
-            d.length > r.doi.length &&
-            d.startsWith(r.doi) &&
-            (readmeRebuilds(readme, r.doi, d) || readmeCutsWithEllipsis(readme, r.doi)),
+          (d) => d.length > r.doi.length && d.startsWith(r.doi) && readmeOnlyCuts(readme, r.doi, d),
         )
       ),
   );

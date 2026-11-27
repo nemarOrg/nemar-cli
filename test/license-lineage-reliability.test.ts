@@ -635,6 +635,33 @@ describe("a README DOI cut by an ellipsis", () => {
     expect(found.dropped).toBe(1);
   });
 
+  test("a short DOI written once on its own as well as cut is a source", () => {
+    const readme = `${NM000843_README}\nAn earlier deposit: https://doi.org/10.5281/zenodo.236.\n`;
+    const found = sourcesOf("10.5281/zenodo.23610719", readme);
+    expect(ids(found)).toEqual([
+      "source_datasets 10.5281/zenodo.23610719",
+      "readme 10.5281/zenodo.236",
+    ]);
+    expect(found.dropped).toBe(0);
+    // Wrapped once and on its own once: also a source.
+    const wrapped = sourcesOf(
+      "10.5281/zenodo.22314785",
+      "Cite https://doi.org/10.5281/zenodo.2231\n4785. Old: 10.5281/zenodo.2231\n",
+    );
+    expect(ids(wrapped)).toEqual([
+      "source_datasets 10.5281/zenodo.22314785",
+      "readme 10.5281/zenodo.2231",
+    ]);
+    // Every occurrence cut (one wrapped, one ellipsis), beside the whole DOI: dropped.
+    const all = sourcesOf(
+      "10.5281/zenodo.22314785",
+      "Data 10.5281/zenodo.22314785; cite 10.5281/zenodo.2231\n4785; notes 10.5281/zenodo.2231 [...]\n",
+    );
+    expect(ids(all)).toEqual(["source_datasets 10.5281/zenodo.22314785"]);
+    // Each cut candidate is counted, as every dropped candidate is.
+    expect(all.dropped).toBe(2);
+  });
+
   test("distinct records are kept: no ellipsis, an ellipsis elsewhere, nothing longer declared", () => {
     const both = sourcesOf(
       null,
