@@ -106,7 +106,8 @@ describe("every runner fixture is identified as the case expects", () => {
     expect(id.matcher).toBe(LICENSE_MATCHER_VERSION);
     expect(LICENSE_FILE_STATES).toContain(id.fact.state);
     // Leftover exists exactly when additions are set.
-    expect(id.leftover.length > 0).toBe(id.fact.additions);
+    // Additions are leftover text, or a longest match that covers less than its whole license.
+    expect(id.leftover.length > 0 || id.partial).toBe(id.fact.additions);
   });
 
   test("each fixture's result is the pinned release's, on Linux", () => {
@@ -186,6 +187,117 @@ describe("the leftover is the text beyond the license", () => {
       }
     }
     expect(identify(text, "CC-BY-4.0", moved).leftover).toContain(ref.matched_text);
+  });
+});
+
+describe("text on a matched line outside the match's span is leftover", () => {
+  test("words after a notice on its own line", () => {
+    const c = caseOf("short-notice-rider");
+    const id = identify(c.text, "CC-BY-4.0", scanOf(c));
+    expect(id.fact).toMatchObject({ state: "matches", additions: true });
+    expect(id.leftover.join(" ")).toContain(
+      "except that the authors must approve every derived publication",
+    );
+  });
+
+  test("a restriction appended to the last line of the full text", () => {
+    const c = caseOf("last-line-rider");
+    const id = identify(c.text, "CC-BY-4.0", scanOf(c));
+    expect(id.fact).toMatchObject({ state: "matches", additions: true });
+    expect(id.leftover.join(" ")).toContain("Commercial use of this dataset is not permitted.");
+  });
+
+  test("the words before a notice's span are leftover too", () => {
+    const c = caseOf("short-notice");
+    expect(identify(c.text, "CC-BY-4.0", scanOf(c)).leftover).toEqual(["This dataset is"]);
+  });
+
+  test("a full text whose span is its whole lines has none", () => {
+    for (const name of [
+      "cc-by-4.0",
+      "cc-by-sa-4.0",
+      "cc-by-nc-4.0",
+      "cc-by-nc-sa-4.0",
+      "cc0-1.0",
+    ]) {
+      const c = caseOf(name);
+      expect(identify(c.text, c.field, scanOf(c)).leftover, name).toEqual([]);
+    }
+  });
+
+  test("a span edge that cannot be found in its line makes the whole line leftover", () => {
+    const c = caseOf("short-notice");
+    const scan = copy(scanOf(c));
+    for (const m of scan.matches) m.matched_text_diagnostics = "nowhere in the line";
+    expect(identify(c.text, "CC-BY-4.0", scan).leftover).toEqual([c.text.split("\n")[0]]);
+  });
+});
+
+describe("a deleted clause sets additions", () => {
+  test("one clause deleted: the longest match covers less than 100, so additions", () => {
+    const c = caseOf("clause-deleted");
+    const scan = scanOf(c);
+    const longest = [...scan.matches].sort((a, b) => b.matched_length - a.matched_length)[0];
+    expect(longest?.match_coverage).toBeLessThan(100);
+    expect(longest?.match_coverage).toBeGreaterThanOrEqual(MIN_MATCH_COVERAGE);
+    const id = identify(c.text, "CC-BY-4.0", scan);
+    expect(id.fact).toMatchObject({ state: "matches", additions: true });
+    expect(id.partial).toBe(true);
+  });
+
+  test("a whole section deleted falls below the threshold: unrecognized", () => {
+    const c = caseOf("section-deleted");
+    expect(identify(c.text, "CC-BY-4.0", scanOf(c)).fact.state).toBe("unrecognized");
+  });
+
+  test("coverage 100 is not partial", () => {
+    const c = caseOf("cc-by-4.0");
+    expect(identify(c.text, c.field, scanOf(c)).partial).toBe(false);
+  });
+});
+
+describe("a line ScanCode names that is not in the text is a scan of something else", () => {
+  const c = caseOf("cc-by-4.0");
+  const count = c.text.split("\n").length;
+  test.each([
+    [
+      "an end line of 2^53",
+      (s: ScanFile) => ((s.matches[0] as { end_line: number }).end_line = 2 ** 53),
+    ],
+    [
+      "an end line one past the text",
+      (s: ScanFile) => ((s.matches[0] as { end_line: number }).end_line = count + 1),
+    ],
+    [
+      "a start line of 0",
+      (s: ScanFile) => ((s.matches[0] as { start_line: number }).start_line = 0),
+    ],
+    [
+      "a start after its end",
+      (s: ScanFile) => {
+        const m = s.matches[0] as { start_line: number; end_line: number };
+        m.start_line = m.end_line + 1;
+      },
+    ],
+    [
+      "a copyright past the text",
+      (s: ScanFile) =>
+        s.copyrights.push({ copyright: "Copyright x", start_line: count + 5, end_line: count + 5 }),
+    ],
+  ] as const)("%s: unreadable, matcher unavailable, no loop", (_label, change) => {
+    const scan = copy(scanOf(c));
+    change(scan);
+    const started = performance.now();
+    const id = identify(c.text, c.field, scan);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(id.fact.state).toBe("unreadable");
+    expect(id.matcher).toBe("unavailable");
+  });
+
+  test("the text's own last line is accepted", () => {
+    const scan = copy(scanOf(c));
+    (scan.matches[0] as { end_line: number }).end_line = count;
+    expect(identify(c.text, c.field, scan).matcher).toBe(LICENSE_MATCHER_VERSION);
   });
 });
 
@@ -306,8 +418,19 @@ describe("NEMAR's own notice", () => {
 describe("the License field against the file's identifier", () => {
   test.each([
     ["CC-BY-4.0", "CC-BY-4.0", "match"],
-    ["CC BY 4.0", "CC-BY-4.0", "match"],
-    ["https://creativecommons.org/licenses/by/4.0/", "CC-BY-4.0", "match"],
+    // Only the identifier itself, case aside, or a field that names no version.
+    ["cc-by-4.0", "CC-BY-4.0", "match"],
+    [" CC-BY-4.0 ", "CC-BY-4.0", "match"],
+    ["CC BY 4.0", "CC-BY-4.0", "differ"],
+    ["https://creativecommons.org/licenses/by/4.0/", "CC-BY-4.0", "differ"],
+    // The review's own examples of a field that is not the file's license.
+    ["BSD-3-Clause-Clear", "BSD-3-Clause", "differ"],
+    ["BSD-2-Clause-Patent", "BSD-2-Clause", "differ"],
+    ["CC-BY-4.0 AND MIT", "CC-BY-4.0", "incomparable"],
+    ["CC-BY-4.0 OR MIT", "MIT", "incomparable"],
+    ["CC-BY-4.0, no commercial use", "CC-BY-4.0", "differ"],
+    ["CC-BY-4.0-NC", "CC-BY-4.0", "differ"],
+    ["MIT", "BSD-2-Clause", "differ"],
     ["CC-BY", "CC-BY-4.0", "match"],
     ["CC-BY", "CC-BY-SA-4.0", "differ"],
     ["CC-BY-4.0", "CC-BY-3.0", "differ"],
@@ -351,6 +474,7 @@ describe("the states that come before the scan", () => {
       fact: { state: "unreadable", spdx: null, additions: false, expression: null },
       matcher: "unavailable",
       leftover: [],
+      partial: false,
     });
   });
 

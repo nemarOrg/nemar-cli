@@ -323,64 +323,36 @@ const COMPARABLE = new Set([
   "cc-by-nc-nd",
 ]);
 
-const CC_SUFFIX: Record<string, string> = {
-  "cc-by": "",
-  "cc-by-sa": "-SA",
-  "cc-by-nc": "-NC",
-  "cc-by-nc-sa": "-NC-SA",
-  "cc-by-nd": "-ND",
-  "cc-by-nc-nd": "-NC-ND",
-};
-
-/** The software license a `permissive-attribution` field names, as its SPDX identifier. */
-function permissiveSpdx(field: string): string | null {
-  const t = field.trim().toLowerCase();
-  if (/\bmit\b|expat/.test(t)) return "MIT";
-  if (/bsd[- ]?2/.test(t)) return "BSD-2-Clause";
-  if (/bsd[- ]?3/.test(t)) return "BSD-3-Clause";
-  if (/apache/.test(t)) return "Apache-2.0";
-  return null;
+/** Whether the field's own text names a version (`4.0`, `-3-`), not one normalization implies. */
+function namesVersion(field: string): boolean {
+  return /\d\.\d/.test(field) || /(?:^|[-\s_])\d+(?=$|[-\s_])/.test(field);
 }
+
+/** An SPDX operator in the field: the field is an expression, not one license. */
+const FIELD_EXPRESSION = /\s(AND|OR|WITH)\s/i;
 
 /**
  * Whether a `License` field and a file's SPDX identifier name the same license.
- * - `incomparable`: the field does not normalize (absent, free text, restricted, unknown).
- * - `match`: the same SPDX identifier, or a field with no version (`CC-BY`) and a file of its
- *   family. MIT, BSD and Apache are compared by identifier only, never by family.
- * - `differ`: anything else.
+ * - `incomparable`: the field does not normalize (absent, free text, restricted, unknown), or it
+ *   is an expression (`CC-BY-4.0 AND MIT`): the file cannot be judged against one license.
+ * - `match`: the trimmed field is the identifier itself (case aside), or the field names no
+ *   version (`CC-BY`, `CC0`, `ODbL`) and normalizes to the identifier's family. MIT, BSD and Apache
+ *   share a normalized family, so they match by identifier only.
+ * - `differ`: anything else, including a field that adds words or a suffix to an identifier
+ *   (`CC BY 4.0`, `CC-BY-4.0-NC`, `CC-BY-4.0, no commercial use`): a person reads the difference.
  */
 export function compareLicenseField(
   field: string | null,
   spdx: string,
 ): "match" | "differ" | "incomparable" {
   if (field === null) return "incomparable";
-  const f = normalizeLicense(field);
+  const trimmed = field.trim();
+  if (FIELD_EXPRESSION.test(trimmed)) return "incomparable";
+  const f = normalizeLicense(trimmed);
   if (!COMPARABLE.has(f.license)) return "incomparable";
-  if (field.trim().toLowerCase() === spdx.toLowerCase()) return "match";
-  if (f.license === "permissive-attribution") {
-    return permissiveSpdx(field) === spdx ? "match" : "differ";
-  }
-  const p = normalizeLicense(spdx);
-  if (p.license !== f.license) return "differ";
-  if (f.version === null) return "match";
-  let canonical: string;
-  switch (f.license) {
-    case "cc0":
-      canonical = `CC0-${f.version}`;
-      break;
-    case "pddl":
-      canonical = `PDDL-${f.version}`;
-      break;
-    case "odc-by":
-      canonical = `ODC-By-${f.version}`;
-      break;
-    case "odbl":
-      canonical = `ODbL-${f.version}`;
-      break;
-    default:
-      canonical = `CC-BY${CC_SUFFIX[f.license]}-${f.version}`;
-  }
-  return canonical === spdx ? "match" : "differ";
+  if (trimmed.toLowerCase() === spdx.toLowerCase()) return "match";
+  if (f.license === "permissive-attribution" || namesVersion(trimmed)) return "differ";
+  return normalizeLicense(spdx).license === f.license ? "match" : "differ";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -401,6 +373,12 @@ export interface LicenseIdentification {
    * uncovered lines. Empty unless `fact.additions`. Untrusted depositor text: never logged.
    */
   leftover: string[];
+  /**
+   * The longest match covers less than all of its license's text (a clause deleted, a text cut):
+   * `additions` is set, and what is missing cannot be shown as leftover, so the reader of the
+   * review needs the file itself.
+   */
+  partial: boolean;
 }
 
 const SCANCODE_REF = /^LicenseRef-scancode-/;
@@ -447,6 +425,8 @@ const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
 /**
  * The text beyond `p`'s matches, in file order (ADR 0142, "Additions"):
  * - each bracketed (unmatched) token in a `p` match's diagnostics;
+ * - the text on a `p` match's first line before its span, and on its last line after it (the
+ *   diagnostics are the span itself; the matched text is whole lines), unless only punctuation;
  * - the matched text of a match of any other license, except an unknown-license-reference match
  *   whose lines a `p` match also covers (the "licensed under the" of a notice);
  * - the matched text of each license clue;
@@ -463,6 +443,7 @@ export function leftoverOf(scan: ScanFile, p: string, text: string): string[] {
     for (const hit of m.matched_text_diagnostics.matchAll(/\[([^\]\n]*)\]/g)) {
       out.push({ line: m.start_line, text: hit[1] ?? "" });
     }
+    for (const edge of spanEdges(m, lines)) out.push(edge);
   }
   for (const m of scan.matches) {
     if (m.license_expression_spdx === p) continue;
@@ -500,6 +481,49 @@ export function leftoverOf(scan: ScanFile, p: string, text: string): string[] {
   return out.sort((a, b) => a.line - b.line).map((o) => o.text);
 }
 
+/** The diagnostics without their brackets: the text of the span as the file has it. */
+const unbracket = (s: string) => s.replace(/[[\]]/g, "");
+
+/**
+ * The text of a match's first line before the span, and of its last line after it. A span edge
+ * that cannot be found in its line makes the whole line leftover: the safe direction.
+ */
+function spanEdges(m: ScanMatch, lines: string[]): { line: number; text: string }[] {
+  const out: { line: number; text: string }[] = [];
+  const span = linesOf(m.matched_text_diagnostics);
+  const head = unbracket(span[0] ?? "").trim();
+  const tail = unbracket(span.at(-1) ?? "").trim();
+  const first = lines[m.start_line - 1] ?? "";
+  const last = lines[m.end_line - 1] ?? "";
+  const at = head === "" ? -1 : first.indexOf(head);
+  const end = tail === "" ? -1 : last.lastIndexOf(tail);
+  if (at < 0 || end < 0) {
+    out.push({ line: m.start_line, text: first });
+    if (m.end_line !== m.start_line) out.push({ line: m.end_line, text: last });
+    return out;
+  }
+  const before = first.slice(0, at);
+  const after = last.slice(end + tail.length);
+  if (!ONLY_PUNCTUATION.test(before)) out.push({ line: m.start_line, text: before.trim() });
+  if (!ONLY_PUNCTUATION.test(after)) out.push({ line: m.end_line, text: after.trim() });
+  return out;
+}
+
+/**
+ * Whether every line ScanCode names is a line of the text. A line outside it (0, past the end, a
+ * start after its end) is a scan of something else, never iterated.
+ */
+export function linesAreInText(scan: ScanFile, text: string): boolean {
+  const count = linesOf(text).length;
+  const ok = (a: number, b: number) =>
+    Number.isSafeInteger(a) && Number.isSafeInteger(b) && a >= 1 && a <= b && b <= count;
+  return (
+    scan.matches.every((m) => ok(m.start_line, m.end_line)) &&
+    scan.clues.every((m) => ok(m.start_line, m.end_line)) &&
+    scan.copyrights.every((c) => ok(c.start_line, c.end_line))
+  );
+}
+
 /** The longest match by `matched_length`; the first of equals, in ScanCode's order. */
 function longestMatch(matches: ScanMatch[]): ScanMatch | null {
   let best: ScanMatch | null = null;
@@ -532,11 +556,12 @@ export interface IdentifyInputs {
 
 /** ADR 0142 section 1's rule, in order. */
 export function identifyLicenseFile(inputs: IdentifyInputs): LicenseIdentification {
-  const done = (f: LicenseFileFact, matcher: MatcherWord, leftover: string[] = []) => ({
-    fact: f,
-    matcher,
-    leftover,
-  });
+  const done = (
+    f: LicenseFileFact,
+    matcher: MatcherWord,
+    leftover: string[] = [],
+    partial = false,
+  ): LicenseIdentification => ({ fact: f, matcher, leftover, partial });
   const { document, licenseField, scan } = inputs;
   // No scan directory: the workflow predates the matcher (ADR 0142 decision 2, deploys 1 and 2).
   if (scan === null) return done(fact("unreadable"), "unavailable");
@@ -550,6 +575,7 @@ export function identifyLicenseFile(inputs: IdentifyInputs): LicenseIdentificati
   const result = scan.scan;
   if (result.scan_errors > 0) return done(fact("unreadable"), matcher);
   const text = document.text;
+  if (!linesAreInText(result, text)) return done(fact("unreadable"), "unavailable");
 
   const notice = nemarNoticeOf(text, licenseField);
   if (notice !== null) return done(fact("matches", notice), matcher);
@@ -572,15 +598,18 @@ export function identifyLicenseFile(inputs: IdentifyInputs): LicenseIdentificati
   const compared = compareLicenseField(licenseField, p);
   if (compared === "incomparable") return done(fact("unrecognized", p), matcher);
   const leftover = leftoverOf(result, p, text);
+  // A deleted clause leaves no text behind to show; coverage below 100 is the only sign of it.
+  const partial = longest.match_coverage < 100;
   return done(
     {
       state: compared === "match" ? "matches" : "matches_other",
       spdx: p,
-      additions: leftover.length > 0,
+      additions: leftover.length > 0 || partial,
       expression: null,
     },
     matcher,
     leftover,
+    partial,
   );
 }
 
