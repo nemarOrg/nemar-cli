@@ -7,7 +7,8 @@
  * `.nemar/metadata.json` from the default branch, and the deposit attestation's upstream source,
  * then runs the one shared resolver (`shared/license-lineage.ts`), the same one
  * `nemar dataset license-check` runs on a local copy. It writes nothing to D1, GitHub or S3. Each
- * registry answer is cached per DOI for 24 hours in the Worker cache; a failed fetch is not cached.
+ * registry answer is cached per DOI for 24 hours in the Worker cache; a failed fetch and a
+ * `not_found` are not cached, and a failed fetch is asked again (ADR 0142 decision 3).
  *
  * 200 is the lineage result, whatever its outcome (an `unresolved` outcome is a finding, not an
  * error; a missing `dataset_description.json` is `unresolved`, never `no_upstream_declared`).
@@ -16,12 +17,12 @@
  * 404 an unknown dataset; 409 a dataset with no repository; 502 a repository read that failed.
  */
 
-import { type LineageResult, resolveLicenseLineage } from "../../../../shared/license-lineage.js";
+import type { LineageResult } from "../../../../shared/license-lineage.js";
 import { README_CANDIDATES } from "../../../../shared/readme-candidates.js";
 import { isValidDatasetId } from "../../services/datasetId";
 import { getFileContent } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
-import { workerLineageCache } from "../../services/license-lineage-cache";
+import { resolveWorkerLineage } from "../../services/license-lineage-cache";
 import { extractRepoName } from "../../services/repo-metadata";
 import type { Bindings } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
@@ -48,7 +49,8 @@ function upstreamSourceOf(attestation: string | null): string | null {
  * A dataset's lineage from its repository files at `ref` (default `main`) and its attestation, by
  * the one shared resolver. `ok: false` when a repository read failed: a lineage is never computed
  * from inputs that could not be read. Also used by the batch acknowledgment (card D3), which reads
- * at the screened commit.
+ * at the screened commit, and by the decision card (epic #2449), which resolves the lineage again
+ * with its own `resolved_at` (ADR 0142 decision 3).
  */
 export async function readDatasetLineage(
   env: Bindings,
@@ -70,15 +72,12 @@ export async function readDatasetLineage(
     console.error(`[license-lineage] repository read failed for ${args.datasetId}:`, err);
     return { ok: false };
   }
-  const result = await resolveLicenseLineage(
-    {
-      datasetDescription: description,
-      nemarMetadata: metadata,
-      attestationUpstreamSource: upstreamSourceOf(args.attestation),
-      readme,
-    },
-    { cache: workerLineageCache() },
-  );
+  const result = await resolveWorkerLineage({
+    datasetDescription: description,
+    nemarMetadata: metadata,
+    attestationUpstreamSource: upstreamSourceOf(args.attestation),
+    readme,
+  });
   return { ok: true, result };
 }
 

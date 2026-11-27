@@ -1,14 +1,19 @@
 /**
  * The license-lineage resolver's per-DOI cache in the Worker (epic #2182, cards D1 and B4): the
  * Worker cache (`caches.default`), keyed by a URL on a host that is never fetched. Each registry
- * answer is kept for `CACHE_TTL_SECONDS`; a failed fetch is never cached (the resolver's rule).
- * One module for the two readers: the admin lineage route and the publication review's inputs.
+ * answer is kept for `CACHE_TTL_SECONDS`; a failed fetch and a `not_found` are never cached, so an
+ * `unresolved` source is never served from it (the resolver's rule, ADR 0142 decision 3).
+ * One module for the readers: the admin lineage route, the publication review's inputs, and the
+ * decision card, which all resolve through {@link resolveWorkerLineage}.
  */
 
 import {
   CACHE_TTL_SECONDS,
   type LineageCache,
+  type LineageInputs,
+  type LineageResult,
   type SourceRecord,
+  resolveLicenseLineage,
 } from "../../../shared/license-lineage.js";
 
 /** A cache key is a URL in the Worker cache; this host is never fetched. */
@@ -37,4 +42,15 @@ export function workerLineageCache(): LineageCache | undefined {
       );
     },
   };
+}
+
+/**
+ * A lineage resolved again now, as every Worker reader resolves it (ADR 0142 decision 3): the
+ * resolver's default retries (`LINEAGE_RETRY`, within its fetch budget), the Worker cache for
+ * answers only, and a fresh `resolved_at`. An `unresolved` source is asked again every time, so the
+ * review, the admin command and the decision card each get the registries' answer of their own
+ * moment; the card shows its own beside the review's and never raises the stored verdict.
+ */
+export function resolveWorkerLineage(inputs: LineageInputs): Promise<LineageResult> {
+  return resolveLicenseLineage(inputs, { cache: workerLineageCache() });
 }
