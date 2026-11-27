@@ -1202,6 +1202,32 @@ describe("figshare article URLs are read from figshare", () => {
     }
   });
 
+  test("a metadata-only figshare record is unresolved whatever its license", async () => {
+    const a = await Bun.file(ARTICLE_FIXTURE).json();
+    a.is_metadata_record = true;
+    a.metadata_reason = "Data available on request from the authors";
+    standIn.override("figshare /v2/articles/7708514?", { status: 200, body: JSON.stringify(a) });
+    const r = await run(inputs("CC-BY-4.0", [{ URL: NM000830_URL }]));
+    expect(r.outcome).toBe("unresolved");
+    expect(r.sources[0].license).toBeNull();
+  });
+
+  test("a SourceDatasets Version reads that figshare version; the URL's own version wins", async () => {
+    const r = await run(inputs("CC-BY-4.0", [{ URL: NM000830_URL, Version: "v1" }]));
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(count("/v2/articles/7708514/versions/1")).toBe(1);
+    expect(count("/v2/articles/7708514?")).toBe(0);
+    // A Version that is not a figshare version number reads the latest.
+    standIn.stop();
+    standIn = startStandIn();
+    await run(inputs("CC-BY-4.0", [{ URL: NM000830_URL, Version: "1.0.2" }]));
+    expect(count("/v2/articles/7708514?")).toBe(1);
+    expect(figshareArticleOfUrl("https://figshare.com/articles/x/7708514/1")).toEqual({
+      id: "7708514",
+      version: "1",
+    });
+  });
+
   test("a figshare article that is missing or does not answer is unresolved", async () => {
     standIn.override("figshare /v2/articles/7708514?", { status: 404 });
     const missing = await run(inputs("CC-BY-4.0", [{ URL: NM000830_URL }]));

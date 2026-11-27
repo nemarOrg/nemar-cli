@@ -740,7 +740,13 @@ export function refFromIdentifier(
   const zenDoi = /zenodo\.org\/doi\/(10\.\d{4,9}\/\S+)/i.exec(t);
   if (zenDoi) return doiRef(zenDoi[1], origin);
   const fs = figshareArticleOfUrl(t);
-  if (fs) return { kind: "figshare_article", ...fs, origin };
+  if (fs) {
+    // A version in the URL wins; else the SourceDatasets entry's Version when it is a figshare
+    // version number; else the latest.
+    const hint = versionHint?.trim().replace(/^v/i, "") ?? "";
+    const version = fs.version ?? (/^\d{1,6}$/.test(hint) ? hint : null);
+    return { kind: "figshare_article", id: fs.id, version, origin };
+  }
   const pn = PHYSIONET_URL.exec(t);
   if (pn) {
     return {
@@ -1629,7 +1635,8 @@ export const FIGSHARE_PAPER_TYPES: ReadonlySet<string> = new Set([
  * A figshare article URL, read from figshare's API (`/v2/articles/<id>`, or its version): the
  * figshare record decides what it is (ADR 0139 decision 7, amendment of 2026-11-27). A `dataset`
  * with a license is a dataset under that license; a paper-like type is a publication; any other
- * type, or a dataset with no license, is `unresolved`. The record's DOI names the source (a PLOS
+ * type, a dataset with no license, and a metadata-only record (`is_metadata_record`: the data is
+ * held elsewhere or on request) are `unresolved`. The record's DOI names the source (a PLOS
  * figshare dataset shares its article's DOI, `10.1371/journal.pone.0211710`), and that DOI is
  * never then read from Crossref, which would call it the journal article.
  */
@@ -1650,6 +1657,9 @@ async function resolveFigshareArticle(
       ? normalizeDoiKey(a.doi)
       : fallbackId;
   const type = typeof a.defined_type_name === "string" ? a.defined_type_name.toLowerCase() : null;
+  // A metadata-only record describes data held elsewhere or available on request: its license
+  // is not shown to be the data's, so an administrator decides.
+  const metadataOnly = a.is_metadata_record === true;
   const authors = Array.isArray(a.authors)
     ? a.authors
         .map((x) => (isRecord(x) ? text(x.full_name) : null))
@@ -1665,7 +1675,11 @@ async function resolveFigshareArticle(
     publisher: "figshare",
     evidence_url: url,
   };
-  if (type === null || (!FIGSHARE_DATA_TYPES.has(type) && !FIGSHARE_PAPER_TYPES.has(type))) {
+  if (
+    metadataOnly ||
+    type === null ||
+    (!FIGSHARE_DATA_TYPES.has(type) && !FIGSHARE_PAPER_TYPES.has(type))
+  ) {
     return unknownLicense(base);
   }
   const lic = isRecord(a.license) ? a.license : null;
