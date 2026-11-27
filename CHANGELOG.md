@@ -15,6 +15,11 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Changed
+
+- **Automatic denial runs in shadow mode in production (ADR 0139 amendment).**
+  An eligible review fail gets its confirming run (Sonnet 5.5 at max), and an agreement is recorded as `would_deny`; nothing is denied and no depositor is mailed.
+
 ## 0.10.48 - 2026-11-27
 
 ### Changed

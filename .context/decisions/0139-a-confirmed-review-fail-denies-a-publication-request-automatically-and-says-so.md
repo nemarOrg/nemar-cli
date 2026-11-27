@@ -147,3 +147,9 @@ It clears that reason alone.
   The derivation drops `license_lineage_unconfirmed`, and the stored verdict is derived again without it when the stored column still equals what its report derives; the verdict then follows the other reasons.
   It never clears another reason and never approves; an administrator's override still clears the reason too.
   The admin show and the administrators' mail print "License permission recorded on (date) by (administrator), ticket (ticket)".
+
+## Amendment 2026-11-27 (owner): production runs in shadow mode
+
+`PUBLICATION_AUTO_DENY_MODE = "shadow"` joins production `[vars]`: an eligible fail gets its confirming run and an agreement is recorded as `would_deny`, and nothing is denied.
+The owner reads the shadow results on the queue before switching to `on`, which is a separate reviewed change to the same line and its guard test.
+The daily cap stays unset (25).
