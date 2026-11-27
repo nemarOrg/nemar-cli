@@ -903,6 +903,21 @@ describe("data containers are data; publications stay publications", () => {
   const ND4 = { name: "CC BY-ND 4.0", url: "https://creativecommons.org/licenses/by-nd/4.0/" };
   const F8 = [{ DOI: "10.17605/osf.io/f8sq3" }];
 
+  test("an OSF child with children of its own leaves no verdict; the tree is not walked", async () => {
+    // yb3pq (recorded): three of its nine children have children of their own.
+    const r = await run(inputs("CC-BY-NC-SA-4.0", [{ DOI: "10.17605/osf.io/yb3pq" }]));
+    expect(r.outcome).toBe("unresolved");
+    expect(r.sources[0]).toMatchObject({ resolver: "osf", license: null });
+    expect(standIn.misses).toEqual([]);
+    expect(count("/v2/nodes/sp3ck")).toBe(0);
+    // A child whose count is not given is not shown to have none.
+    standIn.override("osf /v2/nodes/f8sq3/children/", {
+      status: 200,
+      body: childrenOf([osfChild("abcde", SA4, null)]),
+    });
+    expect((await run(inputs("CC-BY-SA-4.0", F8))).outcome).toBe("unresolved");
+  });
+
   test("each child is judged on its own: a stricter child decides, and two share-alike versions do not merge", async () => {
     standIn.override("osf /v2/nodes/f8sq3/children/", {
       status: 200,

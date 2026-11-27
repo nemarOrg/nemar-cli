@@ -432,11 +432,11 @@
     "case": "osf-project",
     "registry": "osf",
     "method": "GET",
-    "path": "/v2/nodes/f8sq3/children/?embed=license&page[size]=50",
-    "url": "https://api.osf.io/v2/nodes/f8sq3/children/?embed=license&page[size]=50",
+    "path": "/v2/nodes/f8sq3/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/f8sq3/children/?embed=license&page[size]=50&related_counts=children",
     "status": 200,
     "file": "45-osf-children-f8sq3.json",
-    "fetched_at": "2026-11-27T17:30:08Z"
+    "fetched_at": "2026-11-27T17:43:26Z"
   },
   {
     "case": "osf-project",
@@ -452,31 +452,31 @@
     "case": "osf-url-sa",
     "registry": "osf",
     "method": "GET",
-    "path": "/v2/nodes/rmafj/children/?embed=license&page[size]=50",
-    "url": "https://api.osf.io/v2/nodes/rmafj/children/?embed=license&page[size]=50",
+    "path": "/v2/nodes/rmafj/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/rmafj/children/?embed=license&page[size]=50&related_counts=children",
     "status": 200,
     "file": "47-osf-children-rmafj.json",
-    "fetched_at": "2026-11-27T17:30:09Z"
+    "fetched_at": "2026-11-27T17:43:26Z"
   },
   {
     "case": "osf-url-by",
     "registry": "osf",
     "method": "GET",
-    "path": "/v2/nodes/j3s7g/children/?embed=license&page[size]=50",
-    "url": "https://api.osf.io/v2/nodes/j3s7g/children/?embed=license&page[size]=50",
+    "path": "/v2/nodes/j3s7g/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/j3s7g/children/?embed=license&page[size]=50&related_counts=children",
     "status": 200,
     "file": "48-osf-children-j3s7g.json",
-    "fetched_at": "2026-11-27T17:30:09Z"
+    "fetched_at": "2026-11-27T17:43:26Z"
   },
   {
     "case": "osf-no-rights",
     "registry": "osf",
     "method": "GET",
-    "path": "/v2/nodes/j7as8/children/?embed=license&page[size]=50",
-    "url": "https://api.osf.io/v2/nodes/j7as8/children/?embed=license&page[size]=50",
+    "path": "/v2/nodes/j7as8/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/j7as8/children/?embed=license&page[size]=50&related_counts=children",
     "status": 200,
     "file": "49-osf-children-j7as8.json",
-    "fetched_at": "2026-11-27T17:30:10Z"
+    "fetched_at": "2026-11-27T17:43:27Z"
   },
   {
     "case": "osf-project-no-rights",
@@ -502,11 +502,11 @@
     "case": "osf-project-no-rights",
     "registry": "osf",
     "method": "GET",
-    "path": "/v2/nodes/c5zbq/children/?embed=license&page[size]=50",
-    "url": "https://api.osf.io/v2/nodes/c5zbq/children/?embed=license&page[size]=50",
+    "path": "/v2/nodes/c5zbq/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/c5zbq/children/?embed=license&page[size]=50&related_counts=children",
     "status": 200,
     "file": "52-osf-children-c5zbq.json",
-    "fetched_at": "2026-11-27T17:30:12Z"
+    "fetched_at": "2026-11-27T17:43:28Z"
   },
   {
     "case": "osf-project-children",
@@ -532,11 +532,11 @@
     "case": "osf-project-children",
     "registry": "osf",
     "method": "GET",
-    "path": "/v2/nodes/yb3pq/children/?embed=license&page[size]=50",
-    "url": "https://api.osf.io/v2/nodes/yb3pq/children/?embed=license&page[size]=50",
+    "path": "/v2/nodes/yb3pq/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/yb3pq/children/?embed=license&page[size]=50&related_counts=children",
     "status": 200,
     "file": "55-osf-children-yb3pq.json",
-    "fetched_at": "2026-11-27T17:30:15Z"
+    "fetched_at": "2026-11-27T17:43:29Z"
   },
   {
     "case": "osf-datacite-cc-by",
@@ -552,11 +552,11 @@
     "case": "osf-datacite-cc-by",
     "registry": "osf",
     "method": "GET",
-    "path": "/v2/nodes/wpkrz/children/?embed=license&page[size]=50",
-    "url": "https://api.osf.io/v2/nodes/wpkrz/children/?embed=license&page[size]=50",
+    "path": "/v2/nodes/wpkrz/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/wpkrz/children/?embed=license&page[size]=50&related_counts=children",
     "status": 200,
     "file": "57-osf-children-wpkrz.json",
-    "fetched_at": "2026-11-27T17:30:15Z"
+    "fetched_at": "2026-11-27T17:43:29Z"
   },
   {
     "case": "figshare-collection",

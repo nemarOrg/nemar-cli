@@ -1698,6 +1698,15 @@ async function resolvePhysioNet(
   );
 }
 
+/** How many children an OSF child node has (`related_counts=children`), or null when not given. */
+function childCountOf(child: unknown): number | null {
+  if (!isRecord(child) || !isRecord(child.relationships)) return null;
+  const rel = child.relationships.children;
+  const related = isRecord(rel) && isRecord(rel.links) ? rel.links.related : null;
+  const meta = isRecord(related) && isRecord(related.meta) ? related.meta : null;
+  return meta !== null && Number.isInteger(meta.count) ? Number(meta.count) : null;
+}
+
 /** The most child components of an OSF node read; a node with more is not judged. */
 export const MAX_OSF_CHILDREN = 50;
 
@@ -1773,7 +1782,7 @@ async function resolveOsf(
     publisher: described.publisher ?? "OSF",
     evidence_url: url,
   };
-  const childUrl = `${o.bases.osf}/v2/nodes/${encodeURIComponent(guid)}/children/?embed=license&page[size]=${MAX_OSF_CHILDREN}`;
+  const childUrl = `${o.bases.osf}/v2/nodes/${encodeURIComponent(guid)}/children/?embed=license&page[size]=${MAX_OSF_CHILDREN}&related_counts=children`;
   const ch = await o.get(childUrl);
   if (ch.kind === "absent") return failedRecord(doi, "not_found", childUrl);
   if (ch.kind === "failed") return failedRecord(doi, ch.status, childUrl);
@@ -1787,6 +1796,9 @@ async function resolveOsf(
   const raws = [...own.texts];
   const entries: Array<DeclaredLicense | null> = [own.declared];
   for (const child of cb.data) {
+    // Only direct children are read: a child with children of its own (or one whose count is not
+    // given) leaves the license unknown, and an administrator decides; the tree is not walked.
+    if (childCountOf(child) !== 0) return unknownLicense(base);
     const lic = isRecord(child) ? osfNodeLicense(child) : null;
     if (lic === null) return failedRecord(doi, "unparseable", childUrl);
     values.push(lic.value ?? { license: "none", version: null });
