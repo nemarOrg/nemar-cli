@@ -6,7 +6,10 @@
  * What a page prints: a reason's `sentence`, `statement` and neutral `cure` (made by the
  * Worker's own `reasonViewsOf`), the finding, document, fact and question word tables they are
  * composed from, the description's headline, the identifier screen's headline and lines, and the
- * start and request refusals' sentences. What it never prints, and so is allowed
+ * start and request refusals' sentences, and every sentence of the decision card (ADR 0142,
+ * decision 4: its cue reasons, its action sentences, its notes and labels, the automatic denial's
+ * statements, and every string of a card built for each reason code), whose
+ * `next_action.command` is the one field a page never prints. What it never prints, and so is allowed
  * to name a command: `command`, `line`, `description.lines`, `description.next` and the
  * review gate's refusal message. The last test records that boundary, so a change that moves a
  * command into a printed field, or a terminal sentence into a page-owned one, is noticed.
@@ -19,9 +22,26 @@
 import { describe, expect, test } from "bun:test";
 import { ORIGIN_NOT_ALLOWED_MESSAGE } from "../backend/src/middleware/auth";
 import { NOT_HANDED_OVER, START_REFUSALS } from "../backend/src/routes/admin/publication-review";
+import {
+  ACTION_COMMAND,
+  ACTION_SENTENCE,
+  GREEN_REASON,
+  HEAD_LINE,
+  LICENSE_CUE_RULES,
+  NOT_AS_REVIEWED_NOTE,
+  NOT_REVIEWED_NOTE,
+  PERMITTED_GREEN_REASON,
+  buildDecisionCard,
+} from "../backend/src/services/decision-card";
 import { EXEMPT_SCREEN_DESCRIPTION } from "../backend/src/services/identifier-screen-stored";
 import { reasonViewsOf } from "../backend/src/services/publication-review-view";
 import { failingReport, screenReportBodyFor } from "../backend/test/helpers/publication-review";
+import {
+  DECISION_ACTIONS,
+  DEPOSITOR_TEXT_LABEL,
+  MODEL_TEXT_LABEL,
+  REGISTRY_TEXT_LABEL,
+} from "../shared/contract/decision-card";
 import {
   APPROVAL_CLOSED_DURING_RUN_MESSAGE,
   APPROVAL_IN_FLIGHT_MESSAGE,
@@ -40,6 +60,7 @@ import {
   describeScreen,
   parseScreenReport,
 } from "../shared/identifier-screen-report";
+import { AUTO_DENY_STATES, AUTO_DENY_STATE_COPY } from "../shared/publication-auto-deny";
 import {
   APPROVAL_PUBLISHING_LINE,
   APPROVAL_STOPPED_HARD_LINE,
@@ -65,6 +86,7 @@ import {
   parsePublicationReviewReport,
 } from "../shared/publication-review";
 import { MINIMUM_FAILURES } from "../shared/submission-minimums";
+import { GATE_CLEAR, SNAPSHOT, detailOf, reasonView } from "./helpers/decision-card-fixtures";
 import { terminalFlaws } from "./helpers/terminal-words";
 
 const ID = "nm000123";
@@ -450,6 +472,64 @@ describe("the Worker sentences the page prints as they arrive", () => {
       expect(terminalFlaws(text, 1), `${label}: ${text}`).toEqual([]);
     }
     expect(Object.keys(APPROVAL_RELEASE_REASON_TEXT).length).toBeGreaterThan(0);
+  });
+});
+
+describe("the decision card's words", () => {
+  test("the cue reasons, the action sentences, the notes, the labels and the denial lines", () => {
+    const texts: Array<[string, string]> = [
+      ...LICENSE_CUE_RULES.map((r): [string, string] => [`cue ${r.code}`, r.reason]),
+      ["cue green", GREEN_REASON],
+      ["cue green with a permission", PERMITTED_GREEN_REASON],
+      ...Object.entries(HEAD_LINE)
+        .filter((e): e is [string, string] => e[1] !== null)
+        .map(([k, v]): [string, string] => [`head ${k}`, v]),
+      ...DECISION_ACTIONS.map((a): [string, string] => [`action ${a}`, ACTION_SENTENCE[a]]),
+      ["not as reviewed", NOT_AS_REVIEWED_NOTE],
+      ["not reviewed", NOT_REVIEWED_NOTE],
+      ["depositor label", DEPOSITOR_TEXT_LABEL],
+      ["model label", MODEL_TEXT_LABEL],
+      ["registry label", REGISTRY_TEXT_LABEL],
+      ...AUTO_DENY_STATES.map((s): [string, string] => [
+        `auto-deny ${s}`,
+        AUTO_DENY_STATE_COPY[s].statement,
+      ]),
+    ];
+    for (const [label, text] of texts) {
+      expect(text.length, label).toBeGreaterThan(0);
+      expect(terminalFlaws(text), `${label}: ${text}`).toEqual([]);
+    }
+    expect(LICENSE_CUE_RULES.length).toBeGreaterThan(10);
+  });
+
+  test("every string of a built card but the action's command, for every reason code", () => {
+    let visited = 0;
+    const walk = (x: unknown, path: string): void => {
+      if (typeof x === "string") {
+        visited++;
+        expect(terminalFlaws(x), `${path}: ${x}`).toEqual([]);
+      } else if (Array.isArray(x)) x.forEach((y, i) => walk(y, `${path}[${i}]`));
+      else if (typeof x === "object" && x !== null) {
+        for (const [k, v] of Object.entries(x)) walk(v, `${path}.${k}`);
+      }
+    };
+    for (const code of REASON_CODES) {
+      const card = buildDecisionCard({
+        detail: detailOf({ reasons: [reasonView(code)] }),
+        freshCovered: false,
+        gate: GATE_CLEAR,
+        autoDenyState: "would_deny",
+        snapshot: SNAPSHOT,
+        current: null,
+        freshLineage: null,
+      });
+      const { command, ...shown } = card.next_action;
+      walk({ ...card, next_action: shown }, code);
+      // The boundary: the one field a page never prints keeps its command.
+      expect(terminalFlaws(command, 1)).toContain("a nemar command");
+    }
+    expect(visited).toBeGreaterThan(REASON_CODES.length * 10);
+    expect(Object.keys(ACTION_COMMAND).length).toBe(DECISION_ACTIONS.length);
   });
 });
 

@@ -40,6 +40,7 @@ import { isOneOf } from "../../../../shared/pr-review";
 import { auditLogStatement } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL } from "../../services/approval-dispatch";
 import { isValidDatasetId } from "../../services/datasetId";
+import { decisionCardFor } from "../../services/decision-card-inputs";
 import { isNonProductionEnv } from "../../services/environment";
 import { type StartOutcome, startPublicationReview } from "../../services/publication-review";
 import { errorWords } from "../../services/publication-review-log";
@@ -212,7 +213,9 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
       if (detail === null) {
         return refuse(c, 404, "not_found", `${datasetId} has no active publication request.`);
       }
-      return c.json(detail);
+      // The administrator's decision card (ADR 0142, decision 4), built from this detail; null when
+      // it could not be built, which never withholds the detail.
+      return c.json({ ...detail, decision_card: await decisionCardFor(c.env, detail) });
     } catch (err) {
       // Ids and fixed words only: the error text can carry SQL.
       console.error(
