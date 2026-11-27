@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.43 - 2026-11-26
+
 ### Publication queue: evidence (epic #2182)
 
 **Release note.**
