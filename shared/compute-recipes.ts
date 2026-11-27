@@ -144,7 +144,7 @@ export interface ComputeRecipe {
   /**
    * The entry stands for a recipe that does not exist yet, or whose numbers nobody has verified. No
    * path dispatches a placeholder (`recipe_placeholder`): the entry is here so the registry's shape is
-   * held, and the flag is removed in the change that makes the recipe real.
+   * held, and the flag is removed or set false in the change that makes the recipe real.
    */
   placeholder?: boolean;
   eligibility: RecipeEligibility;
@@ -301,8 +301,9 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     minutes: 720,
     inputs: Object.freeze(["bids"] as const),
     executors: Object.freeze(["tapis"] as const),
+    // An administrator's run only: the daily dispatcher never runs it. No longer a placeholder (2026-11-27).
     autoDispatch: false,
-    placeholder: true,
+    placeholder: false,
     eligibility: "eeg",
     // The floor steps it re-runs as preparation map as in the floor, except its re-run `qc` (ADR 0134); its
     // quality plugins follow the decomposition at `quality` (ADR 0137).
@@ -407,6 +408,20 @@ export function recipeQualityPlugins(recipe: Pick<ComputeRecipe, "checkpoints">)
   const plugins: readonly string[] = RECIPE_PLUGIN_STEPS;
   const quality = recipe.checkpoints.find((c) => c.checkpoint === "quality");
   return (quality?.steps ?? []).filter((s) => plugins.includes(s));
+}
+
+/** The one word a placeholder recipe is refused with, on every path (ADR 0118 amendment of 2026-11-05, item 3). */
+export const RECIPE_PLACEHOLDER_REFUSAL = "recipe_placeholder";
+
+/**
+ * Whether a recipe is refused as a placeholder, and with which word: the one decision the admin run route, the
+ * dispatch, the dry run and the queue each ask, after where the recipe may run and before anything is read. A
+ * recipe is a placeholder only when its entry says `placeholder: true`; a missing flag or `false` runs.
+ */
+export function placeholderRefusal(
+  recipe: Pick<ComputeRecipe, "placeholder">,
+): typeof RECIPE_PLACEHOLDER_REFUSAL | null {
+  return recipe.placeholder === true ? RECIPE_PLACEHOLDER_REFUSAL : null;
 }
 
 /**

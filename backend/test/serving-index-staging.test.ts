@@ -16,8 +16,8 @@
  *  (f) the serving index route signs the copy the RECORDED specification names, and refuses every other job
  *      with the one answer of the launcher's door.
  *
- * nemar-ica stays a placeholder (no path dispatches it), so the dispatch is exercised through the functions it
- * calls, in its order: `stageServingIndex`, `recipeJobSpec`, `createJob`, `buildLaunch`.
+ * The dispatch is exercised through the functions it calls, in its order: `stageServingIndex`, `recipeJobSpec`,
+ * `createJob`, `buildLaunch` (a run through the admin route is `compute-pipeline-input.test.ts`'s).
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
