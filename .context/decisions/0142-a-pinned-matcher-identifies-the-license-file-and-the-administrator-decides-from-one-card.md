@@ -227,6 +227,18 @@ A docs.nemar.org page, `/platform/license-check`, explains the check to deposito
 - **Vendored SPDX texts with a matcher of our own**: rejected; normalization, matching and the rules for notices are what ScanCode already does and maintains (take, not make), and we would own their correctness and drift.
 - **Model only, with a larger LICENSE cap**: rejected; it spends the cap on boilerplate, an identification would differ between runs and models, and the decisive fact (which license this is) should be a platform fact, not a model's.
 
+## Amendment 2026-11-27 (#2454): the rule for a README DOI cut short
+
+Decision 3's bullet on cut README DOIs is replaced by the rule phase 3 built (pull request #2472).
+A DOI candidate is cut, dropped and counted when its suffix is shorter than five characters (`10.17605/o`),
+or, in the README, when it has a data-repository prefix and its suffix does not have that repository's DOI shape
+(OpenNeuro, Zenodo, PhysioNet, figshare items and collections, OSF, Dryad datasets and files, Harvard Dataverse; `DATA_REPOSITORY_DOI_SHAPES` in `shared/license-lineage.ts`).
+The rule that a candidate ending where the text ends is cut is not used:
+the resolver reads whole files, so the end of a README is never a cut, and in a test it dropped a valid DOI that ended a README.
+A dropped candidate still never stands beside other sources as `unresolved`;
+when the README's only candidates were dropped and no source remains, the outcome is `unresolved` with the dropped count, never `no_upstream_declared`,
+because the dataset did name a source that could not be read.
+
 ## Receipts
 
 - Epic nemarOrg/nemar-cli#2449, issue #2450; the 37-review measurement in the epic.
