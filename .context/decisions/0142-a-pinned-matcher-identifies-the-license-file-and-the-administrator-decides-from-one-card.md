@@ -46,15 +46,26 @@ One description key is withheld from the model in 34 of the 37 reviews, and the 
 - **Where it runs, in the workflow's threat model.**
   The header of `run-publication-review.yml` says what each step can hold and what the order closes; ScanCode adds 80 packages of third-party code to it, so it does not run the way the review script does.
   - The install is its own step after the dataset fetch, with no `env:` beyond the paths: it holds no dataset token (only the fetch and the validation-run lookup do) and no Anthropic identity, and, with `--no-build`, it executes no package code.
-  - The scan is its own step, before the OIDC fetch for Anthropic, and runs ScanCode as `sudo unshare --net -- setpriv --reuid=65534 --regid=65534 --clear-groups -- env -i PATH=<venv>/bin:/usr/bin scancode ...`, from an environment installed outside the runner user's home,
-    on a copy of LICENSE in a directory that user may read and an output directory it may write, and nothing else.
-    So the scanning process has no network, so it can send nothing anywhere; it has no environment, so neither the OIDC request variables that `id-token: write` puts in every step nor any token reach it;
+  - **Before the scan**, as the runner user: the install step warms ScanCode's license index once (`scancode --reindex-licenses`, or the first scan of a fixed text) inside the environment, which then stays read-only to everyone else.
+    The step extracts LICENSE with `git cat-file blob <head>:LICENSE` from the fetched repository, never following an annexed link or pointer (an annexed LICENSE is `annexed` and is not scanned),
+    into a fresh directory outside `/home/runner`, `/tmp/license-scan/in` (mode 0755, the file 0644);
+    it creates `/tmp/license-scan/out`, `/tmp/license-scan/home` and `/tmp/license-scan/tmp`, owned by uid 65534 with mode 0700.
+  - **The scan** is its own step, before the OIDC fetch for Anthropic, and runs ScanCode as
+    `sudo unshare --net -- setpriv --reuid=65534 --regid=65534 --clear-groups -- env -i PATH=<venv>/bin:/usr/bin HOME=/tmp/license-scan/home TMPDIR=/tmp/license-scan/tmp SCANCODE_CACHE=/tmp/license-scan/home SCANCODE_TEMP=/tmp/license-scan/tmp scancode ... --json /tmp/license-scan/out/result.json /tmp/license-scan/in/LICENSE`,
+    from the environment installed outside the runner user's home.
+    It needs the runner's passwordless `sudo`, because Ubuntu 23.10 and later block an unprivileged `unshare --net` through AppArmor; a runner without it records `unavailable`.
+    So the scanning process has no network, so it can send nothing anywhere; it has no environment beyond those paths, so neither the OIDC request variables that `id-token: write` puts in every step nor any token reach it;
     and as another user it cannot write the runner user's files, so it cannot plant a hook for the mint action's post step or for the Review step.
-  - The Review step reads the output as JSON data, validated against the fields this decision uses; nothing ScanCode wrote is executed.
+  - **After the scan**, the Review step checks that `result.json` is a regular file owned by uid 65534, with mode no wider than 0644 and at most 4 MiB, before it parses it;
+    it reads the output as JSON data, validated against the fields this decision uses, and nothing ScanCode wrote is executed.
   - Running ScanCode in the Review step with the SDK, as an accepted risk like the header's item (c), was rejected: it would put 80 packages' runtime code beside the Anthropic identity and the mint's post step, for no benefit.
     A separate job was rejected for the reason the header gives: the LICENSE text would have to cross jobs as an artifact, and this repository's artifacts are public.
   - Not closed: a kernel escape from the sandbox, and the callback token in the event file (the header's item (b)), which the sandbox cannot send anywhere.
-  Phase 1 proves on a runner that the scan step cannot open a socket and cannot write the workflow's `_actions` and `_temp` directories, and the header gains these lines in the same change.
+  Phase 1 proves on a runner that a real scan of a CC-BY-4.0 text returns its result inside the sandbox, and that the scan step cannot open a socket and cannot write the workflow's `_actions` and `_temp` directories;
+  the header gains these lines in the same change.
+- **`unavailable` is never silent after deploy 3.**
+  Before the workflow change it is expected; after it, it means the install, the sandbox or the scan broke.
+  The card's license panel then says "License matcher unavailable" as its amber reason, and the administrators' existing review mail and the daily digest of ADR 0139 decision 4 carry the same line, so a broken matcher shows on the first review it touches.
 - **Its cost.**
   The download is about 153 MB (the ScanCode wheel is 126 MB), and the environment is about 667 MB installed, 573 MB of it the license index.
   A cold install took 20 seconds on a laptop, so 30 to 60 seconds is the estimate on a GitHub runner; one file scans in about 5 seconds, start-up included.
