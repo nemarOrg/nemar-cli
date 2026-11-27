@@ -19,8 +19,10 @@ import {
   LimitExceeded,
   READERS,
   READER_IDS,
+  READER_INCOMPLETE_REASONS,
   type RangeSource,
   type ReaderId,
+  type ReaderResult,
   cachedSource,
   companionsOf,
   limitsFor,
@@ -207,6 +209,38 @@ async function pool<T>(items: readonly T[], size: number, fn: (item: T) => Promi
   if (failed) throw failed.reason;
 }
 
+const COVERAGES: ReadonlySet<unknown> = new Set(["complete", "partial", "not-applicable"]);
+const READER_REASONS: ReadonlySet<unknown> = new Set(READER_INCOMPLETE_REASONS);
+
+/**
+ * A reader's result has the shape the commit below reads. A reader is code in this repository,
+ * but a bug in one (a missing `findings`, a `null` finding, a reason outside the closed words)
+ * must fail that one file, never the whole screen or the report's door.
+ */
+function isReaderResult(result: unknown): result is ReaderResult {
+  if (typeof result !== "object" || result === null) return false;
+  const r = result as Record<string, unknown>;
+  if (!COVERAGES.has(r.coverage)) return false;
+  if (!Array.isArray(r.findings)) return false;
+  for (const f of r.findings as unknown[]) {
+    if (typeof f !== "object" || f === null) return false;
+    const finding = f as Record<string, unknown>;
+    if (typeof finding.kind !== "string" || typeof finding.severity !== "string") return false;
+  }
+  if (r.incomplete !== undefined && !READER_REASONS.has(r.incomplete)) return false;
+  if (r.notes !== undefined && !Array.isArray(r.notes)) return false;
+  if (r.needs !== undefined) {
+    if (!Array.isArray(r.needs) || r.needs.some((n) => typeof n !== "string")) return false;
+  }
+  if (r.unscreened !== undefined) {
+    if (typeof r.unscreened !== "object" || r.unscreened === null) return false;
+    for (const n of Object.values(r.unscreened)) {
+      if (!Number.isSafeInteger(n) || (n as number) < 0) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Read every recording a registered reader parses, and count how each read ended.
  *
@@ -288,7 +322,7 @@ export async function readRecordings<E extends RecordingEntry>(
   };
   const started = options.now();
 
-  await pool(work, options.concurrency, async ({ entry, reader }) => {
+  const readOne = async ({ entry, reader }: { entry: E; reader: FormatReader }) => {
     const t = out.tallies[reader.id];
     if (options.now() - started >= options.datasetTimeMs) {
       t.partial++;
@@ -298,14 +332,19 @@ export async function readRecordings<E extends RecordingEntry>(
     // History keeps headers only: a superseded recording's companions are not looked for.
     const pairedLacking = superseded.has(entry) ? 0 : (missing.get(entry.path) ?? 0);
     let source: ReturnType<typeof cachedSource>;
-    let result: Awaited<ReturnType<FormatReader["scan"]>>;
+    let result: unknown;
     // EDF/BDF statistics, from the header the reader already read (a cache hit, no new read).
     let patient: string | null = null;
     const limits = limitsFor(reader, entry.path);
     try {
       source = cachedSource(options.open(entry), limits);
       result = await withTimer(reader.scan(source, entry.path, limits), limits.timeMs);
-      if (reader.id === "edf" && result.coverage === "complete" && !source.limited) {
+      if (
+        reader.id === "edf" &&
+        isReaderResult(result) &&
+        result.coverage === "complete" &&
+        !source.limited
+      ) {
         const head = await source.read(0, EDF_HEADER_BYTES);
         if (head.length >= EDF_HEADER_BYTES) patient = edfIdentificationText(head).patient;
       }
@@ -328,7 +367,13 @@ export async function readRecordings<E extends RecordingEntry>(
       fail(`${reader.id}/${options.failureClass(error)}`);
       return;
     }
-    // Everything below only commits; nothing below can throw.
+    if (!isReaderResult(result)) {
+      // A reader bug, not a property of the file: that file failed, under a closed class.
+      t.failed++;
+      fail(`${reader.id}/internal`);
+      return;
+    }
+    // Everything below only commits; on a result that passed `isReaderResult` it cannot throw.
     if (result.coverage === "not-applicable") {
       // Not this reader's format: unscreened under its extension, in no tally, no companions.
       t.files--;
@@ -376,7 +421,8 @@ export async function readRecordings<E extends RecordingEntry>(
     if (lacking > 0) out.reasons.add("companion-missing");
     if (limited) out.reasons.add("limit");
     if (result.coverage === "partial" && result.incomplete) out.reasons.add(result.incomplete);
-  });
+  };
+  await pool(work, options.concurrency, readOne);
 
   // A reader other than EDF/BDF whose files did not all get a full or partial read: the EDF/BDF
   // shortfall has its own words (`edf-headers-unread`, `edf-headers-sampled`).

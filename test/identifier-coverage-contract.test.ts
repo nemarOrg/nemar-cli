@@ -830,3 +830,60 @@ describe("review round 2: read failures have words", () => {
     }
   });
 });
+
+describe("seam review: the builder's own failure paths", () => {
+  test("a scan that never resolves ends partial, reason time, at the reader's timeMs", async () => {
+    const hung = stubReader({
+      limits: { ...DEFAULT_READER_LIMITS, timeMs: 5 },
+      scan: () => new Promise(() => undefined),
+    });
+    const startedAt = Date.now();
+    const { report } = await scan({ "sub-01/nirs/a.snirf": bytes(128) }, [...WITHOUT_HDF5, hung]);
+    expect(report.scan?.read_by_format?.snirf).toEqual({
+      files: 1,
+      read: 0,
+      partial: 1,
+      failed: 0,
+    });
+    expect(report.scan?.incomplete_reasons).toEqual(["time"]);
+    expect(report.scan?.status).toBe("unchecked");
+    // Ended by the reader's 5 ms, not by any longer budget.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  test("a malformed reader result fails only that file, under the closed class internal", async () => {
+    for (const malformed of [
+      null,
+      { coverage: "complete" },
+      { coverage: "complete", findings: [null] },
+      { coverage: "done", findings: [] },
+      { coverage: "partial", findings: [], incomplete: "made-up" },
+      { coverage: "complete", findings: [], needs: "a.fdt" },
+      { coverage: "complete", findings: [], unscreened: { "zip:.x": -1 } },
+    ]) {
+      const broken = stubReader({ scan: async () => malformed as never });
+      const { report } = await scan(
+        {
+          "sub-01/nirs/a.snirf": bytes(128),
+          "sub-01/eeg/sub-01_task-rest_eeg.edf": edfHeader(),
+        },
+        [...WITHOUT_HDF5, broken],
+      );
+      const shown = JSON.stringify(malformed);
+      expect([shown, report.scan?.read_by_format?.snirf]).toEqual([
+        shown,
+        { files: 1, read: 0, partial: 0, failed: 1 },
+      ]);
+      expect([shown, report.scan?.read_failures]).toEqual([shown, { "snirf/internal": 1 }]);
+      // The other file was read as ever: the screen went on.
+      expect([shown, report.scan?.read_by_format?.edf]).toEqual([
+        shown,
+        { files: 1, read: 1, partial: 0, failed: 0 },
+      ]);
+      expect([shown, report.scan?.status]).toEqual([shown, "unchecked"]);
+    }
+    // The twin: a well-formed result from the same reader is a clean read.
+    const fine = await scan({ "sub-01/nirs/a.snirf": bytes(128) }, [...WITHOUT_HDF5, stubReader()]);
+    expect(fine.report.scan?.status).toBe("clean");
+  });
+});
