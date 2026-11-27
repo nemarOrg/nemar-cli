@@ -1202,5 +1202,6 @@ Section 5's reasons gain two, both platform facts the model never decides:
 
 The evidence carries the closed word as `name_upstream` (`matches`, `differs`, `not_applicable`, `unknown`), an optional key of a version-3 block that has a lineage; a block written before it reads as it was written and derives neither reason.
 The job computes it with `nameFollowsUpstream` from the whole raw `Name` at the reviewed commit and the sources the Worker served it, as it computes `credited` from the same sources, so the Worker's inputs body is unchanged.
+As with ADR 0142's version 3, the Worker accepts the key one release before the job emits it: the release carrying the parser, the reasons and the card comes first (#2495), and the job's one line that passes the sources comes in a later release; until then every report reads as today.
 It is never sent to the model and never lowers `name_adequate`, so the model's answer about the name stays its own (ADR 0139's amendment of this date depends on that).
 Publications and README-only candidates are not upstream datasets: a README source can make a `matches`, never a `differs` or an `unknown`; no declared dataset with a title is `not_applicable`.

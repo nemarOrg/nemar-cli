@@ -489,6 +489,7 @@ Section 3a refuses an author-year anywhere in a dataset name; this carves out a 
 - **What a Name that follows its upstream is.**
   Its `Name` starts with the title of one upstream dataset source (as that source's registry gives it, through the license-lineage resolver), compared after Unicode NFKC, case folding, apostrophes removed and other punctuation as spaces, with a leading "The" or "A" kept as part of the title.
   What follows is nothing, or a suffix of one closed grammar (`shared/name-follows-upstream.ts`): `, Surname YYYY`, ` (Surname YYYY)`, ` - Surname et al. YYYY` or ` Surname & Surname YYYY`, then optionally the submission standards' final `(service:key)`.
+  The service key is kept deliberately: the submission standards (docs.nemar.org/policies/submission-standards) already allow a final `(service:key)` after a descriptive name, so a Name that obeys them is never called drifted.
   A bare-space suffix takes only the `et al.` and `&` shapes, so an ordinary title word before a year (`Motor 2019`) is never read as an author.
 - **What is carved out.**
   The author-year inside the upstream title (nm000781's upstream title begins `Defenderfer 2019;`) and the author-year of the suffix are not a breach of the naming rule for such a Name.
