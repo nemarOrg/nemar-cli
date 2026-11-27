@@ -920,6 +920,76 @@ describe("start", () => {
     expect(refused.stderr).toContain(START_REFUSALS.screen_not_ready.error);
   });
 
+  test("--again replaces a review that reported: the earlier one is kept in the history, marked", async () => {
+    const { reviewId } = seedPassing("nm000480");
+
+    const r = await h.cli([...START, "nm000480", "--again"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm000480: review started.");
+    expect(r.stdout).toContain(`The earlier review (#${reviewId}) is kept in the history`);
+    expect(r.stdout).toContain("is the review in force");
+    expect(dispatchedDatasets()).toEqual(["nm000480"]);
+    const rows = reviewRows();
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({ state: "dispatched" });
+
+    // `show` prints both, the old one marked superseded by the new one, the new one in force.
+    const shown = await h.cli(["admin", "dataset", "publish", "show", "nm000480"]);
+    const history = shown.stdout.slice(shown.stdout.indexOf("History"));
+    expect(history).toContain(`superseded by #${rows[1].id}`);
+    expect(history.split("\n").find((l) => l.includes(`#${rows[1].id} `))).toContain("in force");
+  });
+
+  test("--again on a review that has not reported starts it as usual and says nothing was replaced", async () => {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: "nm000480" });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: "nm000480",
+      state: "errored",
+      detail: "dispatch_failed",
+    });
+
+    const r = await h.cli([...START, "nm000480", "--again"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm000480: review started again.");
+    expect(r.stdout).not.toContain("kept in the history");
+    expect(reviewRows()).toHaveLength(1);
+  });
+
+  test("--again is refused with --all, and with no dataset id, and sends nothing", async () => {
+    seedPassing("nm000480");
+
+    const all = await h.cli([...START, "--all", "--again", "--yes"]);
+    expect(all.exitCode).toBe(1);
+    expect(output(all)).toContain(
+      "--again takes one dataset id and cannot be combined with --all.",
+    );
+
+    const none = await h.cli([...START, "--again"]);
+    expect(none.exitCode).toBe(1);
+    expect(output(none)).toContain("Give a dataset id, or --all.");
+
+    expect(h.requests).toEqual([]);
+    expect(reviewRows()).toHaveLength(1);
+  });
+
+  test("a start refused while the automatic denial holds the review says so and exits 1", async () => {
+    const { reviewId } = seedPassing("nm000480");
+    h.db.run(
+      "UPDATE publication_reviews SET auto_deny_state = 'denied', auto_deny_at = datetime('now') WHERE id = ?",
+      [reviewId],
+    );
+
+    const r = await h.cli([...START, "nm000480", "--again"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain(START_REFUSALS.auto_deny_active.error);
+    expect(output(r)).toContain("(auto_deny_active)");
+    expect(reviewRows()).toHaveLength(1);
+  });
+
   test("--dry-run goes with --all", async () => {
     seedStartable("nm000480");
 

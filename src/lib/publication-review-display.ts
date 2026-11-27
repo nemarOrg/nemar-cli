@@ -313,6 +313,16 @@ export function findingLines(findings: PublicationReviewRecord["findings"]): str
   });
 }
 
+/** What marks a history entry an administrator's re-review replaced: "  superseded by #N" (the Worker's ids). */
+function supersededNote(h: PublicationReviewHistoryEntry): string {
+  if (h.superseded_at === undefined || h.superseded_at === null) return "";
+  const by =
+    h.superseded_by === undefined || h.superseded_by === null
+      ? ""
+      : ` by #${plain(String(h.superseded_by))}`;
+  return chalk.dim(`  superseded${by}`);
+}
+
 /** The reviews of the request, newest first, when there is more than the one in force. */
 export function historyLines(
   d: Pick<PublicationReviewDetail, "history" | "history_truncated" | "review">,
@@ -326,7 +336,7 @@ export function historyLines(
     out.push(
       `  #${plain(String(h.id)).padEnd(5)} ${plain(h.head_sha).slice(0, 12)}  ${plain(h.state).padEnd(10)}  ${stored.padEnd(15)}  ${chalk.dim(plain(h.created_at))}${
         h.id === inForce ? chalk.dim("  in force") : ""
-      }`,
+      }${supersededNote(h)}`,
     );
   }
   if (d.history_truncated) out.push(chalk.dim("  (older reviews not shown)"));
