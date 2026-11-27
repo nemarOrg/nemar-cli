@@ -467,6 +467,7 @@
     "backend/test/publication-review-gate-d1.test.ts": 4715,
     "backend/test/publication-review-gate.test.ts": 879,
     "backend/test/publication-review-inputs.test.ts": 2783,
+    "backend/test/publication-review-license-matcher-migration.test.ts": 1200,
     "backend/test/publication-review-log.test.ts": 11,
     "backend/test/publication-review-mail-d1.test.ts": 5053,
     "backend/test/publication-review-mail.test.ts": 756,
