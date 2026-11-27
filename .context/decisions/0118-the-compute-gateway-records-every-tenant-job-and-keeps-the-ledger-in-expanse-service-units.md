@@ -1219,6 +1219,7 @@ It changes no code, no switch, no wrangler file and no version.
    Every path that would reach Tapis in such a Worker answers `unconfigured`, and no job, credential or launch value is sent to a tenant.
    A Tapis-executor pipeline run is refused with `tapis_unconfigured` (503) before any write, for every caller (step S3c of the portable compute plan, #2168), so no stamp, no job row and no ledger hold can appear that only a cancel would end.
    A runner run and a dry run are unaffected.
+   **[amended 2026-11-27: in such a Worker the tenant sweep is quiet (`tapisUnconfigured: true`, no error word; nothing in the `live` pass, one information line in the daily `week` pass) while no Tapis job is live and no Tapis credential is present; it errors `unconfigured` when a Tapis job is live or a credential is present, and `tenant_unreadable` when that count cannot be read (#2501).]**
 3. **Setting a Tapis credential where `COMPUTE_ENABLED` is `1` is the Tapis go-live.**
    It needs the items of `nemarOrg/nemar-process#9` settled and every Tapis mechanic selecting `executor = 'tapis'`, the tenant sweep's tag bind included.
    The bind (`handleUnbound` with `BIND_TAPIS_JOB_SQL`) selects no executor at the time of writing, so once Tapis is configured a Tapis job tagged `nemar_job:<a runner job's id>` could move that runner row; with no credential it is unreachable.
