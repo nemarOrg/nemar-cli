@@ -12,12 +12,18 @@ import type { AccountKind } from "../../../../shared/contract/user.js";
 import type { UploaderPreflight } from "../../../../shared/identifier-screen-report.js";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
+import {
+  MAX_BUCKET_POLICY_BYTES,
+  POLICY_FULL_TAG,
+  hasHeadroomForNewDataset,
+} from "../../services/bucket-policy";
 import { generateDatasetId, isSandboxDatasetId, isValidDatasetId } from "../../services/datasetId";
-import { isNonProductionEnv } from "../../services/environment";
+import { isNonProductionEnv, testS3EndpointOverride } from "../../services/environment";
 import {
   type GitHubRepo,
   addCollaborator,
   createRepository,
+  deleteRepository,
   enableAutoMerge,
   ensureMainBranch,
   ensureWorkflowsDeployed,
@@ -26,7 +32,7 @@ import {
 import { getDatasetsToken } from "../../services/github-auth";
 import { preflightRecording, takePreflight } from "../../services/identifier-preflight";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
-import { generateDatasetUploadUrls, markDatasetPrivate } from "../../services/s3";
+import { generateDatasetUploadUrls, getBucketPolicy, markDatasetPrivate } from "../../services/s3";
 import {
   generateDownloadPolicy,
   generateUploadPolicy,
@@ -235,6 +241,56 @@ async function generateUploadUrlsForFiles(
       },
     };
   }
+}
+
+/**
+ * Undo a create that failed after its id was claimed and its repository was
+ * created (#2497). The owner's S3 permission is always removed (its prefix
+ * was never secured). The repository is deleted, and only then the claimed
+ * `datasets` row: if the repository cannot be deleted, the row is kept and
+ * records the repository's name, so the leftover stays findable by its id.
+ * Returns the names of what could not be removed (empty when complete).
+ */
+async function rollBackNewDataset(
+  db: D1Database,
+  datasetId: string,
+  userId: number,
+  repoFullName: string,
+  pat: string,
+): Promise<string[]> {
+  const leftovers: string[] = [];
+  try {
+    await db
+      .prepare("DELETE FROM user_s3_permissions WHERE user_id = ? AND s3_prefix = ?")
+      .bind(userId, datasetId)
+      .run();
+  } catch (err) {
+    console.error(`[datasets] rollback: could not delete S3 permission for ${datasetId}:`, err);
+    leftovers.push("s3_permission");
+  }
+  let repoDeleted = false;
+  try {
+    await deleteRepository(datasetId, pat);
+    repoDeleted = true;
+  } catch (err) {
+    console.error(`[datasets] rollback: could not delete repository ${datasetId}:`, err);
+    leftovers.push("github_repository");
+  }
+  try {
+    if (repoDeleted) {
+      await db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId).run();
+    } else {
+      await db
+        .prepare("UPDATE datasets SET github_repo = ? WHERE dataset_id = ?")
+        .bind(repoFullName, datasetId)
+        .run();
+      leftovers.push("dataset_row");
+    }
+  } catch (err) {
+    console.error(`[datasets] rollback: could not settle dataset row ${datasetId}:`, err);
+    leftovers.push("dataset_row");
+  }
+  return leftovers;
 }
 
 export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
@@ -529,6 +585,52 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         );
       }
 
+      // Bucket-policy headroom BEFORE anything is claimed or created (#2497).
+      // Every new dataset adds a private carve-out to one shared policy
+      // document capped by AWS at 20,480 bytes; when it was full, every
+      // create claimed an id, created a GitHub repository and only then
+      // failed at the carve-out, leaving both behind. Refusing here leaves
+      // nothing behind.
+      //
+      // A policy that cannot be READ is not a refusal here: the check is
+      // inconclusive, and the create goes on to the carve-out write, which
+      // fails closed and rolls the create back (below). Storage is never
+      // left unsecured on either path; this check only saves the round trip
+      // through GitHub when the answer is already known.
+      const createS3Options = {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION,
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        endpointUrl: testS3EndpointOverride(c.env),
+      };
+      let currentPolicy: Awaited<ReturnType<typeof getBucketPolicy>> | undefined;
+      try {
+        currentPolicy = await getBucketPolicy(createS3Options);
+      } catch (policyError) {
+        const msg = policyError instanceof Error ? policyError.message : String(policyError);
+        console.error(
+          `${POLICY_FULL_TAG} headroom check inconclusive, bucket policy unreadable: ${msg}`,
+        );
+      }
+      if (currentPolicy !== undefined) {
+        const headroom = hasHeadroomForNewDataset(currentPolicy, c.env.S3_BUCKET);
+        if (!headroom.ok) {
+          console.error(
+            `${POLICY_FULL_TAG} dataset creation refused for user ${user.username}: ` +
+              `one more carve-out would make the bucket policy ${headroom.bytes} of ` +
+              `${MAX_BUCKET_POLICY_BYTES} bytes (#2497)`,
+          );
+          return c.json(
+            {
+              error: "Storage policy full, administrators notified",
+              note: "No dataset was created. NEMAR cannot mark new dataset storage private until an administrator frees space in the bucket policy. Retry later.",
+            },
+            503,
+          );
+        }
+      }
+
       // Generate dataset ID (xx000XXX for sandbox, nm000XXX for regular).
       // There is a TOCTOU gap between ID generation (SELECT) and the INSERT
       // below. The UNIQUE constraint on datasets.dataset_id prevents duplicates;
@@ -687,25 +789,31 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       // unless their prefix is listed private in the bucket policy. We must add
       // that carve-out before the client can upload anything, so fail closed
       // here rather than hand out upload URLs for an un-secured prefix.
+      //
+      // On failure, roll the create back (#2497): delete the repository, the
+      // S3 permission and the claimed row, so a refused create leaves no
+      // orphan. No upload URL is ever issued on this path.
       try {
-        await markDatasetPrivate(
-          {
-            bucket: c.env.S3_BUCKET,
-            region: c.env.AWS_REGION,
-            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-          },
-          datasetId,
-        );
+        await markDatasetPrivate(createS3Options, datasetId);
       } catch (s3Error) {
         const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
         console.error(`Failed to mark new dataset ${datasetId} private:`, s3Msg);
+        const leftovers = await rollBackNewDataset(
+          db,
+          datasetId,
+          user.id,
+          githubRepo.full_name,
+          pat,
+        );
         return c.json(
           {
             error: "Failed to secure dataset storage",
             dataset_id: datasetId,
-            github_repo: githubRepo.full_name,
-            note: "The GitHub repository was created but the dataset's S3 storage could not be marked private, so upload was not started. Retry `nemar dataset upload`; an administrator should check the bucket policy if this persists.",
+            rolled_back: leftovers.length === 0,
+            note:
+              leftovers.length === 0
+                ? "The dataset's S3 storage could not be marked private, so the dataset was not created and nothing was uploaded. Retry `nemar dataset upload`; an administrator should check the bucket policy if this persists."
+                : `The dataset's S3 storage could not be marked private, so nothing was uploaded, and the rollback could not remove: ${leftovers.join(", ")}. Contact an administrator.`,
           },
           500,
         );
