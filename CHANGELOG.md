@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.48 - 2026-11-27
+
 ### Changed
 
 - **The publication review calls Haiku 5.5 at max effort (was high; ADR 0102 amendment).**
