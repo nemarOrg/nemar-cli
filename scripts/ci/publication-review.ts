@@ -124,9 +124,10 @@ export const CONFIRM_MAX_TOKENS = 128_000;
 
 /**
  * Every call's deadline, the first run's and the confirming run's. It keeps the call inside the
- * workflow's 20-minute limit with the steps before it; a run that reaches it ends
+ * workflow's limit with the steps before it (20 minutes, and 28 once the license matcher's steps
+ * of ADR 0142 are deployed: 8 more for their own limits); a run that reaches it ends
  * `model_unavailable`, and a confirming run that does not report never confirms anything. A job
- * that still runs past 20 minutes is cancelled, reports `workflow_failed`, and the Worker's
+ * that still runs past its limit is cancelled, reports `workflow_failed`, and the Worker's
  * 30-minute watchdog is behind that.
  */
 export const CONFIRM_DEADLINE_MS = 12 * 60_000;

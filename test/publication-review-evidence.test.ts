@@ -1475,6 +1475,11 @@ describe("LICENSE's identification (ADR 0142) changes nothing the model sees in 
       scanOptions: { resultOwnerUid: UID },
     });
     expect(withScan.raw).toBe(without.raw);
+    // And the report the job posts, byte for byte.
+    expect(withScan.res.outcome).toBe("reported");
+    expect(JSON.stringify(withScan.res.outcome === "reported" ? withScan.res.report : null)).toBe(
+      JSON.stringify(without.res.outcome === "reported" ? without.res.report : null),
+    );
     expect(withScan.res.outcome === "reported" && withScan.res.report.record?.input_digest).toBe(
       without.res.outcome === "reported" && without.res.report.record?.input_digest,
     );
