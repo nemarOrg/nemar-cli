@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.50 - 2026-11-27
+
 ### Changed
 
 - **License lineage is more reliable (resolver version 3; ADR 0142 decision 3).**
