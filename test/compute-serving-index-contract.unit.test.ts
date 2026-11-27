@@ -179,6 +179,19 @@ describe("where the launcher places the index, and the arguments that hand it to
     expect(COMPUTE_DATASET_ID_RE.test("serving-index")).toBe(false);
   });
 
+  test("a run with no index staged is handed the tag's commit alone, the same two values a staged run ends with", () => {
+    expect(recipeSourceCommitArguments(COMMIT)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, COMMIT]);
+    expect(
+      recipeServingIndexArguments({
+        path: SERVING_INDEX_CONTAINER_PATH,
+        sourceCommit: COMMIT,
+      }).slice(2),
+    ).toEqual(recipeSourceCommitArguments(COMMIT));
+    for (const bad of ["abc", COMMIT.toUpperCase(), `${COMMIT}\n`, ""]) {
+      expect(() => recipeSourceCommitArguments(bad)).toThrow(RangeError);
+    }
+  });
+
   test("the arguments are the flag, the path, and the tag's commit as --source-commit", () => {
     expect(
       recipeServingIndexArguments({ path: SERVING_INDEX_CONTAINER_PATH, sourceCommit: COMMIT }),
@@ -196,19 +209,6 @@ describe("where the launcher places the index, and the arguments that hand it to
     expect(() =>
       recipeServingIndexArguments({ path: SERVING_INDEX_CONTAINER_PATH, sourceCommit: "abc" }),
     ).toThrow(RangeError);
-  });
-
-  test("a run with no index staged is handed the tag's commit alone, the same two values a staged run ends with", () => {
-    expect(recipeSourceCommitArguments(COMMIT)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, COMMIT]);
-    expect(
-      recipeServingIndexArguments({
-        path: SERVING_INDEX_CONTAINER_PATH,
-        sourceCommit: COMMIT,
-      }).slice(2),
-    ).toEqual(recipeSourceCommitArguments(COMMIT));
-    for (const bad of ["abc", COMMIT.toUpperCase(), `${COMMIT}\n`, ""]) {
-      expect(() => recipeSourceCommitArguments(bad)).toThrow(RangeError);
-    }
   });
 
   test("nemar-ica stays a placeholder", () => {
