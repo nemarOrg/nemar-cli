@@ -464,6 +464,29 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
     expect(spec.args.slice(-2)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, T]);
   });
 
+  test("a deferral of the run's commit in between does not restart the 24 hours (MUTATION: count source_commit_deferred as another kind)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.index(ID, { http: 503 });
+    expect((await run(env)).kind).toBe("deferred");
+    // A later pass could not read the tag's commit: the run is deferred for that, by another word.
+    github.tag(ID, TAG, { http: 502 });
+    expect(await sourceCommitForRun(env, ica, "bids", ID, TAG)).toMatchObject({
+      kind: "deferred",
+      reason: "github_unreadable",
+    });
+    // The first deferral, of the index, was 25 hours ago; the commit's deferral an hour ago.
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_stamps SET created_at = datetime('now', CASE WHEN refusal_code = ?1 THEN '-25 hours' ELSE '-1 hours' END)",
+    )
+      .bind(SERVING_INDEX_DEFERRED_WORD)
+      .run();
+    expect(await run(env)).toEqual({
+      kind: "run",
+      servingIndex: { staged: false, reason: "index_unreadable" },
+    });
+  });
+
   test("a fault under 24 hours keeps deferring (MUTATION: end the wait early)", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);

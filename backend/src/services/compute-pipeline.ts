@@ -821,7 +821,8 @@ export const SERVING_INDEX_DEFERRED_WORD = "serving_index_deferred";
  * Whole minutes (whole seconds divided by 60, so the 24-hour boundary is exact) since the FIRST deferral of a tuple's current run (`?1` dataset, `?2` version, `?3` recipe, `?4`
  * recipe version, `?5` engine, `?6` input), on SQLite's clock: the oldest deferred stamp newer than the
  * tuple's newest stamp of any other kind, so an earlier run's deferrals never shorten a later run's wait.
- * NULL when the run was never deferred.
+ * A deferral of the run's commit ({@link SOURCE_COMMIT_DEFERRED_WORD}, ADR 0143) is a pause of the same run,
+ * not another kind: it does not restart the 24 hours. NULL when the run was never deferred.
  */
 export const SERVING_INDEX_DEFERRAL_AGE_SQL = `SELECT (CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', MIN(d.created_at)) AS INTEGER)) / 60 AS minutes
   FROM compute_pipeline_stamps d
@@ -832,7 +833,8 @@ export const SERVING_INDEX_DEFERRAL_AGE_SQL = `SELECT (CAST(strftime('%s', 'now'
                          WHERE o.dataset_id = ?1 AND o.version = ?2 AND o.recipe = ?3
                            AND o.recipe_version = ?4 AND o.engine = ?5 AND o.input = ?6
                            AND NOT (o.state = 'refused'
-                                    AND o.refusal_code = '${SERVING_INDEX_DEFERRED_WORD}')), 0)`;
+                                    AND o.refusal_code IN ('${SERVING_INDEX_DEFERRED_WORD}',
+                                                           '${SOURCE_COMMIT_DEFERRED_WORD}'))), 0)`;
 
 export type ServingIndexDecision =
   | { kind: "run"; servingIndex: StagedServingIndex }
