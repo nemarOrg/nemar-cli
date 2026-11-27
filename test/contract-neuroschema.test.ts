@@ -460,7 +460,8 @@ describe("neuroschema bundle: record root and processing extensions", () => {
     const dataset = fixture("dataset-ds002718-processing.json");
     for (const stamp of ["0.6.0", "0.4.1", "0.3.0"]) {
       if (!record({ ...doc, schema_version: stamp })) throw new Error(formatAjvErrors(record));
-      if (!validate({ ...dataset, schema_version: stamp })) throw new Error(formatAjvErrors(validate));
+      if (!validate({ ...dataset, schema_version: stamp }))
+        throw new Error(formatAjvErrors(validate));
     }
   });
 
