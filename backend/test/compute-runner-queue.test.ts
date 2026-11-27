@@ -49,7 +49,7 @@ import { computeRunnerRoutes } from "../src/routes/compute-runners";
 import { getJob } from "../src/services/compute-jobs";
 import { UNCOPIED_TERMINAL_SQL } from "../src/services/compute-lifecycle";
 import { RUNNER_TERMINAL_TRANSITION_SQL } from "../src/services/compute-lifecycle";
-import { dispatchPipelineJob } from "../src/services/compute-pipeline";
+import { dispatchPipelineJob, poolOfRecipe } from "../src/services/compute-pipeline";
 import { recordKey, sha256Hex } from "../src/services/compute-records";
 import {
   CLAIM_RUNNER_JOB_SQL,
@@ -1483,6 +1483,73 @@ describe("the recipe of a runner job is the recipe's", () => {
     const floor = findRecipe("nemar-floor");
     expect(floor?.executors).toEqual(["tapis", "runner"]);
     expect(floor?.inputs).toEqual(["bids", "zarr"]);
+  });
+});
+
+/**
+ * `nemar-ica` over the Zarr serving copy on a runner (portable compute card Q1z): its job is the GPU pool's, so a
+ * runner of that pool with a GPU claims it and one registered there with none does not. The image is the CUDA one,
+ * the one `COMPUTE_RUNTIME_IMAGE` pins for every recipe (`test/fixtures/nemar-recipe-version.json`).
+ */
+describe("nemar-ica's Zarr job is claimed by a runner with a GPU in its pool", () => {
+  const CUDA_REF = (
+    JSON.parse(
+      readFileSync(join(import.meta.dir, "../../test/fixtures/nemar-recipe-version.json"), "utf8"),
+    ) as { image: string }
+  ).image;
+  const CUDA_DIGEST = CUDA_REF.slice(CUDA_REF.indexOf("@") + 1);
+
+  /** An administrator's runner dispatch of nemar-ica over a fresh dataset's serving copy, and its job id. */
+  async function dispatchIca(e: Bindings): Promise<string> {
+    const r = await dispatchPipelineJob(e, {
+      recipe: "nemar-ica",
+      datasetId: await dataset(e),
+      actor: { kind: "admin", userId: ids.admin },
+      executor: "runner",
+      input: "zarr",
+    });
+    if (!r.ok) throw new Error(`could not dispatch: ${r.code}`);
+    return r.jobId;
+  }
+
+  test("a GPU runner of poolOfRecipe(nemar-ica) claims it, with the CUDA image, one GPU, 16384 MB and no ICA option (MUTATION: gpus 0; an --ica-max-iter argument)", async () => {
+    const e = { ...env, COMPUTE_RUNTIME_IMAGE: CUDA_REF };
+    const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
+    expect(poolOfRecipe(ica)).toBe("gpu");
+    const r = await runner(e, { pool: poolOfRecipe(ica), gpus: 1 });
+    const jobId = await dispatchIca(e);
+    const res = await claim(r, 1);
+    expect(res.status).toBe(200);
+    const jobs = RunnerClaimResponseSchema.parse(res.body).jobs as unknown as (Claimed & {
+      image: { digest: string };
+      memory_mb: number;
+    })[];
+    expect(jobs.map((j) => [j.id, j.memory_mb, j.image.digest])).toEqual([
+      [jobId, 16384, CUDA_DIGEST],
+    ]);
+    const decoded = decodeLaunchSpecEnv((jobs[0] as Claimed).launch_spec_env);
+    if (!decoded.ok) throw new Error(`no specification: ${decoded.reason}`);
+    const spec = LaunchSpecSchema.parse(JSON.parse(decoded.text));
+    expect([spec.image.uri.replace(/^docker:\/\//, ""), spec.resources.gpus, spec.command]).toEqual(
+      [CUDA_REF, 1, ["nemar-recipe", "run", "nemar-ica", "--input", "zarr"]],
+    );
+    expect(spec.datasets).toEqual([]);
+    expect(spec.args.filter((a) => a.startsWith("--ica-"))).toEqual([]);
+  });
+
+  test("a runner of that pool registered with no GPU claims nothing, and the job stays waiting (MUTATION: drop the gpus term)", async () => {
+    const e = { ...env, COMPUTE_RUNTIME_IMAGE: CUDA_REF };
+    const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
+    const none = await runner(e, { pool: poolOfRecipe(ica), gpus: 0 });
+    const jobId = await dispatchIca(e);
+    expect(RunnerClaimResponseSchema.parse((await claim(none, 1)).body).jobs).toHaveLength(0);
+    expect(await row(jobId)).toMatchObject({ state: "created", runner_id: null });
+    // A CPU runner, however large, does not claim it either.
+    const cpu = await runner(e, { cores: 64, memory_mb: 256_000 });
+    expect(RunnerClaimResponseSchema.parse((await claim(cpu, 1)).body).jobs).toHaveLength(0);
+    // The GPU runner does.
+    const gpu = await runner(e, { pool: poolOfRecipe(ica), gpus: 1 });
+    expect((await claimOne(gpu)).id).toBe(jobId);
   });
 });
 
