@@ -44,6 +44,7 @@ import {
   COMPUTE_RECIPES,
   RECIPE_PRODUCT_OUTPUT_PREFIX,
   RECIPE_SERVING_INDEX_FLAG,
+  RECIPE_SOURCE_COMMIT_FLAG,
   type RecipeInput,
   findRecipe,
   recipeCheckpointMap,
@@ -401,9 +402,23 @@ function tableHasTransientCode(text: string): boolean | null {
   return false;
 }
 
+/** Every value a specification's arguments hand as `--source-commit` (the flag and its value, or `flag=value`). */
+function handedSourceCommits(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === RECIPE_SOURCE_COMMIT_FLAG) out.push(args[i + 1] ?? "");
+    else if (a.startsWith(`${RECIPE_SOURCE_COMMIT_FLAG}=`)) {
+      out.push(a.slice(RECIPE_SOURCE_COMMIT_FLAG.length + 1));
+    }
+  }
+  return out;
+}
+
 /**
  * Decide one stamp, in the order of ADR 0123 decision 7 and card V1b item 9, the first check that fails
- * deciding the word: the stamp states a digest; the spec names no `--recording`; no row of the recordings
+ * deciding the word: the stamp states a digest; the spec names no `--recording`; a BIDS stamp's digest is the
+ * commit the spec hands as `--source-commit`, when it hands one; no row of the recordings
  * table has a transient code; for a Zarr input the record's `stores_unread` is an empty list, its
  * `stores_content` a non-empty list, the paths of its rows exactly its `stores` (each once), and the
  * RECOMPUTED `inputDigestV2` of those rows equals the record's `input_digest` and the stamp's; last, the eight
@@ -449,6 +464,16 @@ export async function keyStamp(stores: Stores, stamp: CandidateStamp): Promise<K
       } else {
         if (flagged > 0) return unkeyable("serving_index_unattested");
         servingIndex = SERVING_INDEX_NONE;
+      }
+    }
+    // A BIDS stamp's `git:` digest is the commit its record states. When the dispatcher handed the run a commit
+    // (`--source-commit` in the RECORDED specification, ADR 0143), the digest must be exactly that commit: a
+    // record that states another, or a specification that hands two, is `digest_mismatch`, never keyed as if
+    // the run had read what it claims. A specification from before the dispatcher handed one is not checked.
+    if (stamp.input === "bids") {
+      const handed = handedSourceCommits(spec.args);
+      if (handed.length > 1 || (handed.length === 1 && stamp.input_digest !== `git:${handed[0]}`)) {
+        return unkeyable("digest_mismatch");
       }
     }
 

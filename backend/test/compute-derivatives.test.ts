@@ -476,6 +476,35 @@ async function bidsJob(
   return { id, jobId: r.jobId, stampId: r.stampId, version: r.version, files };
 }
 
+/** The arguments with every `--source-commit` and its value taken out. */
+const withoutSourceCommit = (args: readonly string[]): string[] => {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--source-commit") i++;
+    else out.push(args[i] as string);
+  }
+  return out;
+};
+
+/**
+ * Rewrite a job's RECORDED specification (what the dispatcher wrote before the job existed) and the digest the
+ * job row keeps of it, as a case needs a specification the dispatcher would have written otherwise.
+ */
+async function rewriteSpec(
+  env: Bindings,
+  jobId: string,
+  change: (spec: { args: string[]; serving_index?: unknown }) => void,
+): Promise<void> {
+  const key = recordKey(jobId, "spec.json");
+  const spec = JSON.parse((await (await fx.harness.records.get(key))?.text()) as string);
+  change(spec);
+  const bytes = enc(JSON.stringify(spec));
+  await fx.harness.records.put(key, bytes);
+  await env.DB.prepare("UPDATE compute_jobs SET spec_digest = ?1 WHERE id = ?2")
+    .bind(await sha256Hex(bytes), jobId)
+    .run();
+}
+
 // --- Reads -----------------------------------------------------------------------------------------------------
 
 interface Der {
@@ -1258,6 +1287,32 @@ describe("every keying check of the ADR, each failed alone", () => {
 
   test("a spec with --recording is a subset run (recording_subset)", () =>
     expectUnkeyable(() => zarrJob({ recording: true }), "recording_subset"));
+
+  /** A BIDS run whose recorded specification hands `handed` as --source-commit and whose record states `stated`. */
+  async function bidsHanded(handed: string[], stated: string): Promise<Made> {
+    const made = await bidsJob({ sourceCommit: stated });
+    await rewriteSpec(envOf(), made.jobId, (spec) => {
+      spec.args = [
+        ...withoutSourceCommit(spec.args),
+        ...handed.flatMap((c) => ["--source-commit", c]),
+      ];
+    });
+    return made;
+  }
+
+  test("a BIDS record that states another commit than the dispatcher handed is digest_mismatch (MUTATION: trust the record's git: digest)", () =>
+    expectUnkeyable(() => bidsHanded([COMMIT], SOURCE), "digest_mismatch"));
+
+  test("a BIDS specification that hands two commits is digest_mismatch, even when the record states one of them", () =>
+    expectUnkeyable(() => bidsHanded([SOURCE, COMMIT], SOURCE), "digest_mismatch"));
+
+  test("a BIDS record that states the commit it was handed is keyed by it", async () => {
+    const env = envOf();
+    const made = await bidsHanded([COMMIT], COMMIT);
+    expect(await syncAll(env)).toMatchObject({ created: 1, derivative_unkeyable: {}, errored: 0 });
+    expect((await one(env)).input_digest).toBe(`git:${COMMIT}`);
+    expect((await one(env)).stamp_id).toBe(made.stampId);
+  });
 
   test("a recording that ended out_of_memory is transient, and so are internal_error, disk_error and time_budget (transient_failure)", async () => {
     for (const code of ["out_of_memory", "internal_error", "disk_error", "time_budget"]) {
@@ -2403,25 +2458,19 @@ async function icaBidsJob(
   }
   await fx.harness.results.put(manifestKey, enc(JSON.stringify(manifest)));
   if (o.servingIndex !== undefined || o.recorded !== undefined) {
-    const key = recordKey(made.jobId, "spec.json");
-    const spec = JSON.parse((await (await fx.harness.records.get(key))?.text()) as string);
-    if (o.recorded !== undefined) {
-      spec.serving_index = o.recorded.serving_index;
-      spec.args = [...spec.args, ...o.recorded.args];
-    } else {
-      spec.args =
-        o.servingIndex === "flag"
-          ? [...spec.args, "--serving-index", "/data/serving/index.json"]
-          : [...spec.args, "--serving-index=/data/serving/index.json"];
-    }
-    const bytes = enc(JSON.stringify(spec));
-    await fx.harness.records.put(key, bytes);
-    await sql(
-      env,
-      "UPDATE compute_jobs SET spec_digest = ?1 WHERE id = ?2",
-      await sha256Hex(bytes),
-      made.jobId,
-    );
+    await rewriteSpec(env, made.jobId, (spec) => {
+      if (o.recorded !== undefined) {
+        // What the dispatcher would have recorded for nemar-ica: the archive's own arguments, then exactly the
+        // ones the case names (a commit the floor's dispatch handed is replaced, never doubled).
+        spec.serving_index = o.recorded.serving_index;
+        spec.args = [...withoutSourceCommit(spec.args), ...o.recorded.args];
+      } else {
+        spec.args =
+          o.servingIndex === "flag"
+            ? [...spec.args, "--serving-index", "/data/serving/index.json"]
+            : [...spec.args, "--serving-index=/data/serving/index.json"];
+      }
+    });
   }
   return made;
 }
@@ -2507,8 +2556,10 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
 
   test("a run the dispatcher staged an index for is keyed by the recorded digest (MUTATION: key it none; read the digest from anything but the specification)", async () => {
     const env = envOf();
+    // The record states the commit the arguments hand the run, as nemar-process writes it.
     const made = await icaBidsJob({
       recorded: { serving_index: { sha256: STAGED_HEX, size: 812 }, args: STAGED_ARGS },
+      sourceCommit: COMMIT40,
     });
     expect(await syncAll(env)).toMatchObject({ created: 1, stored: 1, errored: 0 });
     const row = (await one(env)) as Der & { serving_index: string | null };
