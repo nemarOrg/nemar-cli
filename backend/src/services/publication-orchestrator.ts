@@ -113,6 +113,7 @@ import {
   waitForPublicPropagation,
 } from "./s3";
 import { INSERT_DATASET_VERSION_SQL, columnsFromDescription } from "./source-snapshot";
+import { alertIfPolicyFull } from "./storage-policy-alert.js";
 import { ZARR_REQUEUE_AT_PATH } from "./sweep-stamps";
 import {
   OWNER_NAME_MISSING_MESSAGE,
@@ -696,6 +697,7 @@ async function stepS3PublicRead(c: ApproveStepContext): Promise<RespondOutcome |
 
       await updateProgress("s3_public_read", undefined, s3PublicAttempts);
     } catch (err) {
+      await alertIfPolicyFull(c.env, err);
       const msg = errorMessage(err);
       console.error(`[publish] S3 public read policy failed for ${datasetId}:`, err);
       await updateProgress("s3_public_read", msg);

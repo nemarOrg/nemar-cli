@@ -77,6 +77,7 @@ import {
 } from "../../services/publication-review-view";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
+import { alertIfPolicyFull } from "../../services/storage-policy-alert";
 import { checkSubmissionGate } from "../../services/submission-gate";
 import { SUBMISSION_POLICY_URL } from "../../services/submission-minimums";
 import {
@@ -1511,6 +1512,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         datasetId,
       );
     } catch (s3Error) {
+      await alertIfPolicyFull(c.env, s3Error);
       const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
       console.error(`S3 policy update failed for ${datasetId}:`, s3Msg);
 

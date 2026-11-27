@@ -13,6 +13,7 @@ import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { deleteRepository } from "./github.js";
 import { type DeleteResult, deleteDatasetObjects, markDatasetPublic } from "./s3.js";
+import { alertIfPolicyFull } from "./storage-policy-alert.js";
 
 export interface DeletionSteps {
   github: { success: boolean; error?: string };
@@ -169,6 +170,7 @@ export async function deleteDatasetCascade(
     try {
       await markDatasetPublic(s3Options, datasetId);
     } catch (err) {
+      await alertIfPolicyFull(env, err);
       const msg = err instanceof Error ? err.message : String(err);
       warnings.push(`Bucket-policy carve-out cleanup failed: ${msg}`);
     }

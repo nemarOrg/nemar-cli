@@ -75,6 +75,7 @@
     "backend/test/broadcast-cloudflare.test.ts": 240,
     "backend/test/broadcast-outcomes-skipped-d1.test.ts": 180,
     "backend/test/broadcast-queue.test.ts": 249,
+    "backend/test/bucket-policy-transition.test.ts": 200,
     "backend/test/bucket-policy.test.ts": 89,
     "backend/test/catalog-anonymous-error-details.test.ts": 251,
     "backend/test/catalog-contract-validation.test.ts": 400,

@@ -1665,8 +1665,22 @@ export async function getBucketPolicy(options: PresignedUrlOptions): Promise<Buc
 }
 
 /**
- * Overwrite the bucket policy with the given document.
+ * A visibility transition refused because the policy it would write is over
+ * AWS's cap (#2497, ADR 0145). Making one id of a wildcard-covered decade or
+ * hundred public expands the wildcard into explicit entries (up to about 17
+ * for a hundred), so a removal can grow the policy too. Callers with an env
+ * pass it to `alertIfPolicyFull` (storage-policy-alert.ts).
  */
+export class BucketPolicyFullError extends Error {
+  constructor(
+    message: string,
+    readonly bytes: number,
+  ) {
+    super(message);
+    this.name = "BucketPolicyFullError";
+  }
+}
+
 /** Overwrite the bucket policy; returns the written document's size in bytes. */
 async function putBucketPolicy(
   options: PresignedUrlOptions,
@@ -1749,6 +1763,18 @@ async function transitionDatasetVisibility(
     const next = makePrivate
       ? addPrivateDataset(current, bucket, datasetId)
       : removePrivateDataset(current, bucket, datasetId);
+    // Price the write before making it: a removal from a covered decade or
+    // hundred expands the wildcard and can push the policy over the cap.
+    const nextBytes = policyByteSize(next);
+    if (nextBytes > MAX_BUCKET_POLICY_BYTES) {
+      const cause = makePrivate
+        ? ""
+        : " (its wildcard carve-out expands into the ids it still covers)";
+      throw new BucketPolicyFullError(
+        `Bucket policy full: making ${datasetId} ${makePrivate ? "private" : "public"} would write ${nextBytes} of ${MAX_BUCKET_POLICY_BYTES} bytes${cause}; free space in the bucket policy first (#2497, ADR 0145)`,
+        nextBytes,
+      );
+    }
     let written: number;
     try {
       written = await putBucketPolicy(options, next);
