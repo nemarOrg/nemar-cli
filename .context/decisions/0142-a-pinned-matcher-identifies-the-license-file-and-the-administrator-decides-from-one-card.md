@@ -248,7 +248,7 @@ Decision 4 is extended by the rulings of phase 4's review (pull request #2479).
 - **A recorded license permission clears `needs_permission` and `share_alike_mismatch` on the card**: the cue is green when nothing else stands, and its reason says a recorded permission covers the upstream license.
   `redistribution_prohibited` stays red with a permission, because a repository's data use agreement may bind more than the authors.
   A permission counts per lineage: the card's fresher lineage is covered only when the permission covers that lineage's own basis (`permissionCovers`), never because it covered the review's.
-- **`approve` also needs the approval's own gates**: the screened commit is still `main` by the approval path's check (`verifyScreenHead`; stale and unverified suggest running the screen again), and the request is `requested`, or `approving` with no approval run holding it and nothing published.
+- **`approve` also needs the approval's own gates**: the screened commit is still `main` by the approval path's check (`verifyScreenHead`, asked by the card once and without a sleep; a stale head suggests running the screen again, and a head that could not be checked suggests waiting and looking again), and the request is `requested`, or `approving` with no approval run holding it and nothing published.
 - The dataset's License field and each source's declared licenses carry their labels in the card's JSON.
 
 ## Receipts

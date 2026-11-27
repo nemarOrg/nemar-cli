@@ -528,7 +528,7 @@ export const ACTION_SENTENCE: Record<DecisionAction, string> = {
   acknowledge_screen:
     "Acknowledge the identifier screen's result with a recorded reason; the approval asks for it.",
   rerun_screen: "Run the identifier screen again: it has no verdict about the current commit.",
-  wait: "Wait: the identifier screen or the review is still running, or today's review allowance is spent.",
+  wait: "Wait and look again: the identifier screen or the review is still running, today's review allowance is spent, or whether the screened commit is current could not be checked just now.",
   start_review: "Start the review of the current screened commit.",
   review_again:
     "Review the request again: the upstream data's license resolves now, and the review read it unresolved.",
@@ -647,14 +647,11 @@ export function nextActionOf(
   }
   if (d.request_status === "approving" && d.started_publishing) return "administrator_reads";
   if (any(SCREEN_WAIT) || d.screen_gate === "wait") return "wait";
-  if (
-    any(SCREEN_RERUN) ||
-    d.screen_gate === "rerun" ||
-    o.head === "stale" ||
-    o.head === "unverified"
-  ) {
+  if (any(SCREEN_RERUN) || d.screen_gate === "rerun" || o.head === "stale") {
     return "rerun_screen";
   }
+  // GitHub could not be asked: nothing is wrong with the screen, so try again rather than re-run it.
+  if (o.head === "unverified") return "wait";
   if (any(REVIEW_WAIT)) return "wait";
   if (any(REVIEW_START)) return "start_review";
   if (o.freshBetter) return "review_again";
@@ -835,7 +832,7 @@ export const HEAD_LINE: Record<HeadCheck, string | null> = {
   stale:
     "The screened commit is no longer the repository's main branch, so the screen must run again before an approval.",
   unverified:
-    "Whether the screened commit is still the repository's main branch could not be checked, so an approval would be refused until it can be.",
+    "Whether the screened commit is still the repository's main branch could not be checked just now; try again shortly, as an approval would be refused until it can be.",
 };
 
 function licensePanelOf(input: DecisionCardInput, metadata: CardMetadata): CardLicensePanel {

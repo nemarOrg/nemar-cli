@@ -18,7 +18,7 @@
  *   - the fresher lineage covered by the review's permission ("the review's permission never covers
  *     the card's fresher lineage");
  *   - the head check removed from the door and the tiers ("a screened commit that is no longer
- *     main ... never suggests approve"; also the route test in backend/test/decision-card.test.ts);
+ *     main ..."; also the route test in backend/test/decision-card.test.ts);
  *   - the request-status conditions removed ("only a requested request, or a stopped approval with
  *     nothing published, suggests approve");
  *   - the `cue !== "red"` of `approvalWouldPass` removed ("a red cue never suggests approve, even
@@ -384,10 +384,13 @@ describe("the next action", () => {
     expect(approvalWouldPass(clean, "amber", GATE_CLEAR)).toBe(true);
   });
 
-  test("a screened commit that is no longer main, or could not be checked, never suggests approve", () => {
-    for (const head of ["stale", "unverified"] as const) {
+  test("a stale head suggests running the screen again, an unchecked one waiting; neither approve", () => {
+    for (const [head, action] of [
+      ["stale", "rerun_screen"],
+      ["unverified", "wait"],
+    ] as const) {
       const c = card(clean, { gate: { head, approvalInFlight: false } });
-      expect(c.next_action.action).toBe("rerun_screen");
+      expect(c.next_action.action).toBe(action);
       expect(c.identifier_screen.head).toBe(head);
       expect(c.identifier_screen.head_line).not.toBeNull();
       expect(approvalWouldPass(clean, "green", { head, approvalInFlight: false })).toBe(false);
