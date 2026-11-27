@@ -755,6 +755,7 @@
     "test/datasets-route-inventory.unit.test.ts": 27,
     "test/datasets-search.unit.test.ts": 21,
     "test/debug-log-redaction.unit.test.ts": 51,
+    "test/decision-card.unit.test.ts": 23,
     "test/device-login.unit.test.ts": 1054,
     "test/dispatch-chunk.unit.test.ts": 76,
     "test/docs-anchors.unit.test.ts": 110,

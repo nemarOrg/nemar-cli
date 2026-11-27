@@ -1954,14 +1954,14 @@ const NOT_STARTABLE = `A review starts only for a request that is waiting for it
 // state asks for them, and the `--force` of the gate's own sentences, which are prose about a flag
 // rather than a command to run. `COMMAND_ACKNOWLEDGE` is `next` only when neither of those two is
 // appended, so the one is not a prefix check of the other.
-const COMMAND_SCREEN = "nemar admin dataset publish screen <dataset>";
-const COMMAND_START = "nemar admin dataset publish start <dataset>";
-const COMMAND_SHOW = "nemar admin dataset publish show <dataset>";
-const COMMAND_APPROVE = "nemar admin dataset publish approve <dataset>";
-const COMMAND_DENY = "nemar admin dataset publish deny <dataset>";
+export const COMMAND_SCREEN = "nemar admin dataset publish screen <dataset>";
+export const COMMAND_START = "nemar admin dataset publish start <dataset>";
+export const COMMAND_SHOW = "nemar admin dataset publish show <dataset>";
+export const COMMAND_APPROVE = "nemar admin dataset publish approve <dataset>";
+export const COMMAND_DENY = "nemar admin dataset publish deny <dataset>";
 const COMMAND_LINEAGE = "nemar admin dataset publish license-lineage <dataset>";
 const ACKNOWLEDGE_FLAG = '--acknowledge-identifier-screen "<reason>"';
-const COMMAND_ACKNOWLEDGE = `${COMMAND_APPROVE} ${ACKNOWLEDGE_FLAG}`;
+export const COMMAND_ACKNOWLEDGE = `${COMMAND_APPROVE} ${ACKNOWLEDGE_FLAG}`;
 
 /** A command or sentence with its `<dataset>` filled; the caller passes an id already validated. */
 function fill(template: string, datasetId: string): string {
