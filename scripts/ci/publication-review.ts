@@ -95,8 +95,11 @@ export type Environment = keyof typeof CALLBACK_ORIGINS;
 
 const DATASET_ID = /^(nm|xx|on)\d{6}$/;
 
-/** Output budget. Adaptive thinking at high effort counts toward it. */
-export const MAX_TOKENS = 16_000;
+/**
+ * Output budget: Haiku 5.5's whole 128,000 tokens. Adaptive thinking at `max` counts toward it, and
+ * 64,000 cut a real review off before it answered (2026-11-27). A call this large streams.
+ */
+export const MAX_TOKENS = 128_000;
 
 /**
  * The confirming run's budget (ADR 0139, decision 1): effort `max` thinks as long as it needs, so
@@ -120,6 +123,7 @@ export interface ModelCallShape {
 export const REVIEW_CALL: ModelCallShape = {
   effort: PUBLICATION_REVIEW_EFFORT,
   maxTokens: MAX_TOKENS,
+  deadlineMs: CONFIRM_DEADLINE_MS,
 };
 
 /** The run errors this script may post: everything the Worker does not write itself. */
@@ -200,7 +204,7 @@ export interface ModelUsage {
 }
 
 /**
- * One call to the model: Haiku 5.5 at high effort, no tools, a schema-constrained answer. The
+ * One call to the model: Haiku 5.5 at max effort, streamed, no tools, a schema-constrained answer. The
  * model can read the prompt and write a JSON object; it cannot do anything else. `model` and
  * `onUsage` are for the offline calibration only; the review never passes them. `onUsage` is told
  * the call's token counts as soon as the answer arrives, before the answer is judged, so a call the
