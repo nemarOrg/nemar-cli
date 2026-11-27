@@ -6,11 +6,16 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  RECIPE_SERVING_INDEX_COMMIT_FLAG,
+  RECIPE_SERVING_INDEX_DELTA_PATH_FLAG,
   RECIPE_SERVING_INDEX_FLAG,
+  RECIPE_SERVING_INDEX_MAX_DELTA_PATHS,
   RECIPE_SOURCE_COMMIT_FLAG,
   findRecipe,
   recipeArguments,
   recipeServingIndexArguments,
+  recipeServingIndexAttestationArguments,
+  recipeSourceCommitArguments,
 } from "../shared/compute-recipes";
 import {
   LAUNCHER_DETAILS,
@@ -79,9 +84,38 @@ describe("what a job's specification records of the serving index", () => {
       "no_github_credentials",
       "token_mint_failed",
       "index_not_stored",
+      "index_behind_tag",
+      "index_diverged",
+      "index_content_changed",
+      "index_delta_unlisted",
     ]);
     expect(COMPUTE_SERVING_INDEX_MAX_BYTES).toBe(64 * 1024 * 1024);
     expect(SERVING_INDEX_MAX_BYTES).toBe(COMPUTE_SERVING_INDEX_MAX_BYTES);
+  });
+
+  test("a staged index ahead of its tag records both commits and the changed-path count, and nothing else (ADR 0144)", () => {
+    const ahead = { tag_commit: COMMIT, index_commit: "c".repeat(40), changed_path_count: 5 };
+    expect(
+      JobSpecSchema.safeParse(recipeJob({ sha256: HEX, size: 812, ahead_of_tag: ahead })).success,
+    ).toBe(true);
+    for (const bad of [
+      { ...ahead, index_commit: COMMIT },
+      { ...ahead, tag_commit: "abc" },
+      { ...ahead, index_commit: "C".repeat(40) },
+      { ...ahead, changed_path_count: -1 },
+      { ...ahead, changed_path_count: 601 },
+      { ...ahead, paths: [".nemar/x"] },
+      { tag_commit: COMMIT, index_commit: "c".repeat(40) },
+    ]) {
+      expect(
+        JobSpecSchema.safeParse(recipeJob({ sha256: HEX, size: 812, ahead_of_tag: bad })).success,
+        JSON.stringify(bad),
+      ).toBe(false);
+    }
+    // A refusal never carries it.
+    expect(
+      JobSpecSchema.safeParse(recipeJob({ reason: "no_index", ahead_of_tag: ahead })).success,
+    ).toBe(false);
   });
 
   test("a job that is not a recipe's is refused a serving index, naming the field", () => {
@@ -178,6 +212,69 @@ describe("where the launcher places the index, and the arguments that hand it to
     expect(COMPUTE_DATASET_ID_RE.test("serving-index")).toBe(false);
   });
 
+  test("a run with no index staged is handed the tag's commit alone, the same two values a staged run ends with", () => {
+    expect(recipeSourceCommitArguments(COMMIT)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, COMMIT]);
+    expect(
+      recipeServingIndexArguments({
+        path: SERVING_INDEX_CONTAINER_PATH,
+        sourceCommit: COMMIT,
+      }).slice(2),
+    ).toEqual(recipeSourceCommitArguments(COMMIT));
+    for (const bad of ["abc", COMMIT.toUpperCase(), `${COMMIT}\n`, ""]) {
+      expect(() => recipeSourceCommitArguments(bad)).toThrow(RangeError);
+    }
+  });
+
+  test("an index ahead of its tag is attested with its commit and every changed path, as nemar-process#108 reads them (ADR 0144)", () => {
+    const index = "c".repeat(40);
+    expect(RECIPE_SERVING_INDEX_COMMIT_FLAG).toBe("--serving-index-commit");
+    expect(RECIPE_SERVING_INDEX_DELTA_PATH_FLAG).toBe("--serving-index-delta-path");
+    expect(
+      recipeServingIndexAttestationArguments({
+        tagCommit: COMMIT,
+        indexCommit: index,
+        deltaPaths: [".gitattributes", ".nemar/a.json"],
+      }),
+    ).toEqual([
+      "--serving-index-commit",
+      index,
+      "--serving-index-delta-path",
+      ".gitattributes",
+      "--serving-index-delta-path",
+      ".nemar/a.json",
+    ]);
+    // Commits that change no file: the commit alone.
+    expect(
+      recipeServingIndexAttestationArguments({
+        tagCommit: COMMIT,
+        indexCommit: index,
+        deltaPaths: [],
+      }),
+    ).toEqual(["--serving-index-commit", index]);
+    // The argument budget: 64 strings, 16 fixed, so 24 paths (the recipe takes 32).
+    expect(RECIPE_SERVING_INDEX_MAX_DELTA_PATHS).toBe((64 - 16) / 2);
+    const paths = (n: number) => Array.from({ length: n }, (_, i) => `.nemar/${i}`);
+    expect(
+      recipeServingIndexAttestationArguments({
+        tagCommit: COMMIT,
+        indexCommit: index,
+        deltaPaths: paths(24),
+      }),
+    ).toHaveLength(50);
+    for (const bad of [
+      { tagCommit: COMMIT, indexCommit: COMMIT, deltaPaths: [] },
+      { tagCommit: COMMIT, indexCommit: "abc", deltaPaths: [] },
+      { tagCommit: "C".repeat(40), indexCommit: index, deltaPaths: [] },
+      { tagCommit: COMMIT, indexCommit: index, deltaPaths: paths(25) },
+      { tagCommit: COMMIT, indexCommit: index, deltaPaths: [""] },
+      { tagCommit: COMMIT, indexCommit: index, deltaPaths: [".nemar/a", ".nemar/a"] },
+    ]) {
+      expect(() => recipeServingIndexAttestationArguments(bad), JSON.stringify(bad)).toThrow(
+        RangeError,
+      );
+    }
+  });
+
   test("the arguments are the flag, the path, and the tag's commit as --source-commit", () => {
     expect(
       recipeServingIndexArguments({ path: SERVING_INDEX_CONTAINER_PATH, sourceCommit: COMMIT }),
@@ -197,8 +294,10 @@ describe("where the launcher places the index, and the arguments that hand it to
     ).toThrow(RangeError);
   });
 
-  test("nemar-ica stays a placeholder", () => {
-    expect(findRecipe("nemar-ica")?.placeholder).toBe(true);
+  test("nemar-ica is no longer a placeholder, and runs on Tapis only, where the serving index is staged", () => {
+    const ica = findRecipe("nemar-ica");
+    expect(ica?.placeholder).toBe(false);
+    expect(ica?.executors).toEqual(["tapis"]);
   });
 });
 

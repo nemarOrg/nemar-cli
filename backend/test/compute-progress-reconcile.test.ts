@@ -68,7 +68,7 @@ let fx: LifecycleFixture;
 let env: Bindings;
 
 beforeAll(async () => {
-  fx = await startLifecycleFixture();
+  fx = await startLifecycleFixture({ githubTags: true });
 }, 120_000);
 
 beforeEach(async () => {

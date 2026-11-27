@@ -126,7 +126,7 @@ export const START_REFUSALS: Record<StartRefusedReason, PublicationReviewErrorBo
   auto_deny_active: {
     code: "auto_deny_active",
     error:
-      "The automatic denial is confirming this review or has acted on it, so it cannot be replaced.",
+      "The automatic denial is confirming this review, has denied the request or is holding it under the daily cap, so it cannot be replaced.",
   },
   platform_limit: {
     code: "platform_limit",

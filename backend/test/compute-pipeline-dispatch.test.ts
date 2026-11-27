@@ -45,7 +45,7 @@ import { logged } from "./helpers/logs";
 let fx: LifecycleFixture;
 
 beforeAll(async () => {
-  fx = await startLifecycleFixture();
+  fx = await startLifecycleFixture({ githubTags: true });
 }, 120_000);
 
 afterAll(async () => {

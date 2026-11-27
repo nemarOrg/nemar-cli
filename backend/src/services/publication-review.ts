@@ -401,7 +401,15 @@ export interface StartOptions {
  * confirmed `fail` was acted on or is waiting on the daily digest and cap (`denied`, `would_deny`,
  * `capped`, `no_service_account`, `restored`), and superseding that review would hide it.
  */
-const SUPERSEDE_AUTO_DENY_STATES = ["none", "not_eligible", "disagreed", "confirm_failed"] as const;
+// `would_deny` is shadow mode's record of an agreement: nothing was denied, so the administrator may
+// review the commit again (owner, 2026-11-27).
+const SUPERSEDE_AUTO_DENY_STATES = [
+  "none",
+  "not_eligible",
+  "disagreed",
+  "confirm_failed",
+  "would_deny",
+] as const;
 
 /**
  * What a supersede's first write is conditioned on, in one statement, so it is decided in the same

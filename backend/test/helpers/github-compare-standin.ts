@@ -1,6 +1,7 @@
 /**
  * A stand-in for the two EXTERNAL services the Zarr source check reads (portable compute, card DM-06b): the
- * GitHub REST API (a commit by tag, and the compare of two commits) and the Zarr serving copy's index
+ * GitHub REST API (a commit by tag, the compare of two commits, a file at a commit and the tree of one) and the Zarr
+ * serving copy's index
  * (`<base>/<id>/zarr/index.json`). One real `Bun.serve` on loopback; the request log says what was asked, so a
  * test can say a path made no call and that a dispatch made at most three.
  *
@@ -60,6 +61,27 @@ export interface GithubCompareStandin {
   branch(repo: string, name: string, commit: string): void;
   /** The compare of `base...head`, 404 when unset. */
   compare(repo: string, base: string, head: string, answer: CompareAnswer): void;
+  /**
+   * A file of a repository at a commit, as `GET /repos/<org>/<repo>/contents/<path>?ref=<commit>` answers it: the
+   * text (sent base64-encoded, as GitHub sends it), a status, or a whole body. Unset: 404.
+   */
+  contents(
+    repo: string,
+    ref: string,
+    path: string,
+    answer: string | { http: number } | { body: unknown },
+  ): void;
+  /**
+   * The tree of a repository at a commit, as `GET /repos/<org>/<repo>/git/trees/<commit>` answers it: the files it
+   * holds (sent as GitHub sends them, each a `blob` entry after a `tree` entry for each directory above it, and with
+   * `truncated` as given, false by default), a status, or a whole body. As on GitHub, the listing holds only the top
+   * level unless the request asks `recursive`. Unset: 404.
+   */
+  tree(
+    repo: string,
+    ref: string,
+    answer: { paths: string[]; truncated?: boolean } | { http: number } | { body: unknown },
+  ): void;
   /** The index of a dataset: a document, or a status (404 when unset); a string is sent as it is. */
   index(
     id: string,
@@ -82,6 +104,11 @@ export function startGithubCompareStandin(): GithubCompareStandin {
   const tags = new Map<string, string | { http: number } | { body: unknown }>();
   const branches = new Map<string, string>();
   const compares = new Map<string, CompareAnswer>();
+  const files = new Map<string, string | { http: number } | { body: unknown }>();
+  const trees = new Map<
+    string,
+    { paths: string[]; truncated?: boolean } | { http: number } | { body: unknown }
+  >();
   const indexes = new Map<
     string,
     Record<string, unknown> | string | { http: number } | { stream: string }
@@ -136,6 +163,44 @@ export function startGithubCompareStandin(): GithubCompareStandin {
         }
         return Response.json({ sha: hit, commit: { message: "x" } });
       }
+      m = /^\/repos\/nemarDatasets\/([^/]+)\/contents\/(.+)$/.exec(url.pathname);
+      if (m) {
+        const path = (m[2] as string).split("/").map(decodeURIComponent).join("/");
+        const hit = files.get(`${m[1]}@${url.searchParams.get("ref")}:${path}`);
+        if (hit === undefined) return Response.json({ message: "Not Found" }, { status: 404 });
+        if (typeof hit !== "string") {
+          if ("body" in hit) return Response.json(hit.body);
+          return new Response("{}", { status: hit.http });
+        }
+        const content = Buffer.from(hit, "utf8").toString("base64");
+        return Response.json({ type: "file", encoding: "base64", size: hit.length, path, content });
+      }
+      m = /^\/repos\/nemarDatasets\/([^/]+)\/git\/trees\/([^/]+)$/.exec(url.pathname);
+      if (m) {
+        const hit = trees.get(`${m[1]}@${m[2]}`);
+        if (hit === undefined) return Response.json({ message: "Not Found" }, { status: 404 });
+        if (isStatusOnly(hit)) return new Response("{}", { status: hit.http });
+        if ("body" in hit) return Response.json(hit.body);
+        const recursive = url.searchParams.has("recursive");
+        const entries: Array<{ path: string; mode: string; type: string; sha: string }> = [];
+        const seen = new Set<string>();
+        for (const path of hit.paths) {
+          const parts = path.split("/");
+          for (let depth = 1; depth <= parts.length; depth++) {
+            const entry = parts.slice(0, depth).join("/");
+            if (seen.has(entry) || (!recursive && depth > 1)) continue;
+            seen.add(entry);
+            const isFile = depth === parts.length;
+            entries.push({
+              path: entry,
+              mode: isFile ? "100644" : "040000",
+              type: isFile ? "blob" : "tree",
+              sha: "0".repeat(40),
+            });
+          }
+        }
+        return Response.json({ sha: m[2], tree: entries, truncated: hit.truncated ?? false });
+      }
       m = /^\/repos\/nemarDatasets\/([^/]+)\/compare\/(.+)$/.exec(url.pathname);
       if (m) {
         const hit = compares.get(`${m[1]}/${decodeURIComponent(m[2] as string)}`);
@@ -181,6 +246,8 @@ export function startGithubCompareStandin(): GithubCompareStandin {
     tag: (repo, name, answer) => void tags.set(`${repo}/${name}`, answer),
     branch: (repo, name, commit) => void branches.set(`${repo}/${name}`, commit),
     compare: (repo, base, head, answer) => void compares.set(`${repo}/${base}...${head}`, answer),
+    contents: (repo, ref, path, answer) => void files.set(`${repo}@${ref}:${path}`, answer),
+    tree: (repo, ref, answer) => void trees.set(`${repo}@${ref}`, answer),
     index: (id, answer) => void indexes.set(id, answer),
     stall: (ms, scope = "all") => {
       stallMs = ms;
@@ -190,6 +257,8 @@ export function startGithubCompareStandin(): GithubCompareStandin {
       tags.clear();
       branches.clear();
       compares.clear();
+      files.clear();
+      trees.clear();
       indexes.clear();
       log.length = 0;
       stallMs = 0;

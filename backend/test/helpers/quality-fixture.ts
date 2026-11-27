@@ -4,8 +4,8 @@
  * the quality suites of epic #2324 phase B1.
  *
  * Nothing here stands in for NEMAR's code: the files are the recipe's own, and the rows are written with
- * SQL the tables accept (a stamp of a recipe the registry holds as a placeholder cannot be dispatched, so
- * its succeeded stamp is seeded, as the reconcile suites seed a job's state).
+ * SQL the tables accept (nemar-ica's dispatch stages the serving index and makes a Tapis job, neither of which
+ * these suites are about, so its succeeded stamp is seeded, as the reconcile suites seed a job's state).
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";

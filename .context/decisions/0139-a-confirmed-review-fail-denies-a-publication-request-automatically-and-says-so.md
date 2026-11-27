@@ -148,6 +148,14 @@ It clears that reason alone.
   It never clears another reason and never approves; an administrator's override still clears the reason too.
   The admin show and the administrators' mail print "License permission recorded on (date) by (administrator), ticket (ticket)".
 
+## Amendment 2026-11-27 (owner): production runs in shadow mode
+
+`PUBLICATION_AUTO_DENY_MODE = "shadow"` joins production `[vars]`: an eligible fail gets its confirming run and an agreement is recorded as `would_deny`, and nothing is denied.
+The owner reads the shadow results on the queue before switching to `on`, which is a separate reviewed change to the same line and its guard test.
+The daily cap stays unset (25); past 25 agreements in a day, an agreement is recorded as `capped`, not `would_deny`, and the confirming run has been spent either way.
+The daily digest lists the `would_deny` rows to the administrators.
+A `would_deny` first run may be reviewed again by an administrator (`start --again`), because nothing was denied.
+
 ## Amendment 2026-11-27 (owner, epic #2449): the record names the license matcher
 
 Decision 9's record gains the license matcher version (`scancode-32.5.0+spdx-3.27`), and decision 7's lineage records when it was resolved (ADR 0142).

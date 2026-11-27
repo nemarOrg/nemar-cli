@@ -21,6 +21,43 @@ earlier releases are described only by their generated notes.
   A registry that does not answer is asked again (two retries with backoff, within a fixed fetch budget), and no `unresolved` source is served from the cache; each lineage records `resolved_at`.
   An `https://osf.io/<id>` source maps to `10.17605/osf.io/<id>` and falls back to the license OSF declares for the node; a DOI cut short in a README is dropped and counted; an access-rights word such as `openAccess` is not read as a license.
   `needs_permission` and `unresolved` sources show the license the source declares, and `nemar dataset license-check` and `nemar admin dataset publish license-lineage` no longer print a bug-report prompt for an outcome.
+- **The Worker reads publication review report v3, and the review job can identify LICENSE with ScanCode (ADR 0142; nothing changes yet).**
+  The parser accepts v3 (license_file, the names of description keys not shown, the matcher version, the lineage's resolved_at); the job still sends v2 until the next release. While LICENSE differs from the License field, the license question is at most unknown and no license finding can deny automatically. Migration 0162 adds `publication_reviews.license_matcher`. `nemar dataset license-check` prints the ScanCode commands that reproduce the identification.
+- **nemar-ica is no longer a placeholder: an administrator can run it (owner decision of 2026-11-27).**
+  `nemar admin compute pipeline run nemar-ica` (with `--dataset`, or `--eligible` and `--limit`, and `--dry-run`) is no longer refused with `recipe_placeholder`; it goes through every other check a run has, on Tapis only, reads its tag's commit and stages the serving index first (ADR 0143, ADR 0141), so a GitHub or index fault defers it (`source_commit_deferred`, `serving_index_deferred`).
+  It is still never run by the daily dispatcher (`autoDispatch` is false), still runs on Tapis only, and still needs the owner's compute switches, the Tapis configuration and a funded GPU pool.
+  The pipeline grid and coverage now report it with `placeholder: false`, so the admin page no longer says it is a placeholder.
+- **nemar-ica is handed a serving index built after its version's tag when only NEMAR's own metadata changed since (ADR 0144).**
+  One GitHub compare of the tag's commit and the index's admits the index when every path between them is under `.nemar/` or `.github/`, or is a `.gitattributes` file whose patch adds or removes only `annex.*`, `diff`, `merge`, `filter=annex`, `text`, `binary` or `eol=lf` attributes.
+  When a `.gitattributes` changed, every `.gitattributes` at the index's commit, changed or not, is listed (one recursive tree listing) and read whole, and none may carry `eol=crlf` or `crlf` anywhere; a truncated listing or more than 24 such files refuses the index as `index_delta_unlisted`.
+  The run stays the tag's: it is handed the tag's commit and keyed by it, and the job's specification records the index's own commit as provenance (`ahead_of_tag`).
+  Any other commit is refused with a word that says why (`index_behind_tag`, `index_diverged`, `index_content_changed`, `index_delta_unlisted`) and the run goes ahead without the index; a compare, tree listing or file GitHub cannot answer defers the run.
+  The run attests the admission to the recipe with `--serving-index-commit` and one `--serving-index-delta-path` per changed path (at most 24, or the index is refused as `index_delta_unlisted`).
+  **Deploy order:** merge nemarOrg/nemar-process#108 before nemar-process's 0.1.2 release, publish its runtime image, and repin `COMPUTE_RUNTIME_IMAGE` to it before compute is turned on: an older image refuses these arguments.
+
+### Fixed
+
+- **Every Worker-dispatched run of the archive is handed its version's tag commit, so its derivative can be stored (ADR 0143).**
+  The dispatcher now reads the commit of the version's tag on GitHub at every `bids` dispatch, of every recipe (`nemar-floor` included), and hands it as `--source-commit`; the run's record states it and its derivative is keyed by `git:` and that commit.
+  Before, only a nemar-ica run with a staged serving index got a commit, so every other run of the archive was skipped for good by the derivative store (`no_input_digest`).
+  A run whose commit GitHub cannot give is deferred (`source_commit_deferred`, 503, a refused stamp; the next pass tries again), and a version whose tag is missing from its repository is refused (`version_tag_absent`, 409, nothing written).
+  A missing or unusable GitHub credential stops a run over the queue; one repository GitHub cannot answer, or a missing tag, is passed over, and a run tries up to ten datasets past its room so such datasets never fill it.
+  The derivative store also refuses to key a BIDS stamp whose stated commit is not the one its specification handed (`digest_mismatch`).
+- **A derivative the store decides not to keep reads the same in the pipeline grid, the coverage and a run's detail.**
+  The derivative store's pass now resolves the `stored` checkpoint of each run it decided, so the read-only views no longer show it pending until the next stamp sync.
+  The coverage's `complete` no longer counts a run whose derivative was skipped for good or lost.
+
+## 0.10.49 - 2026-11-27
+
+### Changed
+
+- **Automatic denial runs in shadow mode in production (ADR 0139 amendment).**
+  An eligible review fail gets its confirming run (Sonnet 5.5 at max), and an agreement is recorded as `would_deny`; nothing is denied and no depositor is mailed.
+  The administrators' daily digest lists the `would_deny` requests; past 25 agreements in a day they are recorded as `capped`. An administrator may review a `would_deny` commit again with `start --again`.
+- **License lineage is more reliable (resolver version 3; ADR 0142 decision 3).**
+  A registry that does not answer is asked again (two retries with backoff, within a fixed fetch budget), and no `unresolved` source is served from the cache; each lineage records `resolved_at`.
+  An `https://osf.io/<id>` source maps to `10.17605/osf.io/<id>` and falls back to the license OSF declares for the node; a DOI cut short in a README is dropped and counted; an access-rights word such as `openAccess` is not read as a license.
+  `needs_permission` and `unresolved` sources show the license the source declares, and `nemar dataset license-check` and `nemar admin dataset publish license-lineage` no longer print a bug-report prompt for an outcome.
 
 ## 0.10.48 - 2026-11-27
 

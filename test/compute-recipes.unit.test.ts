@@ -20,6 +20,7 @@ import {
   RECIPE_IMAGE_DIGEST_FLAG,
   RECIPE_INPUTS,
   RECIPE_INPUT_EXECUTOR,
+  RECIPE_PLACEHOLDER_REFUSAL,
   RECIPE_PLUGIN_STEPS,
   RECIPE_PRE_CHECKS,
   RECIPE_PRODUCT_DIR,
@@ -34,6 +35,7 @@ import {
   declaredCheckpoints,
   defaultInput,
   findRecipe,
+  placeholderRefusal,
   readRecipeRecord,
   recipeArguments,
   recipeCheckpointMap,
@@ -127,9 +129,23 @@ describe("the registry", () => {
     expect(RECIPE_INPUTS).toEqual(["bids", "zarr"]);
   });
 
-  test("nemar-ica is a placeholder (its numbers are unverified) and nemar-floor is not", () => {
-    expect(findRecipe("nemar-ica")?.placeholder).toBe(true);
+  test("nemar-ica is no longer a placeholder (lifted 2026-11-27): an administrator's run on Tapis only, never automatic (MUTATION: set it back)", () => {
+    const ica = findRecipe("nemar-ica");
+    expect(ica?.placeholder).toBe(false);
+    expect([ica?.autoDispatch, ica?.executors, ica?.inputs]).toEqual([false, ["tapis"], ["bids"]]);
     expect(findRecipe("nemar-floor")?.placeholder).toBeFalsy();
+  });
+
+  test("placeholderRefusal refuses a recipe whose entry says placeholder, and only that (MUTATION: read a missing flag as a placeholder; drop the check)", () => {
+    const floor = findRecipe("nemar-floor");
+    if (floor === null) throw new Error("no nemar-floor");
+    // A registry entry as a future placeholder would be written: the floor's, with the flag set.
+    const future = Object.freeze({ ...floor, name: "nemar-future", placeholder: true });
+    expect(placeholderRefusal(future)).toBe(RECIPE_PLACEHOLDER_REFUSAL);
+    expect(RECIPE_PLACEHOLDER_REFUSAL).toBe("recipe_placeholder");
+    expect(placeholderRefusal({ ...floor, placeholder: false })).toBeNull();
+    const { placeholder: _absent, ...unflagged } = floor;
+    expect(placeholderRefusal(unflagged)).toBeNull();
   });
 
   test("findRecipe is exact: no case fold, no trim, and a non-string is none", () => {

@@ -3,8 +3,8 @@
  * results bucket to a dataset's pages, through the real entry points: `reconcilePipelineProgress` over
  * Miniflare's R2 and a real migrated database, `promoteDerivative` (the admin route's promotion), and
  * `readPipelineExtensions`, the one read `/<id>/metadata.json` and the page bundle serve. The product is
- * nemar-ica's own, copied from nemar-process P7 (`test/fixtures/quality/ica-views`). nemar-ica is a
- * placeholder the dispatch refuses, so its succeeded stamp is seeded with SQL the table accepts, and its
+ * nemar-ica's own, copied from nemar-process P7 (`test/fixtures/quality/ica-views`). A nemar-ica run is a
+ * Tapis job this suite does not make, so its succeeded stamp is seeded with SQL the table accepts, and its
  * product is put where the launcher uploads it.
  *
  * What is pinned, each case by the mutation it names:

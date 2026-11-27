@@ -40,7 +40,7 @@ let server: Server;
 let env: Bindings;
 
 beforeAll(async () => {
-  fx = await startLifecycleFixture();
+  fx = await startLifecycleFixture({ githubTags: true });
   handle = makeRoutesApp();
 }, 120_000);
 
