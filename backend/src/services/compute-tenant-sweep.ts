@@ -154,6 +154,13 @@ export interface TenantSweepResult {
   tenantLive: number | null;
   occupied: number | null;
   ceiling: number | null;
+  /**
+   * Set (and only ever `true`) when Tapis is not configured and no `executor = 'tapis'` job is live: the
+   * Worker runs runner jobs only (ADR 0118 amendment of 2026-11-14, item 2), so there is nothing for the
+   * sweep to look at and nothing for a person to do. Absent on every other result. `admin compute status`
+   * still reports Tapis as unconfigured (ADR 0136); this only keeps the sweep's log quiet.
+   */
+  tapisUnconfigured?: true;
   /** Fixed words; never a message. */
   errors: string[];
   errorClass: string | null;
@@ -652,6 +659,15 @@ async function readTenantSlots(env: Bindings, r: TenantSweepResult, live: number
   }
 }
 
+/** The `executor = 'tapis'` jobs in a live state: what an unconfigured Tapis would leave unwatched. */
+async function countLiveTapisJobs(env: Bindings): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM compute_jobs WHERE executor = 'tapis' AND state IN (${LIVE_STATES_SQL})`,
+  ).first<{ n: number }>();
+  if (row === null) throw new Error("the live Tapis job count returned no row");
+  return row.n;
+}
+
 /**
  * One run of the tenant sweep. Null outside exact production and while compute is off, before anything
  * is read. A listing that fails is `list_failed` and nothing at all is written.
@@ -666,7 +682,19 @@ export async function sweepTenantJobs(
   try {
     const ctx = tapisAccess(env, TICK_READ);
     if (ctx === null) {
-      r.errors.push("unconfigured");
+      // Unconfigured is a gap only while a Tapis job is live: such a job would go unwatched. With none,
+      // the Worker is running runner jobs only and the sweep is idle on purpose. A count that cannot be
+      // read is never taken for zero.
+      let liveTapis: number;
+      try {
+        liveTapis = await countLiveTapisJobs(env);
+      } catch (err) {
+        r.errors.push("tenant_unreadable");
+        r.errorClass = errorClassName(err);
+        return r;
+      }
+      if (liveTapis > 0) r.errors.push("unconfigured");
+      else r.tapisUnconfigured = true;
       return r;
     }
     let listed: TapisJob[];
@@ -750,6 +778,13 @@ export async function sweepTenantJobs(
 export function tenantLogLine(
   r: TenantSweepResult,
 ): { level: "info" | "warn" | "error"; line: string } | null {
+  // Tapis unconfigured with no live Tapis job: silent every 30 minutes, one information line a day so a
+  // person reading the daily logs sees the sweep is idle on purpose.
+  if (r.tapisUnconfigured === true && r.errors.length === 0) {
+    return r.mode === "week"
+      ? { level: "info", line: "[compute-tenant] mode=week tapis=unconfigured live_tapis=0" }
+      : null;
+  }
   const accessFailed = Object.entries(r.accessFailed).reduce((n, [, c]) => n + c, 0);
   // A cut listing needs a person in a `week` pass (a job of the week may be missing) and, in a `live` pass,
   // only when a live job could be hiding past the cut.

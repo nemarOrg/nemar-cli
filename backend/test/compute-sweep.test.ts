@@ -911,9 +911,18 @@ describe("what the sweep will not do", () => {
     expect(total("compute_jobs")).toBe(0);
   });
 
-  test("with Tapis unconfigured it says so and does nothing", async () => {
-    const result = await sweepTenantJobs(env({ TAPIS_AUTH_STRATEGY: undefined }), "live");
-    expect(result?.errors).toEqual(["unconfigured"]);
+  test("with Tapis unconfigured and a live Tapis job it says so, at error level, and does nothing", async () => {
+    await makeJob(fx);
+    const requests = fx.tapis.log.length;
+    for (const mode of ["live", "week"] as const) {
+      const result = await sweepTenantJobs(env({ TAPIS_AUTH_STRATEGY: undefined }), mode);
+      expect(result?.errors).toEqual(["unconfigured"]);
+      expect(result && "tapisUnconfigured" in result).toBe(false);
+      const log = result ? tenantLogLine(result) : null;
+      expect(log?.level).toBe("error");
+      expect(log?.line).toContain("errors=unconfigured");
+    }
+    expect(fx.tapis.log.length).toBe(requests);
   });
 
   test("more unbound jobs than a run handles are deferred, loudly, and taken next run", async () => {
@@ -944,5 +953,68 @@ describe("what the sweep will not do", () => {
     // A run that found nothing and failed at nothing says nothing at all.
     const quiet = await sweepTenantJobs(env(), "live");
     expect(quiet && tenantLogLine(quiet)).toBeNull();
+  });
+});
+
+describe("Tapis unconfigured in a Worker that runs runner jobs only (ADR 0118 amendment, item 2)", () => {
+  const unconfigured = () => env({ TAPIS_AUTH_STRATEGY: undefined });
+
+  /** The sweep in both modes with Tapis unconfigured: quiet in `live`, one information line in `week`. */
+  async function expectQuiet(): Promise<void> {
+    const requests = fx.tapis.log.length;
+    const live = await sweepTenantJobs(unconfigured(), "live");
+    expect(live?.errors).toEqual([]);
+    expect(live?.tapisUnconfigured).toBe(true);
+    expect(live && tenantLogLine(live)).toBeNull();
+    const week = await sweepTenantJobs(unconfigured(), "week");
+    expect(week?.errors).toEqual([]);
+    expect(week?.tapisUnconfigured).toBe(true);
+    expect(week && tenantLogLine(week)).toEqual({
+      level: "info",
+      line: "[compute-tenant] mode=week tapis=unconfigured live_tapis=0",
+    });
+    expect(fx.tapis.log.length).toBe(requests);
+  }
+
+  test("with no Tapis job at all it writes no error: nothing in `live`, one information line in `week`", async () => {
+    await expectQuiet();
+  });
+
+  test("a Tapis job that has ended is not live: still quiet", async () => {
+    await endedJob(fx);
+    await expectQuiet();
+  });
+
+  test("a live runner job is not a Tapis job: still quiet", async () => {
+    // A pipeline job made through the real `createJob`, moved to the runner executor (the schema allows a
+    // runner for pipeline jobs only); still `created`, so live.
+    await fundPlatform(env().DB, "pipelines", 10_000_000);
+    const made = await makeJob(fx, { source: "pipeline" });
+    fx.harness.db.run("UPDATE compute_jobs SET executor = 'runner' WHERE id = ?", [made.job.id]);
+    expect((await reread(env(), made.job.id)).state).toBe("created");
+    await expectQuiet();
+  });
+
+  test("a count that cannot be read is never taken for zero: `tenant_unreadable` at error level", async () => {
+    const hook = hookedDb(env().DB);
+    hook.armAfterFirst("FROM compute_jobs WHERE executor = 'tapis'", () => {
+      throw new Error("D1 refused the read");
+    });
+    const result = await sweepTenantJobs(
+      env({ DB: hook.db, TAPIS_AUTH_STRATEGY: undefined }),
+      "live",
+    );
+    expect(result?.errors).toEqual(["tenant_unreadable"]);
+    expect(result && "tapisUnconfigured" in result).toBe(false);
+    const log = result ? tenantLogLine(result) : null;
+    expect(log?.level).toBe("error");
+    expect(log?.line).toContain("errors=tenant_unreadable");
+  });
+
+  test("with Tapis configured the result never carries the field, and a quiet run still says nothing", async () => {
+    const result = await sweepTenantJobs(env(), "live");
+    expect(result?.errors).toEqual([]);
+    expect(result && "tapisUnconfigured" in result).toBe(false);
+    expect(result && tenantLogLine(result)).toBeNull();
   });
 });
