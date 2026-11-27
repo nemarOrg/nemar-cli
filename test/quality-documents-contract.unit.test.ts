@@ -474,6 +474,19 @@ describe("the fixture's dataset summary", () => {
     expect(brain.min).toBe(step.qualityMetrics["nemar-quality:percentBrainComponents"].value);
   });
 
+  test("nemar-quality 0.2.0 ran: mutualInformationReduction summarizes one recording, as the record reports it", () => {
+    const entry = (DOCUMENT as Loose).recipes["nemar-ica"];
+    const mir = entry.distributions["nemar-quality:mutualInformationReduction"];
+    expect(mir.n).toBe(1);
+    const record = jsonOf(RECORDING_RECORD) as Loose;
+    const step = record.processingSteps.find((s: Loose) => s.stepId === "nemar-quality");
+    const value = step.qualityMetrics["nemar-quality:mutualInformationReduction"].value;
+    expect(Number.isFinite(value)).toBe(true);
+    // The summary rounds to four decimals (nemar-process records.py); the record keeps full precision.
+    expect(mir.min).toBeCloseTo(value, 4);
+    expect(mir.max).toBe(mir.min);
+  });
+
   test("lineNoiseBeforeDb is the number extensions.nemar.metrics holds, not summaryMetrics' table", () => {
     const entry = (DOCUMENT as Loose).recipes["nemar-ica"];
     const record = jsonOf(RECORDING_RECORD) as Loose;
@@ -850,6 +863,7 @@ describe("recordQualityEntry over the fixture's recording", () => {
     };
     expect(entry).toEqual(expected);
     expect(Object.keys(entry.metrics)).toContain("nemar-quality:percentBrainComponents");
+    expect(Object.keys(entry.metrics)).toContain("nemar-quality:mutualInformationReduction");
     expect(entry.views.map((v: Loose) => v.key)).toEqual([
       "icmaps",
       "icactivity",
@@ -893,6 +907,21 @@ describe("recordQualityEntry over the fixture's recording", () => {
       }),
     );
     expect(entry.views_skipped.map((s: Loose) => s.reason)).toEqual(words);
+    if (!validateRecordEntry(entry)) throw new Error(formatAjvErrors(validateRecordEntry));
+  });
+
+  test("a stored record with the retired word frame_rotated is still admitted (MUTATION: close reason to the current words)", async () => {
+    expect(VIEWS_SKIPPED_NEMAR_PROCESS_WORDS).not.toContain("frame_rotated" as never);
+    const entry = await entryOf(
+      recordWith((r) => {
+        r.extensions.nemar.views_skipped = [
+          { key: "retired", kind: "nemar.spectrum", reason: "frame_rotated" },
+        ];
+      }),
+    );
+    expect(entry.views_skipped).toEqual([
+      { key: "retired", kind: "nemar.spectrum", reason: "frame_rotated" },
+    ]);
     if (!validateRecordEntry(entry)) throw new Error(formatAjvErrors(validateRecordEntry));
   });
 
@@ -1109,6 +1138,12 @@ describe("the record entry mirror agrees with Ajv (identity, metrics, views skip
       "a skipped view with a nemar-process word",
       (e) => {
         e.views_skipped = [{ key: "spectrum", kind: "nemar.spectrum", reason: "no_good_window" }];
+      },
+    ],
+    [
+      "a skipped view with the retired nemar-process word frame_rotated",
+      (e) => {
+        e.views_skipped = [{ key: "spectrum", kind: "nemar.spectrum", reason: "frame_rotated" }];
       },
     ],
     [
