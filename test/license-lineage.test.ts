@@ -300,6 +300,8 @@ describe("resolveLicenseLineage, one source", () => {
       status: "resolved",
       evidence_url: "https://openneuro.org/datasets/ds003645/versions/2.0.2",
     });
+    // The declared version itself: no latest flag.
+    expect("resolved_latest" in r.sources[0]).toBe(false);
     expect(standIn.misses).toEqual([]);
   });
 
@@ -309,6 +311,8 @@ describe("resolveLicenseLineage, one source", () => {
     );
     expect(r.sources[0].id).toBe("10.18112/openneuro.ds003645.v2.1.0");
     expect(r.outcome).toBe("compatible");
+    // Resolved to the latest version, not one the dataset declared: the name rule reads it.
+    expect(r.sources[0].resolved_latest).toBe(true);
     expect(standIn.misses).toEqual([]);
   });
 

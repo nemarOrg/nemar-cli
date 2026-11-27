@@ -683,6 +683,11 @@ export interface InputSource {
   status: string;
   origin: string;
   outcome: LineageOutcome;
+  /**
+   * The record was resolved to its latest version rather than a declared one (`isLatestRef`);
+   * absent otherwise, and from a Worker before the name rule. The name rule reads it.
+   */
+  resolved_latest?: true;
 }
 
 /** The most upstream sources an inputs body carries (the resolver checks at most this many). */
@@ -822,6 +827,8 @@ export function parseReviewInputs(raw: unknown): ReviewInputsBody {
       status: x.status as string,
       origin: x.origin as string,
       outcome: x.outcome as LineageOutcome,
+      // Anything but `true` is no flag, so a body from an older Worker reads as before.
+      ...(x.resolved_latest === true ? { resolved_latest: true as const } : {}),
     };
   });
 

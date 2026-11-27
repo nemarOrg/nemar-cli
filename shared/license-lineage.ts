@@ -2281,6 +2281,31 @@ export function combineOutcomes(
 export interface LineageSource extends SourceRecord {
   origin: SourceOrigin;
   outcome: LineageOutcome;
+  /**
+   * The record was resolved to its latest version, not to a version the dataset declared
+   * ({@link isLatestRef}): the upstream may have changed, its title included, since the copy.
+   * Absent otherwise. The name rule (`shared/name-follows-upstream.ts`) reads it.
+   */
+  resolved_latest?: true;
+}
+
+/**
+ * A reference that names no version and is resolved to the latest one: a version-less OpenNeuro
+ * DOI or URL, a figshare article URL or figshare DOI without a version, a PhysioNet project
+ * without one.
+ */
+export function isLatestRef(ref: SourceRef): boolean {
+  switch (ref.kind) {
+    case "openneuro_latest":
+      return true;
+    case "figshare_article":
+    case "physionet":
+      return ref.version === null;
+    case "doi":
+      return /^10\.6084\/m9\.figshare\.(?:c\.)?\d+$/.test(ref.doi);
+    case "url":
+      return false;
+  }
 }
 
 export interface LineageResult {
@@ -2382,6 +2407,9 @@ export async function resolveLicenseLineage(
     ...rec,
     origin: refs[i].origin,
     outcome: sourceOutcome(rec, target),
+    ...(rec.status === "resolved" && isLatestRef(refs[i])
+      ? { resolved_latest: true as const }
+      : {}),
   }));
   const { kept, skipped } = dropStaleRelations(resolved, refs);
   const sources: LineageSource[] = [...kept, ...unreadable];
