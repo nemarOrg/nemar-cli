@@ -53,6 +53,7 @@ import {
   parsePublicationCallbackOutcome,
 } from "../shared/publication-review";
 import { README_CANDIDATES } from "../shared/readme-candidates";
+import { replyFor, standInMessage } from "./helpers/anthropic-sse";
 import { emptyInputs } from "./helpers/review-inputs";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -431,8 +432,12 @@ describe("what it is allowed to hold", () => {
       "${{ vars.ANTHROPIC_PUBLICATION_REVIEW_SERVICE_ACCOUNT_ID }}",
     );
     // The organization and the workspace are shared with the other reviews.
-    expect(env.ANTHROPIC_ORGANIZATION_ID).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_ORGANIZATION_ID }}");
-    expect(env.ANTHROPIC_WORKSPACE_ID).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_WORKSPACE_ID }}");
+    expect(env.ANTHROPIC_ORGANIZATION_ID).toBe(
+      "${{ vars.ANTHROPIC_PUBLICATION_REVIEW_ORGANIZATION_ID }}",
+    );
+    expect(env.ANTHROPIC_WORKSPACE_ID).toBe(
+      "${{ vars.ANTHROPIC_PUBLICATION_REVIEW_WORKSPACE_ID }}",
+    );
     expect(env.ANTHROPIC_IDENTITY_TOKEN_FILE).toContain("anthropic-oidc.jwt");
     expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
     expect(env.PUBLICATION_REVIEW_CALLBACK_TOKEN).toBe(
@@ -1521,32 +1526,36 @@ describe("the shell steps, run for real", () => {
     modelServer = Bun.serve({
       port: 0,
       async fetch(req) {
-        modelRequests.push(await req.text());
-        return Response.json({
-          id: "msg_stand_in",
-          type: "message",
-          role: "assistant",
-          model: "claude-haiku-5-5",
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                questions: {
-                  complete_and_honest: "pass",
-                  meets_standards: "pass",
-                  authors_and_license: "pass",
-                  name_adequate: "pass",
-                },
-                findings: [],
-                summary: "A dataset.",
-                steering: false,
-              }),
-            },
-          ],
-          stop_reason: "end_turn",
-          stop_sequence: null,
-          usage: { input_tokens: 10, output_tokens: 10 },
-        });
+        const text = await req.text();
+        modelRequests.push(text);
+        const body = JSON.parse(text) as Record<string, unknown>;
+        // The review's own request, or nothing: a stand-in that answered anything would let a
+        // wrong model, effort or a non-streamed call pass this chain.
+        if (
+          body.model !== "claude-haiku-5-5" ||
+          (body.output_config as { effort?: string } | undefined)?.effort !== "max" ||
+          body.stream !== true ||
+          "tools" in body
+        ) {
+          return new Response("unexpected request", { status: 400 });
+        }
+        return replyFor(
+          body,
+          standInMessage(
+            JSON.stringify({
+              questions: {
+                complete_and_honest: "pass",
+                meets_standards: "pass",
+                authors_and_license: "pass",
+                name_adequate: "pass",
+              },
+              findings: [],
+              summary: "A dataset.",
+              steering: false,
+            }),
+            { usage: { input_tokens: 10, output_tokens: 10 } },
+          ),
+        );
       },
     });
     for (const k of SDK_KEYS) {
