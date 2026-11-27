@@ -94,9 +94,9 @@ export const PUBLICATION_REVIEW_MODELS = [
 export type PublicationReviewModel = (typeof PUBLICATION_REVIEW_MODELS)[number];
 
 /**
- * The models the offline calibration may compare (ADR 0102's call 6). Only the calibration passes
- * this list to {@link parsePublicationReviewReport}; the Worker's parser accepts the production
- * list alone. Verify the second id against the live model list when the calibration runs.
+ * The models the offline calibration may compare (ADR 0102's call 6). Since 2026-11-27 it names the
+ * same three models as {@link PUBLICATION_REVIEW_MODELS}; the parser still requires a report's model
+ * to be on both, so a model added to only one list is refused.
  */
 export const CALIBRATION_MODELS = [
   "claude-haiku-5-5",

@@ -1151,6 +1151,7 @@ Where this and item 2 differ, this is the later text.
 ## Amendment 2026-11-27 (owner): Sonnet 5.5 and Opus 5.5 are accepted models
 
 The review still calls Haiku 5.5 at high effort (the first entry of `PUBLICATION_REVIEW_MODELS`).
-The Worker now also accepts a first run's report made on Sonnet 5.5 or Opus 5.5, at any recorded effort, so the owner can compare models and efforts on the real queue by changing only which model the workflow's script calls.
+The Worker now also accepts a first run's report made on Sonnet 5.5 or Opus 5.5, at any recorded effort, so the owner can compare models and efforts on the real queue without a release: a branch of the review script that calls another model, checked out by the workflow in `nemarDatasets/.github`, reports results the Worker accepts.
 A first run in the confirming run's exact shape (ADR 0139: Sonnet 5.5 at `max`) is still refused, so a confirming report cannot pass as a first run.
+A first run made on Sonnet 5.5, at any effort, never starts a confirming run: the automatic denial rests on two different models agreeing, and the depositor's mail says so.
 Every record names its model and effort, so the comparison is readable from the stored reviews.
