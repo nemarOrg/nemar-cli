@@ -1223,13 +1223,14 @@ export const STORE_RESULT_SQL_MARKER = "SET state = ?, verdict = ?";
  * seen) and a claimed row records `workflow_failed` instead, which counts.
  *
  * The reproducibility record (ADR 0139, decision 9) is written in the same statement, so a stored
- * report and its record cannot part: the seven columns of migration 0152, NULL for a run error.
+ * report and its record cannot part: the seven columns of migration 0152 and migration 0162's
+ * license matcher, NULL for a run error.
  *
  * The same holds for `inputs_unavailable` (in `NEVER_REACHED_MODEL` too): it is the job's word for
  * inputs it could not read, and once the Worker has served them (`inputs_served_at`) the run may
  * have called the model, so the word is stored as `workflow_failed`, which counts.
  *
- * Binds, in order: the state, the verdict, the detail (three times), the report, the record's seven
+ * Binds, in order: the state, the verdict, the detail (three times), the report, the record's
  * columns ({@link RECORD_COLUMNS}), then `waitingRow`'s.
  */
 function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): string {
@@ -1255,6 +1256,7 @@ const RECORD_COLUMNS = [
   "prompt_version",
   "input_digest",
   "enrichment_source",
+  "license_matcher",
 ] as const;
 
 /**
@@ -1283,6 +1285,7 @@ async function recordBinds(
     r?.prompt_version ?? null,
     r?.input_digest ?? null,
     r?.enrichment_source ?? null,
+    r?.license_matcher ?? null,
   ];
 }
 

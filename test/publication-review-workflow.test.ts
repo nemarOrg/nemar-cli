@@ -1635,10 +1635,10 @@ describe("the shell steps, run for real", () => {
       Reflect.deleteProperty(process.env, "PUBLICATION_REVIEW_CALLBACK_TOKEN");
     }
     expect(code, lines.join("\n")).toBe(0);
-    // This copy of the workflow runs no license scan yet (ADR 0142, deploy 3), so the script
-    // records the identification as unreadable with the matcher unavailable.
+    // This copy of the workflow runs no license scan yet (ADR 0142, deploy 3), so the matcher is
+    // unavailable; the fixture has no LICENSE, which is `absent` whether or not the matcher ran.
     expect(lines).toEqual([
-      "license_file unreadable; matcher unavailable",
+      "license_file absent; matcher unavailable",
       "review 77 (request 12): reported; callback delivered",
     ]);
     // The widened inputs came from the Worker, with the same token, and with no change to this
