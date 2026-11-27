@@ -26,6 +26,8 @@ earlier releases are described only by their generated notes.
 
 ### Changed
 
+- **The `nemar-ica` recipe also runs on a registered runner from the dataset's Zarr copy (#2502).**
+  BIDS input still runs only on Tapis and Zarr input only on a runner; the recipe asks for 16 GB of memory, and automatic dispatch stays off.
 - **The compute tenant sweep stays quiet while Tapis is unconfigured and no Tapis job is live (#2501).**
   It logs one info line in the weekly pass instead of an error each run; a live Tapis job or an unreadable count is still an error.
 
