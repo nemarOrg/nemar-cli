@@ -4,7 +4,7 @@
  * recording, built on request from a derivative a route has decided may be read, and never stored.
  *
  *  1. The checkpoint map of the derivative's recipe version: the one its row recorded when it was made
- *     (`compute_derivatives.checkpoint_map`, migration 0154), else the registry's while the registry holds
+ *     (`compute_derivatives.checkpoint_map`, migration 0160), else the registry's while the registry holds
  *     that very version (the derivative sync writes that map into the row); with neither, the outcomes
  *     cannot be read (`record_unreadable`, `checkpoint_map_unknown`).
  *  2. The recording's row of the run's recordings table (`<key>/desc-<label>_recordings.tsv`), found by a

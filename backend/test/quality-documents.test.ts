@@ -212,7 +212,7 @@ describe("a succeeded run's dataset summary", () => {
 
   test("that outgrows the column when written again is not kept, and the run is reconciled (MUTATION: drop the entry size check)", async () => {
     // The review's construction (#2375): 62,641 bytes, every rule kept, edges written `1000e17, ...`, an
-    // entry of over 146,000 characters that the 0151 CHECK would refuse, failing the whole batch.
+    // entry of over 146,000 characters that the 0157 CHECK would refuse, failing the whole batch.
     const run = await finishedRun((files) => files.set(DOCUMENT, wideEdgesDocument()));
     const lines = await logged(async () => {
       expect(await reconcilePipelineProgress(env)).toMatchObject({ reconciled: 1, errored: 0 });

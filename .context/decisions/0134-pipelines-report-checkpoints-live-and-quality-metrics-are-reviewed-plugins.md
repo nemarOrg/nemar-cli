@@ -131,7 +131,7 @@ This amendment settles it; where it and the decisions above differ, it holds, an
    The dataset entry is built from the run's reconciled counts and the order it declared, with `stored` worked out from its stored derivative, and the dataset link from the link reconciliation keeps on the run's row.
    A recording's entry and link are built on request from the derivative's recordings table and the recording's record, under the quality route's gate, edge cache and purge (`GET /<id>/quality/v1/<recipe>/processing/<recording>`); a recording that failed or was skipped has no record, so its link is `failed`.
    D1 gains no row per recording (ADR 0137 decision 8).
-   Migration 0154 drops the latest-run documents of migration 0150, keeps each run's link on its run row, and keeps each derivative's checkpoint map, so a derivative made by a recipe version the registry has moved past is still read with its own map.
+   Migration 0160 drops the latest-run documents of migration 0156, keeps each run's link on its run row, and keeps each derivative's checkpoint map, so a derivative made by a recipe version the registry has moved past is still read with its own map.
 3. **`stored` follows the last declared checkpoint.**
    A recording is `stored` when it passed the recipe's last declared checkpoint (`quality` for both recipes) and its run's derivative was kept; otherwise `stored` is `skipped` with that checkpoint's code and step.
    So a recording whose quality plugin was skipped shows `stored: skipped` with the plugin's code even though its other files were copied with the derivative: `stored` says the recording completed the recipe and was kept, not that some file of it exists.

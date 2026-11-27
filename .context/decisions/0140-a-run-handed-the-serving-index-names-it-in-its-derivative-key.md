@@ -28,7 +28,7 @@ ADR 0123's key has eight lines and none of them is the index, so a run with an i
 3. **The value is what the platform knows, never what the record claims.**
    A run whose dispatched specification names no `--serving-index` is keyed `none`.
    A run whose specification names one is not keyed (`serving_index_unattested`) until the dispatcher stages the index itself and records the digest of what it staged: until then nothing the platform holds says which index the run read, and keying it as `none` would let it collide with a run that had none.
-4. **The derivative row keeps the field** (`compute_derivatives.serving_index`, migration 0153): null for a version 1 key, `none` or the digest for a version 2 key, so the description writes the key's own text again from the row.
+4. **The derivative row keeps the field** (`compute_derivatives.serving_index`, migration 0159): null for a version 1 key, `none` or the digest for a version 2 key, so the description writes the key's own text again from the row.
 
 ## Consequences
 
@@ -49,4 +49,4 @@ ADR 0123's key has eight lines and none of them is the index, so a run with an i
 
 - nemar-cli #2341 (backend follow-ups from nemar-process P7) and the owner's ruling of 2026-11-25 on the derivative key.
 - nemarOrg/nemar-process#95 (`--serving-index`, `common/serving_index.py`).
-- `shared/contract/derivatives.ts`, `shared/contract/derivatives-vectors.json`, `backend/src/services/compute-derivatives.ts` and migration `0153_compute_derivatives_serving_index.sql`.
+- `shared/contract/derivatives.ts`, `shared/contract/derivatives-vectors.json`, `backend/src/services/compute-derivatives.ts` and migration `0159_compute_derivatives_serving_index.sql`.

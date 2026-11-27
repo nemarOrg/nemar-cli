@@ -324,7 +324,7 @@ export function checkDatasetQualityDocument(
   const names = [...Object.keys(entry.distributions), ...Object.keys(entry.observed_range)];
   if (metricNameOutsideRecipe(names, ctx.plugins) !== null) return refuse("metric_unknown_plugin");
   const entryText = JSON.stringify(raw[ctx.stamp.recipe]);
-  // The column holds at most this many characters (migration 0151); a UTF-16 length is never fewer.
+  // The column holds at most this many characters (migration 0157); a UTF-16 length is never fewer.
   if (entryText.length > DATA_QUALITY_MAX_BYTES) return refuse("entry_too_large");
   return { ok: true, entry, entryText };
 }

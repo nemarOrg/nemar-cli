@@ -3,7 +3,7 @@
 -- dataset level and at the record level alike.
 --
 -- WHAT THIS IS FOR. Until now `/<id>/metadata.json` served the dataset-level `processing` entry and
--- `signalJourney` link of each recipe's LATEST ENDED run (`compute_pipeline_documents`, 0150), with an
+-- `signalJourney` link of each recipe's LATEST ENDED run (`compute_pipeline_documents`, 0156), with an
 -- `in_progress` link while a run reported, while its `dataQuality` came from the promoted run. Both levels
 -- now describe the promoted run, built when they are read:
 --  - the dataset `processing` entry from that run's reconciled counts (`compute_pipeline_progress`, which
@@ -37,7 +37,7 @@ UPDATE compute_pipeline_progress_runs SET link = (
 DROP TABLE compute_pipeline_documents;
 
 -- The checkpoint map of a derivative's recipe version (a JSON array of `{checkpoint, steps}` in the
--- registry's order, without `stored`), recorded when the row is made, as `quality_plugins` is (0153): a
+-- registry's order, without `stored`), recorded when the row is made, as `quality_plugins` is (0159): a
 -- recording's outcomes are read through it, so a derivative made by a recipe version the registry has
 -- since moved past is still read with its own version's map. NULL is a row made before this column, or one
 -- whose recipe version the registry did not hold when it was keyed: the record-level read then uses the

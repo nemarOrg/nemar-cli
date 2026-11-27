@@ -215,8 +215,8 @@ export async function deleteDatasetCascade(
       // NEMAR's own pipeline stamps (migration 0117) have no foreign key and go with the dataset. The
       // JOB rows and the ledger of the runs stay, by design (design section 9): they are the record of
       // what was spent, and carry no dataset-level data. The live progress and its run rows (migration
-      // 0150, ADR 0134; a run row keeps the run's link, 0154) and its runs' quality summaries (migration
-      // 0151, ADR 0137) go first, while the stamps still name them: none has a foreign key.
+      // 0156, ADR 0134; a run row keeps the run's link, 0160) and its runs' quality summaries (migration
+      // 0157, ADR 0137) go first, while the stamps still name them: none has a foreign key.
       db
         .prepare(
           "DELETE FROM compute_pipeline_progress WHERE stamp_id IN (SELECT id FROM compute_pipeline_stamps WHERE dataset_id = ?)",

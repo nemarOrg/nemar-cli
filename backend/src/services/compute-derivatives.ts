@@ -576,7 +576,7 @@ export function qualityPluginsOf(recipe: string, recipeVersion: string): string 
 
 /**
  * A recipe version's checkpoint map, `[{checkpoint, steps}]` in the registry's order without `stored`, as
- * the JSON the row keeps (migration 0154), or null when the registry does not hold that version. A
+ * the JSON the row keeps (migration 0160), or null when the registry does not hold that version. A
  * recording's outcomes are read through it (`quality-processing.ts`), so a derivative made by a version the
  * registry has since moved past is still read with its own version's map.
  */
@@ -628,7 +628,7 @@ const insertDerivativeSql = (eligible: string): string => `INSERT INTO compute_d
 export const INSERT_DERIVATIVE_SQL = insertDerivativeSql(PIPELINE_ELIGIBLE_SQL);
 
 /**
- * Give the rows of one recipe version that have no checkpoint map (made before migration 0154) that
+ * Give the rows of one recipe version that have no checkpoint map (made before migration 0160) that
  * version's map: `?1` the map as JSON, `?2` the recipe, `?3` its version. Only a NULL map is written; a
  * recorded one is never replaced.
  */
@@ -1246,7 +1246,7 @@ export async function syncDerivatives(
     counts.errored++;
   }
 
-  // 1b. A row made before migration 0154 has no checkpoint map: one whose recipe version the registry still
+  // 1b. A row made before migration 0160 has no checkpoint map: one whose recipe version the registry still
   //     holds gets that version's map, so its recordings' outcomes are read after the registry moves on.
   try {
     let filled = 0;

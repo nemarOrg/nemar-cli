@@ -384,7 +384,7 @@ describe("which derivative serves", () => {
     expect((await get(fileUrl(key, SPECTRUM[0]))).status).toBe(502);
   });
 
-  test("a row with no recorded plugins (made before migration 0153) serves nothing (MUTATION: fall back to the registry)", async () => {
+  test("a row with no recorded plugins (made before migration 0159) serves nothing (MUTATION: fall back to the registry)", async () => {
     const key = await derivative({ qualityPlugins: null });
     let res: Response | undefined;
     const lines = await logged(async () => {
@@ -809,7 +809,7 @@ describe("CORS through the real Worker: a nemar.org page can read the ETag (webs
   });
 });
 
-describe("migration 0152: the dataset's quality cache epoch", () => {
+describe("migration 0158: the dataset's quality cache epoch", () => {
   const epoch = () =>
     (
       db.query("SELECT epoch FROM dataset_quality_epochs WHERE dataset_id = ?").get(DATASET) as {
@@ -849,13 +849,13 @@ describe("migration 0152: the dataset's quality cache epoch", () => {
   });
 });
 
-describe("migration 0153: earlier rows' quality plugins (review of #2383)", () => {
+describe("migration 0159: earlier rows' quality plugins (review of #2383)", () => {
   test("a nemar-floor row gets [] and stays servable; another recipe's earlier row stays null", () => {
     const dir = join(import.meta.dir, "../src/db/migrations");
     const files = readdirSync(dir)
       .filter((f) => f.endsWith(".sql"))
       .sort();
-    const at = files.indexOf("0153_compute_derivatives_serving_index.sql");
+    const at = files.indexOf("0159_compute_derivatives_serving_index.sql");
     expect(at).toBeGreaterThan(0);
     const old = new Database(":memory:");
     for (const f of files.slice(0, at)) old.exec(readFileSync(join(dir, f), "utf8"));

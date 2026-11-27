@@ -1,7 +1,7 @@
 /**
- * Migration 0154_compute_pipeline_promoted_run.sql (ADR 0134 decision 9 as amended 2026-11-26, epic #2324
+ * Migration 0160_compute_pipeline_promoted_run.sql (ADR 0134 decision 9 as amended 2026-11-26, epic #2324
  * phase B4), on two engines: bun:sqlite and Miniflare's D1, each carrying every migration; and its
- * backfill on a bun:sqlite database migrated to 0153 and holding the rows 0150 kept.
+ * backfill on a bun:sqlite database migrated to 0159 and holding the rows 0156 kept.
  *
  * What is pinned: a run row's `link` is a JSON object of a bounded length or nothing, and a derivative's
  * `checkpoint_map` a JSON array of a bounded length or nothing, each CHECK refusing by name;
@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { type Engine, startEngines } from "./helpers/compute-engines";
 import { MIGRATIONS_DIR } from "./helpers/miniflare-d1";
 
-const FILE = "0154_compute_pipeline_promoted_run.sql";
+const FILE = "0160_compute_pipeline_promoted_run.sql";
 const SQL = readFileSync(join(MIGRATIONS_DIR, FILE), "utf-8");
 
 type Row = Record<string, unknown>;
@@ -160,7 +160,7 @@ describe("the backfill", () => {
     );
     // Stamp 11: the last completed link of nemar-floor, with a run row. Stamp 12: a failed link. Stamp 13: a
     // completed link whose run row is gone. Stamp 14: a run row with no document. Stamp 15: a completed link
-    // longer than the column takes (0150 took 65,536 characters), which is left out rather than failing the
+    // longer than the column takes (0156 took 65,536 characters), which is left out rather than failing the
     // migration on the column's CHECK.
     const long = JSON.stringify({ ...JSON.parse(LINK), note: "x".repeat(2100) });
     doc.run("nm000104", "signalJourney", "nemar-floor", 11, LINK);

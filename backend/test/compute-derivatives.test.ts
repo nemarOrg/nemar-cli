@@ -2357,7 +2357,7 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     expect(row.serving_index).toBe("none");
     // The recipe version's quality plugins are recorded with the row, for the quality route (review of #2383).
     expect(JSON.parse(row.quality_plugins as string)).toEqual(["nemar-quality", "nemar-spectrum"]);
-    // Its checkpoint map too, for a recording's outcomes (migration 0154).
+    // Its checkpoint map too, for a recording's outcomes (migration 0160).
     const ica = findRecipe("nemar-ica");
     expect(JSON.parse(row.checkpoint_map as string)).toEqual(
       ica?.checkpoints.map((c) => ({ checkpoint: c.checkpoint, steps: [...c.steps] })),
@@ -2522,7 +2522,7 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
       ((await one(env)) as Der & { checkpoint_map: string | null }).checkpoint_map;
     const registry = await mapOf();
     expect(registry).not.toBeNull();
-    // A row made before migration 0154, of a version the registry no longer holds: nothing to fill it with.
+    // A row made before migration 0160, of a version the registry no longer holds: nothing to fill it with.
     await sql(
       env,
       "UPDATE compute_derivatives SET checkpoint_map = NULL, recipe_version = '0.0.1'",

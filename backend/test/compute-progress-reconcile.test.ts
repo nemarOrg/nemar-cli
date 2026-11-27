@@ -170,7 +170,7 @@ const runRow = (stampId: number) =>
   env.DB.prepare("SELECT * FROM compute_pipeline_progress_runs WHERE stamp_id = ?1")
     .bind(stampId)
     .first<Loose>();
-/** The link reconciliation kept on a run's row (migration 0154), parsed, or null. */
+/** The link reconciliation kept on a run's row (migration 0160), parsed, or null. */
 const linkOf = async (stampId: number) => {
   const r = await runRow(stampId);
   return r?.link ? JSON.parse(r.link) : null;

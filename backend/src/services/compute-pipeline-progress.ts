@@ -450,7 +450,7 @@ export async function readPipelineExtensions(
         `${LOG} processing_not_shown dataset=${datasetId} recipe=${run.recipe} reason=${reason}`,
       );
     }
-    // The column holds a JSON object or nothing (its CHECK, migration 0154); the link is shown only when it
+    // The column holds a JSON object or nothing (its CHECK, migration 0160); the link is shown only when it
     // is a neuroschema link, as a recording's is.
     if (run.link !== null) {
       const link: unknown = JSON.parse(run.link);
@@ -490,7 +490,7 @@ export const NOT_HOLD_STAMP_SQL = (alias: string): string =>
 /** How many ended runs and pending `stored` rows one call reconciles (each is bounded subrequests). */
 export const RECONCILE_RUNS_PER_CALL = 10;
 
-/** What reconciliation decides for a run that ended (the words migration 0150's CHECK allows). */
+/** What reconciliation decides for a run that ended (the words migration 0156's CHECK allows). */
 export const RECONCILE_OUTCOMES = [
   "reconciled",
   "table_missing",
@@ -526,7 +526,7 @@ export const RECONCILE_CANDIDATES_SQL = `SELECT s.id, s.dataset_id, s.version, s
  * THE RECONCILE GATE: the run row given its outcome, the recipe version, the declared checkpoints and the
  * run's link, only while it has no outcome. ?1 stamp, ?2 job, ?3 write id, ?4 outcome, ?5 disagreement, ?6
  * recipe version, ?7 declared (JSON list or null), ?8 the completed link of the run's dataset record (JSON
- * object or null, migration 0154). Every later statement writes only where the write id stands.
+ * object or null, migration 0160). Every later statement writes only where the write id stands.
  */
 export const RECONCILE_GATE_SQL = `INSERT INTO compute_pipeline_progress_runs
     (stamp_id, job_id, write_id, reconciled_at, outcome, disagreement, recipe_version, declared, link)
@@ -558,7 +558,7 @@ export const RECONCILE_ROW_SQL = `INSERT INTO compute_pipeline_progress
     reconciled = excluded.reconciled, disagreement = excluded.disagreement`;
 
 /**
- * A succeeded run's dataset quality summary (migration 0151, ADR 0137 decision 8), kept for its stamp, only
+ * A succeeded run's dataset quality summary (migration 0157, ADR 0137 decision 8), kept for its stamp, only
  * where the write id stands; a stamp's summary is written once. ?1 stamp, ?2 dataset (the STAMP's), ?3
  * recipe, ?4 entry, ?5 the dataset record's digest, ?6 write id.
  */
@@ -659,7 +659,7 @@ export async function reconcilePipelineProgress(
 
 /**
  * The completed signalJourney link of a succeeded run's dataset record, kept on its run row (migration
- * 0154) as JSON, or null, or `later`:
+ * 0160) as JSON, or null, or `later`:
  *  - a failed stamp: null (the run ended without a record NEMAR shows; a failed run is never promoted);
  *  - a succeeded stamp of a known recipe: the `completed` link built from its record, which needs no
  *    checkpoint map; a record that cannot make one keeps none (`link_not_written reason=record_unlinkable`);

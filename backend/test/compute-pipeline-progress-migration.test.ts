@@ -1,5 +1,5 @@
 /**
- * Migration 0150_compute_pipeline_progress.sql (ADR 0134, epic #2324 phase 2), on two engines: bun:sqlite
+ * Migration 0156_compute_pipeline_progress.sql (ADR 0134, epic #2324 phase 2), on two engines: bun:sqlite
  * and Miniflare's D1. bun:sqlite is more permissive than the SQLite D1 ships, so a CHECK proven only on
  * the first is not proven.
  *
@@ -7,7 +7,7 @@
  * an outcome exactly when it is reconciled; two stamps may share a job (a hold stamp does); a progress row never counts past its total
  * and a reconciled one sums to it; live counts are whole or absent; the primary keys hold; no column is
  * named for a person; no foreign key; every GLOB is within D1's 50 characters. Its third table,
- * `compute_pipeline_documents`, is dropped by migration 0154 (`compute-pipeline-promoted-run-migration.test.ts`).
+ * `compute_pipeline_documents`, is dropped by migration 0160 (`compute-pipeline-promoted-run-migration.test.ts`).
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { type Engine, startEngines } from "./helpers/compute-engines";
 import { MIGRATIONS_DIR } from "./helpers/miniflare-d1";
 
-const FILE = "0150_compute_pipeline_progress.sql";
+const FILE = "0156_compute_pipeline_progress.sql";
 const SQL = readFileSync(join(MIGRATIONS_DIR, FILE), "utf-8");
 
 type Row = Record<string, unknown>;

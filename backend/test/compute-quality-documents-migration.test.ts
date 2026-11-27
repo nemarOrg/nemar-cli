@@ -1,5 +1,5 @@
 /**
- * Migration 0151_compute_quality_documents.sql (ADR 0137 decision 8, epic #2324 phase B1), on two engines:
+ * Migration 0157_compute_quality_documents.sql (ADR 0137 decision 8, epic #2324 phase B1), on two engines:
  * bun:sqlite and Miniflare's D1. bun:sqlite is more permissive than the SQLite D1 ships, so a CHECK proven
  * only on the first is not proven.
  *
@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { type Engine, startEngines } from "./helpers/compute-engines";
 import { MIGRATIONS_DIR } from "./helpers/miniflare-d1";
 
-const FILE = "0151_compute_quality_documents.sql";
+const FILE = "0157_compute_quality_documents.sql";
 const SQL = readFileSync(join(MIGRATIONS_DIR, FILE), "utf-8");
 
 type Row = Record<string, unknown>;

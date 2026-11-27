@@ -814,7 +814,7 @@ export const COMPUTE_PIPELINE_CELL_MARKS = [
   "skipped",
 ] as const;
 
-/** What reconciliation decided for a run that ended (migration 0150's words). */
+/** What reconciliation decided for a run that ended (migration 0156's words). */
 export const COMPUTE_PIPELINE_RUN_OUTCOMES = [
   "reconciled",
   "table_missing",
