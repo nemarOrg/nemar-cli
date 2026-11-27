@@ -507,8 +507,14 @@ describe("an input the executor does not run is refused before anything is writt
   });
 
   test("an input a registry recipe does not list is refused naming input, on the executor that runs that input, writing nothing", async () => {
-    // Driven by the registry like the executor case: empty today (every recipe lists both inputs).
-    const pairs = unlisted(RECIPE_INPUTS, (r) => r.inputs);
+    // Driven by the registry like the executor case: empty today (every recipe lists both inputs). A pair whose
+    // input runs only on executors the recipe does not list is left out: it is refused for its executor first,
+    // which the executor case covers.
+    const pairs = unlisted(RECIPE_INPUTS, (r) => r.inputs).filter(([name, input]) =>
+      (RECIPE_INPUT_EXECUTOR[input] as readonly string[]).some((e) =>
+        (findRecipe(name)?.executors as readonly string[] | undefined)?.includes(e),
+      ),
+    );
     expect(pairs).toEqual([]);
     const [w] = worlds() as [World];
     await ready(w);
@@ -516,8 +522,32 @@ describe("an input the executor does not run is refused before anything is writt
     const id = await dataset(w);
     const before = await snapshot(w.d1);
     for (const [recipe, input] of pairs) {
-      const executor = RECIPE_INPUT_EXECUTOR[input][0] as RecipeExecutor;
+      const executor = RECIPE_INPUT_EXECUTOR[input].find((e) =>
+        (findRecipe(recipe)?.executors as readonly string[]).includes(e),
+      ) as RecipeExecutor;
+      for (const extra of [{}, { dry_run: true }]) {
+        const r = await call(
+          "POST",
+          "/compute/pipeline/run",
+          "admin",
+          { recipe, dataset: id, executor, input, ...extra },
+          env,
+        );
+        expect([recipe, input, extra, r.status, r.body.code, r.body.field]).toEqual([
+          recipe,
+          input,
+          extra,
+          400,
+          "invalid_spec",
+          "input",
+        ]);
+      }
       expect(await dispatch(env, id, { recipe, executor, input })).toMatchObject({
+        ok: false,
+        code: "invalid_spec",
+        field: "input",
+      });
+      expect(await pipelineDryRun(env, { recipe, datasetId: id, executor, input })).toMatchObject({
         ok: false,
         code: "invalid_spec",
         field: "input",

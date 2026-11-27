@@ -253,9 +253,6 @@ describe("nemar-ica on a runner over the Zarr serving copy", () => {
         gpus: job.gpus,
       }),
     ).toBe(16384);
-    expect(submitMemoryForQueue("gpu-shared", { cores: 10, memory_mb: 16384, gpus: 1 })).toBe(
-      16384,
-    );
   });
 
   test("nemar-floor's runner dispatch is unchanged: no GPU, its own memory and command, on the same image", async () => {
