@@ -18,7 +18,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { PLATFORM_DAILY_CAP } from "../../shared/publication-review";
-import { startPublicationReview } from "../src/services/publication-review";
+import { startConfirmingReview, startPublicationReview } from "../src/services/publication-review";
 import {
   RECORD_OVERRIDE_SQL,
   evaluateApprovalReviewGate,
@@ -30,6 +30,7 @@ import {
 } from "../src/services/publication-review-rows";
 import { publicationReviewDetail } from "../src/services/publication-review-view";
 import { realD1, yieldingD1 } from "./helpers/d1";
+import { markScreen } from "./helpers/identifier-screen";
 import {
   SCREENED_HEAD,
   failingReport,
@@ -48,6 +49,7 @@ import {
 const h = createHarness();
 
 const ADMIN_KEY = "again-admin-key-0123456789abcdef0123456789abcdef";
+const OWNER_KEY = "again-owner-key-0123456789abcdef0123456789abcdef";
 
 /** A request with a clear screen at SCREENED_HEAD whose review reported `report`. */
 async function reportedRequest(report: Record<string, unknown> = failingReport()) {
@@ -429,6 +431,160 @@ describe("again is exact about what it replaces", () => {
     const retry = await again(requestId, admin, { again: false });
     expect(retry).toMatchObject({ started: true, reason: "redispatched", reviewId: fresh.id });
     expect(h.reviews()).toHaveLength(2);
+  });
+});
+
+describe("the guards of the supersede batch itself hold against a writer between the read and the write", () => {
+  /** A D1 that runs `act` once, just before the supersede batch begins. */
+  function beforeSupersede(act: () => void) {
+    let done = false;
+    return hookedD1(realD1(h.db), {
+      batch: (sqls) => {
+        if (done || !sqls.some((q) => q.includes("SET superseded_at"))) return;
+        done = true;
+        act();
+      },
+    });
+  }
+  const nothingReplaced = (oldId: number) => {
+    expect(h.reviews().filter((r) => r.id !== oldId && r.confirm_of === null)).toEqual([]);
+    expect(columnsOf(oldId)).toMatchObject({ state: "reported", superseded_at: null });
+    expect(h.dispatches()).toHaveLength(0);
+  };
+
+  test("a confirming run that lands in between holds the review", async () => {
+    const { admin, requestId, oldId } = await reportedRequest();
+    const db = beforeSupersede(() =>
+      h.db.run(
+        `INSERT INTO publication_reviews
+           (request_id, dataset_id, head_sha, anonymous, requested_by, state, nonce, confirm_of)
+         VALUES (?, ?, ?, 0, 1, 'dispatched', 'n', ?)`,
+        [requestId, PROD_DATASET, SCREENED_HEAD, oldId],
+      ),
+    );
+    const out = await again(requestId, admin, { env: h.env({ DB: db }) });
+    expect(out).toMatchObject({ started: false, reason: "auto_deny_active", reviewId: oldId });
+    nothingReplaced(oldId);
+  });
+
+  test("an automatic denial that lands in between holds the review", async () => {
+    const { admin, requestId, oldId } = await reportedRequest();
+    const db = beforeSupersede(() =>
+      h.db.run(
+        "UPDATE publication_reviews SET auto_deny_state = 'denied', auto_deny_at = datetime('now') WHERE id = ?",
+        [oldId],
+      ),
+    );
+    const out = await again(requestId, admin, { env: h.env({ DB: db }) });
+    expect(out).toMatchObject({ started: false, reason: "auto_deny_active", reviewId: oldId });
+    nothingReplaced(oldId);
+  });
+
+  test("a request that becomes approving in between is not reviewed again", async () => {
+    const { admin, requestId, oldId } = await reportedRequest();
+    const db = beforeSupersede(() =>
+      h.db.run("UPDATE publication_requests SET status = 'approving' WHERE id = ?", [requestId]),
+    );
+    const out = await again(requestId, admin, { env: h.env({ DB: db }) });
+    expect(out).toMatchObject({ started: false, reason: "request_not_requested" });
+    nothingReplaced(oldId);
+  });
+});
+
+describe("a confirming run is not spent on a first run that was superseded in between", () => {
+  test("the insert writes nothing, and nothing is marked", async () => {
+    const { requestId, oldId } = await reportedRequest();
+    const first = (await readReviewByKey(
+      h.env().DB,
+      requestId,
+      SCREENED_HEAD,
+      false,
+    )) as NonNullable<Awaited<ReturnType<typeof readReviewByKey>>>;
+    expect(first.id).toBe(oldId);
+    // The first run is read, then an administrator's re-review supersedes it before the insert.
+    let done = false;
+    const db = hookedD1(realD1(h.db), {
+      statement: (sql) => {
+        if (done || !sql.includes("confirm_of")) return;
+        if (!sql.trimStart().startsWith("INSERT")) return;
+        done = true;
+        h.db.run("UPDATE publication_reviews SET superseded_at = datetime('now') WHERE id = ?", [
+          oldId,
+        ]);
+      },
+    });
+    const out = await startConfirmingReview(h.env({ DB: db }), first);
+    expect(done).toBe(true);
+    expect(out).toMatchObject({ started: false, reason: "duplicate" });
+    expect(h.reviews()).toHaveLength(1);
+    expect(h.review(oldId)).toMatchObject({ auto_deny_state: "none" });
+    expect(h.dispatches()).toHaveLength(0);
+  });
+
+  test("a first run that stands still gets its confirming run", async () => {
+    const { requestId, oldId } = await reportedRequest();
+    const first = (await readReviewByKey(
+      h.env().DB,
+      requestId,
+      SCREENED_HEAD,
+      false,
+    )) as NonNullable<Awaited<ReturnType<typeof readReviewByKey>>>;
+    const out = await startConfirmingReview(h.env(), first);
+    expect(out).toMatchObject({ started: true });
+    expect(h.reviews().find((r) => r.confirm_of === oldId)).toMatchObject({ state: "dispatched" });
+  });
+});
+
+describe("the depositor's status after a re-review", () => {
+  const OTHER = "e".repeat(40);
+  test("shows the newest reported record, superseded or not, until the new run reports", async () => {
+    const { admin, requestId } = await reportedRequest();
+    // The commit changed and its own review reported; the older review stays below it.
+    markScreen(h.db, requestId, PROD_DATASET, { head: OTHER });
+    const h2 = seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      head: OTHER,
+      state: "reported",
+      report: reportFor(OTHER, false),
+      claimed: true,
+    });
+    h.db.run(
+      "UPDATE publication_reviews SET input_digest = ?, models = ?, prompt_version = 'publication-review-prompt/1' WHERE id = ?",
+      ["d".repeat(64), JSON.stringify([{ model: "claude-haiku-5-5", effort: "high" }]), h2],
+    );
+    const owner = (
+      h.db
+        .query<{ owner_user_id: number }, [string]>(
+          "SELECT owner_user_id FROM datasets WHERE dataset_id = ?",
+        )
+        .get(PROD_DATASET) as { owner_user_id: number }
+    ).owner_user_id;
+    await seedUser(h.db, "againowner", "member", OWNER_KEY);
+    h.db.run(
+      "UPDATE datasets SET owner_user_id = (SELECT id FROM users WHERE username = 'againowner') WHERE dataset_id = ?",
+      [PROD_DATASET],
+    );
+    expect(owner).toBeGreaterThan(0);
+
+    const status = async () => {
+      const res = await h.app.request(
+        `/datasets/${PROD_DATASET}/publish/status`,
+        { headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+        h.env(),
+      );
+      expect(res.status).toBe(200);
+      return (await res.json()) as { review_record: { head_sha?: string; head?: string } | null };
+    };
+    const before = JSON.stringify((await status()).review_record);
+    expect(before).toContain(OTHER);
+
+    const out = await again(requestId, admin);
+    expect(out).toMatchObject({ started: true, superseded: h2 });
+    // The new run is only dispatched: the record is still the superseded review of H2, not H1's.
+    const during = JSON.stringify((await status()).review_record);
+    expect(during).toBe(before);
+    expect(during).not.toContain(SCREENED_HEAD);
   });
 });
 

@@ -406,11 +406,14 @@ const SUPERSEDE_AUTO_DENY_STATES = ["none", "not_eligible", "disagreed", "confir
 /**
  * What a supersede's first write is conditioned on, in one statement, so it is decided in the same
  * transaction as the write: the row is the reported first run that was read, not yet superseded,
- * and the automatic denial is neither in progress (a confirming run is on record while the word is
+ * the request is still waiting for its decision (one that has just become `approving` is not
+ * reviewed again), and the automatic denial is neither in progress (a confirming run is on record while the word is
  * still `none`) nor acted.
  */
 const SUPERSEDE_GUARD_SQL = `id = ? AND state = 'reported' AND superseded_at IS NULL
     AND confirm_of IS NULL
+    AND EXISTS (SELECT 1 FROM publication_requests AS q
+                 WHERE q.id = publication_reviews.request_id AND q.status = 'requested')
     AND auto_deny_state IN (${SUPERSEDE_AUTO_DENY_STATES.map(sqlWord).join(", ")})
     AND (auto_deny_state <> 'none'
          OR NOT EXISTS (SELECT 1 FROM publication_reviews AS c
@@ -514,7 +517,15 @@ export async function startPublicationReview(
       );
       // Another writer moved the old row first (a second re-review, or the automatic denial): it is
       // read again and planned again, and a re-review that won answers `running`.
-      if (created === null) continue;
+      if (created === null) {
+        // Or the request stopped waiting (an approval began): that is the answer, not a retry.
+        const now = await db
+          .prepare("SELECT status FROM publication_requests WHERE id = ?")
+          .bind(request.id)
+          .first<{ status: string }>();
+        if (now?.status !== "requested") return answer("request_not_requested", plan.row.id);
+        continue;
+      }
       try {
         // The old row is history from here on, whatever the hand-over comes to: the answer names
         // it, so a caller can say that a review was replaced.
@@ -858,7 +869,8 @@ export async function startConfirmingReview(
       `INSERT INTO publication_reviews
          (request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, nonce,
           confirm_of)
-       VALUES (?, ?, ?, ?, ?, NULL, 'dispatched', ?, ?)
+       SELECT ?, ?, ?, ?, ?, NULL, 'dispatched', ?, ?
+        WHERE EXISTS (SELECT 1 FROM publication_reviews WHERE id = ? AND superseded_at IS NULL)
        ON CONFLICT (confirm_of) WHERE confirm_of IS NOT NULL DO NOTHING`,
     )
     .bind(
@@ -869,8 +881,12 @@ export async function startConfirmingReview(
       first.requestedBy,
       nonce,
       first.id,
+      first.id,
     )
     .run();
+  // Nothing inserted: a confirming run is already on record, or an administrator's re-review
+  // superseded this first run since it was read, so no call is spent confirming a history row.
+  // Neither marks the first run (the caller treats `duplicate` as no failure).
   if ((inserted.meta.changes ?? 0) !== 1) return answer("duplicate");
   const reviewId = Number(inserted.meta.last_row_id);
   try {
