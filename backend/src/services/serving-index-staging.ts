@@ -14,22 +14,21 @@
  * because the recipe uses a row of the index only when the index's commit is its `--source-commit`, and the
  * commit it is given is the tag's.
  *
- * A FAULT DEFERS, ANYTHING ELSE DISPATCHES WITHOUT (ADR 0141, amended). When GitHub or the index cannot be read,
- * or the copy cannot be kept (`SERVING_INDEX_FAULT_REASONS`), the dispatcher defers the run for up to 24 hours
+ * A FAULT DEFERS, ANYTHING ELSE DISPATCHES WITHOUT (ADR 0141, amended). When the index cannot be read, or the
+ * copy cannot be kept (`SERVING_INDEX_FAULT_REASONS`), the dispatcher defers the run for up to 24 hours
  * from its first deferral (`compute-pipeline.ts`, `servingIndexForRun`). When the index is absent, built from
  * another commit, too large or not one the recipe can use, the job is dispatched at once without one, and its
  * specification records the word: the run declares no view of the serving copy, and its derivative is keyed
  * `none`. The index's shape is checked here as the recipe checks it (`servingIndexShapeOk`), so a run is never
  * handed an index it would refuse.
  *
- * A RUN WITHOUT AN INDEX STILL GETS THE TAG'S COMMIT (ADR 0141 amendment of 2026-11-27). The tag's commit is read
- * whatever becomes of the index, and an answer that stages nothing carries it (`tagCommit`, null only when
- * GitHub could not be read or answered no such tag), so the run is handed `--source-commit` and its record states
- * the commit its files were read at: that commit is the `git:` input digest a BIDS derivative is keyed by
- * (ADR 0123 decision 3), and a run whose record states none can never be stored (`no_input_digest`).
+ * THE TAG'S COMMIT IS THE DISPATCHER'S, READ FIRST (ADR 0143). Every Worker-dispatched run of the archive is handed
+ * the commit of its version's tag (`--source-commit`), staged index or not, so its record states the commit its
+ * files were read at, the `git:` input digest a BIDS derivative is keyed by (ADR 0123 decision 3). The dispatcher
+ * reads it before anything here (`versionTagCommit`), defers a run whose commit GitHub could not give and refuses
+ * one whose tag is absent, and hands staging the commit it read: staging reads only the index.
  *
- * THE BOUNDS are `checkZarrSource`'s: one GitHub tag lookup (two requests at most, the second only after a 404
- * or 422 without the leading `v`), one index read abandoned after `ZARR_SOURCE_INDEX_TIMEOUT_MS` and read to at
+ * THE BOUNDS are `checkZarrSource`'s: one index read abandoned after `ZARR_SOURCE_INDEX_TIMEOUT_MS` and read to at
  * most `COMPUTE_SERVING_INDEX_MAX_BYTES` (the recipe's own bound), and one create-only write. The test seam
  * `NEMAR_ZARR_INDEX_BASE` is honored only in a recognized non-production environment, as there.
  */
@@ -44,12 +43,7 @@ import type { Bindings } from "../types/bindings.js";
 import { putServingIndexCopy, sha256Hex } from "./compute-records.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getZarrIndexResponse } from "./s3.js";
-import {
-  ZARR_SOURCE_INDEX_TIMEOUT_MS,
-  ZARR_SOURCE_LOCAL_USER_AGENT,
-  githubAccess,
-  tagCommit,
-} from "./zarr-source-check.js";
+import { ZARR_SOURCE_INDEX_TIMEOUT_MS, ZARR_SOURCE_LOCAL_USER_AGENT } from "./zarr-source-check.js";
 
 export type StagedServingIndex =
   | {
@@ -60,21 +54,12 @@ export type StagedServingIndex =
       /** The index's `source_commit`, which is the tag's commit: the run's `--source-commit`. */
       sourceCommit: string;
     }
-  | {
-      staged: false;
-      reason: ServingIndexAbsentReason;
-      /**
-       * The commit of the version's tag when it was read, which is every word but the ones GitHub or its
-       * credentials gave (`tag_absent`, `github_unreadable`, `token_mint_failed`, `no_github_credentials`) and a
-       * staging that threw before the tag was read; null otherwise. The run's `--source-commit` when not null.
-       */
-      tagCommit: string | null;
-    };
+  | { staged: false; reason: ServingIndexAbsentReason };
 
-const absent = (
-  reason: ServingIndexAbsentReason,
-  tagCommit: string | null,
-): StagedServingIndex => ({ staged: false, reason, tagCommit });
+const absent = (reason: ServingIndexAbsentReason): StagedServingIndex => ({
+  staged: false,
+  reason,
+});
 
 type IndexRead =
   | { ok: true; bytes: Uint8Array }
@@ -296,7 +281,9 @@ function indexSourceCommit(
 
 /**
  * The words of a staging that may clear on a later attempt (ADR 0141 amendment): GitHub or the index could not
- * be read, or the copy could not be kept. A run is not dispatched on one of them for
+ * be read, or the copy could not be kept. Since ADR 0143 the dispatcher reads the tag's commit before staging and
+ * defers on a GitHub word itself, so staging gives only the index's; the GitHub words stay in this list because
+ * they are words of a staging all the same. A run is not dispatched on one of them for
  * {@link SERVING_INDEX_DEFER_MINUTES} from its first deferral; every other word dispatches it at once without an
  * index (the index is absent, of another commit, or one the recipe cannot use).
  */
@@ -318,48 +305,40 @@ const errorName = (err: unknown): string =>
   err instanceof Error ? err.name.replace(/[^A-Za-z0-9]/g, "") || "Error" : "unknown";
 
 /**
- * Stage the serving index of `datasetId` for a run of the version tagged `tag` (the data-plane tag, `v1.0.2`),
- * or say why none is staged. Never throws: every failure is a word; a fault (`isServingIndexFault`) defers the
- * run, any other word dispatches it without an index. The copy is kept BEFORE this answers `staged`, so a specification never names bytes that are not kept.
+ * Stage the serving index of `datasetId` for a run of the archive whose version's tag is at `tagCommit` (read by the
+ * dispatcher, ADR 0143), or say why none is staged. Never throws: every failure is a word; a fault
+ * (`isServingIndexFault`) defers the run, any other word dispatches it without an index. The copy is kept BEFORE
+ * this answers `staged`, so a specification never names bytes that are not kept.
  */
 export async function stageServingIndex(
   env: Bindings,
   datasetId: string,
-  tag: string,
+  tagCommit: string,
 ): Promise<StagedServingIndex> {
-  // The tag's commit once GitHub has answered it: every later answer carries it, a throw included.
-  let read: string | null = null;
   try {
-    const access = await githubAccess(env);
-    if (!access.ok) return absent(access.reason, null);
-    const [index, tagged] = await Promise.all([
-      readIndexBytes(env, datasetId),
-      tagCommit(datasetId, tag, access),
-    ]);
-    if (!tagged.ok) return absent(tagged.reason, null);
-    read = tagged.commit;
-    if (!index.ok) return absent(index.reason, read);
+    const index = await readIndexBytes(env, datasetId);
+    if (!index.ok) return absent(index.reason);
     const source = indexSourceCommit(index.bytes);
-    if (!source.ok) return absent(source.reason, read);
+    if (!source.ok) return absent(source.reason);
     // Exactly the tag's commit: never a metadata-only difference (ADR 0141).
-    if (source.commit !== read) return absent("source_commit_differs", read);
+    if (source.commit !== tagCommit) return absent("source_commit_differs");
     const sha256 = await sha256Hex(index.bytes);
     let kept: boolean;
     try {
       kept = await putServingIndexCopy(env, sha256, index.bytes);
     } catch (err) {
       console.error(`[serving-index] copy_put_failed error=${errorName(err)}`);
-      return absent("index_not_stored", read);
+      return absent("index_not_stored");
     }
     if (!kept) {
       // Other bytes under a content address: never overwritten, and an administrator looks.
       console.error(`[serving-index] copy_conflict sha256=${sha256}`);
-      return absent("index_not_stored", read);
+      return absent("index_not_stored");
     }
     return { staged: true, sha256, size: index.bytes.byteLength, sourceCommit: source.commit };
   } catch (err) {
     // A throw here is a defect, not a service: the error's name (never its message) is for the operator.
     console.error(`[serving-index] stage_threw error=${errorName(err)}`);
-    return absent("index_unreadable", read);
+    return absent("index_unreadable");
   }
 }

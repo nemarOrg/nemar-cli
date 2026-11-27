@@ -38,7 +38,7 @@ let fx: LifecycleFixture;
 const handle = makeComputeApp();
 
 beforeAll(async () => {
-  fx = await startLifecycleFixture();
+  fx = await startLifecycleFixture({ githubTags: true });
 }, 120_000);
 
 beforeEach(async () => {

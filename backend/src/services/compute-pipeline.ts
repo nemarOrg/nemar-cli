@@ -132,7 +132,11 @@ import {
   isServingIndexFault,
   stageServingIndex,
 } from "./serving-index-staging.js";
-import { checkZarrSource } from "./zarr-source-check.js";
+import {
+  type VersionTagCommitReason,
+  checkZarrSource,
+  versionTagCommit,
+} from "./zarr-source-check.js";
 
 // --- Words ------------------------------------------------------------------------------------------
 
@@ -230,6 +234,8 @@ export type PipelineRefusal =
   | "zarr_source_mismatch"
   | "zarr_source_unverifiable"
   | "serving_index_deferred"
+  | "source_commit_deferred"
+  | "version_tag_absent"
   | "recipe_not_automatic"
   | "recipe_placeholder"
   | "runners_disabled"
@@ -298,7 +304,7 @@ export type DispatchResult =
       field?: string;
       /**
        * For a Zarr source refusal: one of `ZARR_SOURCE_REASONS`, a fixed word that says what was not shown; for
-       * `serving_index_deferred`, the fault's word.
+       * `serving_index_deferred` and `source_commit_deferred`, the fault's word.
        */
       reason?: string;
       /** `serving_index_deferred` only: when the run goes ahead without the index (ISO 8601, UTC). */
@@ -446,6 +452,10 @@ const partitionOf = (recipe: ComputeRecipe) => recipe.partition as PartitionName
  * Zarr host ({@link pipelineZarrBase}, from `env`, never from a request or a dataset row). A `zarr` run with
  * no verified attestation is a programming error here, never a job, and so is an input the recipe does not
  * list.
+ *
+ * A `bids` run is handed the commit of its version's tag (`sourceCommit`, `--source-commit`, ADR 0143), which its
+ * record states as the `git:` input digest its derivative is keyed by: with a staged serving index as the index's
+ * own arguments end (ADR 0141), and alone otherwise. A `bids` run with no commit is a programming error here.
  */
 export function recipeJobSpec(
   recipe: ComputeRecipe,
@@ -457,6 +467,8 @@ export function recipeJobSpec(
     image: { ref: string; digest: string };
     /** Required for a `zarr` input, never read for a `bids` one. */
     zarrSource?: ZarrCommitAttestation | null;
+    /** The commit of the version's tag (`versionTagCommit`): required for a `bids` input, never read for a `zarr` one. */
+    sourceCommit?: string;
     /** The Worker's bindings the Zarr origin is read from; only a `zarr` input reads them. */
     env: Pick<Bindings, "ENVIRONMENT" | "ZARR_HOSTNAME">;
     /**
@@ -475,6 +487,9 @@ export function recipeJobSpec(
     throw new RangeError("a recipe that keys the serving index needs what was staged");
   }
   const staged = keysIndex ? (input.servingIndex as StagedServingIndex) : null;
+  if (!zarr && input.sourceCommit === undefined) {
+    throw new RangeError("a run of the archive is handed the commit of its version's tag");
+  }
   return JobSpecSchema.parse({
     name: `${recipe.name} ${input.datasetId} ${input.tag}`.slice(0, 80),
     runtime: "image",
@@ -495,19 +510,14 @@ export function recipeJobSpec(
             tag: input.tag,
             imageDigest: input.image.digest,
           }),
-          // The staged index's file and the commit it was built from, the tag's (ADR 0141); with no index staged,
-          // the tag's commit alone whenever it was read (the amendment of 2026-11-27), which the record states as
-          // the `git:` input digest a BIDS derivative is keyed by. Without it the run can never be stored.
-          ...(staged === null
-            ? []
-            : staged.staged
-              ? recipeServingIndexArguments({
-                  path: SERVING_INDEX_CONTAINER_PATH,
-                  sourceCommit: staged.sourceCommit,
-                })
-              : staged.tagCommit === null
-                ? []
-                : recipeSourceCommitArguments(staged.tagCommit)),
+          // The tag's commit, always (ADR 0143): after the staged index's file when one was staged (ADR 0141), whose
+          // commit is the tag's, and alone otherwise.
+          ...(staged?.staged === true
+            ? recipeServingIndexArguments({
+                path: SERVING_INDEX_CONTAINER_PATH,
+                sourceCommit: input.sourceCommit as string,
+              })
+            : recipeSourceCommitArguments(input.sourceCommit as string)),
         ],
     ...(staged === null
       ? {}
@@ -697,6 +707,105 @@ export async function tupleHeld(
   return row !== null;
 }
 
+// --- A deferred run ------------------------------------------------------------------------------------------
+
+/**
+ * Record a deferral of the tuple (`?1` dataset to `?6` input) as a `refused` stamp with `word`, or say that a live or
+ * succeeded stamp of the tuple refuses its claim (`null`), as the claim of a run would. A refused stamp holds no
+ * slot (the partial unique index is over live and succeeded stamps), never counts toward the cooldown or the cap
+ * (those read `failed` stamps), and is left out of the grid, so the dataset stays a candidate and the next dispatch
+ * pass tries again. No migration: the stamp's own columns carry it.
+ */
+async function deferTuple(
+  db: D1Database,
+  tuple: readonly [string, string, string, string, string, RecipeInput],
+  word: string,
+): Promise<number | null> {
+  let stampId: number;
+  try {
+    const claimed = await db
+      .prepare(CLAIM_STAMP_SQL)
+      .bind(...tuple)
+      .run();
+    const id = claimed.meta?.last_row_id;
+    if (typeof id !== "number") throw new Error("a stamp that was just claimed has no id");
+    stampId = id;
+  } catch (err) {
+    if (looksUnique(err)) return null;
+    throw err;
+  }
+  await finishStamp(db, stampId, "refused", word);
+  return stampId;
+}
+
+// --- The commit of a run of the archive (ADR 0143) -----------------------------------------------------------
+
+/**
+ * The word of a `refused` stamp that records a run of the archive deferred because GitHub could not give the commit
+ * of its version's tag (`github_unreadable`, `token_mint_failed`, `no_github_credentials`). Like
+ * {@link SERVING_INDEX_DEFERRED_WORD} it holds no slot and leaves the dataset a candidate, and unlike it it never
+ * runs out: a run of the archive is never dispatched without its commit, because its derivative could never be
+ * keyed (ADR 0143).
+ */
+export const SOURCE_COMMIT_DEFERRED_WORD = "source_commit_deferred";
+
+export type SourceCommitDecision =
+  | { kind: "commit"; commit: string }
+  /** The repository has no tag for the version: refused, nothing written (`version_tag_absent`). */
+  | { kind: "tag_absent" }
+  | { kind: "deferred"; reason: Exclude<VersionTagCommitReason, "tag_absent">; stampId: number }
+  | { kind: "live_attempt_exists" };
+
+/**
+ * The commit a run of the archive is handed (ADR 0143): the commit of its version's tag (`versionTagCommit`), read
+ * on every dispatch of every recipe. A tag the repository does not have is `tag_absent`, which the dispatch refuses
+ * with nothing written (a version the data plane serves whose tag is missing is an integrity fault an administrator
+ * mends, and a run without its commit could never be stored); a fault of GitHub or its credentials DEFERS the run,
+ * recorded as a `refused` stamp with {@link SOURCE_COMMIT_DEFERRED_WORD}, for as long as the fault lasts. A live or
+ * succeeded stamp of the tuple makes the deferral's claim fail: `live_attempt_exists`.
+ */
+export async function sourceCommitForRun(
+  env: Bindings,
+  recipe: ComputeRecipe,
+  input: RecipeInput,
+  datasetId: string,
+  tag: string,
+): Promise<SourceCommitDecision> {
+  const read = await versionTagCommit(env, datasetId, tag);
+  if (read.ok) return { kind: "commit", commit: read.commit };
+  if (read.reason === "tag_absent") {
+    console.error(`[compute-pipeline] version_tag_absent dataset=${datasetId} version=${tag}`);
+    return { kind: "tag_absent" };
+  }
+  const tuple = [datasetId, tag, recipe.name, recipe.version, recipe.engine, input] as const;
+  const stampId = await deferTuple(env.DB, tuple, SOURCE_COMMIT_DEFERRED_WORD);
+  if (stampId === null) return { kind: "live_attempt_exists" };
+  console.error(
+    `[compute-pipeline] source_commit_deferred dataset=${datasetId} reason=${read.reason} stamp=${stampId}`,
+  );
+  return { kind: "deferred", reason: read.reason, stampId };
+}
+
+/**
+ * The dispatch's answer to a commit decision that does not run: `version_tag_absent` (409) with nothing written,
+ * `source_commit_deferred` (503) with the fault's word and the stamp that records it, or `live_attempt_exists`.
+ */
+export function sourceCommitRefusal(
+  decided: Exclude<SourceCommitDecision, { kind: "commit" }>,
+  datasetId: string,
+  tag: string,
+): DispatchResult {
+  if (decided.kind === "live_attempt_exists") {
+    return fail("live_attempt_exists", datasetId, { version: tag });
+  }
+  if (decided.kind === "tag_absent") return fail("version_tag_absent", datasetId, { version: tag });
+  return fail("source_commit_deferred", datasetId, {
+    version: tag,
+    reason: decided.reason,
+    stampId: decided.stampId,
+  });
+}
+
 // --- The serving index of a run of the archive (ADR 0141, amended) ----------------------------------------
 
 /**
@@ -759,13 +868,14 @@ export function servingIndexRefusal(
 }
 
 /**
- * What a run of the archive by a recipe that keys the serving index is handed (ADR 0141, amended):
+ * What a run of the archive by a recipe that keys the serving index is handed (ADR 0141, amended), given the commit
+ * of its version's tag (`sourceCommitForRun`, read first, ADR 0143):
  *  - a staged index, or a word that is not a fault (no index, another commit, too large, unusable): run now;
- *  - a fault (GitHub or the index could not be read, the copy could not be kept): the run is DEFERRED, recorded
+ *  - a fault (the index could not be read, the copy could not be kept): the run is DEFERRED, recorded
  *    as a `refused` stamp with {@link SERVING_INDEX_DEFERRED_WORD}, and the dispatch refuses with
  *    `serving_index_deferred` and the fault's word, so a later pass tries again;
  *  - a fault {@link SERVING_INDEX_DEFER_MINUTES} or more after the run's first deferral: run without the index,
- *    and the specification records the fault's word.
+ *    and the specification records the fault's word; the run still has its commit.
  * A live or succeeded stamp of the tuple makes the deferral's claim fail: `live_attempt_exists`, as the claim
  * of a run would say.
  */
@@ -775,8 +885,9 @@ export async function servingIndexForRun(
   input: RecipeInput,
   datasetId: string,
   tag: string,
+  tagCommit: string,
 ): Promise<ServingIndexDecision> {
-  const staged = await stageServingIndex(env, datasetId, tag);
+  const staged = await stageServingIndex(env, datasetId, tagCommit);
   if (staged.staged) return { kind: "run", servingIndex: staged };
   if (!isServingIndexFault(staged.reason)) {
     console.error(
@@ -795,19 +906,8 @@ export async function servingIndexForRun(
     );
     return { kind: "run", servingIndex: staged };
   }
-  let stampId: number;
-  try {
-    const claimed = await env.DB.prepare(CLAIM_STAMP_SQL)
-      .bind(...tuple)
-      .run();
-    const id = claimed.meta?.last_row_id;
-    if (typeof id !== "number") throw new Error("a stamp that was just claimed has no id");
-    stampId = id;
-  } catch (err) {
-    if (looksUnique(err)) return { kind: "live_attempt_exists" };
-    throw err;
-  }
-  await finishStamp(env.DB, stampId, "refused", SERVING_INDEX_DEFERRED_WORD);
+  const stampId = await deferTuple(env.DB, tuple, SERVING_INDEX_DEFERRED_WORD);
+  if (stampId === null) return { kind: "live_attempt_exists" };
   console.error(
     `[compute-pipeline] serving_index_deferred dataset=${datasetId} reason=${staged.reason} stamp=${stampId}`,
   );
@@ -895,12 +995,26 @@ export async function dispatchPipelineJob(
   const accountId = await pipelinesAccountId(db);
   if (accountId === null) return fail("pipelines_account_missing", datasetId, { version: tag });
 
-  // A run of the archive by a recipe that keys the serving index is handed the index built from the tag's
-  // commit, or none with the word for why, and the tag's commit either way once it was read; a fault defers it
-  // (ADR 0141, amended). Before the claim, like the specification.
+  // A run of the archive, of any recipe, is handed the commit of its version's tag, read now: a tag the repository
+  // lacks is refused and a GitHub fault defers the run, so no run is spent that could never be keyed (ADR 0143).
+  // A recipe that keys the serving index is then handed the index built from that commit, or none with the word
+  // for why; an index fault defers it (ADR 0141, amended). Before the claim, like the specification.
+  let sourceCommit: string | undefined;
+  if (recipeInput === "bids") {
+    const decided = await sourceCommitForRun(env, recipe, recipeInput, datasetId, tag);
+    if (decided.kind !== "commit") return sourceCommitRefusal(decided, datasetId, tag);
+    sourceCommit = decided.commit;
+  }
   let servingIndex: StagedServingIndex | undefined;
   if (recipeKeysServingIndex(recipe, recipeInput)) {
-    const decided = await servingIndexForRun(env, recipe, recipeInput, datasetId, tag);
+    const decided = await servingIndexForRun(
+      env,
+      recipe,
+      recipeInput,
+      datasetId,
+      tag,
+      sourceCommit as string,
+    );
     if (decided.kind !== "run") return servingIndexRefusal(decided, datasetId, tag);
     servingIndex = decided.servingIndex;
   }
@@ -916,6 +1030,7 @@ export async function dispatchPipelineJob(
       image,
       zarrSource: resolved.zarrSource,
       env,
+      ...(sourceCommit === undefined ? {} : { sourceCommit }),
       ...(servingIndex === undefined ? {} : { servingIndex }),
     });
   } catch (err) {
@@ -1973,6 +2088,8 @@ const STOPS_A_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusal>([
   // The tenant ceiling is full for the pipelines' class: the next dataset meets the same count.
   "platform_busy",
   "create_failed",
+  // GitHub or its credentials could not give a tag's commit: the next dataset meets the same fault (ADR 0143).
+  "source_commit_deferred",
 ]);
 
 export interface EligibleRun {

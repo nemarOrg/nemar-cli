@@ -55,6 +55,7 @@ import {
   dispatchPipelineJob,
   recipeJobSpec,
   servingIndexForRun,
+  sourceCommitForRun,
   syncPipelineStamps,
 } from "../src/services/compute-pipeline";
 import { recordKey, sha256Hex } from "../src/services/compute-records";
@@ -446,8 +447,9 @@ async function zarrJob(o: ZarrJobOptions = {}): Promise<Made> {
 }
 
 /**
- * A BIDS run (Tapis) of `nemar-floor`, finished the same way. `sourceCommit` is the commit the record states
- * (`SOURCE` by default; null is a run handed no `--source-commit`, whose record states none).
+ * A BIDS run (Tapis) of `nemar-floor`, finished the same way. `sourceCommit` is the commit the record states: by
+ * default the one the dispatcher handed it (`--source-commit`, the tag's, `COMMIT`; ADR 0143), as nemar-process
+ * writes it; null is a record that states none.
  */
 async function bidsJob(
   over: { id?: string; sourceCommit?: string | null; stampDigest?: string } = {},
@@ -462,7 +464,7 @@ async function bidsJob(
     dataset: {
       id,
       version: r.version,
-      source_commit: over.sourceCommit === undefined ? SOURCE : over.sourceCommit,
+      source_commit: over.sourceCommit === undefined ? COMMIT : over.sourceCommit,
     },
   });
   const files = await finishJob(env, r.jobId, id, record, tableOf(), 1);
@@ -1404,7 +1406,14 @@ describe("every keying check of the ADR, each failed alone", () => {
 
   test("a bids stamp whose input digest is a sha256: one is key_invalid, field input_digest", () =>
     expectUnkeyable(
-      () => bidsJob({ stampDigest: `sha256:${"4".repeat(64)}` }),
+      async () => {
+        const made = await bidsJob({ stampDigest: `sha256:${"4".repeat(64)}` });
+        // A specification from before the dispatcher handed a commit: only the key's own validator can refuse it.
+        await rewriteSpec(envOf(), made.jobId, (spec) => {
+          spec.args = withoutSourceCommit(spec.args);
+        });
+        return made;
+      },
       "key_invalid",
       "input_digest",
     ));
@@ -1415,7 +1424,8 @@ describe("every keying check of the ADR, each failed alone", () => {
     const result = await syncAll(env);
     expect(result).toMatchObject({ created: 1, stored: 1, errored: 0 });
     const row = await one(env);
-    expect(row.input_digest).toBe(`git:${SOURCE}`);
+    // The commit the dispatcher handed the run, the tag's (ADR 0143), which its record states.
+    expect(row.input_digest).toBe(`git:${COMMIT}`);
     expect(row.key).toBe(await keyOfStamp(env, made.stampId));
     const description = JSON.parse(
       (await (await derivatives.get(`d/${row.key}/derivative.json`))?.text()) as string,
@@ -2249,17 +2259,18 @@ describe("a derivative the store decided not to keep reads the same in the grid,
     return { cell, stored, covered: card.covered, complete: card.complete };
   }
 
-  test("a run skipped for good (no_input_digest) reads stored skipped in the grid and the run, and is not complete, right after the store's pass (MUTATION: leave the stored row to the next stamp sync; count complete from the last checkpoint alone)", async () => {
+  test("a run skipped for good (digest_mismatch) reads stored skipped in the grid and the run, and is not complete, right after the store's pass (MUTATION: leave the stored row to the next stamp sync; count complete from the last checkpoint alone)", async () => {
     const env = envOf();
-    // The floor's run of the archive is handed no source commit, so its record states none.
-    const made = await bidsJob({ sourceCommit: null });
+    // Every recording passed, but the record states another commit than the dispatcher handed the run: the store
+    // can never key it, whatever later passes find.
+    const made = await bidsJob({ sourceCommit: SOURCE });
     const before = await views(env, made.id, made.stampId);
     expect([before.cell.mark, before.stored.mark]).toEqual(["pending", "pending"]);
     // Undecided, the run is complete by its last checkpoint: the store may still keep it.
     expect([before.covered, before.complete]).toEqual([1, 1]);
 
     expect(await syncAll(env)).toMatchObject({
-      derivative_unkeyable: { no_input_digest: 1 },
+      derivative_unkeyable: { digest_mismatch: 1 },
       created: 0,
       errored: 0,
     });
@@ -2589,7 +2600,10 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     const id = await dataset();
     // The serving index was built from another commit than the tag's: the dispatcher stages none.
     github.index(id, { source_commit: SOURCE, store_count: 0, stores: [] });
-    const decided = await servingIndexForRun(env, ica, "bids", id, "v1.0.0");
+    // The dispatch's order (ADR 0143): the tag's commit first, then the index built from it.
+    const commit = await sourceCommitForRun(env, ica, "bids", id, "v1.0.0");
+    if (commit.kind !== "commit") throw new Error(`no commit: ${commit.kind}`);
+    const decided = await servingIndexForRun(env, ica, "bids", id, "v1.0.0", commit.commit);
     if (decided.kind !== "run") throw new Error(`not run: ${decided.kind}`);
     expect(decided.servingIndex).toMatchObject({ staged: false, reason: "source_commit_differs" });
     const image = { ref: RUNTIME_IMAGE, digest: RUNTIME_IMAGE_DIGEST };
@@ -2599,6 +2613,7 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
       input: "bids",
       image,
       env: { ENVIRONMENT: "development" },
+      sourceCommit: commit.commit,
       servingIndex: decided.servingIndex,
     });
     const base = recipeArguments({ datasetId: id, tag: "v1.0.0", imageDigest: image.digest });

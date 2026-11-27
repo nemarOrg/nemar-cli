@@ -8,7 +8,9 @@
  *      kept under their SHA-256, and the size and digest are the bytes';
  *  (b) an index of another commit is refused, and so is one that differs from the tag by metadata only (the
  *      Zarr input's `metadata_only` allowance is never asked for: no compare is requested);
- *  (c) every other failure is a word, and none refuses the run;
+ *  (c) every other failure is a word, and none refuses the run; the tag's commit is the dispatcher's, read before
+ *      staging for every run of the archive: a GitHub fault defers the run for as long as it lasts and an absent
+ *      tag refuses it (ADR 0143), so staging is handed the commit and asks GitHub nothing;
  *  (d) nemar-ica's archive job carries the index's path and the tag's commit, and records the digest or the word;
  *  (e) the launch specification carries a staged index, and nothing of an absent one;
  *  (f) the serving index route signs the copy the RECORDED specification names, and refuses every other job
@@ -39,9 +41,13 @@ import { createJob } from "../src/services/compute-jobs";
 import { buildLaunch } from "../src/services/compute-lifecycle";
 import {
   SERVING_INDEX_DEFERRED_WORD,
+  SOURCE_COMMIT_DEFERRED_WORD,
+  dispatchPipelineJob,
   recipeJobSpec,
   servingIndexForRun,
   servingIndexRefusal,
+  sourceCommitForRun,
+  sourceCommitRefusal,
 } from "../src/services/compute-pipeline";
 import { servingIndexKey } from "../src/services/compute-records";
 import { signComputeToken } from "../src/services/compute-tokens";
@@ -148,7 +154,7 @@ describe("the index is staged only when it was built from the tag's own commit",
     const text = indexText(T);
     github.tag(ID, TAG, T);
     github.index(ID, text);
-    const staged = await stageServingIndex(devEnv(), ID, TAG);
+    const staged = await stageServingIndex(devEnv(), ID, T);
     const bytes = new TextEncoder().encode(text);
     expect(staged).toEqual({
       staged: true,
@@ -158,18 +164,17 @@ describe("the index is staged only when it was built from the tag's own commit",
     });
     const kept = await fx.harness.records.get(servingIndexKey(sha(bytes)));
     expect(new Uint8Array(await (kept as R2ObjectBody).arrayBuffer())).toEqual(bytes);
-    // The tag is looked up as a tag; no compare is ever asked.
-    expect(github.log.some((r) => r.path.endsWith(`/commits/refs/tags/${TAG}`))).toBe(true);
+    // Staging is handed the tag's commit and asks GitHub nothing: no tag, no compare.
+    expect(github.log.filter((r) => r.path.startsWith("/repos/"))).toEqual([]);
     expect(compareRequests()).toEqual([]);
   });
 
   test("an index of another commit is not staged, and nothing is kept (MUTATION: accept any commit)", async () => {
     github.tag(ID, TAG, T);
     github.index(ID, indexText(S));
-    expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
+    expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
       staged: false,
       reason: "source_commit_differs",
-      tagCommit: T,
     });
     expect(await servingCopies()).toEqual([]);
   });
@@ -184,27 +189,20 @@ describe("the index is staged only when it was built from the tag's own commit",
       ahead_by: 1,
       files: [{ filename: ".nemar/zarr.json", status: "modified" }],
     });
-    expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
+    expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
       staged: false,
       reason: "source_commit_differs",
-      tagCommit: T,
     });
     expect(compareRequests()).toEqual([]);
     expect(await servingCopies()).toEqual([]);
-  });
-
-  test("a tag without its leading v is found as the Zarr check finds it", async () => {
-    github.tag(ID, "1.0.0", T);
-    github.index(ID, indexText(T));
-    expect((await stageServingIndex(devEnv(), ID, TAG)).staged).toBe(true);
   });
 });
 
 // --- (c): every other failure is a word ------------------------------------------------------------------
 
-describe("anything else stages nothing, with a word and the tag's commit when it was read, and never throws", () => {
-  const cases: Array<[string, () => void, string, string | null]> = [
-    ["no index", () => github.tag(ID, TAG, T), "no_index", T],
+describe("anything else stages nothing, with a word, and never throws", () => {
+  const cases: Array<[string, () => void, string]> = [
+    ["no index", () => github.tag(ID, TAG, T), "no_index"],
     [
       "an index the copy cannot serve",
       () => {
@@ -212,7 +210,6 @@ describe("anything else stages nothing, with a word and the tag's commit when it
         github.index(ID, { http: 500 });
       },
       "index_unreadable",
-      T,
     ],
     [
       "an index that is not JSON",
@@ -221,7 +218,6 @@ describe("anything else stages nothing, with a word and the tag's commit when it
         github.index(ID, "{not json");
       },
       "index_unusable",
-      T,
     ],
     [
       "an index that is a JSON array",
@@ -230,7 +226,6 @@ describe("anything else stages nothing, with a word and the tag's commit when it
         github.index(ID, "[]");
       },
       "index_unusable",
-      T,
     ],
     [
       "an index without a commit",
@@ -239,7 +234,6 @@ describe("anything else stages nothing, with a word and the tag's commit when it
         github.index(ID, indexText(null));
       },
       "index_commit_unusable",
-      T,
     ],
     [
       "an index with an abbreviated commit",
@@ -248,27 +242,12 @@ describe("anything else stages nothing, with a word and the tag's commit when it
         github.index(ID, indexText(T.slice(0, 12)));
       },
       "index_commit_unusable",
-      T,
-    ],
-    ["a tag GitHub does not have", () => github.index(ID, indexText(T)), "tag_absent", null],
-    [
-      "a tag GitHub cannot answer",
-      () => {
-        github.tag(ID, TAG, { http: 502 });
-        github.index(ID, indexText(T));
-      },
-      "github_unreadable",
-      null,
     ],
   ];
-  for (const [label, arrange, reason, tagCommit] of cases) {
-    test(`${label}: ${reason} (MUTATION: drop the tag's commit from the word)`, async () => {
+  for (const [label, arrange, reason] of cases) {
+    test(`${label}: ${reason}`, async () => {
       arrange();
-      expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
-        staged: false,
-        reason,
-        tagCommit,
-      });
+      expect(await stageServingIndex(devEnv(), ID, T)).toEqual({ staged: false, reason });
       expect(await servingCopies()).toEqual([]);
     });
   }
@@ -276,22 +255,10 @@ describe("anything else stages nothing, with a word and the tag's commit when it
   test("an index over the recipe's 64 MiB is not read past its bound (MUTATION: drop the bound)", async () => {
     github.tag(ID, TAG, T);
     github.index(ID, { stream: " ".repeat(COMPUTE_SERVING_INDEX_MAX_BYTES + 1) });
-    expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
+    expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
       staged: false,
       reason: "index_too_large",
-      tagCommit: T,
     });
-  });
-
-  test("production without the GitHub App asks nothing and stages nothing", async () => {
-    github.tag(ID, TAG, T);
-    github.index(ID, indexText(T));
-    expect(await stageServingIndex(fx.env(), ID, TAG)).toEqual({
-      staged: false,
-      reason: "no_github_credentials",
-      tagCommit: null,
-    });
-    expect(github.log).toEqual([]);
   });
 
   test("a key that holds other bytes is never overwritten, and nothing is staged (MUTATION: keep whatever is there)", async () => {
@@ -301,9 +268,9 @@ describe("anything else stages nothing, with a word and the tag's commit when it
     await fx.harness.records.put(servingIndexKey(sha(text)), "other bytes");
     let staged: unknown;
     const lines = await logged(async () => {
-      staged = await stageServingIndex(devEnv(), ID, TAG);
+      staged = await stageServingIndex(devEnv(), ID, T);
     });
-    expect(staged).toEqual({ staged: false, reason: "index_not_stored", tagCommit: T });
+    expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
     // Its own line, with the digest, never the generic one (MUTATION: share the put failure's line).
     expect(lines.filter((l) => l.startsWith("[serving-index]"))).toEqual([
       `[serving-index] copy_conflict sha256=${sha(text)}`,
@@ -315,8 +282,8 @@ describe("anything else stages nothing, with a word and the tag's commit when it
   test("a copy already kept with the same bytes is staged again, as one object", async () => {
     github.tag(ID, TAG, T);
     github.index(ID, indexText(T));
-    const first = await stageServingIndex(devEnv(), ID, TAG);
-    const second = await stageServingIndex(devEnv(), ID, TAG);
+    const first = await stageServingIndex(devEnv(), ID, T);
+    const second = await stageServingIndex(devEnv(), ID, T);
     expect(second).toEqual(first);
     expect(await servingCopies()).toHaveLength(1);
   });
@@ -330,10 +297,10 @@ describe("anything else stages nothing, with a word and the tag's commit when it
       staged = await stageServingIndex(
         { ...env, COMPUTE_RECORDS: undefined } as unknown as Bindings,
         ID,
-        TAG,
+        T,
       );
     });
-    expect(staged).toEqual({ staged: false, reason: "index_not_stored", tagCommit: T });
+    expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
     // The store's throw is logged by the error's class name alone (MUTATION: log the conflict line).
     expect(lines.filter((l) => l.startsWith("[serving-index]"))).toEqual([
       "[serving-index] copy_put_failed error=Error",
@@ -354,9 +321,9 @@ describe("anything else stages nothing, with a word and the tag's commit when it
     } as unknown as R2Bucket;
     let staged: unknown;
     const lines = await logged(async () => {
-      staged = await stageServingIndex({ ...env, COMPUTE_RECORDS: broken }, ID, TAG);
+      staged = await stageServingIndex({ ...env, COMPUTE_RECORDS: broken }, ID, T);
     });
-    expect(staged).toEqual({ staged: false, reason: "index_not_stored", tagCommit: T });
+    expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
     expect(lines.filter((l) => l.startsWith("[serving-index]"))).toEqual([
       "[serving-index] copy_put_failed error=TypeError",
     ]);
@@ -404,10 +371,9 @@ describe("an index the recipe cannot use is index_unusable, and the run goes ahe
     test(`${label}: index_unusable, nothing kept, and no deferral`, async () => {
       github.tag(ID, TAG, T);
       github.index(ID, text);
-      expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
+      expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
         staged: false,
         reason: "index_unusable",
-        tagCommit: T,
       });
       expect(await servingCopies()).toEqual([]);
       expect(isServingIndexFault("index_unusable")).toBe(false);
@@ -424,7 +390,7 @@ describe("an index the recipe cannot use is index_unusable, and the run goes ahe
       github.reset();
       github.tag(ID, TAG, T);
       github.index(ID, indexText(T, over));
-      expect((await stageServingIndex(devEnv(), ID, TAG)).staged, JSON.stringify(over)).toBe(true);
+      expect((await stageServingIndex(devEnv(), ID, T)).staged, JSON.stringify(over)).toBe(true);
     }
   });
 });
@@ -432,7 +398,7 @@ describe("an index the recipe cannot use is index_unusable, and the run goes ahe
 // --- (c3): a fault defers the run, for at most 24 hours ------------------------------------------------------
 
 describe("a fault defers the run; after 24 hours, or for an absent index, it runs without one", () => {
-  const run = (env: Bindings) => servingIndexForRun(env, ica, "bids", ID, TAG);
+  const run = (env: Bindings) => servingIndexForRun(env, ica, "bids", ID, TAG, T);
   const deferredStamps = async (env: Bindings) =>
     (
       await env.DB.prepare(
@@ -449,14 +415,6 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
       .run();
 
   for (const [label, arrange, reason] of [
-    [
-      "GitHub cannot be read",
-      () => {
-        github.tag(ID, TAG, { http: 502 });
-        github.index(ID, indexText(T));
-      },
-      "github_unreadable",
-    ],
     [
       "the index cannot be read",
       () => {
@@ -487,11 +445,10 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
     });
   }
 
-  test("a fault 24 hours after the first deferral runs without the index, recording the fault (MUTATION: defer for ever; measure from the newest deferral)", async () => {
+  test("a fault 24 hours after the first deferral runs without the index, recording the fault, and with the tag's commit (MUTATION: defer for ever; measure from the newest deferral)", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
-    github.index(ID, indexText(T));
+    github.index(ID, { http: 503 });
     expect((await run(env)).kind).toBe("deferred");
     expect((await run(env)).kind).toBe("deferred");
     // The first deferral 25 hours ago and the second an hour ago: the wait is measured from the first.
@@ -500,16 +457,17 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
     ).run();
     expect(await run(env)).toEqual({
       kind: "run",
-      servingIndex: { staged: false, reason: "github_unreadable", tagCommit: null },
+      servingIndex: { staged: false, reason: "index_unreadable" },
     });
-    const spec = icaSpec({ staged: false, reason: "github_unreadable", tagCommit: null });
-    expect(spec.serving_index).toEqual({ reason: "github_unreadable" });
+    const spec = icaSpec({ staged: false, reason: "index_unreadable" });
+    expect(spec.serving_index).toEqual({ reason: "index_unreadable" });
+    expect(spec.args.slice(-2)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, T]);
   });
 
   test("a fault under 24 hours keeps deferring (MUTATION: end the wait early)", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, { http: 503 });
     expect((await run(env)).kind).toBe("deferred");
     await backdate(env, 23);
     expect((await run(env)).kind).toBe("deferred");
@@ -518,7 +476,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
   test("an earlier run's deferral never shortens a later run's wait", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, { http: 503 });
     expect((await run(env)).kind).toBe("deferred");
     await backdate(env, 48);
     // That run went ahead and ended: a failed stamp of the same tuple.
@@ -531,8 +489,8 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
     expect((await run(env)).kind).toBe("deferred");
   });
 
-  for (const [label, arrange, reason, tagCommit] of [
-    ["no index", () => github.tag(ID, TAG, T), "no_index", T],
+  for (const [label, arrange, reason] of [
+    ["no index", () => github.tag(ID, TAG, T), "no_index"],
     [
       "an index of another commit",
       () => {
@@ -540,9 +498,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
         github.index(ID, indexText(S));
       },
       "source_commit_differs",
-      T,
     ],
-    ["a tag GitHub does not have", () => github.index(ID, indexText(T)), "tag_absent", null],
     [
       "an index the recipe cannot use",
       () => {
@@ -550,16 +506,15 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
         github.index(ID, indexText(T, { stores: {} }));
       },
       "index_unusable",
-      T,
     ],
-  ] as Array<[string, () => void, string, string | null]>) {
+  ] as Array<[string, () => void, string]>) {
     test(`${label}: runs at once without the index, and no stamp is written (MUTATION: defer every word)`, async () => {
       const env = devEnv();
       await seedEegDataset(env, ID);
       arrange();
       expect(await run(env)).toEqual({
         kind: "run",
-        servingIndex: { staged: false, reason, tagCommit },
+        servingIndex: { staged: false, reason },
       });
       expect(await deferredStamps(env)).toEqual([]);
     });
@@ -577,7 +532,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
   test("a live stamp of the tuple refuses the deferral's claim as live_attempt_exists", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, { http: 503 });
     await env.DB.prepare(
       `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, input, attempt, state)
        VALUES (?1, ?2, ?3, ?4, ?5, 'bids', 1, 'dispatched')`,
@@ -590,7 +545,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
   test("the dispatch answers a deferral with serving_index_deferred, the word, the stamp and when it runs without the index (MUTATION: dispatch through a deferral)", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, { http: 503 });
     const before = Date.now();
     const deferred = await run(env);
     if (deferred.kind !== "deferred") throw new Error("not deferred");
@@ -600,7 +555,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
       code: "serving_index_deferred",
       datasetId: ID,
       version: TAG,
-      reason: "github_unreadable",
+      reason: "index_unreadable",
       stampId: deferred.stampId,
       runsWithoutIndexAfter: deferred.runsWithoutIndexAfter,
     });
@@ -627,7 +582,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
   test("exactly 1,440 minutes after the first deferral the run goes ahead; a minute short it is deferred", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, { http: 503 });
     expect((await run(env)).kind).toBe("deferred");
     const setAge = (minutes: number) =>
       env.DB.prepare(
@@ -654,7 +609,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
 });
 
 describe("a 403 is read with the dataset row: an absent index runs at once, a ready copy's 403 defers", () => {
-  const run = (env: Bindings) => servingIndexForRun(env, ica, "bids", ID, TAG);
+  const run = (env: Bindings) => servingIndexForRun(env, ica, "bids", ID, TAG, T);
   const S3 = {
     S3_BUCKET: "example-bucket",
     AWS_REGION: "us-east-2",
@@ -704,7 +659,7 @@ describe("a 403 is read with the dataset row: an absent index runs at once, a re
         if (expected === "no_index") {
           expect(decided).toEqual({
             kind: "run",
-            servingIndex: { staged: false, reason: "no_index", tagCommit: T },
+            servingIndex: { staged: false, reason: "no_index" },
           });
         } else {
           expect(decided).toMatchObject({ kind: "deferred", reason: "index_unreadable" });
@@ -743,6 +698,147 @@ describe("a 403 is read with the dataset row: an absent index runs at once, a re
   }
 });
 
+// --- (c4): every run of the archive is handed its tag's commit, or waits for it (ADR 0143) -------------------------
+
+describe("every run of the archive reads its tag's commit first: a fault defers it for as long as it lasts, an absent tag refuses it", () => {
+  const stamps = async (env: Bindings) =>
+    (
+      await env.DB.prepare(
+        "SELECT state, refusal_code, job_id FROM compute_pipeline_stamps WHERE dataset_id = ?1 ORDER BY id",
+      )
+        .bind(ID)
+        .all<{ state: string; refusal_code: string | null; job_id: string | null }>()
+    ).results;
+
+  for (const recipe of [ica, floor]) {
+    test(`${recipe.name}: the tag's commit, found with or without the tag's leading v, and nothing written`, async () => {
+      const env = devEnv();
+      await seedEegDataset(env, ID);
+      github.tag(ID, "1.0.0", T);
+      expect(await sourceCommitForRun(env, recipe, "bids", ID, TAG)).toEqual({
+        kind: "commit",
+        commit: T,
+      });
+      expect(await stamps(env)).toEqual([]);
+    });
+  }
+
+  test("a tag the repository does not have is tag_absent: refused as version_tag_absent with nothing written, and logged (MUTATION: run it without a commit)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    let decided: unknown;
+    const lines = await logged(async () => {
+      decided = await sourceCommitForRun(env, floor, "bids", ID, TAG);
+    });
+    expect(decided).toEqual({ kind: "tag_absent" });
+    expect(lines).toContain(`[compute-pipeline] version_tag_absent dataset=${ID} version=${TAG}`);
+    expect(await stamps(env)).toEqual([]);
+    expect(sourceCommitRefusal({ kind: "tag_absent" }, ID, TAG)).toEqual({
+      ok: false,
+      code: "version_tag_absent",
+      datasetId: ID,
+      version: TAG,
+    });
+    expect(COMPUTE_PIPELINE_REFUSAL_STATUS.version_tag_absent).toBe(409);
+  });
+
+  for (const [label, env, arrange, reason] of [
+    [
+      "GitHub cannot answer",
+      () => devEnv(),
+      () => github.tag(ID, TAG, { http: 502 }),
+      "github_unreadable",
+    ],
+    [
+      "production without the GitHub App",
+      () => fx.env(),
+      () => github.tag(ID, TAG, T),
+      "no_github_credentials",
+    ],
+  ] as Array<[string, () => Bindings, () => void, string]>) {
+    test(`${label}: deferred with a refused stamp, and still deferred two days on, never run without its commit (MUTATION: let the deferral run out; run on a fault)`, async () => {
+      const on = env();
+      await seedEegDataset(on, ID);
+      arrange();
+      const first = await sourceCommitForRun(on, floor, "bids", ID, TAG);
+      expect(first).toMatchObject({ kind: "deferred", reason });
+      expect(await stamps(on)).toEqual([
+        { state: "refused", refusal_code: SOURCE_COMMIT_DEFERRED_WORD, job_id: null },
+      ]);
+      await on.DB.prepare(
+        "UPDATE compute_pipeline_stamps SET created_at = datetime('now', '-48 hours') WHERE dataset_id = ?1",
+      )
+        .bind(ID)
+        .run();
+      expect(await sourceCommitForRun(on, floor, "bids", ID, TAG)).toMatchObject({
+        kind: "deferred",
+        reason,
+      });
+      if (first.kind !== "deferred") throw new Error("not deferred");
+      expect(sourceCommitRefusal(first, ID, TAG)).toEqual({
+        ok: false,
+        code: "source_commit_deferred",
+        datasetId: ID,
+        version: TAG,
+        reason,
+        stampId: first.stampId,
+      });
+      expect(COMPUTE_PIPELINE_REFUSAL_STATUS.source_commit_deferred).toBe(503);
+    });
+  }
+
+  test("production without the GitHub App asks GitHub nothing", async () => {
+    const env = fx.env();
+    await seedEegDataset(env, ID);
+    await sourceCommitForRun(env, floor, "bids", ID, TAG);
+    expect(github.log).toEqual([]);
+  });
+
+  test("a live stamp of the tuple refuses the deferral's claim as live_attempt_exists", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, { http: 502 });
+    await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, input, attempt, state)
+       VALUES (?1, ?2, ?3, ?4, ?5, 'bids', 1, 'dispatched')`,
+    )
+      .bind(ID, TAG, floor.name, floor.version, floor.engine)
+      .run();
+    expect(await sourceCommitForRun(env, floor, "bids", ID, TAG)).toEqual({
+      kind: "live_attempt_exists",
+    });
+  });
+
+  test("through the dispatch, a floor run of the archive is deferred or refused before any job is made (MUTATION: dispatch without reading the commit)", async () => {
+    const env = devEnv();
+    await seedPipelinesAccount(env);
+    await fundPipelines(env);
+    await seedEegDataset(env, ID);
+    const admin = { kind: "admin", userId: 1 } as const;
+    const dispatch = () =>
+      dispatchPipelineJob(env, { recipe: "nemar-floor", datasetId: ID, actor: admin });
+    github.tag(ID, TAG, { http: 502 });
+    expect(await dispatch()).toMatchObject({
+      ok: false,
+      code: "source_commit_deferred",
+      reason: "github_unreadable",
+    });
+    github.reset();
+    expect(await dispatch()).toMatchObject({ ok: false, code: "version_tag_absent", version: TAG });
+    const jobs = await env.DB.prepare("SELECT COUNT(*) AS n FROM compute_jobs").first<{
+      n: number;
+    }>();
+    expect(jobs?.n).toBe(0);
+    expect((await stamps(env)).map((s) => [s.state, s.refusal_code])).toEqual([
+      ["refused", SOURCE_COMMIT_DEFERRED_WORD],
+    ]);
+    // And with the tag there, the job is made and handed the commit.
+    github.tag(ID, TAG, T);
+    const made = await dispatch();
+    expect(made).toMatchObject({ ok: true });
+  });
+});
+
 // --- (d): the job --------------------------------------------------------------------------------------------
 
 const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
@@ -751,13 +847,17 @@ const image = { ref: RUNTIME_IMAGE, digest: RUNTIME_IMAGE_DIGEST };
 const HEX = "7".repeat(64);
 const STAGED = { staged: true as const, sha256: HEX, size: 812, sourceCommit: T };
 
-function icaSpec(servingIndex: Parameters<typeof recipeJobSpec>[1]["servingIndex"]) {
+function icaSpec(
+  servingIndex: Parameters<typeof recipeJobSpec>[1]["servingIndex"],
+  sourceCommit: string | undefined = T,
+) {
   return recipeJobSpec(ica, {
     datasetId: ID,
     tag: TAG,
     input: "bids",
     image,
     env: { ENVIRONMENT: "development" },
+    ...(sourceCommit === undefined ? {} : { sourceCommit }),
     ...(servingIndex === undefined ? {} : { servingIndex }),
   });
 }
@@ -779,7 +879,7 @@ describe("nemar-ica's archive job names what was staged", () => {
     expect(spec.serving_index).toEqual({ sha256: HEX, size: 812 });
   });
 
-  test("none staged, the tag's commit read: the arguments hand the run that commit and no index, and the word is recorded (MUTATION: hand the flag anyway; hand the commit only with a staged index)", () => {
+  test("none staged: the arguments hand the run the tag's commit and no index, and the word is recorded (MUTATION: hand the flag anyway; hand the commit only with a staged index)", () => {
     for (const reason of [
       "source_commit_differs",
       "no_index",
@@ -787,23 +887,25 @@ describe("nemar-ica's archive job names what was staged", () => {
       "index_too_large",
       "index_unreadable",
     ] as const) {
-      const spec = icaSpec({ staged: false, reason, tagCommit: T });
+      const spec = icaSpec({ staged: false, reason });
       expect(spec.args).toEqual([...base, RECIPE_SOURCE_COMMIT_FLAG, T]);
       expect(spec.args).not.toContain(RECIPE_SERVING_INDEX_FLAG);
       expect(spec.serving_index).toEqual({ reason });
     }
   });
 
-  test("none staged and the tag's commit never read: the arguments are the archive's own (MUTATION: hand a commit that was not read)", () => {
-    for (const reason of ["github_unreadable", "tag_absent", "no_github_credentials"] as const) {
-      const spec = icaSpec({ staged: false, reason, tagCommit: null });
-      expect(spec.args).toEqual(base);
-      expect(spec.serving_index).toEqual({ reason });
-    }
-  });
-
-  test("a tag commit that is not a full commit is a programming error, never an argument", () => {
-    expect(() => icaSpec({ staged: false, reason: "no_index", tagCommit: T.slice(0, 12) })).toThrow(
+  test("a run of the archive with no commit, or one that is not a full commit, is a programming error, never a job (ADR 0143)", () => {
+    expect(() =>
+      recipeJobSpec(ica, {
+        datasetId: ID,
+        tag: TAG,
+        input: "bids",
+        image,
+        env: { ENVIRONMENT: "development" },
+        servingIndex: { staged: false, reason: "no_index" },
+      }),
+    ).toThrow(RangeError);
+    expect(() => icaSpec({ staged: false, reason: "no_index" }, T.slice(0, 12))).toThrow(
       RangeError,
     );
   });
@@ -819,10 +921,13 @@ describe("nemar-ica's archive job names what was staged", () => {
       input: "bids",
       image,
       env: { ENVIRONMENT: "development" },
+      sourceCommit: T,
       servingIndex: STAGED,
     });
     expect(spec.serving_index).toBeUndefined();
     expect(spec.args).not.toContain(RECIPE_SERVING_INDEX_FLAG);
+    // It is handed the tag's commit all the same (ADR 0143).
+    expect(spec.args.slice(-2)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, T]);
   });
 });
 
@@ -880,12 +985,11 @@ describe("an index built from another commit than the tag's (on007823 in the loc
     await seedEegDataset(env, ID);
     github.tag(ID, TAG, T);
     github.index(ID, indexText(S));
-    const decided = await servingIndexForRun(env, ica, "bids", ID, TAG);
+    const decided = await servingIndexForRun(env, ica, "bids", ID, TAG, T);
     if (decided.kind !== "run") throw new Error(`not run: ${decided.kind}`);
     expect(decided.servingIndex).toEqual({
       staged: false,
       reason: "source_commit_differs",
-      tagCommit: T,
     });
     const job = await icaJob(env, decided.servingIndex);
     const launch = await launchOf(env, job.id);
@@ -906,7 +1010,7 @@ describe("the launch specification and the serving index route", () => {
     const text = indexText(T);
     github.tag(ID, TAG, T);
     github.index(ID, text);
-    const staged = await stageServingIndex(env, ID, TAG);
+    const staged = await stageServingIndex(env, ID, T);
     if (!staged.staged) throw new Error(staged.reason);
     const job = await icaJob(env, staged);
     const launch = await launchOf(env, job.id);
@@ -926,7 +1030,7 @@ describe("the launch specification and the serving index route", () => {
 
   test("none staged: nothing of it is in the launch, and the route gives the door's one refusal (MUTATION: put the word in the launch; sign without a recorded digest)", async () => {
     const env = devEnv();
-    const job = await icaJob(env, { staged: false, reason: "no_index", tagCommit: T });
+    const job = await icaJob(env, { staged: false, reason: "no_index" });
     const launch = await launchOf(env, job.id);
     expect("serving_index" in launch).toBe(false);
     const wrong = await callRoute(env, job.id, "0".repeat(64));
@@ -939,7 +1043,7 @@ describe("the launch specification and the serving index route", () => {
     const env = devEnv();
     github.tag(ID, TAG, T);
     github.index(ID, indexText(T));
-    const staged = await stageServingIndex(env, ID, TAG);
+    const staged = await stageServingIndex(env, ID, T);
     if (!staged.staged) throw new Error(staged.reason);
     const job = await icaJob(env, staged);
     const token = await tokenOf(env, job.id);
@@ -956,7 +1060,7 @@ describe("the launch specification and the serving index route", () => {
     const env = devEnv();
     github.tag(ID, TAG, T);
     github.index(ID, indexText(T));
-    const staged = await stageServingIndex(env, ID, TAG);
+    const staged = await stageServingIndex(env, ID, T);
     if (!staged.staged) throw new Error(staged.reason);
     const job = await icaJob(env, staged);
     const key = `records/${job.id}/spec.json`;
@@ -970,7 +1074,7 @@ describe("the launch specification and the serving index route", () => {
     const env = devEnv();
     github.tag(ID, TAG, T);
     github.index(ID, indexText(T));
-    const staged = await stageServingIndex(env, ID, TAG);
+    const staged = await stageServingIndex(env, ID, T);
     if (!staged.staged) throw new Error(staged.reason);
     const job = await icaJob(env, staged);
     const token = await tokenOf(env, job.id);

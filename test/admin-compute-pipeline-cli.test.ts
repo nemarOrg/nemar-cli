@@ -90,7 +90,7 @@ const server = Bun.serve({
 const API = `http://127.0.0.1:${server.port}`;
 
 beforeAll(async () => {
-  fx = await startLifecycleFixture();
+  fx = await startLifecycleFixture({ githubTags: true });
 }, 120_000);
 
 afterAll(async () => {
