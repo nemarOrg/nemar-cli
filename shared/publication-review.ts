@@ -864,7 +864,14 @@ export function parseReviewInputs(raw: unknown): ReviewInputsBody {
       target_license: strOrNullIn(lineage.target_license),
       sources,
       resolver_version: lineage.resolver_version as string,
-      resolved_at: strOrNullIn(lineage.resolved_at),
+      // Null from a Worker of resolver version 2; anything else must be an instant.
+      resolved_at:
+        lineage.resolved_at === null || lineage.resolved_at === undefined
+          ? null
+          : typeof lineage.resolved_at === "string" &&
+              LINEAGE_RESOLVED_AT_RE.test(lineage.resolved_at)
+            ? lineage.resolved_at
+            : badInputs(),
     },
     resubmission_note: strOrNullIn(r.resubmission_note),
     coverage: { source: coverage.source as CoverageSource, formats },
