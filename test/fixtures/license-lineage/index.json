@@ -337,5 +337,265 @@
     "status": 200,
     "file": "35-datacite-dandi-cc-by.json",
     "fetched_at": "2026-11-27T16:22:45Z"
+  },
+  {
+    "case": "osf-project",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.17605%2Fosf.io%2Ff8sq3",
+    "url": "https://api.datacite.org/dois/10.17605%2Fosf.io%2Ff8sq3",
+    "status": 200,
+    "file": "36-datacite-osf-project.json",
+    "fetched_at": "2026-11-27T17:15:48Z"
+  },
+  {
+    "case": "figshare-collection-v1",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.6084%2Fm9.figshare.c.6979581.v1",
+    "url": "https://api.datacite.org/dois/10.6084%2Fm9.figshare.c.6979581.v1",
+    "status": 200,
+    "file": "37-datacite-figshare-collection-v1.json",
+    "fetched_at": "2026-11-27T17:15:48Z"
+  },
+  {
+    "case": "plos-component",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.1371%2Fjournal.pone.0303144.s001",
+    "url": "https://api.datacite.org/dois/10.1371%2Fjournal.pone.0303144.s001",
+    "status": 404,
+    "file": "38-datacite-plos-component.json",
+    "fetched_at": "2026-11-27T17:15:49Z"
+  },
+  {
+    "case": "plos-component",
+    "registry": "crossref",
+    "method": "GET",
+    "path": "/works/10.1371%2Fjournal.pone.0303144.s001",
+    "url": "https://api.crossref.org/works/10.1371%2Fjournal.pone.0303144.s001",
+    "status": 200,
+    "file": "39-crossref-plos-component.json",
+    "fetched_at": "2026-11-27T17:15:50Z"
+  },
+  {
+    "case": "plos-component",
+    "registry": "crossref",
+    "method": "GET",
+    "path": "/works/10.1371%2Fjournal.pone.0303144",
+    "url": "https://api.crossref.org/works/10.1371%2Fjournal.pone.0303144",
+    "status": 200,
+    "file": "40-crossref-plos-parent.json",
+    "fetched_at": "2026-11-27T17:15:50Z"
+  },
+  {
+    "case": "zenodo-article",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.5281%2Fzenodo.6529724",
+    "url": "https://api.datacite.org/dois/10.5281%2Fzenodo.6529724",
+    "status": 200,
+    "file": "41-datacite-zenodo-article.json",
+    "fetched_at": "2026-11-27T17:15:51Z"
+  },
+  {
+    "case": "figshare-article",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.6084%2Fm9.figshare.28309157",
+    "url": "https://api.datacite.org/dois/10.6084%2Fm9.figshare.28309157",
+    "status": 200,
+    "file": "42-datacite-figshare-article.json",
+    "fetched_at": "2026-11-27T17:15:52Z"
+  },
+  {
+    "case": "figshare-collection-v1",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/collections/6979581/articles?page_size=11",
+    "url": "https://api.figshare.com/v2/collections/6979581/articles?page_size=11",
+    "status": 200,
+    "file": "43-figshare-collection-articles.json",
+    "fetched_at": "2026-11-27T17:30:07Z"
+  },
+  {
+    "case": "figshare-collection-v1",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/articles/24803499",
+    "url": "https://api.figshare.com/v2/articles/24803499",
+    "status": 200,
+    "file": "44-figshare-article-24803499.json",
+    "fetched_at": "2026-11-27T17:30:08Z"
+  },
+  {
+    "case": "osf-project",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/f8sq3/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/f8sq3/children/?embed=license&page[size]=50&related_counts=children",
+    "status": 200,
+    "file": "45-osf-children-f8sq3.json",
+    "fetched_at": "2026-11-27T17:43:26Z"
+  },
+  {
+    "case": "osf-project",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/f8sq3/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/f8sq3/?embed=license",
+    "status": 200,
+    "file": "46-osf-osf-f8sq3.json",
+    "fetched_at": "2026-11-27T17:30:09Z"
+  },
+  {
+    "case": "osf-url-sa",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/rmafj/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/rmafj/children/?embed=license&page[size]=50&related_counts=children",
+    "status": 200,
+    "file": "47-osf-children-rmafj.json",
+    "fetched_at": "2026-11-27T17:43:26Z"
+  },
+  {
+    "case": "osf-url-by",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/j3s7g/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/j3s7g/children/?embed=license&page[size]=50&related_counts=children",
+    "status": 200,
+    "file": "48-osf-children-j3s7g.json",
+    "fetched_at": "2026-11-27T17:43:26Z"
+  },
+  {
+    "case": "osf-no-rights",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/j7as8/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/j7as8/children/?embed=license&page[size]=50&related_counts=children",
+    "status": 200,
+    "file": "49-osf-children-j7as8.json",
+    "fetched_at": "2026-11-27T17:43:27Z"
+  },
+  {
+    "case": "osf-project-no-rights",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.17605%2Fosf.io%2Fc5zbq",
+    "url": "https://api.datacite.org/dois/10.17605%2Fosf.io%2Fc5zbq",
+    "status": 200,
+    "file": "50-datacite-osf-project-no-rights.json",
+    "fetched_at": "2026-11-27T17:30:11Z"
+  },
+  {
+    "case": "osf-project-no-rights",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/c5zbq/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/c5zbq/?embed=license",
+    "status": 200,
+    "file": "51-osf-osf-c5zbq.json",
+    "fetched_at": "2026-11-27T17:30:11Z"
+  },
+  {
+    "case": "osf-project-no-rights",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/c5zbq/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/c5zbq/children/?embed=license&page[size]=50&related_counts=children",
+    "status": 200,
+    "file": "52-osf-children-c5zbq.json",
+    "fetched_at": "2026-11-27T17:43:28Z"
+  },
+  {
+    "case": "osf-project-children",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.17605%2Fosf.io%2Fyb3pq",
+    "url": "https://api.datacite.org/dois/10.17605%2Fosf.io%2Fyb3pq",
+    "status": 200,
+    "file": "53-datacite-osf-project-children.json",
+    "fetched_at": "2026-11-27T17:30:13Z"
+  },
+  {
+    "case": "osf-project-children",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/yb3pq/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/yb3pq/?embed=license",
+    "status": 200,
+    "file": "54-osf-osf-yb3pq.json",
+    "fetched_at": "2026-11-27T17:30:14Z"
+  },
+  {
+    "case": "osf-project-children",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/yb3pq/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/yb3pq/children/?embed=license&page[size]=50&related_counts=children",
+    "status": 200,
+    "file": "55-osf-children-yb3pq.json",
+    "fetched_at": "2026-11-27T17:43:29Z"
+  },
+  {
+    "case": "osf-datacite-cc-by",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/wpkrz/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/wpkrz/?embed=license",
+    "status": 200,
+    "file": "56-osf-osf-wpkrz.json",
+    "fetched_at": "2026-11-27T17:30:15Z"
+  },
+  {
+    "case": "osf-datacite-cc-by",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/wpkrz/children/?embed=license&page[size]=50&related_counts=children",
+    "url": "https://api.osf.io/v2/nodes/wpkrz/children/?embed=license&page[size]=50&related_counts=children",
+    "status": 200,
+    "file": "57-osf-children-wpkrz.json",
+    "fetched_at": "2026-11-27T17:43:29Z"
+  },
+  {
+    "case": "figshare-collection",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/collections/3307977/articles?page_size=11",
+    "url": "https://api.figshare.com/v2/collections/3307977/articles?page_size=11",
+    "status": 200,
+    "file": "58-figshare-collection-3307977-articles.json",
+    "fetched_at": "2026-11-27T17:30:32Z"
+  },
+  {
+    "case": "figshare-collection",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/articles/3563034",
+    "url": "https://api.figshare.com/v2/articles/3563034",
+    "status": 200,
+    "file": "59-figshare-article-3563034.json",
+    "fetched_at": "2026-11-27T17:30:33Z"
+  },
+  {
+    "case": "figshare-collection",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/articles/3563031",
+    "url": "https://api.figshare.com/v2/articles/3563031",
+    "status": 200,
+    "file": "60-figshare-article-3563031.json",
+    "fetched_at": "2026-11-27T17:30:34Z"
+  },
+  {
+    "case": "figshare-collection",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/articles/3563028",
+    "url": "https://api.figshare.com/v2/articles/3563028",
+    "status": 200,
+    "file": "61-figshare-article-3563028.json",
+    "fetched_at": "2026-11-27T17:30:35Z"
   }
 ]
