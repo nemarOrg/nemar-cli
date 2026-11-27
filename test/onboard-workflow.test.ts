@@ -318,8 +318,14 @@ describe("onboard-openneuro pins the upstream tag", () => {
       const cut = body.indexOf('nemar admin import openneuro "$DATASET_ID"');
       expect(cut).toBeGreaterThan(0);
       // The step logs to /tmp; this run logs to its own directory instead.
-      const head = body.slice(0, cut).replaceAll('"/tmp/', `"${dir}/`);
-      expect(head).not.toContain('"/tmp/');
+      // The step's own log path, as the workflow spells it; `dir` may itself sit under /tmp (it does
+      // on a Linux runner), so check for this literal rather than for any "/tmp/.
+      const stepLog = '"/tmp/prepare-${DATASET_ID}';
+      const original = body.slice(0, cut);
+      expect(original).toContain(stepLog);
+      const head = original.replaceAll('"/tmp/', `"${dir}/`);
+      expect(head).not.toContain(stepLog);
+      expect(head).toContain(`"${dir}/prepare-\${DATASET_ID}`);
       const script = join(dir, "prepare.sh");
       writeFileSync(
         script,
