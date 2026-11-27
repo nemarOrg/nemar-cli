@@ -91,6 +91,7 @@ import {
   PUBLICATION_REVIEW_MODEL,
   assemblePublicationReport,
   buildPublicationReviewMessages,
+  publicationInputDigest,
 } from "./publication-review-prompt";
 
 // ---------------------------------------------------------------------------------------------
@@ -174,6 +175,7 @@ function neutralLiveFacts(head: string): LiveFacts {
     screen: { gate: "clear", head, acknowledged_by: null, head_current: null },
     versions: { version_row_exists: false, prior_anonymous_request: false, first_published: false },
     doi: { concept_doi_present: false, concept_ezid_status: null },
+    license_permission: null,
   };
 }
 
@@ -233,7 +235,10 @@ async function reviewEntry(
     const modelOutput = await callPublicationReviewModel(system, user, model, (u) => {
       usage = u;
     });
-    const report = assemblePublicationReport(modelOutput, facts, model);
+    const report = assemblePublicationReport(modelOutput, facts, model, {
+      inputDigest: publicationInputDigest({ facts, cleared }),
+      resolverVersion: null,
+    });
     const { outcome, reasons } = deriveOutcome(report);
     return {
       record: {

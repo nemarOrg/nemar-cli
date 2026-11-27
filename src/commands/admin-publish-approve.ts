@@ -31,6 +31,7 @@ import {
   stepsForRelease,
 } from "../../shared/publication-steps.js";
 import { failWith, requireSignedIn } from "../lib/admin-command.js";
+import { getCurrentUser } from "../lib/api/auth.js";
 import { ApiError } from "../lib/api/errors.js";
 import {
   type PublishProgressInfo,
@@ -434,10 +435,21 @@ After Approval:
           }
         }
 
+        // Whose recorded screen acknowledgment counts: the caller's only (ADR 0086). Unread, it is
+        // nobody's, and the Worker's gate is the final word either way.
+        let caller: number | null = null;
+        if (read.kind === "detail" && read.detail.screen_acknowledgment !== null) {
+          try {
+            caller = (await getCurrentUser()).id;
+          } catch {
+            caller = null;
+          }
+        }
         const decision = decideApproval(datasetId, read, {
           force: !!options.force,
           acknowledge: ack,
           resume: !!options.resume,
+          caller,
         });
         if (decision.kind === "refuse") {
           printRefusal(decision);

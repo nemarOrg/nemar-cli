@@ -49,6 +49,8 @@ function withLines(detail: PublicationReviewDetail): PublicationReviewDetail {
 
 const NO_FLAGS: ApproveOptions = { force: false, acknowledge: undefined, resume: false };
 const FORCE: ApproveOptions = { ...NO_FLAGS, force: true };
+/** The administrator the fixtures' recorded acknowledgment belongs to. */
+const AS_ACKER: ApproveOptions = { ...NO_FLAGS, caller: 3 };
 
 function decide(spec: Spec, options: ApproveOptions = NO_FLAGS): ApproveDecision {
   return decideApproval(ID, read(spec), options);
@@ -374,8 +376,32 @@ describe("6. the screen's acknowledgment is its own reason, cleared by its own f
     expect(d.override).toBeNull();
   });
 
-  test("recorded earlier (by anyone: the Worker decides whose it must be)", () => {
-    expect(proceeds(decide({ ...spec, acknowledged: true })).override).toBeNull();
+  // The fixture's recorded acknowledgment is administrator 3's (test/helpers/review-fixtures.ts).
+  test("recorded earlier by the caller: cleared, as the Worker's gate clears it", () => {
+    expect(proceeds(decide({ ...spec, acknowledged: true }, AS_ACKER)).override).toBeNull();
+  });
+
+  test("recorded by another administrator, or the caller not known: not cleared (ADR 0086)", () => {
+    // A reason recorded by someone else counts only for them; the Worker's gate refuses this
+    // caller, so the CLI asks for the caller's own reason instead of sending a doomed approval.
+    const other = refusal(decide({ ...spec, acknowledged: true }, { ...NO_FLAGS, caller: 4 }));
+    expect(other.why).toBe("needs_ack");
+    expect(other.lines.join(" ")).toContain(
+      REASONS.identifier_screen_needs_acknowledgment.sentence,
+    );
+    expect(
+      refusal(decide({ ...spec, acknowledged: true }, { ...NO_FLAGS, caller: null })).why,
+    ).toBe("needs_ack");
+    expect(refusal(decide({ ...spec, acknowledged: true })).why).toBe("needs_ack");
+    // The caller's own reason given this run still clears it.
+    expect(
+      proceeds(
+        decide(
+          { ...spec, acknowledged: true },
+          { ...NO_FLAGS, caller: 4, acknowledge: "a reason long enough" },
+        ),
+      ).override,
+    ).toBeNull();
   });
 
   test("when the review is not a pass either, the refusal says --force is needed as well", () => {
@@ -416,7 +442,7 @@ describe("7. nothing for an override to clear", () => {
       reasons: ["identifier_screen_needs_acknowledgment" as const],
       acknowledged: true,
     };
-    expect(proceeds(decide(spec, FORCE)).override).toBeNull();
+    expect(proceeds(decide(spec, { ...FORCE, caller: 3 })).override).toBeNull();
   });
 });
 
@@ -432,7 +458,7 @@ describe("8. --force sends exactly what was shown", () => {
 
   test("the acknowledgment reason is not part of an override, nor is anything that was not shown", () => {
     const shown: ReasonCode[] = ["identifier_screen_needs_acknowledgment", "review_running"];
-    const d = proceeds(decide({ reasons: shown, acknowledged: true }, FORCE));
+    const d = proceeds(decide({ reasons: shown, acknowledged: true }, { ...FORCE, caller: 3 }));
     expect(d.override?.reasons).toEqual(["review_running"]);
     for (const code of d.override?.reasons ?? []) expect(OVERRIDE_REASONS).toContain(code);
   });

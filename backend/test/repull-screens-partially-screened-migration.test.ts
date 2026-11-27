@@ -1,5 +1,5 @@
 /**
- * Migration 0150_repull_screens_partially_screened.sql (epic #2182 phase A1, #2185), on two
+ * Migration 0155_repull_screens_partially_screened.sql (epic #2182 phase A1, #2185), on two
  * engines: bun:sqlite and Miniflare's D1, the implementation `wrangler d1 ... --local` runs, where
  * foreign keys are enforced.
  *
@@ -17,7 +17,7 @@ import { Miniflare } from "miniflare";
 import { MIGRATIONS_DIR, applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
 import { type Row, SHA, rowAt } from "./helpers/repull-rows";
 
-const TARGET = "0150_repull_screens_partially_screened.sql";
+const TARGET = "0155_repull_screens_partially_screened.sql";
 const BEFORE = migrationFiles().filter((f) => f < TARGET);
 const AFTER = migrationFiles().filter((f) => f > TARGET);
 
@@ -179,7 +179,7 @@ function onEveryEngine(name: string, body: (e: Engine, repullId: number) => Prom
   });
 }
 
-describe("migration 0150", () => {
+describe("migration 0155", () => {
   onEveryEngine("the new word was refused before the rebuild", async (e) => {
     expect(BEFORE_STATE.get(e.name)?.refusedBefore).toMatch(/CHECK constraint failed/);
   });

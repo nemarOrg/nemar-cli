@@ -19,9 +19,13 @@ import {
   type StartedPublicationReview,
 } from "../../../shared/contract/publication-review-admin.js";
 import { APPROVAL_DISPATCH_TOKEN_HEADER } from "../../../shared/contract/publication.js";
+import type { ActionRequiredOutcome } from "../../../shared/license-lineage.js";
+import type { RecordedMail } from "../../../shared/license-permission.js";
 import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import { isExactIdMatch, matchesListSearch } from "../../../shared/publish-list-search.js";
+import type { PreviousDenialBy } from "../../../shared/resubmission-note.js";
+import type { AckBatchRequest, AckBatchResponse } from "../../../shared/upstream-ack.js";
 import type { IdentifierScreenView } from "../identifier-screen-display.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
@@ -56,6 +60,9 @@ export interface PublishStatusResponse {
   approved_at?: string | null;
   denied_at?: string | null;
   denied_reason?: string | null;
+  // Who denied the request (ADR 0139, decision 5): null for anything but a denial that was not a
+  // withdrawal. Absent from an older backend, which means unknown, never "an administrator".
+  denied_by_kind?: PreviousDenialBy | null;
   // True when the depositor ended the request themselves; `status` is still
   // "denied" so older clients read a finished request. Absent from an older
   // backend, which means unknown, never "no".
@@ -84,6 +91,19 @@ export interface PublishStatusResponse {
   // unknown, never "no".
   anonymous?: boolean;
   identifier_screen?: IdentifierScreenView;
+  /**
+   * The reproducibility record of the request's newest reported review (ADR 0139, decision 9),
+   * and the lines every surface prints for it, fixed words and checked values. Absent from an
+   * older server.
+   */
+  review_record?: unknown;
+  review_record_lines?: string[];
+  /**
+   * What the depositor is asked to send when the review's license lineage needs action, or that an
+   * administrator recorded the evidence (ADR 0139, decision 7, amendment of 2026-11-25). Absent
+   * from an older server.
+   */
+  license_permission_lines?: string[];
 }
 
 export interface PublishRequestsResponse {
@@ -119,6 +139,10 @@ export interface PublishRequestsResponse {
     approval_in_flight?: boolean;
     // The request's block reason when it is blocked (`pr.*` carries the column).
     block_reason?: string | null;
+    // The depositor's resubmission note and the denial this request answers (ADR 0139, decision
+    // 5; `pr.*` carries both columns). Absent from an older backend, which means unknown.
+    resubmission_note?: string | null;
+    previous_request_id?: number | null;
   }>;
   count: number;
 }
@@ -142,6 +166,9 @@ export interface PublishRequestResponse {
   dataset_id: string;
   status: string;
   anonymous?: boolean;
+  // Whether the note sent with the request was recorded (ADR 0139, decision 5). Echoed like
+  // `anonymous`; absent from an older backend, which means unknown, never "dropped".
+  resubmission_note_recorded?: boolean;
   identifier_screen?: IdentifierScreenView;
   request_notice?: string[];
 }
@@ -186,12 +213,15 @@ export interface PublishApproveResponse {
  * `anonymous` asks for a RELEASE rather than a publication (#1408): the data
  * goes public while the repository stays private, the DOI stays reserved with
  * no curator, and the depositor is withheld everywhere NEMAR writes them. The
- * body is only sent when the flag is set, so an ordinary request stays exactly
- * the bodyless POST it has always been.
+ * body is only sent when the flag or a note is set, so an ordinary request stays
+ * exactly the bodyless POST it has always been.
+ *
+ * `note` is the resubmission note (ADR 0139, decision 5), already read by
+ * `readResubmissionNote`; the Worker reads it again and refuses what it cannot keep.
  */
 export async function requestPublication(
   datasetId: string,
-  options: { anonymous?: boolean } = {},
+  options: { anonymous?: boolean; note?: string } = {},
 ): Promise<PublishRequestResponse> {
   // `anonymous` is echoed by the server (#1408). The caller must print from
   // the ECHO rather than from `options.anonymous`: what matters to a depositor
@@ -200,11 +230,14 @@ export async function requestPublication(
   // older backend that does not know the flag.
   return request<PublishRequestResponse>(
     `/datasets/${datasetId}/publish/request`,
-    options.anonymous
+    options.anonymous || options.note !== undefined
       ? {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ anonymous: true }),
+          body: JSON.stringify({
+            ...(options.anonymous ? { anonymous: true } : {}),
+            ...(options.note !== undefined ? { resubmission_note: options.note } : {}),
+          }),
         }
       : { method: "POST" },
     true,
@@ -347,16 +380,137 @@ export async function denyPublication(
 }
 
 /**
+ * Restore a dataset's denied publication request to waiting for its decision (admin; ADR 0139,
+ * decision 4). `requestId` names the request the administrator read; the API refuses it when it is
+ * not the dataset's newest request.
+ */
+export async function restorePublication(
+  datasetId: string,
+  requestId?: number,
+): Promise<{ message: string; dataset_id: string; request_id: number }> {
+  return request<{ message: string; dataset_id: string; request_id: number }>(
+    `/admin/publish/${datasetId}/restore`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestId !== undefined ? { request_id: requestId } : {}),
+    },
+    true,
+  );
+}
+
+/** One source behind a lineage outcome, as `POST /admin/publish/:id/license-permission` lists it. */
+export interface LicensePermissionSource {
+  id: string;
+  license: string | null;
+  license_version: string | null;
+  outcome: string;
+}
+
+/** The answer of `POST /admin/publish/:id/license-permission`, a dry run or a recorded permission. */
+export interface LicensePermissionAnswer {
+  applied: boolean;
+  message: string;
+  dataset_id: string;
+  request_id: number;
+  review_id: number;
+  outcome: ActionRequiredOutcome;
+  target_license: string | null;
+  sources: LicensePermissionSource[];
+  ticket_id: number;
+  /** The ticket's subject and sender, shown so the administrator confirms it holds the evidence. */
+  ticket_subject: string;
+  ticket_sender: string;
+  ticket_sender_is_depositor: boolean;
+  ticket_warning: string | null;
+  request_line: string;
+  permission_id?: number;
+  line?: string | null;
+  /** What the record sent: the administrators' "Ready to approve" mail and the depositor's mail. */
+  mail?: RecordedMail;
+}
+
+/**
+ * Record license permission evidence against a dataset's active publication request (admin; ADR
+ * 0139 decision 7, amendment of 2026-11-25). A dry run unless `apply`; `requestId` names the
+ * request the administrator read, refused when it is not the active one. The evidence is the
+ * administrator's own summary of what the support ticket holds; the API never echoes it.
+ */
+export async function recordLicensePermission(
+  datasetId: string,
+  body: { ticketId: number; evidence: string; requestId?: number; apply: boolean },
+): Promise<LicensePermissionAnswer> {
+  return request<LicensePermissionAnswer>(
+    `/admin/publish/${datasetId}/license-permission`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ticket_id: body.ticketId,
+        evidence: body.evidence,
+        ...(body.requestId !== undefined ? { request_id: body.requestId } : {}),
+        ...(body.apply ? { apply: true } : {}),
+      }),
+    },
+    true,
+  );
+}
+
+/**
  * Re-run the identifier screen of a dataset's active publication request
  * (admin; epic #1610, phase 4). The admins are mailed when it reports.
  */
-export async function rerunIdentifierScreen(datasetId: string): Promise<{
+export async function rerunIdentifierScreen(
+  datasetId: string,
+  batchId?: number,
+): Promise<{
   dataset_id: string;
   request_id: number;
   status: string;
   identifier_screen: IdentifierScreenView;
 }> {
-  return request(`/admin/publish/${datasetId}/identifier-screen`, { method: "POST" }, true);
+  // With a batch id this is one screen of a paced re-screen: the Worker mails no per-request
+  // message and counts the screen toward the batch's digest.
+  return request(
+    `/admin/publish/${datasetId}/identifier-screen`,
+    batchId === undefined
+      ? { method: "POST" }
+      : { method: "POST", body: JSON.stringify({ batch_id: batchId }) },
+    true,
+  );
+}
+
+/**
+ * Create a paced re-screen for the active requests of `datasetIds` (admin; ADR 0086 amendment of
+ * 2026-11-25). `skipped` are the ids with no open request that is screened.
+ */
+export async function createScreenBatch(datasetIds: string[]): Promise<{
+  batch_id: number;
+  total: number;
+  skipped: string[];
+}> {
+  return request(
+    "/admin/publish/screen-batches",
+    { method: "POST", body: JSON.stringify({ dataset_ids: datasetIds }) },
+    true,
+  );
+}
+
+/** Stop a batch's dispatching: its digest follows when the screens already started report. */
+export async function closeScreenBatch(batchId: number): Promise<{ closed: boolean }> {
+  return request(`/admin/publish/screen-batches/${batchId}/close`, { method: "POST" }, true);
+}
+
+/**
+ * One call of the batch acknowledgment on a public upstream (card D3):
+ * `POST /admin/publish/acknowledge-batch`, a dry run unless the body says `apply: true`.
+ */
+export async function acknowledgeBatch(body: AckBatchRequest): Promise<AckBatchResponse> {
+  return request<AckBatchResponse>(
+    "/admin/publish/acknowledge-batch",
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
 }
 
 /**

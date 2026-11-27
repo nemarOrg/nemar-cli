@@ -110,6 +110,7 @@ export const ACCEPTED_BODY = {
   dataset_id: DATASET_ID,
   status: "requested",
   anonymous: false,
+  resubmission_note_recorded: false,
   identifier_screen: {
     state: "pending",
     headline: "Identifier screen: running",
@@ -139,6 +140,7 @@ export function statusBody(over: Record<string, unknown> = {}) {
     approved_at: null,
     denied_at: null,
     denied_reason: null,
+    denied_by_kind: null,
     withdrawn: false,
     withdrawn_at: null,
     block_reason: "bids_validation_pending",
@@ -155,6 +157,11 @@ export function statusBody(over: Record<string, unknown> = {}) {
     current_step: null,
     last_error: null,
     updated_at: "2026-10-07 20:00:00",
+    // No review has reported for this request, so there is no record (ADR 0139, decision 9).
+    review_record: null,
+    review_record_lines: [],
+    // No review reported a lineage that needs action (ADR 0139, decision 7, amendment 2026-11-25).
+    license_permission_lines: [],
     ...over,
   };
 }

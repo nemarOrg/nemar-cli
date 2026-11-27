@@ -103,6 +103,82 @@ const modelRequests: string[] = [];
 let modelStatus = 200;
 let modelServer: ReturnType<typeof Bun.serve>;
 const MODEL_SUMMARY = "SUMMARY-FROM-THE-MODEL-STAND-IN";
+const MODEL_NOTE = "NOTE-FROM-THE-MODEL-STAND-IN";
+
+/**
+ * What the stand-in model answers: every question passed (the default), or the README failed with
+ * a blocker that may deny automatically (ADR 0139). Reset before every test.
+ */
+let modelFails = false;
+
+function modelOutput(): Record<string, unknown> {
+  return {
+    questions: {
+      complete_and_honest: modelFails ? "fail" : "pass",
+      meets_standards: "pass",
+      authors_and_license: "pass",
+      name_adequate: "pass",
+    },
+    findings: modelFails
+      ? [
+          {
+            question: "complete_and_honest",
+            severity: "blocker",
+            code: "readme_missing_or_stub",
+            document: "readme",
+            note: MODEL_NOTE,
+          },
+        ]
+      : [],
+    summary: MODEL_SUMMARY,
+    steering: false,
+  };
+}
+
+/** A streamed answer, as the Messages API sends one (the confirming run streams). */
+function streamedAnswer(model: string): Response {
+  const text = JSON.stringify(modelOutput());
+  const events: [string, Record<string, unknown>][] = [
+    [
+      "message_start",
+      {
+        type: "message_start",
+        message: {
+          id: "msg_stand_in_stream",
+          type: "message",
+          role: "assistant",
+          model,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 1 },
+        },
+      },
+    ],
+    [
+      "content_block_start",
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    ],
+    [
+      "content_block_delta",
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+    ],
+    ["content_block_stop", { type: "content_block_stop", index: 0 }],
+    [
+      "message_delta",
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 10 },
+      },
+    ],
+    ["message_stop", { type: "message_stop" }],
+  ];
+  return new Response(
+    events.map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`).join(""),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
 
 function modelAnswer(): Response {
   if (modelStatus !== 200) {
@@ -120,22 +196,7 @@ function modelAnswer(): Response {
     type: "message",
     role: "assistant",
     model: "claude-haiku-5-5",
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify({
-          questions: {
-            complete_and_honest: "pass",
-            meets_standards: "pass",
-            authors_and_license: "pass",
-            name_adequate: "pass",
-          },
-          findings: [],
-          summary: MODEL_SUMMARY,
-          steering: false,
-        }),
-      },
-    ],
+    content: [{ type: "text", text: JSON.stringify(modelOutput()) }],
     stop_reason: "end_turn",
     stop_sequence: null,
     usage: { input_tokens: 10, output_tokens: 10 },
@@ -167,8 +228,12 @@ let backend: ReturnType<typeof Bun.serve>;
 let backendUrl: string;
 let root: string;
 
+/** Bindings a test adds (the automatic denial's mode); reset before every test. */
+let envExtra: Partial<Bindings> = {};
+
 function env(): Bindings {
   return {
+    ...envExtra,
     DB: realD1(db),
     ENVIRONMENT: "production",
     GITHUB_ADMIN_PAT: GITHUB_PAT,
@@ -190,6 +255,19 @@ beforeAll(() => {
         dispatches.push((await req.json()) as Dispatch);
         return new Response(null, { status: 204 });
       }
+      // The contents API at a commit, served from the dataset's own git repository, as GitHub
+      // would: the review's inputs route reads the description and README at the reviewed head.
+      const contents = /^\/repos\/nemarDatasets\/[a-z0-9]+\/contents\/(.+)$/.exec(url.pathname);
+      const ref = url.searchParams.get("ref") ?? "";
+      const dir = repoOfHead.get(ref);
+      if (req.method === "GET" && contents && dir) {
+        try {
+          const text = git(dir, "show", `${ref}:${contents[1]}`);
+          return Response.json({ encoding: "base64", content: btoa(`${text}\n`) });
+        } catch {
+          return new Response("not found", { status: 404 });
+        }
+      }
       return new Response("not found", { status: 404 });
     },
   });
@@ -199,8 +277,12 @@ beforeAll(() => {
   modelServer = Bun.serve({
     port: 0,
     async fetch(req) {
-      modelRequests.push(await req.text());
-      return modelAnswer();
+      const text = await req.text();
+      modelRequests.push(text);
+      const asked = JSON.parse(text) as { model: string; stream?: boolean };
+      return asked.stream === true && modelStatus === 200
+        ? streamedAnswer(asked.model)
+        : modelAnswer();
     },
   });
   for (const k of SDK_ENV) {
@@ -231,6 +313,8 @@ beforeEach(async () => {
   dispatches = [];
   modelRequests.length = 0;
   modelStatus = 200;
+  modelFails = false;
+  envExtra = {};
   await seedUser(db, "e2eadmin", "admin", ADMIN_KEY, {
     email: ADMIN_EMAIL,
     givenName: "Grace",
@@ -277,6 +361,8 @@ interface Dataset {
 }
 
 let datasetSeq = 0;
+/** Each dataset's repository by its head, for the contents API stand-in. */
+const repoOfHead = new Map<string, string>();
 
 /** A dataset on `main`, laid out as the review job finds it on a runner. */
 function newDataset(description: Record<string, unknown> = GOOD_DESCRIPTION): Dataset {
@@ -303,6 +389,7 @@ function newDataset(description: Record<string, unknown> = GOOD_DESCRIPTION): Da
   git(dir, "add", "-A");
   git(dir, "commit", "-q", "-m", "initial");
   const head = git(dir, "rev-parse", "HEAD");
+  repoOfHead.set(head, dir);
   // What the workflow's own steps leave beside the clone: the tags and the BIDS validation runs.
   writeFileSync(join(temp, "tags.txt"), "");
   writeFileSync(
@@ -594,12 +681,21 @@ describe("a request whose review passes", () => {
       });
       expect(reviews()[0]?.claimed_at).not.toBeNull();
       expect(requestRow(requestId).status).toBe("requested");
+      // The record (ADR 0139, decision 9): the job's part from its report, the screen's from the
+      // Worker's own copy of the screen report.
+      expect(reviews()[0]).toMatchObject({
+        scanner_id: "identifier-scan@abcdef1",
+        prompt_version: "publication-review-prompt/2",
+        resolver_version: "license-lineage/2",
+        models: JSON.stringify([{ model: "claude-haiku-5-5", effort: "high" }]),
+      });
+      expect(String(reviews()[0]?.input_digest)).toMatch(/^[0-9a-f]{64}$/);
 
       // MAIL: exactly one, now, carrying the review's section.
       const mails = await adminMails(calls);
       expect(mails).toHaveLength(1);
       const text = textOf(mails[0]?.html ?? "");
-      expect(text).toContain("Publication review: pass");
+      expect(text).toContain("Ready to approve");
       expect(text).toContain(NOT_ASSESSED_LINE);
       expect(text).toContain(`nemar admin dataset publish approve ${DATASET}`);
       // The model's own words are not in the mail, and no token or nonce is.
@@ -680,6 +776,14 @@ describe("a request whose submission minimum failed at the reviewed commit", () 
         reasons,
       });
       expect(text).not.toContain(MODEL_SUMMARY);
+      // And the review's reproducibility record (ADR 0139, decision 9), in fixed words.
+      const shown = JSON.parse(text) as { review_record: unknown; review_record_lines: string[] };
+      expect(shown.review_record).toMatchObject({
+        head_sha: ds.head,
+        scanner_id: "identifier-scan@abcdef1",
+        prompt_version: "publication-review-prompt/2",
+      });
+      expect(shown.review_record_lines).toContain(`Reviewed commit: ${ds.head}`);
 
       // MAIL: exactly one, after the review, about the blocked request, with the review's section.
       const mails = await adminMails(calls);
@@ -732,7 +836,7 @@ describe("a job that posts an error word", () => {
       expect(mails).toHaveLength(1);
       const text = textOf(mails[0]?.html ?? "");
       expect(text).toContain("Publication review: action required");
-      expect(text).not.toContain("Publication review: pass");
+      expect(text).not.toMatch(/Publication review: pass|Ready to approve/);
       const detail = await adminReview();
       expect(detail.outcome).toBe("action_required");
       expect(detail.reasons.map((r) => r.code)).toContain("review_could_not_run");
@@ -781,6 +885,103 @@ describe("a job that posts an error word", () => {
       expect((await adminReview()).outcome).toBe("pass");
       // This screen result's mail went once, and a later pass does not send another.
       expect(await adminMails(calls)).toHaveLength(1);
+    });
+  });
+});
+
+describe("a request whose review fails, under the automatic denial (ADR 0139)", () => {
+  test("the confirming run goes through the same workflow on the confirming model over the same digest, and denies", async () => {
+    envExtra = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    modelFails = true;
+    const serviceId = await seedUser(
+      db,
+      "nemarAdmin",
+      "admin",
+      "e2e-nemaradmin-key-0123456789abcdef",
+      {
+        email: "e2enemaradmin@example.org",
+      },
+    );
+    await withFakeResend(async (calls) => {
+      const ds = newDataset();
+      const requestId = await pendingRequest();
+      expect(await postScreenResult(requestId, ds.head)).toBe(200);
+      await app.settled();
+      expect(dispatches).toHaveLength(1);
+
+      // The first run: the review's own model, at its effort, not streamed.
+      const first = await runWorkflow(dispatches[0] as Dispatch, ds);
+      expect(first.claimed).toBe(true);
+      expect(first.exit).toBe(0);
+      await app.settled();
+      expect(modelRequests).toHaveLength(1);
+      const asked1 = JSON.parse(modelRequests[0] as string);
+      expect(asked1).toMatchObject({
+        model: "claude-haiku-5-5",
+        output_config: { effort: "high" },
+      });
+      expect(asked1.stream).toBeUndefined();
+
+      // The Worker found the fail eligible and dispatched the confirming run, through the same
+      // event type and payload shape: the workflow is unchanged.
+      expect(reviews()).toHaveLength(2);
+      const [firstRow, confirmRow] = reviews() as [
+        Record<string, unknown>,
+        Record<string, unknown>,
+      ];
+      expect(firstRow).toMatchObject({ state: "reported", verdict: "fail", confirm_of: null });
+      expect(confirmRow).toMatchObject({ state: "dispatched", confirm_of: firstRow.id });
+      expect(dispatches).toHaveLength(2);
+      const confirmDispatch = dispatches[1] as Dispatch;
+      expect(confirmDispatch.event_type).toBe("run-publication-review");
+      expect(Object.keys(confirmDispatch.client_payload).sort()).toEqual(
+        Object.keys((dispatches[0] as Dispatch).client_payload).sort(),
+      );
+      expect(confirmDispatch.client_payload.review_id).toBe(confirmRow.id as number);
+      // The administrators' mail waits for the confirming run.
+      expect(await adminMails(calls)).toHaveLength(0);
+
+      // The confirming run: the same job, told its model by the Worker's inputs route.
+      const second = await runWorkflow(confirmDispatch, ds);
+      expect(second.claimed).toBe(true);
+      expect(second.exit).toBe(0);
+      await app.settled();
+      expect(modelRequests).toHaveLength(2);
+      const asked2 = JSON.parse(modelRequests[1] as string);
+      expect(asked2).toMatchObject({
+        model: "claude-sonnet-5-5",
+        output_config: { effort: "max" },
+        stream: true,
+      });
+      // The same prompt but for the run's own fence nonce, which the digest replaces by a fixed
+      // one: so the same digest.
+      const unfenced = (m: unknown) => JSON.stringify(m).replaceAll(/[0-9a-f]{32}/g, "NONCE");
+      expect(asked2.system).toBe(asked1.system);
+      expect(unfenced(asked2.messages)).toBe(unfenced(asked1.messages));
+      const [r1, r2] = reviews() as [Record<string, unknown>, Record<string, unknown>];
+      expect(r2).toMatchObject({
+        state: "reported",
+        verdict: "fail",
+        models: JSON.stringify([{ model: "claude-sonnet-5-5", effort: "max" }]),
+      });
+      expect(r2.input_digest).toBe(r1.input_digest);
+
+      // Denied, as nemarAdmin, with the closed reason codes.
+      expect(r1.auto_deny_state).toBe("denied");
+      expect(requestRow(requestId)).toMatchObject({
+        status: "denied",
+        auto_denied: 1,
+        denied_by: serviceId,
+        denied_reason: "question_failed",
+      });
+      // The depositor's mail, and never the model's words; no administrator mail now.
+      const sends = calls.filter((c) => c.path === "/emails").map(asSend);
+      const denial = sends.filter((m) => m.subject.includes("denied by an automated agent"));
+      expect(denial).toHaveLength(1);
+      expect(denial[0]?.html).not.toContain(MODEL_SUMMARY);
+      expect(denial[0]?.html).not.toContain(MODEL_NOTE);
+      expect(textOf(denial[0]?.html ?? "")).toContain(`Input digest (SHA-256): ${r1.input_digest}`);
+      expect(await adminMails(calls)).toHaveLength(0);
     });
   });
 });

@@ -74,6 +74,7 @@ import {
   verdictOf,
 } from "../shared/publication-review";
 import { fence } from "../shared/untrusted-text";
+import { emptyInputs } from "./helpers/review-inputs";
 
 let root: string;
 const GIT_ENV = {
@@ -309,6 +310,8 @@ interface RunOptions {
   bids?: string | null;
   head?: string;
   fetchedHead?: string;
+  /** What the Worker's inputs route answers with; an empty body when absent. */
+  inputs?: unknown;
 }
 
 let fileSeq = 0;
@@ -326,6 +329,7 @@ function args(ds: Dataset, o: RunOptions = {}) {
     tagsFile: sideFile(o.tags === undefined ? "" : o.tags),
     bidsRunsFile: sideFile(o.bids === undefined ? BIDS_PASS(ds.head) : o.bids),
     anonymous: o.anonymous ?? false,
+    fetchInputs: async () => o.inputs ?? emptyInputs(),
   };
 }
 
@@ -598,6 +602,7 @@ describe("the model receives cleared prose and numbers, and nothing else", () =>
     expect(Object.keys(facts).sort()).toEqual([
       "description_keys_not_shown",
       "documents",
+      "metadata",
       "name_length",
       "release",
       "structure",
@@ -1364,13 +1369,9 @@ describe("runPublicationReview: the job around the model call", () => {
       required: string[];
       properties: Record<string, unknown>;
     };
-    expect(schema.required.sort()).toEqual(["findings", "questions", "steering", "summary"]);
-    expect(Object.keys(schema.properties).sort()).toEqual([
-      "findings",
-      "questions",
-      "steering",
-      "summary",
-    ]);
+    const fields = ["findings", "note_addresses_reasons", "questions", "steering", "summary"];
+    expect(schema.required.sort()).toEqual(fields);
+    expect(Object.keys(schema.properties).sort()).toEqual(fields);
     const items = (schema.properties.findings as { items: { properties: object } }).items;
     expect(Object.keys(items.properties)).toEqual([
       "question",
@@ -1549,7 +1550,10 @@ describe("main: the whole script, from git to the callback", () => {
     body: Record<string, unknown>;
   }
   const received: Received[] = [];
+  /** The inputs requests the job made, apart from the results it posted. */
+  const inputsAsked: Received[] = [];
   let workerStatus = 200;
+  let inputsStatus = 200;
   let worker: ReturnType<typeof Bun.serve>;
   let otherWorker: ReturnType<typeof Bun.serve>;
   beforeAll(() => {
@@ -1557,12 +1561,19 @@ describe("main: the whole script, from git to the callback", () => {
       Bun.serve({
         port: 0,
         async fetch(req) {
-          received.push({
+          const entry = {
             from,
             path: new URL(req.url).pathname,
             token: req.headers.get("X-Webhook-Token"),
             body: (await req.json()) as Record<string, unknown>,
-          });
+          };
+          if (entry.path === "/webhooks/publication-review-inputs") {
+            inputsAsked.push(entry);
+            return inputsStatus === 200
+              ? Response.json(emptyInputs())
+              : Response.json({ error: "x" }, { status: inputsStatus });
+          }
+          received.push(entry);
           return Response.json({ ok: true }, { status: workerStatus });
         },
       });
@@ -1575,7 +1586,9 @@ describe("main: the whole script, from git to the callback", () => {
   });
   beforeEach(() => {
     received.length = 0;
+    inputsAsked.length = 0;
     workerStatus = 200;
+    inputsStatus = 200;
   });
 
   const TOKEN = "callback-token-for-the-test";

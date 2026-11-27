@@ -88,16 +88,21 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
   publish: [
     "PUBLICATION_STEPS",
+    "acknowledgeBatch",
     "approvePublication",
+    "closeScreenBatch",
     "commentOnPublication",
+    "createScreenBatch",
     "denyPublication",
     "getPublicationReview",
     "getPublishStatus",
     "isRetryablePublishError",
     "listPublishRequests",
+    "recordLicensePermission",
     "requestPublication",
     "rerunIdentifierScreen",
     "resendPublishNotification",
+    "restorePublication",
     "reviewErrorCode",
     "startPublicationReview",
     "stepIndexFor",
@@ -151,6 +156,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getEmailPreferences",
     "getFleetDrift",
     "getImportStatus",
+    "getLicenseLineage",
     "getMailAvailability",
     "getMailTicket",
     "getNeurobagelStatus",
@@ -326,6 +332,8 @@ const INTERNAL_WIRING = ["request"];
  * protection every other symbol has.
  */
 const POST_SPLIT_ADDITIONS = [
+  "restorePublication", // epic #2182 card B5: POST /admin/publish/:id/restore (ADR 0139)
+  "recordLicensePermission", // epic #2182 card B6: POST /admin/publish/:id/license-permission (ADR 0139)
   "recordDepositAttestation", // epic #1610 phase 3, ADR 0087: PUT /datasets/:id/attestation
   "getApiUrl", // #1401: the data plane is this origin + /data (lib/http-download.ts)
   "mintDocsSession", // #1341, epic #1336 phase 3: POST /auth/docs/cli-session
@@ -374,6 +382,8 @@ const POST_SPLIT_ADDITIONS = [
   "uploadTierOf", // #1251, ADR 0040: upload / browse / unknown from a listed row
   "zarrFidelitySweep", // #1068, epic #1181 phase 8: POST /admin/datasets/zarr-fidelity-sweep
   "upstreamBackfill", // #1908, epic #1046 phase 2, ADR 0111: POST /admin/datasets/upstream-backfill
+  "getLicenseLineage", // epic #2182 card D1, ADR 0139: GET /admin/datasets/:id/license-lineage
+  "acknowledgeBatch", // epic #2182 card D3: POST /admin/publish/acknowledge-batch
   "upstreamStatus", // #1910, epic #1046 phase 4, ADR 0111: GET /admin/upstream-status
   "anonymitySweep", // #1409, epic #1406: POST /admin/datasets/anonymity-sweep
   "anonymitySweepReset", // the same route with ?reset=1
@@ -392,6 +402,8 @@ const POST_SPLIT_ADDITIONS = [
   "getPublicationReview", // ADR 0102: GET /admin/publish/:id/review
   "startPublicationReview", // ADR 0102: POST /admin/publish/:id/review/start
   "commentOnPublication", // ADR 0102: POST /admin/publish/:id/comment (mails the depositor an administrator's words)
+  "createScreenBatch", // ADR 0086 amendment of 2026-11-25: POST /admin/publish/screen-batches (a paced re-screen)
+  "closeScreenBatch", // ADR 0086 amendment of 2026-11-25: POST /admin/publish/screen-batches/:id/close (stop dispatching)
   "reviewErrorCode", // ADR 0102: the closed word of a review route's refusal (rawBody.code, not ApiError.code)
   "isRouteNotFound", // a backend that predates a route answers its not-found body: say so, do not call it a bug
   "hasReleasedVersion", // ADR 0111 decision 10: the import's upstream-moved guard asks GET /datasets/:id/versions

@@ -27,6 +27,7 @@ import type {
   PublicationOutcome,
   PublicationReviewDescription,
   PublicationReviewEvidence,
+  PublicationReviewReproducibility,
   PublicationReviewState,
   PublicationRunError,
   Question,
@@ -206,6 +207,12 @@ export interface PublicationReviewRecord {
   /** The model's summary, sanitized. */
   summary: string | null;
   evidence: PublicationReviewEvidence | null;
+  /**
+   * The reproducibility record (ADR 0139, decision 9): the commit, the scanner and its readers, the
+   * resolver, the models, the prompt version and the input digest. Null for a review that did not
+   * report, or one reported before the record existed. Optional so an older server's answer reads.
+   */
+  reproducibility?: PublicationReviewReproducibility | null;
 }
 
 /**
@@ -251,6 +258,18 @@ export interface PublicationReviewDetail {
   /** The request's block reason when it is blocked, as a plain word (`shownBlockReason`), else null. */
   block_reason: string | null;
   /**
+   * The depositor's resubmission note (ADR 0139, decision 5), or null when there is none. The
+   * depositor's own text: shown to administrators under a label that names its author
+   * (`RESUBMISSION_NOTE_LABEL`), never as NEMAR's words. Optional because an older Worker sends
+   * none; absent means unknown, never "no note".
+   */
+  resubmission_note?: string | null;
+  /**
+   * The id of the denied request this one answers (migration 0151), or null for a first request
+   * and for one that follows a withdrawal. Optional for the same reason as the note.
+   */
+  previous_request_id?: number | null;
+  /**
    * The request is `approving`, or `blocked` by the owner-name walk-back, and a step after the
    * validation-only ones completed (`hasStartedPublishing`): a resume passes no gate, and
    * `approve` without `--resume` would start the run over.
@@ -284,6 +303,18 @@ export interface PublicationReviewDetail {
    */
   screen_gate: ScreenGate | "exempt";
   reasons: ReasonView[];
+  /**
+   * The recorded license permission that covers the review in force's lineage and clears
+   * `license_lineage_unconfirmed` (ADR 0139, decision 7, amendment of 2026-11-25), or null: who,
+   * when, the support ticket and the line every surface prints. Never the evidence text. Optional
+   * because an older Worker sends none.
+   */
+  license_permission?: {
+    recorded_at: string;
+    recorded_by: string | null;
+    ticket_id: number;
+    line: string;
+  } | null;
   /** Headline, tone, lines (the standing line last) and the next command. */
   description: PublicationReviewDescription;
   review: PublicationReviewRecord | null;

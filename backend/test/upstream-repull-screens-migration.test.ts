@@ -33,12 +33,12 @@ import { startRepullGitHub } from "./helpers/repull-github-standin";
 import { type Row, SHA, rowAt } from "./helpers/repull-rows";
 
 /**
- * The table's words as they stand. Migration 0106 created it; 0150 rebuilt it to add
+ * The table's words as they stand. Migration 0106 created it; 0155 rebuilt it to add
  * `partially-screened` (report version 2) to both status CHECKs, so the words are pinned against
  * the rebuild, which repeats every other line of 0106 verbatim.
  */
 const WORDS_SQL = readFileSync(
-  join(MIGRATIONS_DIR, "0150_repull_screens_partially_screened.sql"),
+  join(MIGRATIONS_DIR, "0155_repull_screens_partially_screened.sql"),
   "utf-8",
 );
 

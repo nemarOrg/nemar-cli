@@ -78,6 +78,15 @@ function evidence(over: Partial<PublicationReviewEvidence> = {}): PublicationRev
       sidecars_read: 4,
       sidecars_total: 60,
     },
+    inputs: {
+      enrichment: "absent",
+      registry_records: "absent",
+      lineage: "absent",
+      coverage: "absent",
+      resubmission_note: "absent",
+      previous_denial: "absent",
+    },
+    lineage: null,
     ...over,
   };
 }
@@ -265,7 +274,7 @@ describe("the builder checks at run time that pre-send cleared each string, what
       expect(exported.some(([, v]) => v instanceof Set || v instanceof Map)).toBe(false);
       expect(
         Object.keys(presendModule).filter(
-          (k) => k !== "isCleared" && /regist|add|clear|mark/i.test(k),
+          (k) => k !== "isCleared" && k !== "isInputCleared" && /regist|add|clear|mark/i.test(k),
         ),
       ).toEqual([]);
       expect(typeof presendModule.isCleared).toBe("function");
@@ -346,6 +355,7 @@ describe("what the model is shown", () => {
     expect(Object.keys(f).sort()).toEqual([
       "description_keys_not_shown",
       "documents",
+      "metadata",
       "name_length",
       "release",
       "structure",
@@ -526,9 +536,19 @@ describe("the output schema and the assembled report", () => {
     };
     walk(PUBLICATION_OUTPUT_SCHEMA, "schema");
     const props = (PUBLICATION_OUTPUT_SCHEMA as { properties: Record<string, unknown> }).properties;
-    expect(Object.keys(props).sort()).toEqual(["findings", "questions", "steering", "summary"]);
+    expect(Object.keys(props).sort()).toEqual([
+      "findings",
+      "note_addresses_reasons",
+      "questions",
+      "steering",
+      "summary",
+    ]);
     const text = JSON.stringify(PUBLICATION_OUTPUT_SCHEMA);
-    for (const code of PUBLICATION_FINDING_CODES) expect(text).toContain(`"${code}"`);
+    for (const code of PUBLICATION_FINDING_CODES) {
+      // The platform's own codes are not the model's to file (ADR 0139, decision 7).
+      if (code === "source_credit_missing") expect(text).not.toContain(`"${code}"`);
+      else expect(text).toContain(`"${code}"`);
+    }
     // Only string enums, which the structured-output feature is known to support.
     expect(text).not.toMatch(/anyOf|oneOf|\["string","null"\]|"null"/);
   });
@@ -540,10 +560,20 @@ describe("the output schema and the assembled report", () => {
       f,
     );
     expect(report.model).toBe(PUBLICATION_REVIEW_MODEL);
-    expect(report.v).toBe(1);
+    expect(report.v).toBe(2);
     expect(report.evidence).toEqual(f);
     expect(Object.keys(report).sort()).toEqual(
-      ["evidence", "findings", "model", "questions", "steering", "summary", "v"].sort(),
+      [
+        "evidence",
+        "findings",
+        "model",
+        "note_answer",
+        "questions",
+        "record",
+        "steering",
+        "summary",
+        "v",
+      ].sort(),
     );
   });
 

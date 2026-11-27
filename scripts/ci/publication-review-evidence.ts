@@ -39,12 +39,15 @@
 
 import { execFileSync } from "node:child_process";
 import { formatCoverage, readerMatch } from "../../shared/identifier-readers";
+import type { FindingKind } from "../../shared/identifier-scan";
 import { SEMVER } from "../../shared/pr-review";
 import {
   type BidsState,
   CHANGES_CANDIDATES,
   type ClearedDocuments,
+  type ClearedInputs,
   DOCUMENT_BYTE_CEILING,
+  type InputPreSendResult,
   LICENSE_CANDIDATES,
   MAX_COUNT,
   MAX_SAMPLING_RATE_HZ,
@@ -59,6 +62,7 @@ import {
   type ReviewDatatype,
   type ReviewDocument,
   type ReviewFacts,
+  type ReviewLineage,
   type StructuralSummary,
   type TagState,
   type VersionShape,
@@ -587,6 +591,49 @@ export interface EvidenceParts {
   bids: BidsState;
   presend: PreSendResult;
   summary: StructuralSummary;
+  /**
+   * The widened inputs' pre-send result and the lineage facts (ADR 0139, decision 6);
+   * {@link NO_INPUTS} when absent.
+   */
+  inputs?: EvidenceInputs;
+}
+
+/** What the widened inputs add to the evidence block. */
+export interface EvidenceInputs {
+  presend: InputPreSendResult;
+  lineage: ReviewLineage | null;
+}
+
+/**
+ * The inputs of a run that has none to read (the offline calibration, which talks to no Worker):
+ * every section absent and no lineage, so nothing is sent and no lineage reason is derived.
+ */
+export const NO_INPUTS: EvidenceInputs = {
+  presend: {
+    cleared: {},
+    states: {
+      enrichment: "absent",
+      registry_records: "absent",
+      lineage: "absent",
+      coverage: "absent",
+      resubmission_note: "absent",
+      previous_denial: "absent",
+    },
+    withheld_findings: {},
+  },
+  lineage: null,
+};
+
+/** Two count maps added together, key by key. */
+function addFindingCounts(
+  a: Partial<Record<FindingKind, number>>,
+  b: Partial<Record<FindingKind, number>>,
+): Partial<Record<FindingKind, number>> {
+  const out: Partial<Record<FindingKind, number>> = { ...a };
+  for (const [kind, n] of Object.entries(b) as [FindingKind, number][]) {
+    out[kind] = (out[kind] ?? 0) + n;
+  }
+  return out;
 }
 
 /**
@@ -604,10 +651,15 @@ export function buildPublicationEvidence(parts: EvidenceParts): ReviewFacts {
     bids: parts.bids,
     ...parts.description,
     documents: parts.presend.states,
-    withheld_findings: parts.presend.withheld_findings,
+    withheld_findings: addFindingCounts(
+      parts.presend.withheld_findings,
+      (parts.inputs ?? NO_INPUTS).presend.withheld_findings,
+    ),
     description_keys_shown: parts.presend.description_keys_shown,
     description_keys_not_shown: parts.presend.description_keys_not_shown,
     summary: parts.summary,
+    inputs: (parts.inputs ?? NO_INPUTS).presend.states,
+    lineage: (parts.inputs ?? NO_INPUTS).lineage,
   });
 }
 
@@ -627,6 +679,8 @@ export interface DocumentEvidenceInputs {
   /** The BIDS validation workflow's runs at `head`, or `null` when they could not be read (`unknown`). */
   bidsRuns: string | null;
   summary: StructuralSummary;
+  /** The widened inputs, examined by pre-send; {@link NO_INPUTS} when there are none to read. */
+  inputs?: EvidenceInputs;
 }
 
 /**
@@ -642,7 +696,7 @@ export interface DocumentEvidenceInputs {
 export function evidenceFromDocuments(
   docs: Record<ReviewDocument, RawDocument>,
   inputs: DocumentEvidenceInputs,
-): { facts: ReviewFacts; cleared: ClearedDocuments } {
+): { facts: ReviewFacts; cleared: ClearedDocuments; clearedInputs: ClearedInputs } {
   const descriptionState = docs.dataset_description.state;
   if (descriptionState !== "present" && descriptionState !== "absent") {
     throw new PublicationEvidenceError("description_unreadable");
@@ -672,6 +726,11 @@ export function evidenceFromDocuments(
     bids: inputs.bidsRuns === null ? "unknown" : bidsState(inputs.bidsRuns, inputs.head),
     presend: checked,
     summary: inputs.summary,
+    inputs: inputs.inputs ?? NO_INPUTS,
   });
-  return { facts, cleared: checked.cleared };
+  return {
+    facts,
+    cleared: checked.cleared,
+    clearedInputs: (inputs.inputs ?? NO_INPUTS).presend.cleared,
+  };
 }

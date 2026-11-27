@@ -25,6 +25,7 @@ export interface ResendSendBody {
   to: string[];
   subject: string;
   html: string;
+  text?: string;
 }
 
 /** Narrow a captured call to the single-send shape (`POST /emails`). */
