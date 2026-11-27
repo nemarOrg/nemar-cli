@@ -1,0 +1,4 @@
+# The license matcher of the publication review (ADR 0142): ScanCode toolkit, pinned.
+# pluggy is capped because ScanCode 32.5.0 with pluggy 1.7 fails at start ("did not find any 'pre_scan' hooks").
+scancode-toolkit==32.5.0
+pluggy<1.6

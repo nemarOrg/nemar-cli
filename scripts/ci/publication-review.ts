@@ -12,7 +12,14 @@
  *   bun run scripts/ci/publication-review.ts review \
  *     --repo-dir DIR --head SHA --fetched-head SHA --tags-file FILE --bids-runs-file FILE \
  *     --review-id N --request-id N --dataset nmNNNNNN --anonymous true|false \
- *     --environment production|dev
+ *     --environment production|dev [--license-scan-dir DIR]
+ *
+ * **LICENSE is identified by a pinned matcher** (ADR 0142, section 1). `--license-scan-dir` names the
+ * directory the workflow's sandboxed ScanCode step wrote (`scripts/ci/license-file-fact.ts` reads
+ * it); without it, the identification is `unreadable` and the matcher word `unavailable`. In this
+ * phase the identification changes nothing the model sees, the report or the input digest: the
+ * script logs one fixed line, `license_file <state>; matcher <word>`, never the SPDX identifier or
+ * any text, and returns the identification beside the result.
  *
  * The callback token comes from the environment (PUBLICATION_REVIEW_CALLBACK_TOKEN), never argv. A
  * job that fails before this script can report is reported by the workflow's own curl step, which
@@ -66,6 +73,13 @@ import {
   parseReviewInputs,
 } from "../../shared/publication-review";
 import {
+  type LicenseIdentification,
+  type ReadScanOptions,
+  identifyLicenseFile,
+  licenseFieldOf,
+  readScanOutput,
+} from "./license-file-fact";
+import {
   PublicationEvidenceError,
   SHA40,
   evidenceFromDocuments,
@@ -110,9 +124,10 @@ export const CONFIRM_MAX_TOKENS = 128_000;
 
 /**
  * Every call's deadline, the first run's and the confirming run's. It keeps the call inside the
- * workflow's 20-minute limit with the steps before it; a run that reaches it ends
+ * workflow's limit with the steps before it (20 minutes, and 28 once the license matcher's steps
+ * of ADR 0142 are deployed: 8 more for their own limits); a run that reaches it ends
  * `model_unavailable`, and a confirming run that does not report never confirms anything. A job
- * that still runs past 20 minutes is cancelled, reports `workflow_failed`, and the Worker's
+ * that still runs past its limit is cancelled, reports `workflow_failed`, and the Worker's
  * 30-minute watchdog is behind that.
  */
 export const CONFIRM_DEADLINE_MS = 12 * 60_000;
@@ -135,9 +150,16 @@ export const REVIEW_CALL: ModelCallShape = {
 /** The run errors this script may post: everything the Worker does not write itself. */
 export type JobRunError = Exclude<PublicationRunError, (typeof WORKER_ONLY_RUN_ERRORS)[number]>;
 
-export type PublicationReviewResult =
+export type PublicationReviewResult = (
   | { outcome: "reported"; report: PublicationReviewReport }
-  | { outcome: "error"; error: JobRunError; diag?: string };
+  | { outcome: "error"; error: JobRunError; diag?: string }
+) & {
+  /**
+   * LICENSE's identification, when the run got as far as reading the root documents. Internal:
+   * it is not posted in this phase (ADR 0142 decision 2's deploy order).
+   */
+  licenseFile?: LicenseIdentification;
+};
 
 class RunFailure extends Error {
   readonly error: JobRunError;
@@ -164,6 +186,34 @@ export interface ReviewArgs {
    * `inputs_unavailable`.
    */
   fetchInputs: () => Promise<unknown>;
+  /** The workflow's license scan directory (ADR 0142), or undefined when the job ran no scan. */
+  licenseScanDir?: string;
+  /** Tests only: the owners the scan files must have (the job's defaults otherwise). */
+  scanOptions?: ReadScanOptions;
+  /** Where the fixed log line goes; the job's standard output. */
+  log?: (line: string) => void;
+}
+
+/**
+ * LICENSE's identification for one review. The scan directory is read only for a LICENSE that is
+ * text in git and was read in full; its blob id ties the scan to this commit's file.
+ */
+export function identifyReviewLicense(
+  args: Pick<ReviewArgs, "licenseScanDir" | "scanOptions">,
+  tree: Awaited<ReturnType<typeof readTree>>,
+  docs: ReturnType<typeof readRootDocuments>,
+): LicenseIdentification {
+  const document = docs.license;
+  const entry = tree.entries.find((e) => e.path === "LICENSE");
+  const oid = document.state === "present" && entry !== undefined ? entry.oid : null;
+  return identifyLicenseFile({
+    document: { state: document.state, text: document.text },
+    licenseField: licenseFieldOf(docs.dataset_description.text),
+    scan:
+      args.licenseScanDir === undefined
+        ? null
+        : readScanOutput(args.licenseScanDir, oid, args.scanOptions),
+  });
 }
 
 /** Map anything that went wrong to a fixed word. The error's text is never forwarded. */
@@ -286,6 +336,17 @@ function readText(path: string): string | null {
  * and only then is the model called.
  */
 export async function runPublicationReview(args: ReviewArgs): Promise<PublicationReviewResult> {
+  let licenseFile: LicenseIdentification | undefined;
+  const result = await reviewOnce(args, (id) => {
+    licenseFile = id;
+  });
+  return licenseFile === undefined ? result : { ...result, licenseFile };
+}
+
+async function reviewOnce(
+  args: ReviewArgs,
+  onLicense: (id: LicenseIdentification) => void,
+): Promise<PublicationReviewResult> {
   try {
     if (!SHA40.test(args.head) || !SHA40.test(args.fetchedHead)) {
       throw new RunFailure("evidence_unavailable");
@@ -309,6 +370,10 @@ export async function runPublicationReview(args: ReviewArgs): Promise<Publicatio
 
     const tree = await readTree(args.repoDir, args.head);
     const docs = readRootDocuments(args.repoDir, tree);
+    const license = identifyReviewLicense(args, tree, docs);
+    // Fixed words only: never the SPDX identifier, the expression or any leftover text.
+    (args.log ?? console.log)(`license_file ${license.fact.state}; matcher ${license.matcher}`);
+    onLicense(license);
     const { facts, cleared, clearedInputs } = evidenceFromDocuments(docs, {
       head: args.head,
       anonymous: args.anonymous,
@@ -484,6 +549,11 @@ export async function main(
     | "bids-runs-file",
     string
   >;
+  const licenseScanDir = flag(rest, "license-scan-dir");
+  if (rest.includes("--license-scan-dir") && !licenseScanDir) {
+    console.error("missing --license-scan-dir");
+    return 2;
+  }
   try {
     flags = {
       dataset: need(rest, "dataset"),
@@ -530,6 +600,7 @@ export async function main(
     tagsFile: flags["tags-file"],
     bidsRunsFile: flags["bids-runs-file"],
     anonymous: anonymous === "true",
+    licenseScanDir,
     fetchInputs: () =>
       fetchPublicationReviewInputs(origins[environment], token, { reviewId, datasetId: dataset }),
   });
