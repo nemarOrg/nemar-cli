@@ -1,7 +1,8 @@
 # ADR 0145: The public-by-default bucket policy compacts its private carve-outs
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-27
+**Accepted:** 2026-11-27
 **Owner:** Seyed Yahya Shirazi
 
 Records the deny-list bucket policy, which had no ADR of its own (it was decided in #673 and lives in `backend/src/services/bucket-policy.ts`), and the compaction that keeps it under the cap.
@@ -29,8 +30,11 @@ The carve-out list is written in a canonical compacted form, computed from the s
    Removing one id of a covered decade expands the wildcard, drops that id, and recompacts, so the other nine stay private.
    `staging` and any entry this module does not write are kept verbatim; a rewrite never widens public access.
 3. The create route checks headroom before claiming an id: if one more explicit entry on top of the compacted policy would exceed the cap, it refuses with 503 and creates nothing.
-   If the carve-out still fails after the repository exists, it rolls the create back: the repository, the owner's S3 permission and the claimed row are deleted, and no upload URL is issued.
+   The check is advisory: a policy that cannot be read lets the create go on, because the carve-out write fails closed and rolls back.
+   If the carve-out, or the owner's S3 permission, fails after the repository exists, the create is rolled back: the permission is removed, the repository deleted (the same `deleteRepository` and `getDatasetsToken` the admin dataset delete uses), then the claimed row; no upload URL is issued.
+   If the repository cannot be deleted, the row is kept with the repository's name, logged as `[datasets:rollback-incomplete]`, and the admins are mailed.
 4. A policy write above 80% of the cap logs `[bucket-policy:near-cap]`; a refused create logs `[bucket-policy:full]`.
+   Both are also mailed to the admins (production only, under the `publication_request` category the exemplar-invariant alert already uses), at most once a day per condition, stamped in `audit_log` (action `storage_policy_alert`).
 
 ## Consequences
 
