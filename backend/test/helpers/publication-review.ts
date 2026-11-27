@@ -9,10 +9,13 @@
 
 import type { Database } from "bun:sqlite";
 import { type ScreenState, parseScreenReport } from "../../../shared/identifier-screen-report";
+import { LICENSE_MATCHER_VERSION } from "../../../shared/license-file";
 import {
+  PUBLICATION_PROMPT_VERSION,
   type PublicationOutcome,
   type PublicationReviewEvidence,
   type PublicationReviewState,
+  REVIEW_INPUTS,
   parsePublicationReviewReport,
   reportReasons,
   verdictOf,
@@ -173,6 +176,39 @@ export function goodPublicationReport(over: Record<string, unknown> = {}): Recor
   };
   parsePublicationReviewReport(body);
   return body;
+}
+
+/**
+ * A version-3 report body (ADR 0142) as the job will post it from the second deploy: the widened
+ * inputs, a `matches` LICENSE identification with nothing added, the closed key names, the
+ * lineage's `resolved_at`, and a record naming the pinned matcher. `evidence` and `over` go on
+ * top. Parsed by the production parser before it is returned.
+ */
+export function v3PublicationReport(
+  evidence: Record<string, unknown> = {},
+  over: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return goodPublicationReport({
+    v: 3,
+    evidence: {
+      ...evidenceFor(),
+      inputs: Object.fromEntries(REVIEW_INPUTS.map((i) => [i, "absent"])),
+      lineage: { outcome: "compatible", credited: false, resolved_at: "2026-11-27 12:00:00" },
+      license_file: { state: "matches", spdx: "CC-BY-4.0", additions: false, expression: null },
+      description_keys_not_shown_names: ["Version"],
+      ...evidence,
+    },
+    note_answer: "not_asked",
+    record: {
+      prompt_version: PUBLICATION_PROMPT_VERSION,
+      models: [{ model: "claude-haiku-5-5", effort: "max" }],
+      input_digest: "ab".repeat(32),
+      resolver_version: null,
+      enrichment_source: null,
+      license_matcher: LICENSE_MATCHER_VERSION,
+    },
+    ...over,
+  });
 }
 
 export interface SeedReview {

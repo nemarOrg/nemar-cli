@@ -44,6 +44,7 @@ import {
   START_STARTED_REASONS,
 } from "../shared/contract/publication-review-admin";
 import { KNOWN_FORMATS, type ScreenGate } from "../shared/identifier-screen-report";
+import { LICENSE_FILE_STATES, LICENSE_MATCHER_VERSION } from "../shared/license-file";
 import * as prReview from "../shared/pr-review";
 import {
   ANSWERS,
@@ -52,6 +53,7 @@ import {
   CALIBRATION_MODELS,
   DEFAULT_PUBLICATION_VERSION,
   DEPOSITOR_DAILY_CAP,
+  DESCRIPTION_KEYS_NOT_SHOWN_WORDS,
   DESCRIPTION_KEYS_SHOWN,
   DOCUMENT_CHAR_CAPS,
   DOCUMENT_STATES,
@@ -66,7 +68,10 @@ import {
   PUBLICATION_DECLINE_DETAILS,
   PUBLICATION_FINDING_CODES,
   PUBLICATION_OUTCOMES,
+  PUBLICATION_PROMPT_VERSION,
   PUBLICATION_REPORT_ERRORS,
+  PUBLICATION_REPORT_VERSION,
+  PUBLICATION_REPORT_VERSIONS,
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
   PUBLICATION_REVIEW_MODELS,
   PUBLICATION_REVIEW_STATES,
@@ -87,6 +92,7 @@ import {
   REVIEW_FORMATS,
   REVIEW_GATE_REFUSALS,
   REVIEW_GATE_REFUSAL_TEXT,
+  REVIEW_INPUTS,
   REVIEW_OVERDUE_VIEW_MINUTES,
   REVIEW_UNREADABLE_HEADLINE,
   type Reason,
@@ -100,6 +106,7 @@ import {
   cureOf,
   describePublicationReview,
   describeUnreadableReview,
+  descriptionKeysNotShownNamesOf,
   effectiveVersionOf,
   hardReasonsOf,
   isWithheld,
@@ -110,6 +117,8 @@ import {
   reasonLine,
   reasonsOf,
   reportReasons,
+  reproducibilityLines,
+  reproducibilityOf,
   reviewGateRefusalText,
   shownBlockReason,
   startOffered,
@@ -414,6 +423,42 @@ const withEvidence = (over: Record<string, unknown>) =>
   reportBody({ evidence: evidenceBody(over) });
 const withSummary = (over: Record<string, unknown>) => withEvidence({ summary: summaryBody(over) });
 
+/** A version-3 evidence block (ADR 0142): version 2's, the LICENSE identification and the key names. */
+function v3EvidenceBody(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return evidenceBody({
+    inputs: Object.fromEntries(REVIEW_INPUTS.map((i) => [i, "absent"])),
+    lineage: { outcome: "compatible", credited: false, resolved_at: "2026-11-27T12:00:00Z" },
+    license_file: { state: "matches", spdx: "CC-BY-4.0", additions: false, expression: null },
+    // `evidenceBody` counts two keys not shown: `Version` and one NEMAR does not know.
+    description_keys_not_shown_names: ["Version", "other"],
+    ...over,
+  });
+}
+
+/** A version-3 record: version 2's and the matcher. */
+function v3Record(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    prompt_version: PUBLICATION_PROMPT_VERSION,
+    models: [{ model: "claude-haiku-5-5", effort: "max" }],
+    input_digest: "ab".repeat(32),
+    resolver_version: null,
+    enrichment_source: null,
+    license_matcher: LICENSE_MATCHER_VERSION,
+    ...over,
+  };
+}
+
+/** The report-level keys a version-3 report adds to {@link reportBody}. */
+const V3_REPORT = { v: 3, note_answer: "not_asked", record: v3Record() };
+
+/** A version-3 report body, with `evidence` on its evidence and `over` on top. */
+function v3ReportBody(
+  evidence: Record<string, unknown> = {},
+  over: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return reportBody({ ...V3_REPORT, evidence: v3EvidenceBody(evidence), ...over });
+}
+
 /** The fail-class reasons, written out from ADR 0102's table rather than read from the module. */
 const FAIL_CLASS: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   "request_blocked",
@@ -703,9 +748,12 @@ describe("the parser refuses what the job must never send", () => {
     expect(refusal(null)).toBe("not_an_object");
     expect(refusal([reportBody()])).toBe("not_an_object");
     expect(refusal("report")).toBe("not_an_object");
-    expect(refusal(reportBody({ v: 3 }))).toBe("bad_version");
-    // Version 2 carries the fifth answer and the record; a version-1 body that says 2 is refused.
+    expect(refusal(reportBody({ v: 4 }))).toBe("bad_version");
+    expect(refusal(reportBody({ v: 0 }))).toBe("bad_version");
+    // Versions 2 and 3 carry the fifth answer and the record; a version-1 body that says 2 or 3
+    // is refused.
     expect(refusal(reportBody({ v: 2 }))).toBe("unknown_key");
+    expect(refusal(reportBody({ v: 3 }))).toBe("unknown_key");
     expect(refusal(reportBody({ v: "1" }))).toBe("bad_version");
     expect(refusal(reportBody({ model: "claude-haiku-4-5" }))).toBe("bad_model");
     expect(refusal(reportBody({ model: "claude-haiku-4-5" }), { models: CALIBRATION_MODELS })).toBe(
@@ -1093,6 +1141,8 @@ describe("facts only lower an answer (answersOf)", () => {
   const FACTS: Array<{
     name: string;
     evidence: Record<string, unknown>;
+    /** A version-3 fact: the evidence is a version-3 block, and the report is version 3. */
+    v3?: true;
     lowers: Partial<Record<Question, { to: "fail" | "unknown"; code: string; fact: string }>>;
   }> = [
     {
@@ -1222,6 +1272,128 @@ describe("facts only lower an answer (answersOf)", () => {
       evidence: { anonymous: true, placeholder_authors: 2 },
       lowers: {},
     },
+    // Version 3 (ADR 0142): the LICENSE identification.
+    {
+      name: "a LICENSE that names another license than the field (never a fail)",
+      v3: true,
+      evidence: {
+        license_file: {
+          state: "matches_other",
+          spdx: "CC0-1.0",
+          additions: false,
+          expression: null,
+        },
+      },
+      lowers: {
+        authors_and_license: {
+          to: "unknown",
+          code: "license_inconsistent",
+          fact: "license_file_differs",
+        },
+      },
+    },
+    {
+      name: "a LICENSE that names another license, with additions sent cut (still only unknown)",
+      v3: true,
+      evidence: {
+        documents: { ...ALL_SENT, license: "sent_cut" },
+        license_file: {
+          state: "matches_other",
+          spdx: "CC0-1.0",
+          additions: true,
+          expression: null,
+        },
+      },
+      lowers: {
+        // The cut comes first in the rule's order; the differing file lowers no further.
+        authors_and_license: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+      },
+    },
+    {
+      name: "a LICENSE that matches the field, nothing added and nothing sent",
+      v3: true,
+      evidence: {
+        documents: { ...ALL_SENT, license: "absent" },
+        license_file: { state: "matches", spdx: "CC-BY-4.0", additions: false, expression: null },
+      },
+      lowers: {},
+    },
+    {
+      name: "a LICENSE that matches the field, its additions sent whole",
+      v3: true,
+      evidence: {
+        license_file: { state: "matches", spdx: "CC-BY-4.0", additions: true, expression: null },
+      },
+      lowers: {},
+    },
+    {
+      name: "a LICENSE that matches the field, its additions cut",
+      v3: true,
+      evidence: {
+        documents: { ...ALL_SENT, license: "sent_cut" },
+        license_file: { state: "matches", spdx: "CC-BY-4.0", additions: true, expression: null },
+      },
+      lowers: {
+        authors_and_license: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+      },
+    },
+    ...(["unrecognized", "unreadable"] as const).flatMap((state) => [
+      {
+        name: `an ${state} LICENSE sent whole keeps ADR 0102's rule: not lowered`,
+        v3: true as const,
+        evidence: {
+          license_file: { state, spdx: null, additions: false, expression: null },
+        },
+        lowers: {},
+      },
+      {
+        name: `an ${state} LICENSE sent cut keeps ADR 0102's rule: unknown`,
+        v3: true as const,
+        evidence: {
+          documents: { ...ALL_SENT, license: "sent_cut" },
+          license_file: { state, spdx: null, additions: false, expression: null },
+        },
+        lowers: {
+          authors_and_license: {
+            to: "unknown" as const,
+            code: "evidence_incomplete",
+            fact: "text_not_seen_in_full",
+          },
+        },
+      },
+    ]),
+    {
+      name: "an annexed LICENSE is withheld: unknown, as ADR 0102 says",
+      v3: true,
+      evidence: {
+        documents: { ...ALL_SENT, license: "withheld_annexed" },
+        license_file: { state: "annexed", spdx: null, additions: false, expression: null },
+      },
+      lowers: {
+        authors_and_license: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+      },
+    },
+    {
+      name: "an absent LICENSE does not lower the question",
+      v3: true,
+      evidence: {
+        documents: { ...ALL_SENT, license: "absent" },
+        license_file: { state: "absent", spdx: null, additions: false, expression: null },
+      },
+      lowers: {},
+    },
   ];
 
   test("with no fact, the answers are the model's and nothing is noted", () => {
@@ -1240,6 +1412,7 @@ describe("facts only lower an answer (answersOf)", () => {
       "license_field_missing",
       "name_too_short",
       "placeholder_author",
+      "license_file_differs",
     ]);
     expect(QUESTION_FACT_TEXT).toEqual({
       readme_absent: "no README was found at the dataset root",
@@ -1248,6 +1421,8 @@ describe("facts only lower an answer (answersOf)", () => {
       license_field_missing: "dataset_description.json sets no License",
       name_too_short: "the Name in dataset_description.json is shorter than 25 characters",
       placeholder_author: "Authors names a placeholder instead of a person",
+      license_file_differs:
+        "the LICENSE file identifies a different license from the License in dataset_description.json",
     });
     const produced = new Set(FACTS.flatMap((f) => Object.values(f.lowers).map((l) => l.fact)));
     expect([...produced].sort()).toEqual([...QUESTION_FACTS].sort());
@@ -1298,7 +1473,9 @@ describe("facts only lower an answer (answersOf)", () => {
       let lowered = 0;
       for (const questions of combos) {
         const report = parsePublicationReviewReport(
-          reportBody({ questions, evidence: evidenceBody(fact.evidence) }),
+          fact.v3
+            ? v3ReportBody(fact.evidence, { questions })
+            : reportBody({ questions, evidence: evidenceBody(fact.evidence) }),
         );
         const { answers, notes } = answersOf(report);
         for (const q of QUESTIONS) {
@@ -3364,5 +3541,332 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
     expect(reviewGateRefusalText("unverified", "nm000123")).toBe(
       REVIEW_GATE_REFUSAL_TEXT.unverified,
     );
+  });
+});
+
+describe("version 3 of the report (ADR 0142, decision 2)", () => {
+  /** `o` without `key`. */
+  const omit = (o: Record<string, unknown>, key: string) =>
+    Object.fromEntries(Object.entries(o).filter(([k]) => k !== key));
+  const lf = (over: Record<string, unknown>) => ({
+    license_file: {
+      state: "matches",
+      spdx: "CC-BY-4.0",
+      additions: false,
+      expression: null,
+      ...over,
+    },
+  });
+
+  test("the job still writes version 2, and the parser reads versions 1, 2 and 3", () => {
+    expect(PUBLICATION_REPORT_VERSION).toBe(2);
+    expect([...PUBLICATION_REPORT_VERSIONS]).toEqual([1, 2, 3]);
+  });
+
+  test("a version-3 report parses, carries its new facts, and reads back as itself after a store", () => {
+    const parsed = parsePublicationReviewReport(v3ReportBody());
+    expect(parsed.v).toBe(3);
+    expect(parsed.evidence.license_file).toEqual({
+      state: "matches",
+      spdx: "CC-BY-4.0",
+      additions: false,
+      expression: null,
+    });
+    expect(parsed.evidence.description_keys_not_shown_names).toEqual(["Version", "other"]);
+    expect(parsed.evidence.lineage).toEqual({
+      outcome: "compatible",
+      credited: false,
+      resolved_at: "2026-11-27T12:00:00Z",
+    });
+    expect(parsed.record?.license_matcher).toBe(LICENSE_MATCHER_VERSION);
+    const stored = JSON.stringify(parsed);
+    expect(JSON.stringify(parsePublicationReviewReport(JSON.parse(stored)))).toBe(stored);
+    // A lineage the offline calibration did not resolve is null, as in version 2.
+    expect(refusal(v3ReportBody({ lineage: null }))).toBe("accepted");
+    expect(
+      refusal(
+        v3ReportBody({ lineage: { outcome: "compatible", credited: false, resolved_at: null } }),
+      ),
+    ).toBe("accepted");
+  });
+
+  test("every LICENSE state the job reports is accepted where it agrees with itself", () => {
+    const ok: Array<[Record<string, unknown>, Record<string, unknown>]> = [
+      [{ state: "matches" }, {}],
+      [{ state: "matches", additions: true }, {}],
+      [{ state: "matches_other", spdx: "CC0-1.0" }, {}],
+      [{ state: "matches_other", spdx: "CC0-1.0", additions: true }, {}],
+      [{ state: "unrecognized", spdx: null }, {}],
+      // The field did not normalize: `spdx` still names the longest match.
+      [{ state: "unrecognized", spdx: "MIT" }, {}],
+      [{ state: "unrecognized", spdx: "MIT", expression: "MIT OR Apache-2.0" }, {}],
+      [
+        {
+          state: "unrecognized",
+          spdx: null,
+          expression: "(MIT OR Apache-2.0) AND LicenseRef-scancode-unknown",
+        },
+        {},
+      ],
+      [{ state: "absent", spdx: null }, { documents: { ...ALL_SENT, license: "absent" } }],
+      [
+        { state: "annexed", spdx: null },
+        { documents: { ...ALL_SENT, license: "withheld_annexed" } },
+      ],
+      [{ state: "unreadable", spdx: null }, {}],
+      [{ state: "unreadable", spdx: null }, { documents: { ...ALL_SENT, license: "absent" } }],
+      [
+        { state: "unreadable", spdx: null },
+        { documents: { ...ALL_SENT, license: "withheld_annexed" } },
+      ],
+    ];
+    for (const [file, evidence] of ok) {
+      expect({ file, r: refusal(v3ReportBody({ ...evidence, ...lf(file) })) }).toEqual({
+        file,
+        r: "accepted",
+      });
+    }
+    // Every state is reachable.
+    expect(new Set(ok.map(([f]) => f.state))).toEqual(new Set(LICENSE_FILE_STATES));
+  });
+
+  test("a LICENSE identification outside the closed words, or that disagrees with itself, is refused", () => {
+    const bad: Array<[Record<string, unknown>, Record<string, unknown>]> = [
+      // `partial` is the job's own word for a short match; the report never carries it.
+      [{ state: "partial" }, {}],
+      [{ state: "MATCHES" }, {}],
+      [{ state: null }, {}],
+      [{ spdx: null }, {}],
+      [{ state: "matches_other", spdx: null }, {}],
+      [{ spdx: "LicenseRef-scancode-proprietary-license" }, {}],
+      [{ spdx: "CC-BY-4.0 AND MIT" }, {}],
+      [{ spdx: 4 }, {}],
+      [{ additions: "no" }, {}],
+      [{ state: "unrecognized", spdx: null, additions: true }, {}],
+      [{ state: "unreadable", spdx: null, additions: true }, {}],
+      [{ state: "unreadable", spdx: "MIT" }, {}],
+      [{ state: "absent", spdx: "MIT" }, { documents: { ...ALL_SENT, license: "absent" } }],
+      [{ expression: "MIT OR Apache-2.0" }, {}],
+      [{ state: "unrecognized", spdx: null, expression: "see /Users/jdoe/LICENSE" }, {}],
+      [{ state: "unrecognized", spdx: null, expression: "" }, {}],
+      [{ state: "unrecognized", spdx: null, expression: "MIT ".repeat(200) }, {}],
+      // An absent file is an absent document; an annexed one is withheld as annexed.
+      [{ state: "absent", spdx: null }, {}],
+      [{ state: "annexed", spdx: null }, {}],
+      // Leftover, or an unrecognized file, reached the model in some state, never `absent`.
+      [{ additions: true }, { documents: { ...ALL_SENT, license: "absent" } }],
+      [{ state: "unrecognized", spdx: null }, { documents: { ...ALL_SENT, license: "absent" } }],
+    ];
+    for (const [file, evidence] of bad) {
+      expect({ file, r: refusal(v3ReportBody({ ...evidence, ...lf(file) })) }).toEqual({
+        file,
+        r: "bad_evidence",
+      });
+    }
+    expect(refusal(v3ReportBody({ license_file: null }))).toBe("bad_evidence");
+    expect(refusal(v3ReportBody({ license_file: { ...lf({}).license_file, extra: 1 } }))).toBe(
+      "bad_evidence",
+    );
+    expect(refusal(v3ReportBody({ license_file: omit(lf({}).license_file, "expression") }))).toBe(
+      "bad_evidence",
+    );
+  });
+
+  test("the key names are closed words, unique, in order, and agree with the count", () => {
+    expect([...DESCRIPTION_KEYS_NOT_SHOWN_WORDS]).toEqual([
+      "Version",
+      "Keywords",
+      "PipelineDescription",
+      "other",
+    ]);
+    // None of them is a key the model is shown.
+    for (const w of DESCRIPTION_KEYS_NOT_SHOWN_WORDS) {
+      expect((DESCRIPTION_KEYS_SHOWN as readonly string[]).includes(w)).toBe(false);
+    }
+    const names = (n: unknown, notShown: number) =>
+      refusal(
+        v3ReportBody({ description_keys_not_shown: notShown, description_keys_not_shown_names: n }),
+      );
+    expect(names([], 0)).toBe("accepted");
+    expect(names(["Version"], 1)).toBe("accepted");
+    expect(names(["Version", "Keywords"], 2)).toBe("accepted");
+    expect(names(["other"], 5)).toBe("accepted");
+    expect(names(["Version", "other"], 9)).toBe("accepted");
+    // A depositor's key name is never a word; an unknown key is `other`.
+    expect(names(["DepositorKey"], 1)).toBe("bad_evidence");
+    expect(names(["version"], 1)).toBe("bad_evidence");
+    expect(names(["Name"], 1)).toBe("bad_evidence");
+    // Twice, out of order, or disagreeing with the count.
+    expect(names(["Version", "Version"], 2)).toBe("bad_evidence");
+    expect(names(["other", "Version"], 2)).toBe("bad_evidence");
+    expect(names(["Version"], 2)).toBe("bad_evidence");
+    expect(names(["Version", "other"], 1)).toBe("bad_evidence");
+    expect(names([], 1)).toBe("bad_evidence");
+    expect(names("Version", 1)).toBe("bad_evidence");
+    expect(names(null, 0)).toBe("bad_evidence");
+  });
+
+  test("the job's names come from one function: known keys once, the rest as other, shown keys never", () => {
+    expect(descriptionKeysNotShownNamesOf([])).toEqual([]);
+    expect(descriptionKeysNotShownNamesOf(["Name", "License", "Authors"])).toEqual([]);
+    expect(descriptionKeysNotShownNamesOf(["Version"])).toEqual(["Version"]);
+    expect(
+      descriptionKeysNotShownNamesOf(["Sponsor", "Version", "Name", "Keywords", "x", "other"]),
+    ).toEqual(["Version", "Keywords", "other"]);
+    // What it gives, with the count of keys not shown, is what the parser accepts.
+    for (const keys of [["Version", "Mystery", "Other"], ["Keywords"], ["a", "b"], ["Name"]]) {
+      const notShown = keys.filter(
+        (k) => !(DESCRIPTION_KEYS_SHOWN as readonly string[]).includes(k),
+      ).length;
+      expect(
+        refusal(
+          v3ReportBody({
+            description_keys_not_shown: notShown,
+            description_keys_not_shown_names: descriptionKeysNotShownNamesOf(keys),
+          }),
+        ),
+      ).toBe("accepted");
+    }
+  });
+
+  test("an unknown or missing key, at every new level, and the lineage's time", () => {
+    expect(refusal(v3ReportBody({ extra: 1 }))).toBe("bad_evidence");
+    expect(
+      refusal(reportBody({ ...V3_REPORT, evidence: omit(v3EvidenceBody(), "license_file") })),
+    ).toBe("bad_evidence");
+    expect(
+      refusal(
+        reportBody({
+          ...V3_REPORT,
+          evidence: omit(v3EvidenceBody(), "description_keys_not_shown_names"),
+        }),
+      ),
+    ).toBe("bad_evidence");
+    // A version-3 lineage says when it was resolved; a version-2 one does not.
+    expect(refusal(v3ReportBody({ lineage: { outcome: "compatible", credited: false } }))).toBe(
+      "bad_evidence",
+    );
+    for (const at of ["2026-11-27", "yesterday", "2026-11-27T12:00:00+01:00", 1764244800, ""]) {
+      expect(
+        refusal(
+          v3ReportBody({ lineage: { outcome: "compatible", credited: false, resolved_at: at } }),
+        ),
+      ).toBe("bad_evidence");
+    }
+    expect(
+      refusal(
+        v3ReportBody({
+          lineage: { outcome: "compatible", credited: false, resolved_at: "2026-11-27 12:00:00" },
+        }),
+      ),
+    ).toBe("accepted");
+    // A version-3 block is about the widened inputs.
+    expect(refusal(v3ReportBody({ inputs: null, lineage: null }))).toBe("bad_evidence");
+  });
+
+  test("the record names the matcher: any pinned version or unavailable, and nothing else", () => {
+    const withRecord = (over: Record<string, unknown>) =>
+      v3ReportBody({}, { record: v3Record(over) });
+    expect(refusal(withRecord({ license_matcher: "unavailable" }))).toBe("bad_record");
+    // `unavailable` beside a state no scan reached.
+    expect(
+      refusal(
+        v3ReportBody(
+          { ...lf({ state: "unreadable", spdx: null }) },
+          { record: v3Record({ license_matcher: "unavailable" }) },
+        ),
+      ),
+    ).toBe("accepted");
+    // A report stored under an earlier pin still parses after the pin moves.
+    expect(refusal(withRecord({ license_matcher: "scancode-32.4.1+spdx-3.26" }))).toBe("accepted");
+    for (const bad of ["scancode", "askalono-0.5.0", "scancode-32.5.0", "", null, 3]) {
+      expect(refusal(withRecord({ license_matcher: bad }))).toBe("bad_record");
+    }
+    expect(refusal(v3ReportBody({}, { record: omit(v3Record(), "license_matcher") }))).toBe(
+      "bad_record",
+    );
+  });
+
+  test("the versions do not mix: each report version has exactly its own blocks", () => {
+    const v2Evidence = evidenceBody({
+      inputs: Object.fromEntries(REVIEW_INPUTS.map((i) => [i, "absent"])),
+      lineage: null,
+    });
+    const { license_matcher: _m, ...v2Record } = v3Record();
+    // A version-3 report with a version-2 block, and a version-2 report with a version-3 block.
+    expect(refusal(reportBody({ ...V3_REPORT, evidence: v2Evidence }))).toBe("bad_evidence");
+    expect(
+      refusal(
+        reportBody({
+          v: 2,
+          note_answer: "not_asked",
+          record: v2Record,
+          evidence: v3EvidenceBody(),
+        }),
+      ),
+    ).toBe("bad_evidence");
+    // A version-3 report with a version-2 record, and a version-2 report with a version-3 record.
+    expect(refusal(v3ReportBody({}, { record: v2Record }))).toBe("bad_record");
+    expect(
+      refusal(
+        reportBody({ v: 2, note_answer: "not_asked", record: v3Record(), evidence: v2Evidence }),
+      ),
+    ).toBe("bad_record");
+    // A version-1 report with a version-3 block.
+    expect(refusal(reportBody({ evidence: v3EvidenceBody() }))).toBe("bad_evidence");
+  });
+
+  test("a stored version-1 or version-2 report still reads back byte for byte, with no new key", () => {
+    const v2 = reportBody({
+      v: 2,
+      note_answer: "not_asked",
+      record: omit(v3Record(), "license_matcher"),
+      evidence: evidenceBody({
+        inputs: Object.fromEntries(REVIEW_INPUTS.map((i) => [i, "absent"])),
+        lineage: { outcome: "compatible", credited: true },
+      }),
+    });
+    for (const body of [reportBody(), v2]) {
+      const stored = JSON.stringify(parsePublicationReviewReport(body));
+      expect(JSON.stringify(parsePublicationReviewReport(JSON.parse(stored)))).toBe(stored);
+      for (const key of [
+        "license_file",
+        "description_keys_not_shown_names",
+        "resolved_at",
+        "license_matcher",
+      ]) {
+        expect(stored).not.toContain(`"${key}"`);
+      }
+    }
+    // The version-2 body itself, its keys in the job's order, is what the parse gives back.
+    const parsed = JSON.parse(JSON.stringify(parsePublicationReviewReport(v2)));
+    expect(Object.keys(parsed.evidence)).toEqual(Object.keys(v2.evidence as object));
+    expect(parsed.record).toEqual(v2.record);
+    expect(parsed.evidence.lineage).toEqual({ outcome: "compatible", credited: true });
+  });
+
+  test("the matcher joins the record every surface prints, and an edited column is not shown", () => {
+    const row = (licenseMatcher: string | null | undefined) => ({
+      headSha: HEAD,
+      scannerId: null,
+      readerVersions: null,
+      resolverVersion: null,
+      models: null,
+      promptVersion: PUBLICATION_PROMPT_VERSION,
+      inputDigest: "a".repeat(64),
+      enrichmentSource: null,
+      licenseMatcher,
+    });
+    const shown = reproducibilityOf(row(LICENSE_MATCHER_VERSION));
+    expect(shown?.license_matcher).toBe(LICENSE_MATCHER_VERSION);
+    expect(reproducibilityLines(shown as never)).toContain(
+      `License matcher: ${LICENSE_MATCHER_VERSION}`,
+    );
+    expect(reproducibilityOf(row("unavailable"))?.license_matcher).toBe("unavailable");
+    for (const odd of ["<b>x</b>", "scancode-x", null, undefined]) {
+      const r = reproducibilityOf(row(odd));
+      expect(r?.license_matcher).toBeNull();
+      expect(reproducibilityLines(r as never)).toContain("License matcher: not recorded");
+    }
   });
 });
