@@ -1,55 +1,59 @@
 /**
- * The dataset's Name follows its upstream dataset's title (owner rule of 2026-11-27; ADR 0102 and
+ * The dataset's Name follows its upstream dataset's title (owner rules of 2026-11-27; ADR 0102 and
  * ADR 0107 as amended that day). A dataset copied from an upstream dataset keeps the upstream's
- * name: its `Name` starts with the title of one upstream dataset source, as the source's registry
- * gives it, and whatever follows is nothing or a suffix of the closed grammar below (an author-year,
- * then optionally a service key).
+ * name: its `Name` is virtually identical to the title of one DECLARED upstream dataset source, as
+ * the source's registry gives it, and whatever follows is nothing or a suffix of the closed grammar
+ * below (a version, an author-year of the dataset's own people, a service key).
  *
  * One pure, deterministic function, {@link nameFollowsUpstream}. The review job applies it to the
- * `Name` it reads at the reviewed commit and the sources the Worker served it (the license-lineage
- * resolver's records), and stores the closed word in the evidence (`name_upstream`); the Worker's
- * decision card shows the titles it read ({@link upstreamDatasetTitles}). No other copy exists.
+ * `Name` and `Authors` it reads at the reviewed commit and the sources the Worker served it (the
+ * license-lineage resolver's records), and stores the closed word in the evidence
+ * (`name_upstream`); the Worker's decision card shows the titles ({@link upstreamDatasetTitles}).
+ * No other copy exists.
  *
- * **What is compared.** Both texts are normalized the same way ({@link normalizeTitle}): Unicode
- * NFKC, what no reader sees removed (`withoutInvisible`, the naming rule's own), apostrophes
- * removed (`Couple’s` and `Couples` are one word), every other punctuation or symbol character a
- * space, blanks collapsed, case folded. A leading "The" or "A" is NOT ignored: it is part of the
- * title, and the rule is that the name starts with the title, so dropping it would be a guess
- * about which words matter.
+ * **What compares equal** ({@link foldWords}): both texts are cut into words (letters, digits and
+ * combining marks; an apostrophe inside a word is dropped, so `Couple’s` reads `couples`; every
+ * other punctuation or symbol separates words), after Unicode NFKC and with what no reader sees
+ * removed. Each word is then folded: NFKD with the combining marks dropped (accents and
+ * diacritics), lower case, `&` read as `and`, and British spelling read as American by the closed
+ * list {@link SPELLING_FOLDS}. A trailing version marker on the upstream title (`v2`, `v2.0`,
+ * `2.0`, `version 2`) is not part of it. A leading "The" or "A" is NOT ignored: dropping it would
+ * be a guess about which words matter.
  *
- * **The suffix grammar** ({@link NAME_SUFFIX}), on what follows the title in the Name as
- * written (NFKC, invisible characters removed), after any closing punctuation that ends the title
- * (`)`, `]`, `.`, a closing quote):
+ * **The suffix grammar** ({@link NAME_SUFFIX}), on what follows the title's last word in the Name
+ * as written (NFKC, invisible characters removed), after any closing punctuation that ends the
+ * title (`)`, `]`, `.`, a closing quote):
  *
- *     suffix    = [author-year] [" (" service ":" key ")"]
- *     author-year = sep authors " " year | " (" authors " " year ")"
- *     sep       = "," " "* | " "+ dash " "+ | " "+          (dash: - – —)
- *     authors   = surname | surname " et al." | surname " & " surname
- *     surname   = particle* Capital letters ( ("'" | "-") letters )*
- *     particle  = van | von | de | der | den | del | della | di | da | du | le | la | dos | das | ten | ter, then " "
- *     year      = 19NN | 20NN
- *     service   = a lowercase word ("figshare", "openneuro"); key = up to 64 characters, no blank or parenthesis
+ *     suffix      = [version] [author-year] [service-key]
+ *     version     = [" " | ", "] ["("] ("v" N | "version " N | N "." N) [")"]      (N: digits, dotted)
+ *     author-year = open authors [","] " " year [")"]
+ *     open        = "," " "* | " "* ("–" | "—") " "* | " "+ "-" " "+ | " "* "(" | " "+
+ *     authors     = surname | surname " et al." | surname (" & " | " and ") surname
+ *     surname     = particle* Capital letters ( ("'" | "-") letters )*
+ *     year        = 19NN | 20NN
+ *     service-key = " (" service ":" key ")"     (service: one of NAME_SERVICES; key: no blank or parenthesis)
  *
- * The service key is the final parenthetical the submission standards already allow after a
- * descriptive name (docs.nemar.org/policies/submission-standards), so a Name that obeys them is
- * never refused here; the owner's rule adds only the author-year.
- *
- * A bare-space separator takes only the two shapes no ordinary title word makes, `et al.` and
- * `&`: `fNIRS data Motor 2019` is not a citation, while `fNIRS data Lee et al. 2019` is. So the
- * shapes `, Lee 2019`, ` (Lee 2019)`, ` - Lee et al. 2019` and ` Lee & Kim 2019` pass, and
- * ` (fNIRS)`, `: Lee 2019`, ` Lee 2019` and `, Lee 2019 EEG` do not.
+ * A parenthesis opens exactly when one closes it. A bare-space `open` takes only `et al.` or two
+ * surnames, never one. **Every surname must name one of the dataset's Authors or one of the
+ * matched upstream record's creators** (as a run of their folded words), so `EEG (Replication
+ * 2021)` and `EEG, Motor 2019` are not author-years. The service key is the final parenthetical the
+ * submission standards already allow after a descriptive name, for a service the resolver knows.
  *
  * **The results, closed words only** (no title and no name is ever in the result):
- *  - `matches`: the Name follows one dataset source's title.
- *  - `differs`: every declared upstream source was read, at least one is a dataset with a title,
- *    and the Name follows none of them.
+ *  - `matches`: the Name follows the title of one declared dataset source.
+ *  - `differs`: every declared source was read, at least one is a dataset with a title, none was
+ *    resolved to a later version than the one declared, and the Name follows none of them.
  *  - `not_applicable`: no upstream source is declared, or every declared one is a publication.
  *  - `unknown`: what decides it could not be read (the Name, or a declared source whose record was
- *    not read, has no title, or whose lineage is unresolved), and the Name follows no source that
- *    was read. An administrator decides; the rule never guesses.
+ *    not read, has no title, or whose lineage is unresolved), or the Name differs from a source
+ *    that was resolved to its latest version rather than the version declared (a version-less
+ *    OpenNeuro, figshare or PhysioNet reference: the upstream may have been renamed since the
+ *    copy). An administrator decides; the rule never guesses.
  *
- * Sources found only in the README are heuristic candidates, not declarations: one can make a
- * `matches`, never a `differs` or an `unknown`. Several sources: the Name passes if it follows any.
+ * Only declared sources count (SourceDatasets, the enrichment's relations, the attestation). A
+ * README candidate is a heuristic, not a declaration: it neither matches nor differs, so a Name
+ * that follows only a README candidate is `not_applicable`, and never shields a name from the
+ * automatic denial. Several declared sources: the Name passes if it follows any one.
  */
 
 import type { LineageOutcome } from "./license-lineage.js";
@@ -65,144 +69,213 @@ export interface UpstreamTitleSource {
   status: string;
   origin: string;
   outcome: LineageOutcome;
+  /** The record's creators' names, as the registry gave them. */
+  creators?: readonly string[];
+  /** The record was resolved to its latest version, not to a version the dataset declared. */
+  resolved_latest?: boolean;
 }
 
-/** An apostrophe: removed, so a possessive stays one word. */
-const APOSTROPHE = /^['‘’ʼʹ′`´]$/u;
-/** Every other punctuation or symbol character, and every blank: a word boundary. */
-const SEPARATOR = /^[\p{P}\p{S}\s]$/u;
+/** The origins that declare a source; a README candidate does not. */
+export const DECLARED_ORIGINS: readonly string[] = [
+  "source_datasets",
+  "related_identifiers",
+  "attestation",
+];
 
 /**
- * A title or a Name as the rule compares it: NFKC, invisible characters and apostrophes removed,
- * punctuation and symbols as spaces, blanks collapsed and trimmed, lower case (character by
- * character, so a Name and a title are folded alike wherever a letter stands).
+ * The services whose key may close a Name, `(service:key)`: the repositories the license-lineage
+ * resolver reads (its resolvers and its data-repository DOI prefixes), by their usual names.
  */
-export function normalizeTitle(text: string): string {
-  return normalizedWithMap(text).norm;
+export const NAME_SERVICES = [
+  "openneuro",
+  "physionet",
+  "zenodo",
+  "figshare",
+  "osf",
+  "dandi",
+  "dryad",
+  "dataverse",
+] as const;
+
+/**
+ * British spellings read as American, one closed list of regular variants, applied to each
+ * lower-case word in order (the first that matches). Both texts are folded alike, so a fold that
+ * also touches an unrelated word (`detour`) changes nothing in a comparison.
+ */
+export const SPELLING_FOLDS: readonly { variant: string; british: RegExp; american: string }[] = [
+  // colour, behaviour, labour, neighbours, favoured
+  { variant: "-our/-or", british: /^([a-z]{3,})our(s|ed|ing)?$/, american: "$1or$2" },
+  // normalisation, organisations (before -ise, which would leave -isation half done)
+  { variant: "-isation/-ization", british: /^([a-z]{3,})isation(s)?$/, american: "$1ization$2" },
+  // normalise, standardised, visualising
+  { variant: "-ise/-ize", british: /^([a-z]{3,})is(e|es|ed|ing)$/, american: "$1iz$2" },
+  // analyse, paralysed
+  { variant: "-yse/-yze", british: /^([a-z]{3,})ys(e|ed|ing)$/, american: "$1yz$2" },
+  // centre, metres, litre
+  { variant: "-tre/-ter", british: /^([a-z]{2,})tre(s)?$/, american: "$1ter$2" },
+  // catalogue, dialogues, analogue
+  { variant: "-ogue/-og", british: /^([a-z]{3,})ogue(s)?$/, american: "$1og$2" },
+  // licence, defence, offence, pretence (these four only: -ence is not otherwise a variant)
+  { variant: "-ence/-ense", british: /^(licen|defen|offen|preten)ce(s)?$/, american: "$1se$2" },
+];
+
+/** One word folded: diacritics dropped, lower case, `&` as `and`, British spelling as American. */
+export function foldWord(word: string): string {
+  if (word === "&") return "and";
+  const w = word.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
+  for (const f of SPELLING_FOLDS) if (f.british.test(w)) return w.replace(f.british, f.american);
+  return w;
 }
+
+/** A word: letters, digits and marks with apostrophes inside; or an ampersand. */
+const WORD = /[\p{L}\p{N}\p{M}'‘’ʼ]+|&/gu;
+const APOSTROPHES = /['‘’ʼ]/gu;
+
+/** The text the grammar reads, and each folded word with where it ends in that text. */
+function wordsOf(raw: string): { text: string; words: { fold: string; end: number }[] } {
+  const text = withoutInvisible(raw.normalize("NFKC"));
+  const words: { fold: string; end: number }[] = [];
+  for (const m of text.matchAll(WORD)) {
+    const fold = foldWord(m[0].replace(APOSTROPHES, ""));
+    if (fold !== "") words.push({ fold, end: m.index + m[0].length });
+  }
+  return { text, words };
+}
+
+/** The folded words of a text, as the rule compares them. */
+export function foldWords(text: string): string[] {
+  return wordsOf(text).words.map((w) => w.fold);
+}
+
+/** A version marker: `v2`, `v2.0`, `version 2`, or a dotted number `2.0`; never a bare year. */
+const VERSION_MARK = "(?:v\\d+(?:\\.\\d+)*|version\\s+\\d+(?:\\.\\d+)*|\\d+\\.\\d+(?:\\.\\d+)*)";
+const VERSION = `(?:(?:\\s+|\\s*,\\s*)(?:\\(${VERSION_MARK}\\)|${VERSION_MARK}))`;
+/** A trailing version marker on an upstream title, which is not part of what the Name must follow. */
+const TITLE_VERSION = new RegExp(`${VERSION}\\s*$`, "iu");
 
 const PARTICLE = "(?:(?:van|von|de|der|den|del|della|di|da|du|le|la|dos|das|ten|ter) )";
 const SURNAME = `${PARTICLE}*\\p{Lu}[\\p{L}\\p{M}]*(?:['\\u2019-][\\p{L}\\p{M}]+)*`;
+const AUTHORS = `${SURNAME}(?: et al\\.?| (?:&|and) ${SURNAME})?`;
+const OPEN = "(?:\\s*,\\s*|\\s*[\\u2013\\u2014]\\s*|\\s+-\\s+|\\s*\\(|\\s+)";
 const YEAR = "(?:19|20)\\d{2}";
-/** Authors after a comma, a dash or a parenthesis: one surname, `et al.`, or two joined by `&`. */
-const AUTHORS = `${SURNAME}(?: et al\\.?| & ${SURNAME})?`;
-/** Authors after a bare space: only the two shapes no ordinary title word makes. */
-const BARE_AUTHORS = `${SURNAME}(?: et al\\.?| & ${SURNAME})`;
-
-/** The four author-year shapes, each a whole alternative. */
-const AUTHOR_YEAR = `(?:,\\s*${AUTHORS} ${YEAR}|\\s+[-\\u2013\\u2014]\\s+${AUTHORS} ${YEAR}|\\s*\\(${AUTHORS} ${YEAR}\\)|\\s+${BARE_AUTHORS} ${YEAR})`;
+const SERVICE_KEY = `(?:\\s+\\((?:${NAME_SERVICES.join("|")}):[^\\s()]{1,64}\\))`;
 
 /**
- * The final service-key parenthetical the submission standards allow after a descriptive name,
- * `(service:key)`: a lowercase service word, a colon and a key with no blank or parenthesis
- * (`(figshare:12192405)`, `(openneuro:ds004362)`).
+ * The closed suffix grammar (see the file header), anchored at both ends. It matches the empty
+ * text too; the pairing of parentheses, the bare-space rule and the people are checked by
+ * {@link isNameSuffix}. Linear: no nested unbounded repetition over the same characters.
  */
-const SERVICE_KEY = "(?:\\s+\\([a-z][a-z0-9-]{0,31}:[^\\s()]{1,64}\\))";
-
-/**
- * The closed suffix grammar (see the file header), anchored at both ends: an optional author-year
- * shape, then an optional service key. It matches the empty text too. Linear: no nested unbounded
- * repetition over the same characters.
- */
-export const NAME_SUFFIX = new RegExp(`^${AUTHOR_YEAR}?${SERVICE_KEY}?$`, "u");
+export const NAME_SUFFIX = new RegExp(
+  `^(?<version>${VERSION})?(?:(?<open>${OPEN})(?<authors>${AUTHORS}),?\\s(?<year>${YEAR})(?<close>\\))?)?(?<service>${SERVICE_KEY})?$`,
+  "u",
+);
 
 /** Closing punctuation that can end a title: never the start of a suffix. */
 const TITLE_CLOSERS = /^[\p{Pe}\p{Pf}.!?"'’”]+/u;
 
-/** Whether `rest`, what follows the title in the Name as written, is nothing or a suffix of the grammar. */
-export function isNameSuffix(rest: string): boolean {
-  const tail = rest.replace(TITLE_CLOSERS, "");
-  return tail.trim() === "" || NAME_SUFFIX.test(tail);
+/** The surnames of an author-year's authors: one, or two joined by `&` or `and`. */
+function surnamesOf(authors: string): string[] {
+  return authors
+    .replace(/ et al\.?$/, "")
+    .split(/ (?:&|and) /)
+    .filter((s) => s !== "");
+}
+
+/** `needle` is a run of whole words of `hay`. */
+function hasRun(hay: readonly string[], needle: readonly string[]): boolean {
+  if (needle.length === 0) return false;
+  for (let i = 0; i + needle.length <= hay.length; i++) {
+    if (needle.every((w, k) => hay[i + k] === w)) return true;
+  }
+  return false;
 }
 
 /**
- * The Name as written (NFKC, invisible characters removed) and, for each character of its
- * normalized form, the index in that text just past the character it came from.
+ * Whether `rest`, what follows the title in the Name as written, is nothing or a suffix of the
+ * grammar whose every surname is one of `people` (the dataset's Authors and the matched record's
+ * creators).
  */
-function normalizedWithMap(name: string): { text: string; norm: string; ends: number[] } {
-  const text = withoutInvisible(name.normalize("NFKC"));
-  let norm = "";
-  const ends: number[] = [];
-  let pendingSpace = false;
-  for (let i = 0; i < text.length; ) {
-    const cp = text.codePointAt(i) as number;
-    const ch = String.fromCodePoint(cp);
-    const next = i + ch.length;
-    if (APOSTROPHE.test(ch)) {
-      // Removed: `Couple’s` reads `couples`.
-    } else if (SEPARATOR.test(ch)) {
-      pendingSpace = norm.length > 0;
-    } else {
-      if (pendingSpace) {
-        norm += " ";
-        ends.push(i);
-        pendingSpace = false;
-      }
-      // One entry per UTF-16 unit, so `ends[k]` is about `norm[k]` whatever the lower case's length.
-      const low = ch.toLowerCase();
-      norm += low;
-      for (let k = 0; k < low.length; k++) ends.push(next);
-    }
-    i = next;
-  }
-  return { text, norm, ends };
+export function isNameSuffix(rest: string, people: readonly string[] = []): boolean {
+  const tail = rest.replace(TITLE_CLOSERS, "");
+  if (tail.trim() === "") return true;
+  const m = NAME_SUFFIX.exec(tail);
+  if (m === null) return false;
+  const g = m.groups ?? {};
+  if (g.authors === undefined) return true;
+  const opened = (g.open ?? "").includes("(");
+  if (opened !== (g.close !== undefined)) return false;
+  if (/^\s+$/.test(g.open ?? "") && !/ et al\.?$| (?:&|and) /.test(g.authors)) return false;
+  const folded = people.map(foldWords);
+  return surnamesOf(g.authors).every((s) => {
+    const words = foldWords(s);
+    return folded.some((p) => hasRun(p, words));
+  });
 }
 
-/** Whether `name` follows `title`: it starts with it at a word boundary, and the rest is a suffix. */
-export function followsTitle(name: string, title: string): boolean {
-  const t = normalizeTitle(title);
-  if (t === "") return false;
-  const { text, norm, ends } = normalizedWithMap(name);
-  // A title that ends inside a word of the Name leaves a rest that starts with a letter or a digit,
-  // which no suffix does, so the grammar alone keeps `SVWMs` from following `SVWM`.
-  if (!norm.startsWith(t)) return false;
-  return isNameSuffix(text.slice(ends[t.length - 1]));
+/**
+ * Whether `name` follows `title`: its words start with the title's words (the title's trailing
+ * version marker set aside), and the rest is a suffix whose people are `people`.
+ */
+export function followsTitle(name: string, title: string, people: readonly string[] = []): boolean {
+  const t = foldWords(title.normalize("NFKC").replace(TITLE_VERSION, ""));
+  if (t.length === 0) return false;
+  const { text, words } = wordsOf(name);
+  if (words.length < t.length || !t.every((w, i) => words[i]?.fold === w)) return false;
+  return isNameSuffix(text.slice(words[t.length - 1]?.end ?? 0), people);
 }
+
+const isDeclared = (s: UpstreamTitleSource) => DECLARED_ORIGINS.includes(s.origin);
 
 /** A source the lineage read as a dataset (or a data container) whose license it could judge. */
 function isReadDataset(s: UpstreamTitleSource): boolean {
   return s.status === "resolved" && s.outcome !== "unresolved";
 }
 
-/** A source with a title the rule can compare: read, with a title that normalizes to something. */
+/** A source with a title the rule can compare: read, with a title that has a word. */
 function titleOf(s: UpstreamTitleSource): string | null {
-  return s.status === "resolved" && s.title !== null && normalizeTitle(s.title) !== ""
+  return s.status === "resolved" && s.title !== null && foldWords(s.title).length > 0
     ? s.title
     : null;
 }
 
 /**
- * The titles of the upstream dataset sources, each once, in the lineage's order: the titles the
- * rule compares a Name with and the decision card shows.
+ * The titles of the declared upstream dataset sources, each once, in the lineage's order: the
+ * titles the rule compares a Name with and the decision card shows.
  */
 export function upstreamDatasetTitles(sources: readonly UpstreamTitleSource[]): string[] {
   const out: string[] = [];
   for (const s of sources) {
-    const t = titleOf(s);
+    const t = isDeclared(s) ? titleOf(s) : null;
     if (t !== null && !out.includes(t)) out.push(t);
   }
   return out;
 }
 
 /**
- * Whether `name` follows one upstream dataset source's title (the file header has the rule and
- * the results). `name` is the `Name` of `dataset_description.json` (null when it could not be
- * read); `sources` are the lineage's sources as the resolver returned them. Pure and deterministic.
+ * Whether `name` follows one declared upstream dataset source's title (the file header has the
+ * rule and the results). `name` is the `Name` of `dataset_description.json` (null when it could
+ * not be read); `sources` are the lineage's sources as the resolver returned them; `authors` the
+ * description's `Authors`. Pure and deterministic.
  */
 export function nameFollowsUpstream(
   name: string | null,
   sources: readonly UpstreamTitleSource[],
+  authors: readonly string[] = [],
 ): NameUpstreamResult {
-  const readable = name !== null && normalizeTitle(name) !== "";
+  const declared = sources.filter((s) => isDeclared(s) && s.status !== "publication");
+  if (declared.length === 0) return "not_applicable";
+  const readable = name !== null && foldWords(name).length > 0;
   if (readable) {
-    for (const s of sources) {
+    for (const s of declared) {
       const t = titleOf(s);
-      if (t !== null && followsTitle(name, t)) return "matches";
+      if (t !== null && followsTitle(name, t, [...authors, ...(s.creators ?? [])])) {
+        return "matches";
+      }
     }
   }
-  const declared = sources.filter((s) => s.origin !== "readme" && s.status !== "publication");
-  if (declared.length === 0) return "not_applicable";
-  const undetermined = declared.some((s) => !isReadDataset(s) || titleOf(s) === null);
+  const undetermined = declared.some(
+    (s) => !isReadDataset(s) || titleOf(s) === null || s.resolved_latest === true,
+  );
   if (!readable || undetermined) return "unknown";
   return "differs";
 }

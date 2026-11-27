@@ -640,6 +640,14 @@ function nameOf(descriptionText: string | null): string | null {
   return desc !== null && typeof desc.Name === "string" ? desc.Name : null;
 }
 
+/** The `Authors` of `dataset_description.json` that are text: whom an author-year may name. */
+function authorsOf(descriptionText: string | null): string[] {
+  const desc = parseObject(descriptionText);
+  return desc !== null && Array.isArray(desc.Authors)
+    ? desc.Authors.filter((a): a is string => typeof a === "string")
+    : [];
+}
+
 /**
  * The inputs of a run that has none to read (the offline calibration, which talks to no Worker):
  * every section absent and no lineage, so nothing is sent and no lineage reason is derived.
@@ -893,6 +901,7 @@ export function evidenceFromDocuments(
             name_upstream: nameFollowsUpstream(
               nameOf(docs.dataset_description.text),
               inputs.inputs.sources,
+              authorsOf(docs.dataset_description.text),
             ),
           }
         : {}),
