@@ -75,6 +75,8 @@
     "test/dataset-screen.test.ts",
     "test/dataset-screen-spawn.test.ts",
     "test/helpers/dataset-screen-fixture.ts",
+    "scripts/docs/*.ts",
+    "test/docs-anchors.unit.test.ts",
     "scripts/scrub/**/*.ts",
     "test/scrub/**/*.ts"
   ],

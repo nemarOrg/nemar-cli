@@ -15,6 +15,54 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.41 - 2026-11-26
+
+### Local Zarr reader (#2144, ADR 0120)
+
+The CLI can read a time window of a public dataset's Zarr recording itself, through a local engine that shares one read core with the MCP server (ADR 0120).
+It carries no migration and sets no Worker variable or secret, and the API gains one public schema route.
+The MCP server's read, assemble and array-metadata code moved into `shared/zarr/`: `taste.ts` delegates assembly to the shared `assembleWindow`, `array-metadata.ts` is rebuilt on `shared/zarr`, `projection-cache.ts` gains `mcpJsonCache`, and `index-reader.ts` drops `isV3Index`.
+The MCP output is pinned by the `read_window` golden test (its result and request log match byte for byte, apart from the server version stamp).
+
+**Added.**
+- **`nemar zarr read <dataset> <recording> --start <s> --duration <s>` reads a window of a public recording.**
+  It fetches only the chunks the window needs from the dataset's Zarr store and prints a summary (rate, channels, samples, filled ranges and the first values).
+  `--channels`, `--units physical|digital` and `--representation` choose what is read; `--out <file>` writes raw little-endian, channel-major values, and the summary prints the numpy and MATLAB lines that load them; `--json` prints the window's description.
+  Each engine error (not found, not ready, out of range, too large, upstream error, decode error) exits 1 with a hint; the decode error's hint names `nemar engine cache clear`.
+- **A window cannot make the engine fetch more than it needs.**
+  Every range read, and the total of all range reads of one window, is capped by what the store's geometry allows, so a shard footer that claims larger chunks is an upstream error and the read past the cap is never sent.
+  A chunk whose header claims another decoded size than the store's geometry is refused before anything is allocated, and the engine reads a large reply in linear time.
+- **A disk cache, so a repeated read of a cached window sends no range request, even after a restart.**
+  A window whose entries were evicted, or a disk error (reported as one stderr line, never a failed read), sends the read to the host again.
+  A window that fails to decode drops the cached entries it read or stored, so the next read fetches them again.
+  It holds public data only, at `<config dir>/zarr-cache/public/v1/` (made private, mode 0700), up to 2 GiB by default and evicting the least recently used entries.
+  `NEMAR_ZARR_DISK_CACHE_DIR` moves it and `NEMAR_ZARR_DISK_CACHE_BYTES` sets the limit (`0` turns it off).
+  A `NEMAR_ZARR_DISK_CACHE_DIR` that names an existing, non-empty directory the cache did not create is left untouched (no chmod, no writes): the cache is off, with one stderr line, and `nemar engine status` and `nemar doctor` say why.
+  Entries are keyed by the store's identity (dataset, conversion commit and time), so a re-converted store is fetched again; the dataset index is never cached on disk and is read at each engine start.
+- **Three more engine settings, listed in `nemar zarr read --help`.**
+  `NEMAR_ZARR_MAX_PAYLOAD_BYTES` sets the largest window the engine returns (default 256 MiB, at most 1 GiB), `NEMAR_ZARR_RANGE_CACHE_BYTES` bounds the in-memory range cache (default 256 MiB) and `NEMAR_ZARR_DATA_PLANE` moves the data plane's `/data` mount (default: the API origin plus `/data`).
+  A byte limit that is not a positive integer, or a payload limit above 1 GiB, is reported as a configuration error naming the setting.
+- **`nemar engine status` and `nemar engine cache clear`.**
+  `status` starts the engine and shows its version, protocol, largest window, the Zarr host and data plane in use, and the cache's size and limit.
+  `cache clear` removes only the files the cache wrote and reports the bytes freed.
+- **`nemar doctor` has a "Zarr engine" section**: the engine answers within 10 seconds and the cache directory is writable. Doctor's exit code is unchanged, and an unexpected error in the cache check is a failed check, not a crash.
+- **The Zarr host follows the account's API host**: `api.nemar.org` reads from `zarr.nemar.org` and `api-test.nemar.org` from `zarr-test.nemar.org`; `NEMAR_ZARR_BASE` overrides it.
+- **`GET /schemas/zarr-engine-protocol-v0.json` serves the engine's protocol schema.**
+  v0 is unstable and may change in place, so a client can see the previous v0 for up to a day after a change.
+- The CLI gains one runtime dependency, `fzstd` 0.1.1, the zstd decoder the backend already uses.
+
+**Changed.**
+- **The MCP server's Zarr read path now lives in `shared/zarr/`, shared with the CLI's engine (ADR 0120).**
+  It ships with the Worker; `read_window` output is pinned by its golden test.
+  The shared decoder checks a chunk's declared size against the geometry before decoding, so `render_overview` reports a view chunk of the wrong size as a read failure, and the shared code's log lines start with `[zarr]` instead of `[mcp]`.
+
+**Known limits.**
+- `nemar zarr read` reads public datasets only. Private data needs its own cache rules, which ADR 0120 leaves to a later decision.
+- A public dataset that is made private later keeps its already cached bytes on a machine until `nemar engine cache clear` or eviction removes them.
+- The engine speaks protocol v0, which may still change; only the CLI uses it, and the Python and MATLAB clients are not in this release.
+
+## 0.10.40 - 2026-11-26
+
 ### Admin command tree (epic #2307, ADR 0135)
 
 **Release note.**
@@ -132,6 +180,20 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
   Deploy order: the backend first. A new CLI against an older backend exits 1, the same way it does for the re-pull section.
   No secret, binding, cron or migration.
 - **New decision records:** ADR 0130 (community input goes through a time-boxed RFC in `nemarOrg/rfcs`), ADR 0131 (biosig-zarr has its own home and packing rules; partly supersedes ADR 0128) and ADR 0133 (format conformance vectors are canonical in biosig-zarr and nemar-cli vendors them by digest; partly supersedes ADR 0124 decision 3).
+
+### Tickets: the legal-process queue (#2304, ADR 0112 amendment of 2026-11-22)
+
+- **Mail to `legal-process@` lands in a restricted queue whose tickets are kept seven years.**
+  Migration 0149 seeds the `legal-process` queue (`INSERT OR IGNORE`, so a queue an owner already made keeps its settings); it is restricted to owners and starts as a pool with no assignee.
+  The purge keeps a ticket until both `MAIL_RETENTION_DAYS` and its queue's own period have passed; `legal-process` is kept 2557 days (`QUEUE_RETENTION_DAYS`).
+  A legal-process message never joins a ticket of another queue: ingest refuses it as `retention_mismatch`.
+  The restriction and the period are declared in code, not in the row, so once a legal-process ticket exists do not roll the Worker back below 0.10.40: an older Worker purges it at the general period.
+
+### Decision records
+
+- **ADR 0138 (accepted): rootless Podman is supported through one path (#2355).**
+  Site and user container configuration and OCI hooks are shut out, the container's `config.json` is checked against the declared binds before it starts, and anything else is refused as `runtime_unusable`.
+  It supersedes only ADR 0122 decision 6's Podman clause; the runtime is built in nemar-process#85, and no nemar-cli code changes.
 
 ### Changed
 
