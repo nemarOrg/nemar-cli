@@ -199,8 +199,8 @@ Where this amendment and the decisions above differ, this amendment holds.
 - Parity is with eegprep's `topoplot` and `griddata_v4` at `edf694c8` (`871bc7f8` since neuroschema 0.6.1, #2411), which follow EEGLAB's `topoplot` and its v4 interpolation.
   Where they differ, `docs/views/sensor-field.md` decides:
   the map interpolates each value's deviation from the mean and adds the mean back, z = m + spline(v − m), because the biharmonic spline has no constant term and a shared offset (a spectrum's decibels) would ripple across the color axis;
-  sensors within 10⁻³ merge at their mean, where eegprep gives an empty map for duplicates;
-  a sensor whose value is not finite is dropped with its value, where eegprep shifts the later values onto the wrong sensors;
+  sensors within 10⁻³ merge at their mean, where eegprep at `edf694c8` gives an empty map for duplicates (fixed at `871bc7f8` by sccn/eegprep#672, which averages coincident sensors with MATLAB's much smaller tolerance; the merge still decides);
+  a sensor whose value is not finite is dropped with its value, where eegprep at `edf694c8` shifts the later values onto the wrong sensors (fixed at `871bc7f8` by sccn/eegprep#672, which drops both; the drop rule still decides);
   the `minmax` axis widens by 5% of the range on each side, where EEGLAB moves each limit away from zero and clips a map of one sign (the `absmax` axis stays EEGLAB's);
   the nose is EEGLAB's, not eegprep's triangle, and the head outline is a circle on the layout's equator (`0.5 * squeezefac`), as eegprep draws it and 0.35% outside EEGLAB's;
   and fewer than 8 sensors, a grid past the head and an interpolation that overflows are refused with a word, where eegprep draws or returns an empty map.
