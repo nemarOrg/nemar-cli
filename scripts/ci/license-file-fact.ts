@@ -653,11 +653,13 @@ export function identifyLicenseFile(inputs: IdentifyInputs): LicenseIdentificati
     partial = false,
   ): LicenseIdentification => ({ fact: f, matcher, leftover, partial });
   const { document, licenseField, scan } = inputs;
-  // No scan directory: the workflow predates the matcher (ADR 0142 decision 2, deploys 1 and 2).
-  if (scan === null) return done(fact("unreadable"), "unavailable");
-  const matcher = scan.matcher;
+  // No file and an annexed file are what they are whether or not the matcher ran: neither is ever
+  // scanned, and the Worker's parser holds `absent` and `annexed` to the license document's state.
+  const matcher = scan === null ? "unavailable" : scan.matcher;
   if (document.state === "absent") return done(fact("absent"), matcher);
   if (document.state === "annexed") return done(fact("annexed"), matcher);
+  // No scan directory: the workflow predates the matcher (ADR 0142 decision 2, deploys 1 and 2).
+  if (scan === null) return done(fact("unreadable"), "unavailable");
   if (document.state !== "present" || document.text === null) {
     return done(fact("unreadable"), matcher);
   }

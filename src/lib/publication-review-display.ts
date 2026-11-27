@@ -228,6 +228,19 @@ const isRecord = (x: unknown): x is Record<string, unknown> =>
   typeof x === "object" && x !== null && !Array.isArray(x);
 
 /**
+ * `LICENSE: matches CC-BY-4.0`: a version-3 review's LICENSE identification (ADR 0142), its state
+ * and the identifier it names, both closed words of the job's matcher. Null for a review from
+ * before version 3, and for an identification of a shape this CLI does not read. The decision
+ * card's license panel (ADR 0142, decision 4) says the rest.
+ */
+export function licenseFileLine(e: PublicationReviewEvidence): string | null {
+  const f: unknown = e.license_file;
+  if (!isRecord(f) || typeof f.state !== "string") return null;
+  const spdx = typeof f.spdx === "string" ? ` ${plain(f.spdx)}` : "";
+  return `LICENSE: ${plain(f.state)}${spdx}`;
+}
+
+/**
  * Whether `e` has what {@link shownLine} and {@link withheldLine} read, as the types they read it
  * as: a state for each of the review's documents, the two counts of description keys, and a count
  * for every finding kind withheld (none sent is none withheld). The shape is checked, not caught:
@@ -432,6 +445,8 @@ export function reviewDetailLines(d: PublicationReviewDetail): string[] {
       out.push(`  ${evidenceLine(review.evidence)}`, `  ${shownLine(review.evidence)}`);
       const withheld = withheldLine(review.evidence);
       if (withheld !== null) out.push(`  ${withheld}`);
+      const license = licenseFileLine(review.evidence);
+      if (license !== null) out.push(`  ${license}`);
     }
     if (review.reproducibility !== null && review.reproducibility !== undefined) {
       out.push(

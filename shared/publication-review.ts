@@ -35,6 +35,7 @@
 
 import type { FindingKind } from "./identifier-scan.js";
 import { FINDING_KINDS, KNOWN_FORMATS, type ScreenGate } from "./identifier-screen-report.js";
+import { LICENSE_FILE_STATES, type LicenseFileFact } from "./license-file.js";
 import {
   ACTION_REQUIRED_OUTCOMES,
   LICENSE_EVIDENCE_ADDRESS,
@@ -55,10 +56,16 @@ import { sanitizeNote } from "./untrusted-text.js";
  * The version a review job writes. Version 2 (ADR 0139, decisions 5, 6 and 9) adds the widened
  * inputs to the evidence (`inputs`, `lineage`), the fifth answer (`note_answer`) and the
  * reproducibility record (`record`). A stored version-1 report still parses, as it was written.
+ *
+ * Version 3 (ADR 0142, decision 2) adds the LICENSE identification (`evidence.license_file`), the
+ * closed names of the description keys not shown (`evidence.description_keys_not_shown_names`),
+ * when the lineage was resolved (`evidence.lineage.resolved_at`) and the license matcher
+ * (`record.license_matcher`). The Worker reads it from the first of ADR 0142's three deploys; the
+ * job still writes version 2 until the second, so this constant stays at 2 until then.
  */
 export const PUBLICATION_REPORT_VERSION = 2;
 /** Every version the parser reads. */
-export const PUBLICATION_REPORT_VERSIONS = [1, 2] as const;
+export const PUBLICATION_REPORT_VERSIONS = [1, 2, 3] as const;
 export type PublicationReportVersion = (typeof PUBLICATION_REPORT_VERSIONS)[number];
 
 /**
@@ -249,6 +256,37 @@ export const DESCRIPTION_KEYS_SHOWN = [
   "GeneratedBy",
   "SourceDatasets",
 ] as const;
+
+/**
+ * The words a version-3 report names the description keys not shown with (ADR 0142, decision 5):
+ * the keys NEMAR knows that are not in {@link DESCRIPTION_KEYS_SHOWN} (`Version`, which ADR 0102
+ * keeps from the model on purpose, BIDS's `Keywords`, and the deprecated derivative key
+ * `PipelineDescription`), and `other` for any key it does not know. Never a depositor's key name.
+ */
+export const DESCRIPTION_KEYS_NOT_SHOWN_WORDS = [
+  "Version",
+  "Keywords",
+  "PipelineDescription",
+  "other",
+] as const;
+export type DescriptionKeyNotShownWord = (typeof DESCRIPTION_KEYS_NOT_SHOWN_WORDS)[number];
+
+/**
+ * The closed names of the top-level keys of `dataset_description.json` that were not shown, from
+ * those keys: each known key once and `other` once for every key it does not know, in
+ * {@link DESCRIPTION_KEYS_NOT_SHOWN_WORDS} order. A shown key is not named.
+ */
+export function descriptionKeysNotShownNamesOf(
+  keys: readonly string[],
+): DescriptionKeyNotShownWord[] {
+  const shown: readonly string[] = DESCRIPTION_KEYS_SHOWN;
+  const named = new Set<DescriptionKeyNotShownWord>();
+  for (const key of keys) {
+    if (shown.includes(key)) continue;
+    named.add(key !== "other" && isOneOf(DESCRIPTION_KEYS_NOT_SHOWN_WORDS, key) ? key : "other");
+  }
+  return DESCRIPTION_KEYS_NOT_SHOWN_WORDS.filter((w) => named.has(w));
+}
 
 /**
  * What happened to each document. `sent` and `sent_cut` reached the model (the second cut at its
@@ -475,6 +513,17 @@ export interface PublicationReviewEvidence {
   withheld_findings: Partial<Record<FindingKind, number>>;
   description_keys_shown: number;
   description_keys_not_shown: number;
+  /**
+   * The closed names of the keys not shown ({@link descriptionKeysNotShownNamesOf}). Present only
+   * in a version-3 report, so a stored version-1 or version-2 report reads back byte for byte.
+   */
+  description_keys_not_shown_names?: DescriptionKeyNotShownWord[];
+  /**
+   * The LICENSE identification (ADR 0142, decision 1). Present only in a version-3 report. A
+   * `matches_other` lowers `authors_and_license` to at best unknown ({@link answersOf}) and keeps
+   * its fail from any automatic denial (`shared/publication-auto-deny.ts`).
+   */
+  license_file?: LicenseFileFact;
   summary: StructuralSummary;
   /**
    * What happened to each widened input ({@link REVIEW_INPUTS}), in the states a document has
@@ -493,7 +542,17 @@ export interface PublicationReviewEvidence {
 export interface ReviewLineage {
   outcome: LineageOutcome;
   credited: boolean;
+  /**
+   * When the outcome was resolved (ADR 0142, decision 3): a D1 instant (`YYYY-MM-DD HH:MM:SS`) or
+   * an ISO 8601 UTC instant, or null when the resolver did not say. Present only in a version-3
+   * report.
+   */
+  resolved_at?: string | null;
 }
+
+/** A lineage's `resolved_at`: a D1 instant, or an ISO 8601 instant in UTC. */
+export const LINEAGE_RESOLVED_AT_RE =
+  /^\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2}|T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z)$/;
 
 /** The states an input may have: a document's, less the ones that only a git file can be in. */
 export const INPUT_STATES = [
@@ -896,7 +955,20 @@ export interface ReviewReproducibility {
    * time, named by when D1 stored it (or the commit it was read at); null when there was none.
    */
   enrichment_source: string | null;
+  /**
+   * The license matcher (ADR 0142; ADR 0139 decision 9 as amended on 2026-11-27): the pinned
+   * matcher's version (`LICENSE_MATCHER_VERSION` when the job ran, an older pin in an older
+   * report) or `unavailable`. Present only in a version-3 report.
+   */
+  license_matcher?: string;
 }
+
+/**
+ * A recorded matcher word: any pinned `scancode-X.Y.Z+spdx-A.B`, so a report stored under an
+ * earlier pin still parses after the pin moves, or `unavailable`.
+ */
+export const LICENSE_MATCHER_RE =
+  /^(?:scancode-\d{1,4}\.\d{1,4}\.\d{1,4}\+spdx-\d{1,4}\.\d{1,4}|unavailable)$/;
 
 /** An enrichment's source: a stored instant (`datetime('now')` text) or a commit. */
 export const ENRICHMENT_SOURCE_RE = /^(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}|[0-9a-f]{40})$/;
@@ -1097,11 +1169,91 @@ const EVIDENCE_KEYS = [
 /** A version-2 evidence block's keys: version 1's, and the widened inputs and the lineage. */
 const EVIDENCE_V2_KEYS = [...EVIDENCE_KEYS, "inputs", "lineage"] as const;
 
-function parseLineage(raw: unknown): ReviewLineage | null {
+/** A version-3 evidence block's keys: version 2's, the LICENSE identification and the key names. */
+const EVIDENCE_V3_KEYS = [
+  ...EVIDENCE_V2_KEYS,
+  "license_file",
+  "description_keys_not_shown_names",
+] as const;
+
+function parseLineage(raw: unknown, v3: boolean): ReviewLineage | null {
   if (raw === null) return null;
-  if (!isRecord(raw) || !hasExactKeys(raw, ["outcome", "credited"])) badEvidence();
+  const keys = v3 ? ["outcome", "credited", "resolved_at"] : ["outcome", "credited"];
+  if (!isRecord(raw) || !hasExactKeys(raw, keys)) badEvidence();
   const r = raw as Record<string, unknown>;
-  return { outcome: word(LINEAGE_OUTCOMES, r.outcome), credited: bool(r.credited) };
+  const lineage: ReviewLineage = {
+    outcome: word(LINEAGE_OUTCOMES, r.outcome),
+    credited: bool(r.credited),
+  };
+  if (v3) {
+    const at = r.resolved_at;
+    if (at !== null && (typeof at !== "string" || !LINEAGE_RESOLVED_AT_RE.test(at))) badEvidence();
+    lineage.resolved_at = at as string | null;
+  }
+  return lineage;
+}
+
+/** One SPDX-listed identifier, as the job's decision rule takes it: no `LicenseRef-`, no operator. */
+const SPDX_ID_RE = /^(?!LicenseRef-)[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/;
+/** ScanCode's file expression: identifiers, `LicenseRef-` terms, operators and parentheses only. */
+const LICENSE_EXPRESSION_RE = /^[A-Za-z0-9.+\-() ]{1,512}$/;
+
+/**
+ * The LICENSE identification (ADR 0142, decision 1), and its agreement with itself and with the
+ * license document's state: `spdx` names an identifier exactly when the identification was
+ * conclusive (and may when it was `unrecognized`), `additions` only for a conclusive one,
+ * `expression` only for `unrecognized`. An absent document is an absent file, or a conclusive file
+ * with nothing added; an annexed file is exactly a `withheld_annexed` document. So leftover text, an
+ * unrecognized file and an unreadable one all reached the model in some state other than `absent`
+ * (the job reports `absent` and `annexed` even with no matcher).
+ */
+function parseLicenseFile(raw: unknown, license: DocumentState): LicenseFileFact {
+  if (!isRecord(raw) || !hasExactKeys(raw, ["state", "spdx", "additions", "expression"])) {
+    badEvidence();
+  }
+  const r = raw as Record<string, unknown>;
+  const state = word(LICENSE_FILE_STATES, r.state);
+  const conclusive = state === "matches" || state === "matches_other";
+  const spdx = r.spdx;
+  if (spdx !== null && (typeof spdx !== "string" || !SPDX_ID_RE.test(spdx))) badEvidence();
+  if (conclusive && spdx === null) badEvidence();
+  if (!conclusive && state !== "unrecognized" && spdx !== null) badEvidence();
+  const additions = bool(r.additions);
+  if (additions && !conclusive) badEvidence();
+  const expression = r.expression;
+  if (
+    expression !== null &&
+    (typeof expression !== "string" || !LICENSE_EXPRESSION_RE.test(expression))
+  ) {
+    badEvidence();
+  }
+  if (expression !== null && state !== "unrecognized") badEvidence();
+  // Exact: an absent document is no file, or a conclusive file with nothing added (nothing to send);
+  // an annexed document is exactly an annexed file, which is never scanned.
+  if (state === "absent" && license !== "absent") badEvidence();
+  if (license === "absent" && state !== "absent" && !(conclusive && !additions)) badEvidence();
+  if ((state === "annexed") !== (license === "withheld_annexed")) badEvidence();
+  return {
+    state,
+    spdx: spdx as string | null,
+    additions,
+    expression: expression as string | null,
+  };
+}
+
+/**
+ * The closed names of the keys not shown: unique, in {@link DESCRIPTION_KEYS_NOT_SHOWN_WORDS}
+ * order, and agreeing with the count, so each known name stands for one key and `other` for the
+ * rest (one at least).
+ */
+function parseKeysNotShownNames(raw: unknown, notShown: number): DescriptionKeyNotShownWord[] {
+  if (!Array.isArray(raw) || raw.length > DESCRIPTION_KEYS_NOT_SHOWN_WORDS.length) badEvidence();
+  const names = (raw as unknown[]).map((n) => word(DESCRIPTION_KEYS_NOT_SHOWN_WORDS, n));
+  const order = names.map((n) => DESCRIPTION_KEYS_NOT_SHOWN_WORDS.indexOf(n));
+  if (order.some((n, i) => i > 0 && n <= order[i - 1])) badEvidence();
+  const known = names.filter((n) => n !== "other").length;
+  if (names.includes("other") ? notShown <= known : notShown !== known) badEvidence();
+  return names;
 }
 
 /** The Authors words that belong to one kind of release only (`shared/submission-minimums.ts`). */
@@ -1133,8 +1285,10 @@ function parseMinimumFailures(raw: unknown, anonymous: boolean): MinimumFailure[
  */
 export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
   if (!isRecord(raw)) badEvidence();
-  // Version 1's keys exactly, or version 2's exactly: a block is one or the other, never between.
-  const v2 = hasExactKeys(raw as Record<string, unknown>, EVIDENCE_V2_KEYS);
+  // Version 1's keys exactly, version 2's exactly or version 3's exactly: a block is one of them,
+  // never between. Version 3 is version 2 with more, so everything said of version 2 holds of it.
+  const v3 = hasExactKeys(raw as Record<string, unknown>, EVIDENCE_V3_KEYS);
+  const v2 = v3 || hasExactKeys(raw as Record<string, unknown>, EVIDENCE_V2_KEYS);
   if (!v2 && !hasExactKeys(raw as Record<string, unknown>, EVIDENCE_KEYS)) badEvidence();
   const r = raw as Record<string, unknown>;
   if (typeof r.head !== "string" || !HEAD.test(r.head)) badEvidence();
@@ -1182,7 +1336,9 @@ export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
     inputs = {} as Record<ReviewInput, DocumentState>;
     for (const i of REVIEW_INPUTS) inputs[i] = word(INPUT_STATES, rawInputs[i]);
   }
-  const lineage = v2 ? parseLineage(r.lineage) : null;
+  // A version-3 block is about the widened inputs, as a version-2 report's is.
+  if (v3 && r.inputs === null) badEvidence();
+  const lineage = v2 ? parseLineage(r.lineage, v3) : null;
 
   // The finding counts exist exactly when a document or an input was withheld for a finding.
   const withheldForFinding =
@@ -1192,6 +1348,7 @@ export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
 
   const description_keys_shown = count(r.description_keys_shown);
   if (description_keys_shown > DESCRIPTION_KEYS_SHOWN.length) badEvidence();
+  const description_keys_not_shown = count(r.description_keys_not_shown);
 
   const evidence: PublicationReviewEvidence = {
     head: r.head as string,
@@ -1209,11 +1366,19 @@ export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
     documents,
     withheld_findings,
     description_keys_shown,
-    description_keys_not_shown: count(r.description_keys_not_shown),
+    description_keys_not_shown,
     summary: parseSummary(r.summary),
     inputs,
     lineage,
   };
+  // Set only on a version-3 block, so a version-1 or version-2 one serializes as it was written.
+  if (v3) {
+    evidence.description_keys_not_shown_names = parseKeysNotShownNames(
+      r.description_keys_not_shown_names,
+      description_keys_not_shown,
+    );
+    evidence.license_file = parseLicenseFile(r.license_file, documents.license);
+  }
   return evidence as ReviewFacts;
 }
 
@@ -1251,18 +1416,19 @@ function badRecord(): never {
   throw new PublicationReviewReportError("bad_record");
 }
 
+const RECORD_KEYS = [
+  "prompt_version",
+  "models",
+  "input_digest",
+  "resolver_version",
+  "enrichment_source",
+] as const;
+/** A version-3 record's keys: version 2's and the license matcher. */
+const RECORD_V3_KEYS = [...RECORD_KEYS, "license_matcher"] as const;
+
 /** A record of the calls the report's own model made: the first call is always that model's. */
-function parseRecord(raw: unknown, model: ReviewerModel): ReviewReproducibility {
-  if (
-    !isRecord(raw) ||
-    !hasExactKeys(raw, [
-      "prompt_version",
-      "models",
-      "input_digest",
-      "resolver_version",
-      "enrichment_source",
-    ])
-  ) {
+function parseRecord(raw: unknown, model: ReviewerModel, v3: boolean): ReviewReproducibility {
+  if (!isRecord(raw) || !hasExactKeys(raw, v3 ? RECORD_V3_KEYS : RECORD_KEYS)) {
     badRecord();
   }
   const r = raw as Record<string, unknown>;
@@ -1294,13 +1460,20 @@ function parseRecord(raw: unknown, model: ReviewerModel): ReviewReproducibility 
     return { model: call.model as ReviewerModel, effort: call.effort as RecordedEffort };
   });
   if (models[0]?.model !== model) badRecord();
-  return {
+  const record: ReviewReproducibility = {
     prompt_version: r.prompt_version as string,
     models,
     input_digest: r.input_digest as string,
     resolver_version: r.resolver_version as string | null,
     enrichment_source: r.enrichment_source as string | null,
   };
+  if (v3) {
+    if (typeof r.license_matcher !== "string" || !LICENSE_MATCHER_RE.test(r.license_matcher)) {
+      badRecord();
+    }
+    record.license_matcher = r.license_matcher as string;
+  }
+  return record;
 }
 
 /**
@@ -1352,11 +1525,12 @@ export function parsePublicationReviewReport(
   if (!v1Keys && !hasExactKeys(raw, REPORT_V2_KEYS)) {
     throw new PublicationReviewReportError("unknown_key");
   }
-  if (raw.v !== 1 && raw.v !== 2) throw new PublicationReviewReportError("bad_version");
-  const v: PublicationReportVersion = raw.v;
-  // A version-2 report carries the fifth answer and the record; a version-1 one carries neither,
-  // or (read back after a store) carries them as `not_asked` and null.
-  if (v === 2 && v1Keys) throw new PublicationReviewReportError("unknown_key");
+  const versions: readonly unknown[] = PUBLICATION_REPORT_VERSIONS;
+  if (!versions.includes(raw.v)) throw new PublicationReviewReportError("bad_version");
+  const v = raw.v as PublicationReportVersion;
+  // A version-2 or version-3 report carries the fifth answer and the record; a version-1 one
+  // carries neither, or (read back after a store) carries them as `not_asked` and null.
+  if (v !== 1 && v1Keys) throw new PublicationReviewReportError("unknown_key");
   const models = options.models ?? PUBLICATION_REVIEW_MODELS;
   if (!isOneOf(models, raw.model) || !isOneOf(CALIBRATION_MODELS, raw.model)) {
     throw new PublicationReviewReportError("bad_model");
@@ -1382,12 +1556,14 @@ export function parsePublicationReviewReport(
   if (typeof raw.summary !== "string") throw new PublicationReviewReportError("bad_summary");
   if (typeof raw.steering !== "boolean") throw new PublicationReviewReportError("bad_steering");
   const evidence = parsePublicationReviewEvidence(raw.evidence);
-  // A version-2 report is about the widened inputs, and a version-1 report never saw them.
-  if ((v === 2) !== (evidence.inputs !== null)) badEvidence();
+  // A version-2 or version-3 report is about the widened inputs, and a version-1 report never saw
+  // them; only a version-3 report carries the LICENSE identification, and it always does.
+  if ((v !== 1) !== (evidence.inputs !== null)) badEvidence();
+  if ((v === 3) !== (evidence.license_file !== undefined)) badEvidence();
 
   let note_answer: NoteAnswer = "not_asked";
   let record: ReviewReproducibility | null = null;
-  if (v === 2) {
+  if (v !== 1) {
     if (!isOneOf(NOTE_ANSWERS, raw.note_answer)) {
       throw new PublicationReviewReportError("bad_note_answer");
     }
@@ -1398,7 +1574,16 @@ export function parsePublicationReviewReport(
       : raw.note_answer === "not_asked"
         ? "unknown"
         : raw.note_answer;
-    record = parseRecord(raw.record, raw.model);
+    record = parseRecord(raw.record, raw.model, v === 3);
+    // A file the matcher identified, or failed to, was scanned, so the matcher ran (ADR 0142):
+    // `unavailable` is only ever beside `unreadable`, `absent` or `annexed`.
+    const scanned = evidence.license_file?.state;
+    if (
+      record.license_matcher === "unavailable" &&
+      (scanned === "matches" || scanned === "matches_other" || scanned === "unrecognized")
+    ) {
+      badRecord();
+    }
   } else if (!v1Keys && (raw.note_answer !== "not_asked" || raw.record !== null)) {
     throw new PublicationReviewReportError("unknown_key");
   }
@@ -1472,6 +1657,7 @@ export const QUESTION_FACTS = [
   "license_field_missing",
   "name_too_short",
   "placeholder_author",
+  "license_file_differs",
 ] as const;
 export type QuestionFactWord = (typeof QUESTION_FACTS)[number];
 
@@ -1487,6 +1673,8 @@ export const QUESTION_FACT_TEXT: Record<QuestionFactWord, string> = {
   license_field_missing: "dataset_description.json sets no License",
   name_too_short: `the Name in dataset_description.json is shorter than ${MIN_NAME_LENGTH} characters`,
   placeholder_author: "Authors names a placeholder instead of a person",
+  license_file_differs:
+    "the LICENSE file identifies a different license from the License in dataset_description.json",
 };
 
 /** A fact from the evidence that moved a question away from what the model said. */
@@ -1514,6 +1702,12 @@ const ANSWER_RANK: Record<Answer, number> = { pass: 2, unknown: 1, fail: 0 };
  *  - A `Name` shorter than ADR 0026's floor: `name_adequate` fails.
  *  - A placeholder author on a NAMED release: `authors_and_license` fails. For an anonymous
  *    release the Authors half is answered by ADR 0065's inverted rule, which is a minimum.
+ *  - A version-3 LICENSE identified as another license than the `License` field
+ *    (`license_file.state` `matches_other`): `authors_and_license` is at best unknown, never a
+ *    fail (ADR 0142). A `matches` LICENSE is seen when its leftover was: the license document is
+ *    the leftover then, so the rule for a cut or withheld document above is the whole rule, and
+ *    the parser refuses additions beside an absent document. Every other identification
+ *    keeps ADR 0102's rule through the document's state.
  *
  * `notes` lists only the facts that moved an answer, so a question the model itself failed has no
  * note. Every surface that explains a failed or unknown question reads them
@@ -1558,6 +1752,9 @@ export function answersOf(report: PublicationReviewReport): {
   }
   if (!e.anonymous && e.placeholder_authors > 0) {
     lower("authors_and_license", "placeholder_author", "authors_placeholder", "fail");
+  }
+  if (e.license_file?.state === "matches_other") {
+    lower("authors_and_license", "license_file_differs", "license_inconsistent", "unknown");
   }
   return { answers, notes };
 }
@@ -2856,6 +3053,11 @@ export interface PublicationReviewReproducibility {
   input_digest: string | null;
   /** The enrichment the review read, as D1 held it at review time (see {@link ReviewReproducibility}). */
   enrichment_source: string | null;
+  /**
+   * The license matcher of a version-3 report (migration 0162), or null. Optional so an older
+   * Worker's answer reads.
+   */
+  license_matcher?: string | null;
 }
 
 const RECORD_SCANNER_RE = /^identifier-scan@[0-9a-f]{7,40}$/;
@@ -2884,6 +3086,8 @@ export function reproducibilityOf(row: {
   promptVersion: string | null;
   inputDigest: string | null;
   enrichmentSource: string | null;
+  /** Migration 0162's column; a caller that predates it reads as unrecorded. */
+  licenseMatcher?: string | null;
 }): PublicationReviewReproducibility | null {
   const models = parseJsonOrNull(row.models);
   const shownModels =
@@ -2928,6 +3132,10 @@ export function reproducibilityOf(row: {
       row.enrichmentSource !== null && ENRICHMENT_SOURCE_RE.test(row.enrichmentSource)
         ? row.enrichmentSource
         : null,
+    license_matcher:
+      typeof row.licenseMatcher === "string" && LICENSE_MATCHER_RE.test(row.licenseMatcher)
+        ? row.licenseMatcher
+        : null,
   };
   const empty =
     record.scanner_id === null &&
@@ -2936,7 +3144,8 @@ export function reproducibilityOf(row: {
     record.models === null &&
     record.prompt_version === null &&
     record.input_digest === null &&
-    record.enrichment_source === null;
+    record.enrichment_source === null &&
+    record.license_matcher === null;
   return empty ? null : record;
 }
 
@@ -2969,6 +3178,7 @@ export function reproducibilityLines(record: PublicationReviewReproducibility): 
     `Prompt version: ${record.prompt_version ?? unrecorded}`,
     `Input digest (SHA-256): ${record.input_digest ?? unrecorded}`,
     `Enrichment read: ${record.enrichment_source === null ? "none, or not recorded" : `the copy stored at ${record.enrichment_source}`}`,
+    `License matcher: ${record.license_matcher ?? unrecorded}`,
     REPRODUCIBILITY_LINE,
   ];
 }
