@@ -9,6 +9,8 @@ with two edits, both recorded in `index.json` (`edited`):
   The names and ORCID iDs of third-party authors are kept as recorded.
   The other curator names in fixtures 03 and 04 are public DataCite contributor metadata of that OpenNeuro record, kept on purpose so the fixtures stay the registry's real answer.
 Resolver version 2 (epic #2182, card B4) also reads each record's title, creators and publisher from these same recordings; nothing was recorded again for it.
+Files 21 to 32 were fetched on 2026-11-27 for resolver version 3 (epic #2449, phase 3; ADR 0142 decision 3), the same way, with no edits:
+they hold no email address, and the OSF node records were requested without their contributors.
 `index.json` lists every recording with its method, URL, HTTP status, file and fetch time;
 `stand-in.ts` serves them to the tests from a local server.
 
@@ -30,6 +32,21 @@ Resolver version 2 (epic #2182, card B4) also reads each record's title, creator
   DataCite answers 404; Crossref says `journal-article` and lists the CC BY URL twice, once as `tdm` and once as `vor`;
   OpenAlex says `data-paper`.
 - **OpenAlex dataset record with no license:** the OpenNeuro DOI above.
+- **OSF URL, no DataCite DOI, share-alike:** `https://osf.io/rmafj` (a production source, nm000712).
+  DataCite answers 404 for `10.17605/osf.io/rmafj`;
+  OSF's API declares CC BY-SA 4.0 for the node.
+- **OSF URL, no DataCite DOI, attribution:** `https://osf.io/j3s7g` (a production source, nm001031); OSF declares CC BY 4.0.
+- **OSF DOI with DataCite rights:** `10.17605/osf.io/wpkrz`, a Dataset with CC BY 4.0 in its `rightsList`; OSF is not asked.
+- **OSF DOI, DataCite with no rights, node with no license:** `10.17605/osf.io/j7as8`;
+  DataCite's `rightsList` is empty and the node's license relationship is null.
+- **PsychArchives, CC BY beside an access-rights word:** `10.23668/psycharchives.22830`;
+  its `rightsList` holds `CC-BY 4.0`, `openAccess` and the SPDX CC BY 4.0 entry.
+- **PsychArchives, a license NEMAR does not recognize:** `10.23668/psycharchives.22842`;
+  `Scientific Use License v1`, `restrictedAccess` and a `rightsUri` to the license's own DOI.
+- **README DOI shapes a cut-candidate rule must accept** (review of #2472):
+  a Harvard Dataverse DOI with a five-character suffix, `10.7910/DVN/29379` (CC0 Dataset);
+  a figshare collection, `10.6084/m9.figshare.c.3307977` (resourceTypeGeneral `Collection`, CC BY 3.0 US);
+  a Dryad file-level DOI, `10.5061/dryad.8pm4nv0/1` (resourceTypeGeneral `Other`, CC0).
 
 ## Recordings
 
@@ -53,6 +70,18 @@ Resolver version 2 (epic #2182, card B4) also reads each record's title, creator
 | `18-crossref-article.json` | article | crossref | GET https://api.crossref.org/works/10.1038%2Fs41597-019-0027-4 | 200 | 2026-11-25 |
 | `19-openalex-article.json` | article | openalex | GET https://api.openalex.org/works/doi:10.1038%2Fs41597-019-0027-4 | 200 | 2026-11-25 |
 | `20-openalex-openalex-dataset.json` | openalex-dataset | openalex | GET https://api.openalex.org/works/doi:10.18112%2Fopenneuro.ds003645.v2.0.2 | 200 | 2026-11-25 |
+| `21-datacite-osf-rmafj.json` | osf-url-sa | datacite | GET https://api.datacite.org/dois/10.17605%2Fosf.io%2Frmafj | 404 | 2026-11-27 |
+| `22-osf-osf-rmafj.json` | osf-url-sa | osf | GET https://api.osf.io/v2/nodes/rmafj/?embed=license | 200 | 2026-11-27 |
+| `23-datacite-osf-j3s7g.json` | osf-url-by | datacite | GET https://api.datacite.org/dois/10.17605%2Fosf.io%2Fj3s7g | 404 | 2026-11-27 |
+| `24-osf-osf-j3s7g.json` | osf-url-by | osf | GET https://api.osf.io/v2/nodes/j3s7g/?embed=license | 200 | 2026-11-27 |
+| `25-datacite-osf-cc-by.json` | osf-datacite-cc-by | datacite | GET https://api.datacite.org/dois/10.17605%2Fosf.io%2Fwpkrz | 200 | 2026-11-27 |
+| `26-datacite-osf-no-rights.json` | osf-no-rights | datacite | GET https://api.datacite.org/dois/10.17605%2Fosf.io%2Fj7as8 | 200 | 2026-11-27 |
+| `27-osf-osf-no-rights.json` | osf-no-rights | osf | GET https://api.osf.io/v2/nodes/j7as8/?embed=license | 200 | 2026-11-27 |
+| `28-datacite-psycharchives-cc-by.json` | psycharchives-cc-by | datacite | GET https://api.datacite.org/dois/10.23668%2Fpsycharchives.22830 | 200 | 2026-11-27 |
+| `29-datacite-psycharchives-other.json` | psycharchives-other | datacite | GET https://api.datacite.org/dois/10.23668%2Fpsycharchives.22842 | 200 | 2026-11-27 |
+| `30-datacite-dataverse-cc0.json` | dataverse-cc0 | datacite | GET https://api.datacite.org/dois/10.7910%2Fdvn%2F29379 | 200 | 2026-11-27 |
+| `31-datacite-figshare-collection.json` | figshare-collection | datacite | GET https://api.datacite.org/dois/10.6084%2Fm9.figshare.c.3307977 | 200 | 2026-11-27 |
+| `32-datacite-dryad-file.json` | dryad-file | datacite | GET https://api.datacite.org/dois/10.5061%2Fdryad.8pm4nv0%2F1 | 200 | 2026-11-27 |
 
 The two OpenNeuro POSTs carry the GraphQL query recorded in `index.json` (`body`).
 
@@ -63,3 +92,4 @@ The two OpenNeuro POSTs carry the GraphQL query recorded in `index.json` (`body`
 - OpenAlex data is released under CC0.
 - OpenNeuro dataset metadata comes from datasets released under CC0 (the recorded `License` value).
 - The PhysioNet API records are public project metadata, kept here as test evidence of the license names and access policies.
+- The OSF API node records are public project metadata, kept here as test evidence of the license each node declares.

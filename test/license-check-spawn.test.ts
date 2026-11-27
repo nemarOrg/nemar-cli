@@ -8,7 +8,8 @@
  * environment built from nothing and an isolated NEMAR_CONFIG_DIR whose API is the stand-in.
  *
  * Asserted: the printed outcome, sources, evidence URLs, remedy and docs link, the JSON form,
- * and the exit code (0 for a compatible outcome, 2 for every other, 1 for a missing path).
+ * the commands that reproduce the review's identification of LICENSE (ADR 0142; printed, never
+ * run), and the exit code (0 for a compatible outcome, 2 for every other, 1 for a missing path).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -17,6 +18,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import {
+  LICENSE_MATCHER_VERSION,
+  reproduceCommands,
+  scancodeRequirementsUrl,
+} from "../shared/license-file";
+import {
   LINEAGE_COPY,
   type LineageResult,
   RESOLVER_VERSION,
@@ -24,6 +30,7 @@ import {
   lineageLines,
   resolveLicenseLineage,
 } from "../shared/license-lineage";
+import { version as cliVersion } from "../src/lib/version";
 import { type StandIn, startStandIn } from "./fixtures/license-lineage/stand-in";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
@@ -72,6 +79,7 @@ async function cli(args: string[]) {
     NEMAR_LICENSE_OPENALEX_URL: standIn.bases.openalex,
     NEMAR_LICENSE_OPENNEURO_URL: standIn.bases.openneuro,
     NEMAR_LICENSE_PHYSIONET_URL: standIn.bases.physionet,
+    NEMAR_LICENSE_OSF_URL: standIn.bases.osf,
   };
   const proc = spawn({
     cmd: [process.execPath, "run", CLI_ENTRY, ...args],
@@ -128,6 +136,25 @@ describe("nemar dataset license-check", () => {
     expect(stdout).toContain(`evidence: ${standIn.bases.datacite}/dois/10.5281%2Fzenodo.22967622`);
     expect(stdout).toContain(`Remedy: ${LINEAGE_COPY.needs_permission.remedy}`);
     expect(exitCode).toBe(2);
+  }, 30_000);
+
+  test("an osf.io source and a declared license: the outcome is the answer, no bug-report prompt", async () => {
+    // nm000712's source shape (ADR 0142 decision 3): an osf.io URL with no DataCite DOI.
+    writeDataset({
+      Name: "fixture",
+      License: "CC0",
+      SourceDatasets: [{ URL: "https://osf.io/rmafj/" }, { DOI: "10.23668/psycharchives.22842" }],
+    });
+    const { stdout, stderr, exitCode } = await licenseCheck([dataset]);
+    expect(stdout).toContain("License lineage: needs_permission");
+    expect(stdout).toContain("10.17605/osf.io/rmafj [source_datasets]: share_alike_mismatch");
+    expect(stdout).toContain(
+      'declared license: "CC-By Attribution-ShareAlike 4.0 International" <https://creativecommons.org/licenses/by-sa/4.0/legalcode>',
+    );
+    expect(stdout).toContain('declared license: "Scientific Use License v1"');
+    expect(exitCode).toBe(2);
+    expect(stderr).not.toContain("attach the log");
+    expect(standIn.misses).toEqual([]);
   }, 30_000);
 
   test("--json prints the result document; a credentialed source exits 2", async () => {
@@ -210,6 +237,53 @@ describe("nemar dataset license-check", () => {
     expect(standIn.requests.filter((k) => !k.includes(" api "))).toEqual([]);
   }, 60_000);
 
+  test("prints the commands that scan LICENSE as the review does, and runs none of them", async () => {
+    writeDataset({ Name: "fixture", License: "CC0" });
+    const license = join(dataset, "LICENSE");
+    writeFileSync(license, "CC0 1.0 Universal\n");
+    const commands = reproduceCommands(license, cliVersion);
+    const { stdout, exitCode } = await licenseCheck([dataset]);
+    expect(stdout).toContain(`License file: ${license}`);
+    expect(stdout).toContain(LICENSE_MATCHER_VERSION);
+    for (const c of commands) expect(stdout).toContain(`    ${c}`);
+    expect(commands[1]).toContain(`/nemar-cli/v${cliVersion}/scripts/ci/scancode-requirements.txt`);
+    expect(commands[2]).toContain(`--json - '${license}'`);
+    // The exit code is the lineage's, unchanged by the license file.
+    expect(exitCode).toBe(2);
+    // Nothing was run: no environment was created.
+    expect(existsSync(join(REPO_ROOT, "scancode-env"))).toBe(false);
+    expect(existsSync(join(dataset, "scancode-env"))).toBe(false);
+  }, 30_000);
+
+  test("--json carries license_matcher; no LICENSE means no commands", async () => {
+    writeDataset({ Name: "fixture", License: "CC0" });
+    const none = await licenseCheck([dataset, "--json"]);
+    expect(JSON.parse(none.stdout).license_matcher).toEqual({
+      version: LICENSE_MATCHER_VERSION,
+      requirements: scancodeRequirementsUrl(cliVersion),
+      license_file: null,
+      commands: [],
+    });
+    expect(none.exitCode).toBe(2);
+    const license = join(dataset, "LICENSE");
+    writeFileSync(license, "CC0 1.0 Universal\n");
+    const some = await licenseCheck([dataset, "--json"]);
+    const parsed = JSON.parse(some.stdout) as LineageResult & { license_matcher: unknown };
+    expect(parsed.outcome).toBe("no_upstream_declared");
+    expect(parsed.license_matcher).toEqual({
+      version: LICENSE_MATCHER_VERSION,
+      requirements: scancodeRequirementsUrl(cliVersion),
+      license_file: license,
+      commands: reproduceCommands(license, cliVersion),
+    });
+    const human = await licenseCheck([dataset]);
+    expect(human.stdout).not.toContain("no LICENSE at the dataset root");
+    rmSync(license);
+    expect((await licenseCheck([dataset])).stdout).toContain(
+      "License file: no LICENSE at the dataset root",
+    );
+  }, 60_000);
+
   test("a missing path exits 1", async () => {
     const { exitCode, stderr } = await licenseCheck([join(scratch, "absent")]);
     expect(exitCode).toBe(1);
@@ -247,6 +321,36 @@ describe("nemar admin dataset publish license-lineage", () => {
     for (const line of lineageLines(result)) expect(stdout).toContain(line);
     expect(exitCode).toBe(2);
   }, 30_000);
+
+  test("unresolved and needs_permission print no bug-report prompt; a 5xx from NEMAR does", async () => {
+    for (const sources of [
+      [{ URL: "https://example.org/data" }],
+      [{ URL: "https://osf.io/j7as8" }],
+    ]) {
+      const result = await resolveLicenseLineage(
+        {
+          datasetDescription: JSON.stringify({ License: "CC0", SourceDatasets: sources }),
+          nemarMetadata: null,
+          attestationUpstreamSource: null,
+          readme: null,
+        },
+        { bases: standIn.bases },
+      );
+      expect(["unresolved", "needs_permission"]).toContain(result.outcome);
+      standIn.setApi("/admin/datasets/nm000480/license-lineage", {
+        dataset_id: "nm000480",
+        ...result,
+      });
+      const r = await cli(["admin", "dataset", "publish", "license-lineage", "nm000480"]);
+      expect(r.stdout).toContain(`License lineage: ${result.outcome}`);
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr).not.toContain("attach the log");
+    }
+    standIn.setApi("/admin/datasets/nm000480/license-lineage", { error: "Internal error" }, 500);
+    const failed = await cli(["admin", "dataset", "publish", "license-lineage", "nm000480"]);
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr).toContain("attach the log");
+  }, 60_000);
 
   test("a malformed id is refused before any request", async () => {
     const { exitCode } = await cli(["admin", "dataset", "publish", "license-lineage", "nope"]);

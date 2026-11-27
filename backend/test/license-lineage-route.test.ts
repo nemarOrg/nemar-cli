@@ -149,6 +149,27 @@ describe("GET /admin/datasets/:id/license-lineage", () => {
     expect(registries.misses).toEqual([]);
   });
 
+  test("resolves an osf.io source through OSF, asks a failed DataCite again, records resolved_at", async () => {
+    // ADR 0142 decision 3: nm000712's source shape, and a transient DataCite failure.
+    repoFiles.set("nm000901", {
+      "dataset_description.json": JSON.stringify({
+        License: "CC-BY-SA-4.0",
+        SourceDatasets: [{ URL: "https://osf.io/rmafj/" }],
+      }),
+    });
+    db.run("UPDATE datasets SET attestation = NULL WHERE dataset_id = 'nm000901'");
+    registries.override("datacite /dois/10.17605/osf.io/rmafj", { status: 503, times: 1 });
+    const before = Date.now();
+    const { status, body } = await get("/admin/datasets/nm000901/license-lineage");
+    expect(status).toBe(200);
+    expect(body.outcome).toBe("compatible_attribution");
+    const sources = body.sources as Array<Record<string, unknown>>;
+    expect(sources[0]).toMatchObject({ id: "10.17605/osf.io/rmafj", resolver: "osf" });
+    expect(Date.parse(body.resolved_at as string)).toBeGreaterThanOrEqual(before - 1000);
+    expect(registries.requests.filter((k) => k.includes("datacite"))).toHaveLength(2);
+    expect(registries.misses).toEqual([]);
+  });
+
   test("a dataset with no source and no README: no_upstream_declared", async () => {
     repoFiles.set("nm000901", { "dataset_description.json": JSON.stringify({ License: "CC0" }) });
     db.run("UPDATE datasets SET attestation = NULL WHERE dataset_id = 'nm000901'");

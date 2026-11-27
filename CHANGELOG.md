@@ -17,6 +17,12 @@ earlier releases are described only by their generated notes.
 
 ### Changed
 
+- **License lineage is more reliable (resolver version 3; ADR 0142 decision 3).**
+  A registry that does not answer is asked again (two retries with backoff, within a fixed fetch budget), and no `unresolved` source is served from the cache; each lineage records `resolved_at`.
+  An `https://osf.io/<id>` source maps to `10.17605/osf.io/<id>` and falls back to the license OSF declares for the node; a DOI cut short in a README is dropped and counted; an access-rights word such as `openAccess` is not read as a license.
+  `needs_permission` and `unresolved` sources show the license the source declares, and `nemar dataset license-check` and `nemar admin dataset publish license-lineage` no longer print a bug-report prompt for an outcome.
+- **The Worker reads publication review report v3, and the review job can identify LICENSE with ScanCode (ADR 0142; nothing changes yet).**
+  The parser accepts v3 (license_file, the names of description keys not shown, the matcher version, the lineage's resolved_at); the job still sends v2 until the next release. While LICENSE differs from the License field, the license question is at most unknown and no license finding can deny automatically. Migration 0162 adds `publication_reviews.license_matcher`. `nemar dataset license-check` prints the ScanCode commands that reproduce the identification.
 - **nemar-ica is no longer a placeholder: an administrator can run it (owner decision of 2026-11-27).**
   `nemar admin compute pipeline run nemar-ica` (with `--dataset`, or `--eligible` and `--limit`, and `--dry-run`) is no longer refused with `recipe_placeholder`; it goes through every other check a run has, on Tapis only, reads its tag's commit and stages the serving index first (ADR 0143, ADR 0141), so a GitHub or index fault defers it (`source_commit_deferred`, `serving_index_deferred`).
   It is still never run by the daily dispatcher (`autoDispatch` is false), still runs on Tapis only, and still needs the owner's compute switches, the Tapis configuration and a funded GPU pool.

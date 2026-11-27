@@ -1179,3 +1179,13 @@ Thinking counts toward the output budget, so the call streams with the model's w
 The confirming run (ADR 0139) gets the same 128,000 tokens, since it also thinks at `max`.
 The 12-minute call deadline now applies to every first run; a job that still passes the workflow's 20-minute limit is cancelled and reports `workflow_failed`, with the 30-minute watchdog behind it.
 Where this differs from the model decision above (`claude-haiku-5-5` at effort `high`), from call 6, and from the earlier 2026-11-27 amendment that says the review "still calls Haiku 5.5 at high effort", this is the later text.
+
+## Amendment 2026-11-27 (owner, epic #2449): ADR 0142 identifies LICENSE
+
+ADR 0142 partially supersedes section 3's LICENSE bullet and section 5's lowering rule for a cut LICENSE.
+The review job identifies the root LICENSE with a pinned ScanCode toolkit release; for a conclusive identification the model receives only the text left over after the matched license, under the same pre-send rules and cap,
+and a LICENSE that matches the `License` field no longer lowers `authors_and_license` to `unknown`.
+Every other LICENSE state keeps the rule above.
+Section 7's "Bounds, in one place" gains two: the ScanCode install (about 153 MB of hashed wheels, fresh on every run, inside the job's limit, which rises from 20 to 28 minutes when the step deploys)
+and the scan (`--timeout 120` for the file, under a step timeout of 5 minutes); a bound that is hit gives `unreadable` and this section's rule, never a failed review.
+ADR 0142 is the later text.
