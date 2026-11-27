@@ -26,6 +26,24 @@ earlier releases are described only by their generated notes.
 - **The publication review job writes report v3 and prompt version 3 (ADR 0142, deploy 2).**
   A LICENSE the matcher identifies conclusively is sent as no text, or as only the text it adds beyond the license (the whole file when part of the license is missing); the facts name the identification, the License field's normalized license and the matcher, and question 3 says to trust it. The report records `license_file`, the names of the description keys not shown, the lineage's `resolved_at` and the matcher; until the scan step is deployed every report carries `absent`, `annexed` or `unreadable` with matcher `unavailable`, and LICENSE is sent as before.
 
+## 0.10.52 - 2026-11-27
+
+### Fixed
+
+- **License lineage reads data containers and ellipsis-cut README DOIs (resolver version 5; ADR 0139 decision 7 and ADR 0142 decision 3, amendments of 2026-11-27).**
+  A README DOI that prefixes a declared DOI and is followed by an ellipsis (`[...]`, `[…]`, `...`, `…`) is dropped and counted, so nm000746 and nm000843 resolve compatible.
+  Data containers are read as data, not publications, from what they contain: a figshare collection by its members' licenses (any other DataCite `Collection` is `unresolved`), an OSF project by its node and direct child components (a child with children of its own is `unresolved`), each member or child judged on its own and combined as separate sources are, and a PLOS supplementary file (Crossref `component`) by its own license, else its article's (any other publisher's component is `unresolved`). Journal articles stay `source_is_publication`.
+
+## 0.10.51 - 2026-11-27
+
+### Fixed
+
+- **The license notice no longer mails depositors wrongly (resolver version 4; ADR 0139 decision 7 and ADR 0142 decision 3, amendments of 2026-11-27).**
+  A README DOI that is a strict prefix of a DOI declared elsewhere (or of another README DOI), and that the README continues into that DOI across a line break, is that DOI wrapped, and is dropped and counted; it had made nm000746 and nm000843 `unresolved` beside a compatible Zenodo source.
+  DANDI's license spellings (`cc_by_40`, `cc0_10`, `spdx:CC-BY-4.0`) are read, so nm001003's DANDI source is CC BY 4.0 instead of `needs_permission`.
+  An `unresolved` lineage mails the depositor nothing (it is NEMAR's failure to read a registry); administrators still see it.
+  `source_is_publication` has its own sentence, asking for the dataset the data came from instead of saying the license does not permit the copy, and every sentence names the dataset's License as declared (`CC-BY-4.0`), not the normalized family.
+
 ## 0.10.50 - 2026-11-27
 
 ### Changed

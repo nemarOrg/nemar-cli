@@ -11,6 +11,7 @@ import {
   type ReadyMailOutcome,
   type RecordedMail,
   isActionRequiredOutcome,
+  isDepositorNoticeOutcome,
 } from "../../../shared/license-permission.js";
 import { READY_TO_APPROVE_HEADLINE } from "../../../shared/publication-auto-deny.js";
 import type { Bindings } from "../types/bindings.js";
@@ -30,15 +31,18 @@ import { publicationReviewEmailSection } from "./publication-review-view.js";
 export type LicenseNoticeOutcome =
   | "no_row"
   | "not_needed"
+  | "unresolved_not_mailed"
   | "not_waiting"
   | "covered"
   | "already_sent"
   | LicenseNoticeMailState;
 
 /**
- * After a review's result is stored: when a first run reported a lineage that needs action, and its
- * request is still waiting for its decision and is not covered by a recorded permission, mail the
- * requester the message once for the request and that outcome. The notice row is claimed before the
+ * After a review's result is stored: when a first run reported a lineage the depositor can act on
+ * ({@link isDepositorNoticeOutcome}: every outcome that needs action except `unresolved`, which is
+ * NEMAR's failure to read a registry and is not mailed; ADR 0139 decision 7, amendment of
+ * 2026-11-27), and its request is still waiting for its decision and is not covered by a recorded
+ * permission, mail the requester the message once for the request and that outcome. The notice row is claimed before the
  * send, so a repeat sends nothing; what became of the mail is recorded on it. Never throws: a fault
  * is logged with ids and an error class only, and the mail it would have sent is not retried.
  */
@@ -62,6 +66,14 @@ async function notice(env: Bindings, reviewId: number): Promise<LicenseNoticeOut
   const report = view.kind === "reported" ? view.report : null;
   const outcome = report?.evidence.lineage?.outcome ?? null;
   if (report === null || !isActionRequiredOutcome(outcome)) return "not_needed";
+  if (!isDepositorNoticeOutcome(outcome)) {
+    // `unresolved` is NEMAR's failure to read a registry, not the depositor's to fix: no mail.
+    // The administrators still see the outcome on the review card and in publish show.
+    console.log(
+      `[license-notice] review ${reviewId}: lineage ${outcome}, no depositor mail (NEMAR could not read an upstream record)`,
+    );
+    return "unresolved_not_mailed";
+  }
   const request = await db
     .prepare("SELECT id, dataset_id, status, requested_by FROM publication_requests WHERE id = ?")
     .bind(row.requestId)

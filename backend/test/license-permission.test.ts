@@ -20,7 +20,7 @@ import {
 } from "../../shared/license-permission";
 import { READY_TO_APPROVE_HEADLINE } from "../../shared/publication-auto-deny";
 import { PUBLICATION_PROMPT_VERSION, REVIEW_INPUTS } from "../../shared/publication-review";
-import { afterPermissionRecorded } from "../src/services/license-notice";
+import { afterPermissionRecorded, licenseNoticeAfterStore } from "../src/services/license-notice";
 import {
   derivePublicationReview,
   publicationReviewEmailSection,
@@ -56,6 +56,7 @@ const NOTICE_SUBJECT = `Publication request needs license evidence: ${PROD_DATAS
 interface Basis {
   outcome: string;
   target_license: string | null;
+  target_license_declared?: string | null;
   sources: {
     id: string;
     license: string | null;
@@ -266,6 +267,7 @@ describe("the inputs route stores the review's basis", () => {
     expect(JSON.parse(String(h.review(reviewId).lineage_basis))).toEqual({
       outcome: "no_upstream_declared",
       target_license: "none",
+      target_license_declared: null,
       sources: [],
     });
   });
@@ -333,6 +335,105 @@ describe("the depositor's notice", () => {
       expect(h.db.query("SELECT COUNT(*) AS n FROM license_permission_notices").get()).toEqual({
         n: 0,
       });
+    });
+  });
+
+  test("an unresolved lineage mails nobody: NEMAR could not read a registry, and administrators still see it", async () => {
+    await accounts();
+    await withFakeResend(async (calls) => {
+      const logged: string[] = [];
+      const log = console.log;
+      console.log = (...args: unknown[]) => {
+        logged.push(args.map(String).join(" "));
+      };
+      let again: string;
+      let reviewId: number;
+      try {
+        ({ reviewId } = await reviewed(basisOf([SOURCE], "unresolved")));
+        // The after-store step, run again on the same review, says why it sent nothing.
+        again = await licenseNoticeAfterStore(h.env(), reviewId);
+      } finally {
+        console.log = log;
+      }
+      expect(again).toBe("unresolved_not_mailed");
+      expect(noticesTo(calls)).toHaveLength(0);
+      expect(h.db.query("SELECT COUNT(*) AS n FROM license_permission_notices").get()).toEqual({
+        n: 0,
+      });
+      expect(logged).toContain(
+        `[license-notice] review ${reviewId}: lineage unresolved, no depositor mail (NEMAR could not read an upstream record)`,
+      );
+    });
+    // The outcome still holds the request for the administrators, on the card and in show.
+    const d = await detail();
+    expect(reasonCodes(d.body)).toContain("license_lineage_unconfirmed");
+    expect(d.body.outcome).toBe("action_required");
+  });
+
+  test("an unresolved review claims no notice, so a later needs_permission on the request mails once", async () => {
+    await accounts();
+    await withFakeResend(async (calls) => {
+      const { requestId, reviewId } = await reviewed(basisOf([SOURCE], "unresolved"));
+      expect(noticesTo(calls)).toHaveLength(0);
+      expect(
+        h.db
+          .query("SELECT COUNT(*) AS n FROM license_permission_notices WHERE request_id = ?")
+          .get(requestId),
+      ).toEqual({ n: 0 });
+
+      // The registry answers on the next review of the same request: the lineage needs permission.
+      h.db.run("UPDATE publication_reviews SET head_sha = ? WHERE id = ?", [
+        "f".repeat(40),
+        reviewId,
+      ]);
+      const second = seedPublicationReview(h.db, {
+        requestId,
+        datasetId: PROD_DATASET,
+        state: "dispatched",
+        claimed: true,
+      });
+      h.db.run("UPDATE publication_reviews SET lineage_basis = ? WHERE id = ?", [
+        JSON.stringify(basisOf([SOURCE])),
+        second,
+      ]);
+      const res = await h.result(second, {
+        outcome: "reported",
+        report: reportBody("needs_permission"),
+      });
+      expect(res.status).toBe(200);
+      expect(noticesTo(calls)).toHaveLength(1);
+      expect(
+        h.db
+          .query("SELECT outcome, mail_state FROM license_permission_notices WHERE request_id = ?")
+          .all(requestId),
+      ).toEqual([{ outcome: "needs_permission", mail_state: "sent" }]);
+    });
+  });
+
+  test("a publication named as the source gets its own message, naming the declared license", async () => {
+    await accounts();
+    const article = "10.1371/journal.pone.0211710";
+    await withFakeResend(async (calls) => {
+      await reviewed({
+        outcome: "source_is_publication",
+        target_license: "cc-by",
+        target_license_declared: "CC-BY-4.0",
+        sources: [
+          {
+            id: article,
+            license: "cc-by",
+            license_version: "4.0",
+            outcome: "source_is_publication",
+          },
+        ],
+      });
+      const mails = noticesTo(calls);
+      expect(mails).toHaveLength(1);
+      const text = textOf(mails[0]?.html ?? "");
+      expect(text).toContain(
+        `The upstream source you named (${article}, cc-by 4.0) is a publication, not a dataset, so its license is not the data's license. Name the dataset the data came from in dataset_description.json SourceDatasets (its DOI or repository URL), or send evidence that the original authors accept this copy under CC-BY-4.0, to support@nemar.org, quoting ${PROD_DATASET}.`,
+      );
+      expect(text).not.toContain("does not permit this copy");
     });
   });
 

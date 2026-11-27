@@ -498,9 +498,9 @@ describe("the next action", () => {
     });
     // Never raises: the review's unresolved still stands as amber.
     expect(c.license.cue).toBe("amber");
-    // Still unresolved now: the depositor is asked for a link.
+    // Still unresolved now: NEMAR could not read the registry, so an administrator reads it.
     const still = card(d, { freshLineage: { ...fresh, outcome: "unresolved" } });
-    expect(still.next_action.action).toBe("ask_depositor");
+    expect(still.next_action.action).toBe("administrator_reads");
   });
 
   test("every action has a web sentence and a command", () => {

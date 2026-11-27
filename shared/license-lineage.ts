@@ -38,10 +38,13 @@ import { normalizeDoiKey } from "./never-data-paper.js";
  * Stamped on every result, so two results can be compared. Bump it when a rule changes, or when a
  * record gains a field (version 2: each source's title, creators and publisher, epic #2182 card B4;
  * version 3: the declared license, osf.io sources, cut README DOIs dropped, retried fetches, and
- * `resolved_at`, ADR 0142 decision 3);
+ * `resolved_at`, ADR 0142 decision 3; version 4: README DOIs that prefix another declared DOI
+ * dropped, and DANDI's license spellings read, ADR 0142 decision 3, amendment of 2026-11-27;
+ * version 5: README DOIs cut by an ellipsis dropped, and data containers (collections, OSF
+ * projects, Crossref components) read as data, ADR 0139 decision 7, amendment of 2026-11-27);
  * the cache key carries it, so a record of an older version is never served.
  */
-export const RESOLVER_VERSION = "license-lineage/3";
+export const RESOLVER_VERSION = "license-lineage/5";
 
 /** The User-Agent of every registry request. It carries no contact details on purpose. */
 export const LICENSE_CHECK_USER_AGENT = "nemar-license-check/1";
@@ -182,6 +185,7 @@ export const RESOLVERS = [
   "openneuro",
   "physionet",
   "osf",
+  "figshare",
 ] as const;
 export type Resolver = (typeof RESOLVERS)[number];
 
@@ -226,7 +230,9 @@ export const RESOLVER_READ: Record<Resolver, string> = {
     "OpenNeuro: the snapshot's dataset_description.json License, read through its GraphQL API; the title, creators and publisher are DataCite's.",
   physionet:
     "PhysioNet: the published project's license name, access policy and title, read through its API.",
-  osf: "OSF: the node's license (name and URL) and title, read through its API when DataCite holds no DOI or no rights for it.",
+  osf: "OSF: the node's license (name and URL) and title, and each child component's license, read through its API when DataCite holds no DOI or no rights for it, or registers it as a project.",
+  figshare:
+    "figshare: for a figshare collection, each member article's license, read through its API (the collection's own license is not the data's).",
 };
 
 const READ_SOURCES = `The upstream sources declared in dataset_description.json (SourceDatasets), .nemar/metadata.json (IsDerivedFrom and IsIdenticalTo), the deposit attestation and the README (data-repository DOIs and OpenNeuro, Zenodo, PhysioNet or OSF URLs only; a DOI cut short in the text is dropped). Then, per source: ${Object.values(
@@ -390,14 +396,18 @@ export const LICENSE_EVIDENCE_ADDRESS = "support@nemar.org";
  * publication status, the notice mail and the CLI.
  *
  * The placeholders are `{sources}` (each source's identifier and license), `{target}` (the
- * dataset's license) and `{dataset}` (the dataset id). `licensePermissionRequest` in
- * `shared/license-permission.ts` fills them from the lineage result's closed words and checked
- * identifiers only, never from free text, and drops ` ({sources})` when no source can be named.
+ * dataset's License as it declares it, `CC-BY-4.0`, when that is a license identifier that reads
+ * as the license the outcome was judged against; otherwise the normalized word) and `{dataset}`
+ * (the dataset id). `licensePermissionRequest` in `shared/license-permission.ts` fills them from
+ * the lineage result's closed words and checked identifiers only, never from free text, and drops
+ * ` ({sources})` when no source can be named. `source_is_publication` has its own sentence (ADR
+ * 0139 decision 7, amendment of 2026-11-27): a paper named as the source is not a license
+ * conflict, and the first remedy is to name the dataset instead.
  */
 export const LINEAGE_PERMISSION_REQUEST: Record<ActionRequiredOutcome, string> = {
   needs_permission: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the original authors that they accept this copy being published under {target}, for example an email from them, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}. An administrator will record it and the review will continue.`,
   share_alike_mismatch: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the original authors that they accept this copy being published under {target}, for example an email from them, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}. An administrator will record it and the review will continue.`,
-  source_is_publication: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the original authors that they accept this copy being published under {target}, for example an email from them, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}. An administrator will record it and the review will continue.`,
+  source_is_publication: `The upstream source you named ({sources}) is a publication, not a dataset, so its license is not the data's license. Name the dataset the data came from in dataset_description.json SourceDatasets (its DOI or repository URL), or send evidence that the original authors accept this copy under {target}, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}.`,
   redistribution_prohibited: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the repository that holds the upstream data, for example PhysioNet, that it permits this copy being published under {target}, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}; its data use agreement may bind the original authors too, so their permission alone may not be enough. An administrator will record it and the review will continue.`,
   unresolved: `NEMAR could not read the upstream license ({sources}); reply to ${LICENSE_EVIDENCE_ADDRESS} with a link to it, quoting {dataset}, or wait for the next check.`,
 };
@@ -486,6 +496,23 @@ export function normalizeLicense(text: string | null | undefined): NormalizedLic
     const map = { by: "odc-by", odbl: "odbl", pddl: "pddl" } as const;
     return { license: map[odcUri[1] as keyof typeof map], version: versionOf(raw) };
   }
+
+  // DANDI (dandischema's LicenseType, ADR 0142 decision 3, amendment of 2026-11-27): its values
+  // carry an `spdx:` prefix (`spdx:CC-BY-4.0`, `spdx:CC0-1.0`), and the DataCite records DANDI
+  // registers give the enum's name as the rightsIdentifier, the version's dot dropped (`cc_by_40`,
+  // `cc0_10`; measured on 10.48324/dandi.001535/0.250714.1218).
+  const spdx = /^spdx:(\S+)$/i.exec(raw);
+  if (spdx) return normalizeLicense(spdx[1]);
+  const dandiCc = /^cc_by((?:_(?:nc|nd|sa))*)_(\d)(\d)$/.exec(lower);
+  if (dandiCc) {
+    const mods = dandiCc[1];
+    return {
+      license: ccFamily(mods.includes("nc"), mods.includes("nd"), mods.includes("sa")),
+      version: `${dandiCc[2]}.${dandiCc[3]}`,
+    };
+  }
+  const dandiCc0 = /^cc0_(\d)(\d)$/.exec(lower);
+  if (dandiCc0) return { license: "cc0", version: `${dandiCc0[1]}.${dandiCc0[2]}` };
 
   // Token forms: SPDX ids ("CC-BY-NC-SA-4.0", "ODC-By-1.0"), OpenAlex ids ("cc-by-nc"), BIDS
   // values ("CC0", "PD").
@@ -875,6 +902,69 @@ export function declaredLicense(datasetDescription: unknown): string | null {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
+/** Markup a wrapped line can carry between the two halves of a DOI: quotes, `>`, emphasis, code. */
+const WRAP_GAP = String.raw`[>"'*_\`~]*\s[\s>"'*_\`~]*`;
+
+const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+/** An ellipsis that marks text cut by an editor or a tool: `[...]`, `[…]`, `...` or `…`. */
+const ELLIPSIS = String.raw`\s*(?:\[(?:\.\.\.|…)\]|\.\.\.|…)`;
+
+/** What follows a DOI inside a longer token: a letter, digit or `-_/`, or a dot before one. */
+const DOI_CONTINUES = /^(?:[a-z0-9\-_/]|\.[a-z0-9])/i;
+
+/**
+ * Whether every place the README writes `short` as a DOI of its own is `longer` cut short: each
+ * occurrence (case ignored) is either continued into the rest of `longer` across whitespace (a
+ * line break, with any quote or emphasis markup around it: `10.5281/zenodo.2231\n4785`), or
+ * followed by an ellipsis (`10.5281/zenodo.2231 [...]`). An occurrence inside a longer DOI is not
+ * one of its own. One standalone occurrence (`see 10.5281/zenodo.2231.`), and `short` is a source.
+ */
+function readmeOnlyCuts(readme: string, short: string, longer: string): boolean {
+  const rest = longer.slice(short.length);
+  const wrapped = new RegExp(`^${WRAP_GAP}${escapeRegExp(rest)}`, "i");
+  const ellipsis = new RegExp(`^${ELLIPSIS}`, "i");
+  const lower = readme.toLowerCase();
+  let cuts = 0;
+  for (let at = lower.indexOf(short); at !== -1; at = lower.indexOf(short, at + 1)) {
+    const after = readme.slice(at + short.length);
+    if (DOI_CONTINUES.test(after)) continue;
+    if (wrapped.test(after) || ellipsis.test(after)) {
+      cuts++;
+      continue;
+    }
+    return false;
+  }
+  return cuts > 0;
+}
+
+/**
+ * README DOIs that are another declared DOI cut short (ADR 0142 decision 3, amendment of
+ * 2026-11-27): a README DOI that is a strict prefix of a DOI declared in SourceDatasets, the
+ * related identifiers or the attestation, or of another README DOI, AND that the README writes
+ * only as that DOI cut short ({@link readmeOnlyCuts}: every occurrence continued across a line
+ * break, `10.5281/zenodo.2231\n4785` beside a declared `10.5281/zenodo.22314785`, or followed by an
+ * ellipsis, `10.5281/zenodo.2231 [...]`; amendments of 2026-11-27, resolver version 5), is that
+ * DOI wrapped or cut in the text, so it is removed.
+ * Such a cut copy still passes its repository's shape, so {@link isCutDoiCandidate} cannot see it.
+ * A prefix the text does not continue is a distinct record (`zenodo.1234567` beside
+ * `zenodo.12345678`) and stays. An equal DOI is not removed here: de-duplication keeps one.
+ */
+function dropReadmePrefixes(refs: SourceRef[], readme: string | null): SourceRef[] {
+  if (!readme) return refs;
+  const dois = refs.flatMap((r) => (r.kind === "doi" ? [r.doi] : []));
+  return refs.filter(
+    (r) =>
+      !(
+        r.kind === "doi" &&
+        r.origin === "readme" &&
+        dois.some(
+          (d) => d.length > r.doi.length && d.startsWith(r.doi) && readmeOnlyCuts(readme, r.doi, d),
+        )
+      ),
+  );
+}
+
 /** Every declared source, in the decided order, de-duplicated. */
 export function extractSourceRefs(inputs: SourceInputs): SourceRef[] {
   return extractSources(inputs).refs;
@@ -928,13 +1018,16 @@ export function extractSources(inputs: SourceInputs): TextSources {
     dropped += found.dropped;
   }
 
+  const prefixed = dropReadmePrefixes(refs, inputs.readme);
+  dropped += refs.length - prefixed.length;
+
   // A dataset is not its own upstream source, whichever input names it.
   const own =
     isRecord(desc) && typeof desc.DatasetDOI === "string" && desc.DatasetDOI.trim()
       ? normalizeDoiKey(desc.DatasetDOI)
       : null;
   const seen = new Set<string>();
-  const unique = refs.filter((r) => {
+  const unique = prefixed.filter((r) => {
     if (own !== null && r.kind === "doi" && r.doi === own) return false;
     const k = refKey(r);
     if (seen.has(k)) return false;
@@ -957,6 +1050,8 @@ export interface RegistryBases {
   physionet: string;
   /** The OSF API origin; a node is at `/v2/nodes/<guid>/`. */
   osf: string;
+  /** The figshare API origin; a collection's members are at `/v2/collections/<id>/articles`. */
+  figshare: string;
 }
 
 export const DEFAULT_BASES: RegistryBases = {
@@ -966,6 +1061,7 @@ export const DEFAULT_BASES: RegistryBases = {
   openneuro: "https://openneuro.org",
   physionet: "https://physionet.org",
   osf: "https://api.osf.io",
+  figshare: "https://api.figshare.com",
 };
 
 /**
@@ -1002,6 +1098,14 @@ export interface SourceRecord {
   declared_licenses: DeclaredLicense[];
   evidence_url: string | null;
   status: SourceStatus;
+  /**
+   * A data container's parts (a figshare collection's members, an OSF node and its child
+   * components), each license as read. Each part is judged against the target on its own and the
+   * parts combine as separate sources do ({@link sourceOutcome}), because one license cannot stand
+   * for two whose duties differ (CC BY-SA beside CC BY-NC). `license` is then the most restrictive
+   * part, for display only. Absent for every other record.
+   */
+  parts?: NormalizedLicenseValue[];
 }
 
 /** The most creators' names a record keeps. */
@@ -1305,6 +1409,170 @@ export function crossrefLicenses(license: unknown): RecordLicenses {
 
 const CROSSREF_DATA_TYPES = new Set(["dataset", "database"]);
 
+/**
+ * An OSF project (ADR 0139 decision 7, amendment of 2026-11-27): an OSF DOI whose DataCite
+ * resourceType is `Project`, which OSF registers as `Text` (`10.17605/osf.io/f8sq3`) or `Dataset`.
+ * It holds data, and its license is read from OSF's API for the node and each child component
+ * ({@link resolveOsf}), never from DataCite's rights alone.
+ */
+export function isOsfProject(doi: string, resourceType: unknown): boolean {
+  return resourceType === "Project" && OSF_DOI.test(doi);
+}
+
+/** A figshare collection DOI (`10.6084/m9.figshare.c.6979581.v1`) and its collection id. */
+const FIGSHARE_COLLECTION_DOI = /^10\.6084\/m9\.figshare\.c\.(\d+)(?:\.v\d+)?$/;
+
+/** The most members of a figshare collection read; a larger collection is not judged. */
+export const MAX_COLLECTION_MEMBERS = 10;
+
+/** A record that was read but whose license is not known: the source is `unresolved`, never cached. */
+function unknownLicense(
+  base: Omit<SourceRecord, "license" | "license_version" | "raw" | "status" | "declared_licenses">,
+): SourceRecord {
+  return {
+    ...base,
+    license: null,
+    license_version: null,
+    raw: null,
+    declared_licenses: [],
+    status: "resolved",
+  };
+}
+
+/**
+ * A DataCite `Collection` (ADR 0139 decision 7, amendment of 2026-11-27): a collection's own rights
+ * are not its members' (`10.6084/m9.figshare.c.6979581.v1` declares CC BY 4.0 on DataCite while
+ * its one member is CC0), so they are never used. A figshare collection is judged by its members'
+ * licenses, read from figshare's API, the most restrictive winning; a collection with no member,
+ * more than {@link MAX_COLLECTION_MEMBERS}, or a member whose license cannot be read is
+ * `unresolved`. Any other collection is `unresolved`: an administrator decides.
+ */
+async function resolveCollection(
+  doi: string,
+  described: Described,
+  dcUrl: string,
+  o: FetchContext,
+): Promise<SourceRecord> {
+  const fs = FIGSHARE_COLLECTION_DOI.exec(doi);
+  if (!fs) {
+    return unknownLicense({
+      id: doi,
+      resolver: "datacite",
+      resource_type: "Collection",
+      ...described,
+      evidence_url: dcUrl,
+    });
+  }
+  const listUrl = `${o.bases.figshare}/v2/collections/${fs[1]}/articles?page_size=${MAX_COLLECTION_MEMBERS + 1}`;
+  const base = {
+    id: doi,
+    resolver: "figshare" as const,
+    resource_type: "Collection",
+    ...described,
+    evidence_url: listUrl,
+  };
+  const list = await o.get(listUrl);
+  if (list.kind === "failed") return failedRecord(doi, list.status, listUrl);
+  if (list.kind === "absent") return failedRecord(doi, "not_found", listUrl);
+  if (!Array.isArray(list.body)) return failedRecord(doi, "unparseable", listUrl);
+  const ids = list.body.map((m) => (isRecord(m) && Number.isInteger(m.id) ? Number(m.id) : null));
+  if (ids.length === 0 || ids.length > MAX_COLLECTION_MEMBERS) return unknownLicense(base);
+  if (ids.some((id) => id === null)) return failedRecord(doi, "unparseable", listUrl);
+  const values: NormalizedLicenseValue[] = [];
+  const raws: string[] = [];
+  const entries: Array<DeclaredLicense | null> = [];
+  for (const id of ids as number[]) {
+    const url = `${o.bases.figshare}/v2/articles/${id}`;
+    const got = await o.get(url);
+    if (got.kind === "failed") return failedRecord(doi, got.status, url);
+    if (got.kind === "absent") return failedRecord(doi, "not_found", url);
+    const lic = isRecord(got.body) ? got.body.license : null;
+    if (!isRecord(lic)) return unknownLicense(base);
+    const texts = [lic.url, lic.name].filter(
+      (t): t is string => typeof t === "string" && t.trim() !== "",
+    );
+    if (texts.length === 0) return unknownLicense(base);
+    let value = normalizeLicense(texts[0]);
+    for (const t of texts.slice(1)) {
+      if (value.license !== "other") break;
+      value = normalizeLicense(t);
+    }
+    values.push(value);
+    raws.push(texts[0]);
+    entries.push(declared(lic.name, lic.url));
+  }
+  return { ...withLicense(base, values, raws, true, declaredList(entries)), parts: values };
+}
+
+/** The DOI prefix of PLOS, whose policy puts supplementary files under the article's CC BY. */
+export const PLOS_DOI_PREFIX = "10.1371/";
+
+/** A PLOS supplementary file's DOI stem (`10.1371/journal.pone.0303144.s001` -> `...0303144`). */
+const COMPONENT_SUFFIX = /^(.+)\.s\d{1,4}$/;
+
+/**
+ * The article a PLOS `component` belongs to: its `is-component-of` DOI, else its DOI stem; null for
+ * any other publisher's component, which inherits nothing.
+ */
+export function componentParentDoi(doi: string, msg: Record<string, unknown>): string | null {
+  if (!doi.startsWith(PLOS_DOI_PREFIX)) return null;
+  const rel = isRecord(msg.relation) ? msg.relation["is-component-of"] : null;
+  if (Array.isArray(rel)) {
+    for (const r of rel) {
+      if (isRecord(r) && r["id-type"] === "doi" && typeof r.id === "string" && r.id.trim()) {
+        const id = normalizeDoiKey(r.id);
+        return id.startsWith(PLOS_DOI_PREFIX) ? id : null;
+      }
+    }
+  }
+  return COMPONENT_SUFFIX.exec(doi)?.[1] ?? null;
+}
+
+/**
+ * A Crossref `component` (supplementary material) holds data (ADR 0139 decision 7, amendment of
+ * 2026-11-27). Only a PLOS component (`10.1371/journal.pone.0303144.s001`) is judged: it takes the
+ * license Crossref gives it, else its article's version-of-record license, because PLOS's policy
+ * puts supplementary files under the article's CC BY. With neither, and for every other
+ * publisher's component, its license is unknown (null), so the source is `unresolved`, never
+ * compatible by default; an article that cannot be read leaves it failed.
+ */
+async function resolveComponent(
+  doi: string,
+  msg: Record<string, unknown>,
+  crUrl: string,
+  o: FetchContext,
+): Promise<SourceRecord> {
+  const base = {
+    id: doi,
+    resolver: "crossref" as const,
+    resource_type: "component",
+    ...crossrefDescribed(msg),
+  };
+  const unknown = unknownLicense({ ...base, evidence_url: crUrl });
+  if (!doi.startsWith(PLOS_DOI_PREFIX)) return unknown;
+  const own = crossrefLicenses(msg.license);
+  if (own.values.length > 0) {
+    return withLicense({ ...base, evidence_url: crUrl }, own.values, own.raws, true, own.declared);
+  }
+  const parent = componentParentDoi(doi, msg);
+  if (parent === null || parent === doi) return unknown;
+  const pUrl = `${o.bases.crossref}/works/${encodeURIComponent(parent)}`;
+  const p = await o.get(pUrl);
+  if (p.kind === "failed") return failedRecord(doi, p.status, pUrl);
+  if (p.kind === "absent") return unknown;
+  const pm = isRecord(p.body) ? p.body.message : null;
+  if (!isRecord(pm)) return failedRecord(doi, "unparseable", pUrl);
+  const inherited = crossrefLicenses(pm.license);
+  if (inherited.values.length === 0) return { ...unknown, evidence_url: pUrl };
+  return withLicense(
+    { ...base, evidence_url: pUrl },
+    inherited.values,
+    inherited.raws,
+    true,
+    inherited.declared,
+  );
+}
+
 async function resolveOpenNeuro(
   id: string,
   ds: string,
@@ -1430,17 +1698,64 @@ async function resolvePhysioNet(
   );
 }
 
+/** How many children an OSF child node has (`related_counts=children`), or null when not given. */
+function childCountOf(child: unknown): number | null {
+  if (!isRecord(child) || !isRecord(child.relationships)) return null;
+  const rel = child.relationships.children;
+  const related = isRecord(rel) && isRecord(rel.links) ? rel.links.related : null;
+  const meta = isRecord(related) && isRecord(related.meta) ? related.meta : null;
+  return meta !== null && Number.isInteger(meta.count) ? Number(meta.count) : null;
+}
+
+/** The most child components of an OSF node read; a node with more is not judged. */
+export const MAX_OSF_CHILDREN = 50;
+
 /**
- * An OSF node's license, from OSF's API (`/v2/nodes/<guid>/?embed=license`): the license OSF
- * declares for the node, for an OSF DOI DataCite does not hold or holds with no rights (ADR 0142
- * decision 3). A node with no license relationship declares none (`none`); one whose relationship
- * is there but whose embedded license is not is unparseable. A private node answers 401, which is
- * a failed fetch and not retried.
+ * One OSF node's license from an API node object with its license embedded: `{ value }` (null when
+ * the node declares none, read as `none`), or null when the relationship is there but its embedded
+ * license is not (unparseable).
+ */
+function osfNodeLicense(node: Record<string, unknown>): {
+  value: NormalizedLicenseValue | null;
+  texts: string[];
+  declared: DeclaredLicense | null;
+} | null {
+  const relationships = isRecord(node.relationships) ? node.relationships : {};
+  if (relationships.license === null || relationships.license === undefined) {
+    return { value: null, texts: [], declared: null };
+  }
+  const embedded = isRecord(node.embeds) ? node.embeds.license : null;
+  if (!isRecord(embedded) || !isRecord(embedded.data) || !isRecord(embedded.data.attributes)) {
+    return null;
+  }
+  const license = embedded.data.attributes;
+  const texts = [license.url, license.name].filter(
+    (t): t is string => typeof t === "string" && t.trim() !== "",
+  );
+  let value: NormalizedLicenseValue | null = null;
+  for (const t of texts) {
+    value = normalizeLicense(t);
+    if (value.license !== "other") break;
+  }
+  return { value, texts, declared: declared(license.name, license.url) };
+}
+
+/**
+ * An OSF node's license, from OSF's API (`/v2/nodes/<guid>/?embed=license`), for an OSF DOI
+ * DataCite does not hold, holds with no rights (ADR 0142 decision 3), or registers as a project
+ * (ADR 0139 decision 7, amendment of 2026-11-27). The node's child components hold data too, so
+ * they are read (`/v2/nodes/<guid>/children/`) and the most restrictive license of the node and
+ * its children wins; a child that declares none counts as `none`. A children list that cannot be
+ * read, or one whose license cannot be, is failed or unparseable; more than
+ * {@link MAX_OSF_CHILDREN} children leave the license unknown (`unresolved`). A node with no
+ * license relationship declares none (`none`). A private node answers 401, which is a failed fetch
+ * and not retried. `dataLike` says the record holds data (a Dataset or a project).
  */
 async function resolveOsf(
   doi: string,
   guid: string,
   resourceType: string | null,
+  dataLike: boolean,
   /** The DataCite record's title, creators and publisher, when it holds the DOI. */
   described: Described,
   o: FetchContext,
@@ -1455,39 +1770,42 @@ async function resolveOsf(
   }
   const node = body.data;
   const attributes = node.attributes as Record<string, unknown>;
-  const relationships = isRecord(node.relationships) ? node.relationships : {};
-  let license: Record<string, unknown> | null = null;
-  if (relationships.license !== null && relationships.license !== undefined) {
-    const embedded = isRecord(node.embeds) ? node.embeds.license : null;
-    if (!isRecord(embedded) || !isRecord(embedded.data) || !isRecord(embedded.data.attributes)) {
-      return failedRecord(doi, "unparseable", url);
-    }
-    license = embedded.data.attributes;
-  }
-  const texts = [license?.url, license?.name].filter(
-    (t): t is string => typeof t === "string" && t.trim() !== "",
-  );
-  let value: NormalizedLicenseValue | null = null;
-  for (const t of texts) {
-    value = normalizeLicense(t);
-    if (value.license !== "other") break;
-  }
+  const own = osfNodeLicense(node);
+  if (own === null) return failedRecord(doi, "unparseable", url);
   const type = resourceType ?? "Dataset";
-  return withLicense(
-    {
-      id: doi,
-      resolver: "osf",
-      resource_type: type,
-      title: described.title ?? text(attributes.title),
-      creators: described.creators,
-      publisher: described.publisher ?? "OSF",
-      evidence_url: url,
-    },
-    value ? [value] : [],
-    texts,
-    type === "Dataset",
-    license ? declaredList([declared(license.name, license.url)]) : [],
-  );
+  const base = {
+    id: doi,
+    resolver: "osf" as const,
+    resource_type: type,
+    title: described.title ?? text(attributes.title),
+    creators: described.creators,
+    publisher: described.publisher ?? "OSF",
+    evidence_url: url,
+  };
+  const childUrl = `${o.bases.osf}/v2/nodes/${encodeURIComponent(guid)}/children/?embed=license&page[size]=${MAX_OSF_CHILDREN}&related_counts=children`;
+  const ch = await o.get(childUrl);
+  if (ch.kind === "absent") return failedRecord(doi, "not_found", childUrl);
+  if (ch.kind === "failed") return failedRecord(doi, ch.status, childUrl);
+  const cb = ch.body;
+  if (!isRecord(cb) || !Array.isArray(cb.data)) return failedRecord(doi, "unparseable", childUrl);
+  const next = isRecord(cb.links) ? cb.links.next : null;
+  if ((next !== null && next !== undefined) || cb.data.length > MAX_OSF_CHILDREN) {
+    return unknownLicense(base);
+  }
+  const values: NormalizedLicenseValue[] = [own.value ?? { license: "none", version: null }];
+  const raws = [...own.texts];
+  const entries: Array<DeclaredLicense | null> = [own.declared];
+  for (const child of cb.data) {
+    // Only direct children are read: a child with children of its own (or one whose count is not
+    // given) leaves the license unknown, and an administrator decides; the tree is not walked.
+    if (childCountOf(child) !== 0) return unknownLicense(base);
+    const lic = isRecord(child) ? osfNodeLicense(child) : null;
+    if (lic === null) return failedRecord(doi, "unparseable", childUrl);
+    values.push(lic.value ?? { license: "none", version: null });
+    raws.push(...lic.texts);
+    entries.push(lic.declared);
+  }
+  return { ...withLicense(base, values, raws, dataLike, declaredList(entries)), parts: values };
 }
 
 /**
@@ -1509,6 +1827,8 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
     const rtg = typeof types.resourceTypeGeneral === "string" ? types.resourceTypeGeneral : null;
     const { values, raws, declared: declaredLicenses } = dataciteLicenses(a.rightsList);
     const isDataset = rtg === "Dataset";
+    if (rtg === "Collection") return resolveCollection(doi, dataciteDescribed(a), dcUrl, o);
+    const osfProject = isOsfProject(doi, types.resourceType);
     const landing = typeof a.url === "string" ? a.url : "";
     if (isDataset && values.length === 0) {
       const on = OPENNEURO_DOI.exec(doi);
@@ -1531,8 +1851,10 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
       }
     }
     const osf = OSF_DOI.exec(doi);
-    if (osf && values.length === 0 && (isDataset || rtg === null)) {
-      return resolveOsf(doi, osf[1], rtg, dataciteDescribed(a), o);
+    if (osf && (osfProject || (values.length === 0 && (isDataset || rtg === null)))) {
+      // A record with no type is read as a node, as before; a project or a Dataset holds data.
+      const dataLike = isDataset || osfProject || rtg === null;
+      return resolveOsf(doi, osf[1], rtg, dataLike, dataciteDescribed(a), o);
     }
     return withLicense(
       {
@@ -1550,7 +1872,7 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
   }
 
   const osf = OSF_DOI.exec(doi);
-  if (osf) return resolveOsf(doi, osf[1], null, NOT_DESCRIBED, o);
+  if (osf) return resolveOsf(doi, osf[1], null, true, NOT_DESCRIBED, o);
 
   const crUrl = `${o.bases.crossref}/works/${enc}`;
   const cr = await o.get(crUrl);
@@ -1560,6 +1882,7 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
     if (!isRecord(msg)) return failedRecord(doi, "unparseable", crUrl);
     const type = typeof msg.type === "string" ? msg.type : null;
     const { values, raws, declared: declaredLicenses } = crossrefLicenses(msg.license);
+    if (type === "component") return resolveComponent(doi, msg, crUrl, o);
     return withLicense(
       {
         id: doi,
@@ -1616,6 +1939,16 @@ export function isValidCachedRecord(hit: unknown): hit is SourceRecord {
     Array.isArray(hit.declared_licenses) &&
     (SOURCE_STATUSES as readonly string[]).includes(hit.status) &&
     CACHEABLE.has(hit.status as SourceStatus) &&
+    // A record read but with no license is an `unresolved` source, never served from the cache.
+    !(hit.status === "resolved" && hit.license === null) &&
+    (hit.parts === undefined ||
+      (Array.isArray(hit.parts) &&
+        hit.parts.every(
+          (p) =>
+            isRecord(p) &&
+            (NORMALIZED_LICENSES as readonly string[]).includes(String(p.license)) &&
+            (p.version === null || typeof p.version === "string"),
+        ))) &&
     (hit.license === null ||
       (NORMALIZED_LICENSES as readonly string[]).includes(String(hit.license)))
   );
@@ -1630,7 +1963,7 @@ async function cached(
   const hit = await cache?.get(k).catch(() => undefined);
   if (isValidCachedRecord(hit)) return hit;
   const rec = await run();
-  if (cache && CACHEABLE.has(rec.status)) await cache.put(k, rec).catch(() => undefined);
+  if (cache && isValidCachedRecord(rec)) await cache.put(k, rec).catch(() => undefined);
   return rec;
 }
 
@@ -1693,10 +2026,21 @@ function versionAtLeast(target: string | null, source: string | null): boolean {
 
 /** One source's outcome against the target license. */
 export function sourceOutcome(
-  record: Pick<SourceRecord, "status" | "license" | "license_version">,
+  record: Pick<SourceRecord, "status" | "license" | "license_version" | "parts">,
   target: NormalizedLicenseValue,
 ): LineageOutcome {
   if (record.status === "publication") return "source_is_publication";
+  if (record.status === "resolved" && record.parts !== undefined && record.parts.length > 0) {
+    return combineOutcomes(
+      record.parts.map((p) => ({
+        license: p.license,
+        outcome: sourceOutcome(
+          { status: "resolved", license: p.license, license_version: p.version },
+          target,
+        ),
+      })),
+    );
+  }
   if (record.status !== "resolved" || record.license === null) return "unresolved";
   const t = target.license;
   switch (record.license) {

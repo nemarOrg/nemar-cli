@@ -80,6 +80,7 @@ async function cli(args: string[]) {
     NEMAR_LICENSE_OPENNEURO_URL: standIn.bases.openneuro,
     NEMAR_LICENSE_PHYSIONET_URL: standIn.bases.physionet,
     NEMAR_LICENSE_OSF_URL: standIn.bases.osf,
+    NEMAR_LICENSE_FIGSHARE_URL: standIn.bases.figshare,
   };
   const proc = spawn({
     cmd: [process.execPath, "run", CLI_ENTRY, ...args],

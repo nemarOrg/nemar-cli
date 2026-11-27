@@ -162,3 +162,43 @@ Decision 9's record gains the license matcher version (`scancode-32.5.0+spdx-3.2
 A LICENSE file that names a different license from the `License` field (`license_file.state` `matches_other`) lowers `authors_and_license` to `unknown`,
 and decision 1 gains a condition: while the state is `matches_other`, a `fail` of `authors_and_license` is not eligible for an automatic denial, whatever finding it carries (`license_inconsistent` included),
 because both runs would see the same platform fact and their agreement would check nothing.
+
+## Amendment 2026-11-27 (owner hotfix): no mail on `unresolved`, and a publication's own request
+
+Decision 7 and the license permission amendment change in two places, after a depositor received license notices that were wrong.
+
+- **`unresolved` mails nobody.**
+  It means NEMAR could not read an upstream record, which is NEMAR's failure, not the depositor's.
+  The notice mail goes out only for `needs_permission`, `share_alike_mismatch`, `redistribution_prohibited` and `source_is_publication` (`DEPOSITOR_NOTICE_OUTCOMES`, `shared/license-permission.ts`).
+  `unresolved` stays a `license_lineage_unconfirmed` reason: the administrators see it on the decision card and in `nemar admin dataset publish show`, and the after-store step logs why it sent nothing.
+- **`source_is_publication` has its own sentence.**
+  A paper named as the upstream source is not a license conflict, so the sentence no longer says that the upstream license "does not permit this copy".
+  It says that the source named is a publication, not a dataset, so its license is not the data's license,
+  and asks the depositor to name the dataset the data came from in `SourceDatasets` (its DOI or repository URL), or to send evidence that the original authors accept this copy under the dataset's license.
+- **The target license is named as the dataset declares it.**
+  Every sentence names the dataset's `License` as written (`CC-BY-4.0`), not the normalized family (`cc-by`), when that value is a license identifier that normalizes to the license the outcome was judged against;
+  otherwise the normalized word stays.
+  The review's basis keeps it as `target_license_declared`; what a permission covers does not read it.
+
+## Amendment 2026-11-27 (owner, follow-up): data containers are not publications
+
+Decision 7's `source_is_publication` is for publications only; a record that holds data is read for its license (resolver `license-lineage/5`).
+A container's license is read from what it contains, never from a summary that can be more permissive than its parts.
+Measured on the depositor's sources after the first hotfix:
+
+- **A DataCite `Collection`'s own rights are never used.**
+  A figshare collection (`10.6084/m9.figshare.c.<id>`) is judged by its members: the resolver lists them through figshare's API and reads each member's license.
+  `10.6084/m9.figshare.c.6979581.v1` declares CC BY 4.0 on DataCite, while figshare gives the collection no license and its one member is CC0.
+  A collection with no member, more than ten, or a member whose license cannot be read is `unresolved`.
+  Any other repository's collection is `unresolved`: an administrator decides.
+- **An OSF project**, an OSF DOI whose DataCite resourceType is `Project` (OSF registers projects as `Text`, as `10.17605/osf.io/f8sq3`, or as `Dataset`), holds data.
+  It is read from OSF's API whatever DataCite's rights say: the node's license and each direct child component's, and a child that declares none counts as none.
+  A children list that cannot be read, or that has more than one page, leaves no verdict, and so does a child with children of its own: the tree is not walked, and an administrator decides.
+  Every other `Text` record stays a publication.
+- **A Crossref `component`** (supplementary material) is judged only for PLOS (`10.1371/`), whose policy puts supplementary files under the article's CC BY.
+  A PLOS component takes the license Crossref gives it, else its article's version-of-record license (the article from `relation.is-component-of`, else the DOI without its `.sNNN` suffix; the PLOS file `10.1371/journal.pone.0303144.s001` is not in DataCite).
+  Every other publisher's component, and a PLOS component with no license from either, is `unresolved`, never compatible by default; such a record is never cached.
+- **Each part is judged on its own.**
+  A container's members or children are never merged into one license: each is judged against the dataset's license, and they combine as separate sources do (the most restrictive outcome, and a conflict such as share-alike beside NonCommercial needs permission).
+  One merged rank would read CC BY-SA beside CC BY-NC as NonCommercial alone, and a CC BY-SA 4.0 part beside a 3.0 one as compatible with a 3.0 target.
+- Genuine publications stay publications: `10.5281/zenodo.6529724` and `10.6084/m9.figshare.28309157` are `JournalArticle` records.

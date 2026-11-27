@@ -662,7 +662,9 @@ export function nextActionOf(
     return "deny";
   }
   if (codes.has("license_lineage_unconfirmed")) {
-    return o.unresolved ? "ask_depositor" : "record_license_permission";
+    // An unresolved lineage is NEMAR's failure to read a registry, not the depositor's to cure
+    // (ADR 0139 decision 7, amendment of 2026-11-27: no depositor mail): an administrator reads it.
+    return o.unresolved ? "administrator_reads" : "record_license_permission";
   }
   if (any(ADMINISTRATOR_READS)) return "administrator_reads";
   const left = [...codes].filter((c) => c !== "identifier_screen_needs_acknowledgment");
