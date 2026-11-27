@@ -816,10 +816,17 @@ describe("the shell steps, run for real", () => {
     });
   }
 
-  test("federation: the pull-request review unset is not a match", async () => {
-    const r = await runFederationCheck({ ...OWN, OTHER_RULE: "", OTHER_ACCOUNT: "" });
-    expect(r.status).toBe(0);
-  });
+  for (const unset of [
+    { OTHER_RULE: "", OTHER_ACCOUNT: "" },
+    { OTHER_RULE: "" },
+    { OTHER_ACCOUNT: "" },
+  ]) {
+    test(`federation: the pull-request review's ${Object.keys(unset).join(" and ")} unset is not a match`, async () => {
+      const r = await runFederationCheck({ ...OWN, ...unset });
+      expect(r.status).toBe(0);
+      expect(r.reported).toBe("");
+    });
+  }
 
   test("validate: a good dispatch picks the origin from the table and writes an executable reporter", async () => {
     const r = await runStepScript("Validate the dispatch", GOOD);
