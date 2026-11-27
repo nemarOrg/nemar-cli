@@ -306,7 +306,7 @@
     "threshold_uv": 1e-08
   },
   "best_iter": 4,
-  "best_ll": -2.7449900144324153,
+  "best_ll": -2.744990012447326,
   "bit_reproducible": true,
   "block_size": 131072,
   "browser_transform": {
@@ -497,7 +497,7 @@
   "engine": "pamica-torch",
   "engine_input_dtype": "float64",
   "fallback": false,
-  "final_ll": -2.7449900144324153,
+  "final_ll": -2.744990012447326,
   "good_channels": [
     "Fp1",
     "Fp2",
@@ -523,8 +523,13 @@
   "gpu_memory_cap_mb": null,
   "gpu_name": null,
   "iclabel": {
+    "network": "iclabel.onnx",
+    "onnxruntime_threads": {
+      "inter_op": "default",
+      "intra_op": "default"
+    },
     "version": "default",
-    "weights_sha256": "8949a3e1faf61fee997034eca50a94475b78d58b35beb38ba48f0b208444d929"
+    "weights_sha256": "1f16c67ebdbd8e6a30759ab628b61b693a0c4011e35a20e538acbebc1d4ebce4"
   },
   "image_flavor": null,
   "input_profile": "archive",
@@ -536,7 +541,7 @@
   "pamica": {
     "backend": "AMICATorchNG",
     "best_iter": 4,
-    "best_ll": -2.7449900144324153,
+    "best_ll": -2.744990012447326,
     "block_size": 131072,
     "device": "cpu",
     "did_converge": false,
@@ -545,7 +550,7 @@
     "do_reject": false,
     "do_sphere": true,
     "dtype": "float64",
-    "final_ll": -2.7449900144324153,
+    "final_ll": -2.744990012447326,
     "invsigmax": 100.0,
     "invsigmin": 1e-05,
     "iterations": 5,
@@ -557,13 +562,16 @@
     "min_dll": 1e-09,
     "min_nd": 1e-07,
     "minlrate": 1e-08,
+    "n_good_samples": 56400,
     "n_mix": 3,
     "n_models": 1,
+    "n_rejected_samples": 0,
     "newt_start": 50,
     "newtrate": 1.0,
     "pcakeep": 18,
     "pipeline": "pamica.AMICA(backend='torch').fit",
     "rank": 18,
+    "rejection_passes": 0,
     "rejint": 3,
     "rejsig": 3.0,
     "rejstart": 2,
@@ -581,8 +589,7 @@
   "positions": {
     "coordinate_system": "MNI305",
     "coordinate_units": "mm",
-    "source": "electrodes.tsv",
-    "withheld": null
+    "source": "electrodes.tsv"
   },
   "rank": 18,
   "recipe": "nemar-ica",
@@ -608,7 +615,8 @@
   "torch_cuda": null,
   "torch_version": "2.12.1",
   "versions": {
-    "eegprep": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
+    "eegprep": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3",
+    "onnxruntime": "1.32.0",
     "pamica": "0.4.0",
     "torch": "2.12.1"
   }

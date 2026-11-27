@@ -985,12 +985,12 @@ describe("recordQualityEntry over the fixture's recording", () => {
       const own = compact.replace('"metrics":{', `"metrics":{"__proto__":${value},`);
       expect(await reasonOf(enc.encode(own))).toBe("entry_invalid");
     }
-    // In a plugin step's qualityMetrics too.
-    const step = '"qualityMetrics":{"nemar-quality:percentBrainComponents"';
+    // In a plugin step's qualityMetrics too (its first member, the names sorted).
+    const step = '"qualityMetrics":{"nemar-quality:mutualInformationReduction"';
     expect(compact.split(step).length).toBe(2);
     const reported = compact.replace(
       step,
-      `"qualityMetrics":{"__proto__":${JSON.stringify(RECORD.extensions.nemar.metrics.icaRank)},"nemar-quality:percentBrainComponents"`,
+      `"qualityMetrics":{"__proto__":${JSON.stringify(RECORD.extensions.nemar.metrics.icaRank)},"nemar-quality:mutualInformationReduction"`,
     );
     expect(await reasonOf(enc.encode(reported))).toBe("entry_invalid");
   });

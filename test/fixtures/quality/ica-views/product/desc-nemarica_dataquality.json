@@ -144,6 +144,40 @@
           "n": 1,
           "unit": "dB"
         },
+        "nemar-quality:mutualInformationReduction": {
+          "description": "Mutual information reduction of the decomposition: the mutual information its unmixing removes from the sphered data, log|det W| + sum h(x_i) - sum h(y_i), each entropy over 256 fixed bins (eegprep's eeg_mir). Not comparable with Delorme et al. 2012 or the legacy NEMAR report, whose MIR includes the reduction sphering achieves.",
+          "histogram": {
+            "counts": [
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "edges": [
+              0.0,
+              0.25,
+              0.5,
+              1.0,
+              2.0,
+              4.0,
+              8.0,
+              16.0,
+              32.0
+            ],
+            "missing": 0,
+            "overflow": 0,
+            "underflow": 0
+          },
+          "max": 0.0222,
+          "median": 0.0222,
+          "min": 0.0222,
+          "n": 1,
+          "unit": "nat"
+        },
         "nemar-quality:percentBrainComponents": {
           "description": "Share of components whose most probable ICLabel class is Brain.",
           "histogram": {
@@ -279,6 +313,10 @@
           "max": 7.48,
           "min": 7.48
         },
+        "nemar-quality:mutualInformationReduction": {
+          "max": 0.0222,
+          "min": 0.0222
+        },
         "nemar-quality:percentBrainComponents": {
           "max": 44.4444,
           "min": 44.4444
@@ -294,7 +332,7 @@
       },
       "profile": "archive",
       "recipe_version": "1.0.0-b2",
-      "record_sha256": "4805ad20f62713371938980ccf9ceede2e60f1df078d432ead5294a9695b6111"
+      "record_sha256": "bb64f6cb7ef9fe891763f4952c48ad1acd4e29082060dce62adf66a67a7e1cac"
     }
   }
 }
