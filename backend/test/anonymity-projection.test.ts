@@ -100,6 +100,8 @@ const DELIBERATE_INTERNAL_READS: Readonly<Record<string, string>> = {
   "services/enrich-dataset.ts":
     "resolves the uploader to build DataCite attribution; blinds at the WRITE instead",
   "services/publication-orchestrator.ts": "the publish flow itself, which is where anonymity ends",
+  "services/publication-auto-deny.ts":
+    "the automatic denial mails the requester and the dataset's owner by name (ADR 0139, decision 4); only named requests are denied automatically, and nothing it reads reaches a caller",
   "services/repo-spec.ts":
     "resolves GitHub handles to grant repository access; a blinded handle would grant it to nobody",
 };

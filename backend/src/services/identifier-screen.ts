@@ -44,7 +44,7 @@ import {
   screenGate,
   stateOf,
 } from "../../../shared/identifier-screen-report.js";
-import { auditLogStatement } from "../db/audit-log.js";
+import { auditLogParams, auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import {
   type PublicationReviewSection,
@@ -72,6 +72,8 @@ import {
 } from "./identifier-screen-stored.js";
 import { reviewInFlightSql } from "./publication-review-rows.js";
 import { publicationReviewEmailSection, reviewEnabled } from "./publication-review-view.js";
+import { readResubmissionNoteOf } from "./resubmission-note.js";
+import { MAIL_COVERED_BY_DIGEST_SQL, sendDueScreenBatchDigests } from "./screen-batch.js";
 
 // The two readers of a stored screen, the sandbox exemption and the screen's status view live in
 // their own module so the publication review (ADR 0102) can use them without importing this one;
@@ -125,7 +127,9 @@ export const RESET_SCREEN_COLUMNS_SQL = `identifier_screen_status = NULL,
        identifier_screen_mail_claimed_at = NULL,
        identifier_screen_ack_by = NULL,
        identifier_screen_ack_reason = NULL,
-       identifier_screen_ack_at = NULL`;
+       identifier_screen_ack_at = NULL,
+       identifier_screen_batch_id = NULL,
+       identifier_screen_batch_settled_at = NULL`;
 
 /**
  * The admin re-run's claim guard: only an active request that can still be
@@ -187,10 +191,17 @@ export async function mailPublicationRequest(
     anonymous: boolean;
     screen: PublicationScreenSection;
     review?: PublicationReviewSection | null;
+    /**
+     * The request the mail is about, or null when it could not be tied to a row. Required, not
+     * optional, so a new caller cannot send the mail of a resubmission without its note: the
+     * note (ADR 0139, decision 5) is read from the row here, whichever caller sends the mail.
+     */
+    requestId: number | null;
   },
 ): Promise<{ attempted: number; delivered: number }> {
   const adminEmails = await getAdminEmailsForCategory(env.DB, "publication_request", env);
   if (adminEmails.length === 0) return { attempted: 0, delivered: 0 };
+  const resubmissionNote = await readResubmissionNoteOf(env.DB, args.requestId);
   const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
   const outcome = await sendPublicationRequestEmail(
     adminEmails,
@@ -201,7 +212,12 @@ export async function mailPublicationRequest(
     replyTo,
     isDev,
     env,
-    { anonymous: args.anonymous, screen: args.screen, review: args.review ?? undefined },
+    {
+      anonymous: args.anonymous,
+      screen: args.screen,
+      review: args.review ?? undefined,
+      resubmissionNote,
+    },
   );
   return { attempted: outcome.attempted, delivered: outcome.delivered };
 }
@@ -299,18 +315,22 @@ export async function notifyAdminsOfScreen(
       .prepare("SELECT username FROM users WHERE id = ?")
       .bind(claim.requested_by)
       .first<{ username: string | null }>();
+    const screen = screenEmailSection(
+      claim.dataset_id,
+      claim.identifier_screen_status,
+      claim.identifier_screen_report,
+    );
     const outcome = await mailPublicationRequest(env, {
+      requestId,
       datasetId: claim.dataset_id,
       username: user?.username ?? `user ${claim.requested_by}`,
       anonymous: claim.anonymous === 1,
-      screen: screenEmailSection(
-        claim.dataset_id,
-        claim.identifier_screen_status,
-        claim.identifier_screen_report,
-      ),
+      screen,
       // Never throws, and is null when the review is off and has no row: the mail is then what
-      // it was before the review existed.
-      review: await publicationReviewEmailSection(env, requestId),
+      // it was before the review existed. A passed review quotes the screen's status line.
+      review: await publicationReviewEmailSection(env, requestId, Date.now(), {
+        screenStatusLine: screen.headline,
+      }),
     });
     delivered = outcome.delivered;
   } catch (err) {
@@ -369,6 +389,7 @@ export async function mailScreenNotStarted(env: Bindings, requestId: number): Pr
       }>();
     if (!row) return;
     await mailPublicationRequest(env, {
+      requestId,
       datasetId: row.dataset_id,
       username: row.username ?? `user ${row.requested_by}`,
       anonymous: row.anonymous === 1,
@@ -420,18 +441,23 @@ async function recordDispatchFailure(
   requestId: number,
   error: "dispatch-unconfigured" | "dispatch-failed",
   nonce: string | null,
+  batchId: number | null = null,
 ): Promise<void> {
   const report = JSON.stringify(workerErrorReport(error));
   if (nonce === null) {
+    // A screen of a batch keeps its batch id and has its mail covered by the digest (the last
+    // assignment of a column wins, so these follow the reset).
     await db
       .prepare(
         `UPDATE publication_requests
             SET ${RESET_SCREEN_COLUMNS_SQL},
                 identifier_screen_status = 'error', identifier_screen_report = ?,
-                identifier_screen_at = datetime('now')
+                identifier_screen_at = datetime('now'),
+                identifier_screen_batch_id = ?,
+                identifier_screen_emailed_at = ${batchId === null ? "NULL" : "datetime('now')"}
           WHERE id = ?`,
       )
-      .bind(report, requestId)
+      .bind(report, batchId, requestId)
       .run();
     return;
   }
@@ -442,7 +468,8 @@ async function recordDispatchFailure(
     .prepare(
       `UPDATE publication_requests
           SET identifier_screen_status = 'error', identifier_screen_report = ?,
-              identifier_screen_at = datetime('now'), identifier_screen_nonce = NULL
+              identifier_screen_at = datetime('now'), identifier_screen_nonce = NULL,
+              identifier_screen_emailed_at = ${MAIL_COVERED_BY_DIGEST_SQL}
         WHERE id = ? AND identifier_screen_status = 'pending' AND identifier_screen_nonce = ?`,
     )
     .bind(report, requestId, nonce)
@@ -454,17 +481,23 @@ async function recordDispatchFailure(
  * screen column. `guard` is an extra SQL condition (a module constant); the
  * claim is refused, and null returned, when it does not hold.
  */
-async function claimPending(db: D1Database, requestId: number, guard = ""): Promise<string | null> {
+async function claimPending(
+  db: D1Database,
+  requestId: number,
+  guard = "",
+  batchId: number | null = null,
+): Promise<string | null> {
   const nonce = crypto.randomUUID();
   const res = await db
     .prepare(
       `UPDATE publication_requests
           SET ${RESET_SCREEN_COLUMNS_SQL},
               identifier_screen_status = 'pending', identifier_screen_nonce = ?,
-              identifier_screen_dispatched_at = datetime('now')
+              identifier_screen_dispatched_at = datetime('now'),
+              identifier_screen_batch_id = ?
         WHERE id = ? ${guard}`,
     )
-    .bind(nonce, requestId)
+    .bind(nonce, batchId, requestId)
     .run();
   return (res.meta.changes ?? 0) === 1 ? nonce : null;
 }
@@ -480,11 +513,16 @@ async function claimPending(db: D1Database, requestId: number, guard = ""): Prom
  *
  * `guard` lets the admin re-run route refuse to replace a fresh pending run in
  * the same statement that claims it. Returns null when that guard refused.
+ *
+ * `batchId` marks the screen as one of a paced re-screen (`services/screen-batch.ts`): the claim
+ * stores it with the request, and a failure to start is stored with its mail covered by the
+ * batch's digest. The caller does not mail a failed start of a batch.
  */
 export async function startIdentifierScreen(
   env: Bindings,
   args: { requestId: number; datasetId: string; githubRepo: string | null },
   guard = "",
+  batchId: number | null = null,
 ): Promise<StartScreenOutcome | null> {
   const { requestId, datasetId } = args;
   if (isScreenExempt(datasetId)) return { kind: "exempt" };
@@ -521,17 +559,17 @@ export async function startIdentifierScreen(
     const error = unconfigured ? "dispatch-unconfigured" : "dispatch-failed";
     if (guard) {
       // The re-run route: claim first, so the guard decides, then fail it.
-      const nonce = await claimPending(db, requestId, guard);
+      const nonce = await claimPending(db, requestId, guard, batchId);
       if (nonce === null) return null;
-      await recordDispatchFailure(db, requestId, error, nonce);
+      await recordDispatchFailure(db, requestId, error, nonce, batchId);
     } else {
-      await recordDispatchFailure(db, requestId, error, null);
+      await recordDispatchFailure(db, requestId, error, null, batchId);
     }
     console.warn(`[identifier-screen] ${datasetId} request ${requestId}: ${error}`);
     return { kind: "failed", error };
   }
 
-  const nonce = await claimPending(db, requestId, guard);
+  const nonce = await claimPending(db, requestId, guard, batchId);
   if (nonce === null) return null;
   try {
     const token = await signIdentifierScreenCallbackToken({ datasetId, requestId, nonce }, secret);
@@ -559,8 +597,9 @@ export async function startIdentifierScreen(
 // ============================================================================
 
 export type StoreOutcome =
-  | { stored: true; state: ScreenState; blocked: boolean }
-  | { stored: false };
+  // `batchId` is present only for a screen of a paced re-screen (`services/screen-batch.ts`), read
+  // from the statement that stored the result, so the caller settles that batch and no other.
+  { stored: true; state: ScreenState; blocked: boolean; batchId?: number } | { stored: false };
 
 /**
  * Store a verified callback's report on the row it was issued for.
@@ -603,18 +642,29 @@ export async function storeScreenResult(
   // keeps its nonce, so the run it was issued for can still answer. Its mail is
   // re-armed (emailed and lease cleared), because the mail already sent said it
   // did not report. A re-run replaces the nonce, so an older run cannot.
-  const res = await db
+  //
+  // A screen of a paced re-screen (`services/screen-batch.ts`) is the exception to the mail: while
+  // its batch has not sent its digest the mail is stamped as covered by it, in this same
+  // statement, so no path (the callback, the review's result, the watchdog) sends it. The
+  // statement says whether it did (`covered`), which is also whether the depositor's block mail is
+  // left to the digest.
+  const stored = await db
     .prepare(
       `UPDATE publication_requests
           SET identifier_screen_status = ?, identifier_screen_report = ?,
               identifier_screen_at = datetime('now'), identifier_screen_nonce = NULL,
-              identifier_screen_emailed_at = NULL, identifier_screen_mail_claimed_at = NULL
+              identifier_screen_emailed_at = ${MAIL_COVERED_BY_DIGEST_SQL},
+              identifier_screen_mail_claimed_at = NULL
         WHERE id = ? AND identifier_screen_status IN ('pending', 'unreported')
-          AND identifier_screen_nonce = ?`,
+          AND identifier_screen_nonce = ?
+        RETURNING identifier_screen_batch_id AS batch_id,
+                  identifier_screen_emailed_at IS NOT NULL AS covered`,
     )
     .bind(state, JSON.stringify(report), args.requestId, args.nonce)
-    .run();
-  if ((res.meta.changes ?? 0) !== 1) return { stored: false };
+    .first<{ batch_id: number | null; covered: number }>();
+  if (!stored) return { stored: false };
+  const inBatch = stored.batch_id !== null;
+  const covered = stored.covered === 1;
 
   // A direct identifier blocks the request (and tells the depositor). A clear
   // result lifts a block that an earlier screen's findings put there (an admin
@@ -622,8 +672,9 @@ export async function storeScreenResult(
   let blocked = false;
   const gate = screenGate(state);
   if (gate === "blocks") {
-    blocked = await blockForFindings(env, args.requestId, args.datasetId, report);
-  } else if (gate === "clear") {
+    blocked = await blockForFindings(env, args.requestId, args.datasetId, report, covered);
+  } else if (gate === "clear" && !inBatch) {
+    // Not for a request of a batch: a batch screens a blocked request and leaves its status alone.
     await db
       .prepare(
         `UPDATE publication_requests
@@ -633,7 +684,12 @@ export async function storeScreenResult(
       .bind(args.requestId, IDENTIFIER_SCREEN_BLOCK_REASON)
       .run();
   }
-  return { stored: true, state, blocked };
+  return {
+    stored: true,
+    state,
+    blocked,
+    ...(inBatch ? { batchId: stored.batch_id as number } : {}),
+  };
 }
 
 /**
@@ -646,6 +702,7 @@ async function blockForFindings(
   requestId: number,
   datasetId: string,
   report: ScreenReport,
+  quiet = false,
 ): Promise<boolean> {
   const db = env.DB;
   const res = await db
@@ -660,6 +717,9 @@ async function blockForFindings(
   console.log(
     `[identifier-screen] ${datasetId} request ${requestId}: blocked (${IDENTIFIER_SCREEN_BLOCK_REASON})`,
   );
+  // A request of a paced re-screen is blocked without the depositor's mail; the batch's digest
+  // names it, so the administrators know whom to tell.
+  if (quiet) return true;
 
   try {
     const requester = await db
@@ -706,6 +766,8 @@ export interface ScreenSweepResult {
   undelivered: number;
   /** Rows whose handling threw. */
   errors: number;
+  /** Digests of paced re-screens sent by this run (`services/screen-batch.ts`). */
+  digests: number;
   /** True when the run did nothing because this is not production. */
   skipped: boolean;
 }
@@ -762,6 +824,7 @@ export async function sweepIdentifierScreens(env: Bindings): Promise<ScreenSweep
     emailed: 0,
     undelivered: 0,
     errors: 0,
+    digests: 0,
     skipped: false,
   };
   if (isNonProductionEnv(env)) {
@@ -791,7 +854,8 @@ export async function sweepIdentifierScreens(env: Bindings): Promise<ScreenSweep
           // run's own answer, and storeScreenResult accepts it.
           `UPDATE publication_requests
               SET identifier_screen_status = 'unreported', identifier_screen_report = ?,
-                  identifier_screen_at = datetime('now')
+                  identifier_screen_at = datetime('now'),
+                  identifier_screen_emailed_at = ${MAIL_COVERED_BY_DIGEST_SQL}
             WHERE id = ? AND identifier_screen_status = 'pending'
               AND (identifier_screen_dispatched_at IS NULL
                    OR identifier_screen_dispatched_at < datetime('now', '-${SCREEN_REPORT_DEADLINE_MINUTES} minutes'))`,
@@ -827,6 +891,12 @@ export async function sweepIdentifierScreens(env: Bindings): Promise<ScreenSweep
       console.error(`[identifier-screen-sweep] request ${row.id}: ${errorText(err)}`);
     }
   }
+
+  // Last, so a request this run timed out is already `unreported` when its batch's digest is built.
+  const digests = await sendDueScreenBatchDigests(env);
+  result.digests = digests.sent;
+  result.undelivered += digests.undelivered;
+  result.errors += digests.errors;
   return result;
 }
 
@@ -969,6 +1039,13 @@ export async function verifyScreenHead(
  * Record an admin's acknowledgment of a screen that needed one, and audit it.
  * Conditional on the state the gate read, so an acknowledgment can only attach
  * to the result the admin was shown. Returns false when the state moved.
+ *
+ * `shown` narrows the condition further, for a caller that acknowledges without
+ * approving (the batch acknowledgment, card D3): the exact stored report the
+ * administrator was shown, a request still `requested`, and no acknowledgment
+ * already recorded. `details` is added to the audit row's details. On that path the
+ * acknowledgment and its audit row are one transaction (`recordShownAcknowledgment`); the approval
+ * path keeps an acknowledgment whose audit write failed, as the approval it rides on is decided.
  */
 export async function recordScreenAcknowledgment(
   db: D1Database,
@@ -978,8 +1055,17 @@ export async function recordScreenAcknowledgment(
     adminUserId: number;
     reason: string;
     state: string;
+    shown?: { report: string };
+    details?: Record<string, unknown>;
   },
 ): Promise<boolean> {
+  const details = JSON.stringify({
+    ...args.details,
+    request_id: args.requestId,
+    screen_state: args.state,
+    reason: args.reason,
+  });
+  if (args.shown) return recordShownAcknowledgment(db, args, args.shown.report, details);
   const res = await db
     .prepare(
       `UPDATE publication_requests
@@ -996,11 +1082,7 @@ export async function recordScreenAcknowledgment(
       action: "identifier_screen_acknowledged",
       resourceType: "dataset",
       resourceId: args.datasetId,
-      details: JSON.stringify({
-        request_id: args.requestId,
-        screen_state: args.state,
-        reason: args.reason,
-      }),
+      details,
     }).run();
   } catch (err) {
     // The acknowledgment itself is on the request row; the audit row is the
@@ -1010,6 +1092,59 @@ export async function recordScreenAcknowledgment(
     );
   }
   return true;
+}
+
+/** The row an acknowledgment without an approval may attach to: exactly the one shown. */
+const SHOWN_GUARD = `id = ? AND identifier_screen_status = ? AND identifier_screen_report = ?
+                     AND status = 'requested' AND identifier_screen_ack_at IS NULL`;
+
+/**
+ * The batch path (card D3): the audit INSERT and the acknowledgment UPDATE in one `db.batch`,
+ * which D1 runs as one transaction, so both land or neither does. Both carry the same guard and
+ * the INSERT runs first, so in one transaction they see the same row: when the guard does not
+ * hold, neither writes, and an acknowledgment is never left without its audit row. A failed
+ * write rolls the batch back and throws.
+ */
+async function recordShownAcknowledgment(
+  db: D1Database,
+  args: {
+    requestId: number;
+    datasetId: string;
+    adminUserId: number;
+    reason: string;
+    state: string;
+  },
+  report: string,
+  details: string,
+): Promise<boolean> {
+  const guardBinds = [args.requestId, args.state, report];
+  const [, update] = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+         SELECT ?, ?, ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM publication_requests WHERE ${SHOWN_GUARD})`,
+      )
+      .bind(
+        ...auditLogParams({
+          userId: args.adminUserId,
+          action: "identifier_screen_acknowledged",
+          resourceType: "dataset",
+          resourceId: args.datasetId,
+          details,
+        }),
+        ...guardBinds,
+      ),
+    db
+      .prepare(
+        `UPDATE publication_requests
+            SET identifier_screen_ack_by = ?, identifier_screen_ack_reason = ?,
+                identifier_screen_ack_at = datetime('now')
+          WHERE ${SHOWN_GUARD}`,
+      )
+      .bind(args.adminUserId, args.reason, ...guardBinds),
+  ]);
+  return (update.meta.changes ?? 0) === 1;
 }
 
 /**

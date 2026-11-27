@@ -1,7 +1,8 @@
 /**
  * The pre-send boundary of the publication review (ADR 0102, section 2).
  *
- * **This is the only file that mints `ClearedText`.** The prompt builder accepts nothing else, and
+ * **This is the only file that mints `ClearedText`**, for the root documents and for the widened
+ * inputs of ADR 0139 (decision 6) alike, under the same rules (`presendInputs`). The prompt builder accepts nothing else, and
  * `test/publication-review-contract.test.ts` fails if any other source file casts to the type. So
  * the one place that decides what a model may read is this file, and it is short enough to read
  * whole. The brand is checked by the compiler and by a lexical test, and neither can see a type
@@ -66,15 +67,21 @@ import {
 } from "../../shared/identifier-scan";
 import {
   type ClearedDocuments,
+  type ClearedInputs,
   type ClearedText,
   DESCRIPTION_KEYS_SHOWN,
   DOCUMENT_CHAR_CAPS,
   type DocumentState,
+  INPUT_CHAR_CAPS,
+  type InputPreSendResult,
   type PreSend,
   type PreSendResult,
   REVIEW_DOCUMENTS,
+  REVIEW_INPUTS,
   type RawDocument,
   type ReviewDocument,
+  type ReviewInput,
+  type ReviewInputsBody,
 } from "../../shared/publication-review";
 import { tidy } from "../../shared/untrusted-text";
 
@@ -518,8 +525,16 @@ function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prep
  */
 const clearedDigests = new Set<string>();
 
+/**
+ * The registry key of a document is its closed word; an input's is `input:` and its word, so a
+ * string cleared as one input is never taken for a document of the same name.
+ */
+function digestOfKey(key: string, text: string): string {
+  return createHash("sha256").update(key).update("\0").update(text, "utf8").digest("hex");
+}
+
 function digestOf(document: ReviewDocument, text: string): string {
-  return createHash("sha256").update(document).update("\0").update(text, "utf8").digest("hex");
+  return digestOfKey(document, text);
 }
 
 /**
@@ -528,6 +543,38 @@ function digestOf(document: ReviewDocument, text: string): string {
  */
 export function isCleared(document: ReviewDocument, text: unknown): boolean {
   return typeof text === "string" && clearedDigests.has(digestOf(document, text));
+}
+
+/** What the examination of one prepared string came to. */
+type Examined =
+  | { cleared: ClearedText; state: "sent" | "sent_cut"; findings: [] }
+  | { cleared: null; state: DocumentState; findings: Finding[] };
+
+/**
+ * The one examination every document and every input goes through, and the one place cleared text
+ * is minted. The rule over the whole string that will be sent runs here; for a JSON string the
+ * structure's own finding already says a path is there, and one finding per string is what is
+ * counted. Text is cleared only on the path where nothing was found, and its digest is registered
+ * under `key` (a document's or an input's), so the prompt builder can ask about it at run time.
+ */
+function examine(prepared: Prepared, key: string): Examined {
+  if (prepared.kind === "no-text") return { cleared: null, state: prepared.state, findings: [] };
+  const findings: Finding[] = [...prepared.findings];
+  if (!findings.some((f) => f.kind === "local-user-path")) {
+    findings.push(...scanTextForLocalPaths(prepared.sent));
+  }
+  if (findings.length > 0) return { cleared: null, state: "withheld_finding", findings };
+  // The one cast of the repository: this string was examined, byte for byte, and nothing was
+  // found in it.
+  const cleared = prepared.sent as ClearedText;
+  clearedDigests.add(digestOfKey(key, prepared.sent));
+  return { cleared, state: prepared.cut ? "sent_cut" : "sent", findings: [] };
+}
+
+function addCounts(into: Partial<Record<FindingKind, number>>, findings: Finding[]): void {
+  for (const [kind, n] of Object.entries(countByKind(findings))) {
+    into[kind as FindingKind] = (into[kind as FindingKind] ?? 0) + n;
+  }
 }
 
 /**
@@ -545,28 +592,11 @@ export const presend: PreSend = (docs): PreSendResult => {
   for (const document of REVIEW_DOCUMENTS) {
     try {
       const prepared = prepare(document, docs[document]);
-      if (prepared.kind === "no-text") {
-        states[document] = prepared.state;
-        continue;
-      }
-      const findings: Finding[] = [...prepared.findings];
-      // The rule over the whole string that will be sent. For a JSON document the structure's own
-      // finding already says a path is there, and one finding per document is what is counted.
-      if (!findings.some((f) => f.kind === "local-user-path")) {
-        findings.push(...scanTextForLocalPaths(prepared.sent));
-      }
-      if (findings.length > 0) {
-        states[document] = "withheld_finding";
-        for (const [kind, n] of Object.entries(countByKind(findings))) {
-          withheldFindings[kind as FindingKind] = (withheldFindings[kind as FindingKind] ?? 0) + n;
-        }
-        continue;
-      }
-      // The one cast of the repository: this string was examined, byte for byte, and nothing was
-      // found in it.
-      cleared[document] = prepared.sent as ClearedText;
-      clearedDigests.add(digestOf(document, prepared.sent));
-      states[document] = prepared.cut ? "sent_cut" : "sent";
+      const result = examine(prepared, document);
+      states[document] = result.state;
+      addCounts(withheldFindings, result.findings);
+      if (result.cleared === null || prepared.kind === "no-text") continue;
+      cleared[document] = result.cleared;
       keysShown += prepared.keysShown;
       keysNotShown += prepared.keysNotShown;
     } catch {
@@ -583,3 +613,157 @@ export const presend: PreSend = (docs): PreSendResult => {
     description_keys_not_shown: keysNotShown,
   };
 };
+
+// ---------------------------------------------------------------------------------------------
+// The widened inputs (ADR 0139, decision 6)
+// ---------------------------------------------------------------------------------------------
+
+/** The registry key of an input (see {@link digestOfKey}). */
+function inputKey(input: ReviewInput): string {
+  return `input:${input}`;
+}
+
+/** Whether pre-send cleared exactly `text` as the input `input`. */
+export function isInputCleared(input: ReviewInput, text: unknown): boolean {
+  return typeof text === "string" && clearedDigests.has(digestOfKey(inputKey(input), text));
+}
+
+/**
+ * A JSON section, normalized as a document's structure is (every key and string, to any depth),
+ * or null when it is nested deeper than {@link MAX_JSON_DEPTH}, which withholds it as unreadable.
+ */
+function jsonSection(value: unknown, cap: number): unknown | null {
+  if (nestedDeeperThan(value, MAX_JSON_DEPTH)) return null;
+  return normalizeStructure(value, cap);
+}
+
+/**
+ * The rules a JSON section is examined by, over its normalized structure: the JSON key rule (an
+ * identifier-named key that holds content, at any depth) and the path rules over each string and
+ * each key on its own. The whole sent string is then examined by the text rule as well.
+ */
+function scanJsonSection(object: unknown): Finding[] {
+  return [...scanJsonKeys(object), ...scanStructureForPaths(object)];
+}
+
+/** A section ready to be examined: the exact string that would be sent, cut to its cap. */
+function sectionOf(object: unknown, cap: number, findings: Finding[]): Prepared {
+  return {
+    kind: "text",
+    ...toSent(JSON.stringify(object, null, 2), cap),
+    findings,
+    keysShown: 0,
+    keysNotShown: 0,
+  };
+}
+
+const ABSENT: Prepared = { kind: "no-text", state: "absent" };
+const UNREADABLE: Prepared = { kind: "no-text", state: "withheld_unreadable" };
+
+/** Build the string an input would be sent as, or say why there is none. */
+function prepareInput(input: ReviewInput, body: ReviewInputsBody): Prepared {
+  const cap = INPUT_CHAR_CAPS[input];
+  switch (input) {
+    case "enrichment": {
+      // Model-written metadata: fenced as untrusted, like the README, and examined like JSON.
+      if (body.enrichment === null) return ABSENT;
+      const object = jsonSection(body.enrichment.fields, cap);
+      if (object === null) return UNREADABLE;
+      return sectionOf(object, cap, scanJsonSection(object));
+    }
+    case "registry_records": {
+      if (body.lineage.sources.length === 0) return ABSENT;
+      const object = jsonSection(
+        body.lineage.sources.map((s) => ({
+          id: s.id,
+          resolver: s.resolver,
+          resource_type: s.resource_type,
+          title: s.title,
+          creators: s.creators,
+          publisher: s.publisher,
+          license: s.license,
+          license_version: s.license_version,
+          url: s.evidence_url,
+          status: s.status,
+        })),
+        cap,
+      );
+      if (object === null) return UNREADABLE;
+      return sectionOf(object, cap, scanJsonSection(object));
+    }
+    case "lineage": {
+      // A dataset that declares no upstream source has no lineage to show: the documents already
+      // say what it declares, and the facts say the section is absent.
+      if (body.lineage.outcome === "no_upstream_declared" && body.lineage.sources.length === 0) {
+        return ABSENT;
+      }
+      const object = jsonSection(
+        {
+          outcome: body.lineage.outcome,
+          target_license: body.lineage.target_license,
+          sources: body.lineage.sources.map((s) => ({
+            id: s.id,
+            license: s.license,
+            outcome: s.outcome,
+          })),
+        },
+        cap,
+      );
+      if (object === null) return UNREADABLE;
+      return sectionOf(object, cap, scanJsonSection(object));
+    }
+    case "coverage": {
+      // Counts per format, and nothing else: no finding kind, no finding count, no value.
+      if (body.coverage.source === "none") return ABSENT;
+      const object = jsonSection(body.coverage.formats, cap);
+      if (object === null) return UNREADABLE;
+      return sectionOf(object, cap, scanJsonSection(object));
+    }
+    case "resubmission_note": {
+      const note = body.resubmission_note;
+      if (note === null) return ABSENT;
+      if (note.includes("\u0000")) return UNREADABLE;
+      const sent = toSent(note, cap);
+      // Prose: the shared path rule runs over the whole sent string below; the three other ways to
+      // write a local path run here, as they do on a JSON string.
+      return {
+        kind: "text",
+        ...sent,
+        findings: scanLocalPathForms(sent.sent),
+        keysShown: 0,
+        keysNotShown: 0,
+      };
+    }
+    case "previous_denial": {
+      // Closed reason codes and a boolean: the denial's own words never reach this section.
+      if (body.previous_denial === null) return ABSENT;
+      const object = jsonSection(body.previous_denial, cap);
+      if (object === null) return UNREADABLE;
+      return sectionOf(object, cap, scanJsonSection(object));
+    }
+  }
+}
+
+/**
+ * The pre-send check of the widened inputs: each section built in full, normalized and cut, then
+ * examined by the shared rules over exactly that string, and cleared only when they found nothing.
+ * A section they found something in, or could not examine, is withheld whole and recorded; it is
+ * never sent, and never sent in part. The same rules, and the same registry, as the documents'.
+ */
+export function presendInputs(body: ReviewInputsBody): InputPreSendResult {
+  const cleared: ClearedInputs = {};
+  const states = {} as Record<ReviewInput, DocumentState>;
+  const withheldFindings: Partial<Record<FindingKind, number>> = {};
+  for (const input of REVIEW_INPUTS) {
+    try {
+      const result = examine(prepareInput(input, body), inputKey(input));
+      states[input] = result.state;
+      addCounts(withheldFindings, result.findings);
+      if (result.cleared !== null) cleared[input] = result.cleared;
+    } catch {
+      delete cleared[input];
+      states[input] = "withheld_unreadable";
+    }
+  }
+  return { cleared, states, withheld_findings: withheldFindings };
+}

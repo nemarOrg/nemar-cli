@@ -176,6 +176,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /datasets/:id/doi/concept": 2,
   "POST /datasets/:id/doi/publish": 2,
   "GET /datasets/:id/doi": 1,
+  // Epic #2182 card D1 (ADR 0139 decision 7): the upstream license lineage, read-only.
+  "GET /datasets/:id/license-lineage": 1,
   "POST /datasets/:id/doi/update": 2,
   "POST /datasets/:id/enrichment": 2,
   "GET /datasets/:id/files": 1,
@@ -208,12 +210,24 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // ADR 0102: mail the depositor an administrator's typed message and leave the request open; the
   // body is parsed by hand, so there is one handler and no validator.
   "POST /publish/:id/comment": 1,
+  // ADR 0086 amendment of 2026-11-25: a paced re-screen. Create takes a validated body (a validator
+  // and a handler); close is one handler. The re-run route, `POST /publish/:id/identifier-screen`,
+  // takes its optional `{ batch_id }` body by hand, so its entry count is unchanged.
+  "POST /publish/screen-batches": 2,
+  "POST /publish/screen-batches/:batch/close": 1,
   "POST /publish/:id/deny": 2,
+  // ADR 0139, decision 4: restore a denied request; a validated body (a validator and a handler).
+  "POST /publish/:id/restore": 2,
+  // ADR 0139, decision 7 (amendment of 2026-11-25): record license permission evidence; a
+  // validated body (a validator and a handler).
+  "POST /publish/:id/license-permission": 2,
   "POST /publish/:id/approve": 2,
   // ADR 0080: launch an approval from the web by dispatching it to an executor.
   "POST /publish/:id/approve-dispatch": 1,
   // Epic #1610 phase 4: re-run the identifier screen of an active request.
   "POST /publish/:id/identifier-screen": 1,
+  // Epic #2182 card D3: batch acknowledgment on a public upstream; the body is parsed by hand.
+  "POST /publish/acknowledge-batch": 1,
   "POST /datasets/:id/s3-lock": 1,
 
   // Dataset lifecycle (sweeps, doctor, deletion, reindex, manifests)
@@ -417,7 +431,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(275);
+    expect(adminRoutes.routes.length).toBe(284);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

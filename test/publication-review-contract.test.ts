@@ -461,6 +461,8 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "evidence_incomplete",
       "steering_attempt",
       "other",
+      // The platform's own, from the license lineage (ADR 0139, decision 7).
+      "source_credit_missing",
     ]);
     // Nothing about privacy, identifiers or the depositors: the model is not asked (section 2).
     for (const code of PUBLICATION_FINDING_CODES) {
@@ -489,6 +491,8 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "dispatch_unconfigured",
       "review_disabled",
       "workflow_failed",
+      // The job could not read its widened inputs from the Worker (ADR 0139, decision 6).
+      "inputs_unavailable",
     ]);
     expect([...WORKER_ONLY_RUN_ERRORS]).toEqual([
       "dispatch_failed",
@@ -497,6 +501,8 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
     ]);
     expect([...NEVER_REACHED_MODEL]).toEqual([
       "stale_head",
+      // Posted before any model call: the inputs are read first (ADR 0139, decision 6).
+      "inputs_unavailable",
       "dispatch_failed",
       "dispatch_unconfigured",
       "review_disabled",
@@ -515,6 +521,8 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "bad_summary",
       "bad_steering",
       "bad_evidence",
+      "bad_note_answer",
+      "bad_record",
     ]);
   });
 
@@ -684,7 +692,9 @@ describe("the parser refuses what the job must never send", () => {
     expect(refusal(null)).toBe("not_an_object");
     expect(refusal([reportBody()])).toBe("not_an_object");
     expect(refusal("report")).toBe("not_an_object");
-    expect(refusal(reportBody({ v: 2 }))).toBe("bad_version");
+    expect(refusal(reportBody({ v: 3 }))).toBe("bad_version");
+    // Version 2 carries the fifth answer and the record; a version-1 body that says 2 is refused.
+    expect(refusal(reportBody({ v: 2 }))).toBe("unknown_key");
     expect(refusal(reportBody({ v: "1" }))).toBe("bad_version");
     expect(refusal(reportBody({ model: "claude-sonnet-5-5" }))).toBe("bad_model");
     expect(
@@ -1379,6 +1389,8 @@ describe("the reasons table", () => {
       "review_could_not_run",
       "text_withheld",
       "question_unknown",
+      "license_lineage_unconfirmed",
+      "resubmission_note_unaddressed",
       "bids_unconcluded_at_review",
       "version_missing",
       "doi_state_unexpected",
@@ -1548,6 +1560,7 @@ function* liveFacts(): Generator<LiveFacts> {
                         screen: { gate, head, acknowledged_by: null, head_current },
                         versions: { version_row_exists, prior_anonymous_request, first_published },
                         doi: { concept_doi_present, concept_ezid_status },
+                        license_permission: null,
                       };
                     }
 }
@@ -1674,6 +1687,7 @@ describe("reasonsOf, over every row, screen, request, version and DOI fact", () 
         first_published: false,
       },
       doi: { concept_doi_present: false, concept_ezid_status: null },
+      license_permission: null,
     };
     const report = PARSED_REPORTS[0].report;
     expect(reasonsOf({ live: clean, row: { kind: "reported", report, stored: "pass" } })).toEqual(
@@ -2424,6 +2438,8 @@ const OVERRIDABLE: readonly ReasonCode[] = [
   "review_could_not_run",
   "text_withheld",
   "question_unknown",
+  "license_lineage_unconfirmed",
+  "resubmission_note_unaddressed",
   "bids_unconcluded_at_review",
   "version_missing",
   "doi_state_unexpected",
@@ -2620,6 +2636,7 @@ describe("the block reason a surface shows", () => {
         first_published: false,
       },
       doi: { concept_doi_present: false, concept_ezid_status: null },
+      license_permission: null,
     };
     for (const block_reason of ["min_requirements_failed", "Not A Word!", null, "x".repeat(70)]) {
       const live = { ...clean, request: { ...clean.request, block_reason } };

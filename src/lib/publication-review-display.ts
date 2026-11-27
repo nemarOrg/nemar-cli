@@ -30,7 +30,12 @@ import {
   REVIEW_DOCUMENTS,
   type ReviewDocument,
   effectiveVersionOf,
+  reproducibilityLines,
 } from "../../shared/publication-review.js";
+import {
+  RESUBMISSION_NOTE_LABEL,
+  RESUBMISSION_NOTE_PROVENANCE,
+} from "../../shared/resubmission-note.js";
 import { type IdentifierScreenView, identifierScreenLines } from "./identifier-screen-display.js";
 import { plain } from "./terminal-text.js";
 
@@ -339,6 +344,27 @@ const GATE_WORD: Record<string, string> = {
 };
 
 /**
+ * The depositor's resubmission note as quoted lines under the label that names its author (ADR 0139,
+ * decision 5), or none when there is no note. Every line passes `plain()`: the note is the
+ * depositor's text, and an escape sequence in it would run in the administrator's terminal. A
+ * Worker that predates the note sends none, which reads as no note here, never as an empty one.
+ */
+export function resubmissionNoteLines(d: PublicationReviewDetail): string[] {
+  const note = typeof d.resubmission_note === "string" ? d.resubmission_note : "";
+  if (plain(note).trim() === "") return [];
+  const out = [
+    `  ${chalk.bold(RESUBMISSION_NOTE_LABEL)} ${chalk.dim(`(${RESUBMISSION_NOTE_PROVENANCE})`)}`,
+  ];
+  for (const line of note.split("\n")) out.push(`    > ${plain(line)}`);
+  if (typeof d.previous_request_id === "number") {
+    out.push(
+      chalk.dim(`  It answers the denial of request ${plain(String(d.previous_request_id))}.`),
+    );
+  }
+  return out;
+}
+
+/**
  * `GET /admin/publish/:id/review` as the lines `show` prints: the request, the screen, then the
  * review in the Worker's words (its headline, the gate, every reason with what clears it), the
  * model's answers, the platform facts that lowered one, the model's findings and summary under
@@ -356,6 +382,9 @@ export function reviewDetailLines(d: PublicationReviewDetail): string[] {
     `${chalk.bold(plain(d.dataset_id))}  request ${plain(String(d.request_id))}, ${status}, ${kind}`,
   );
   if (d.environment !== "production") out.push(`  ${chalk.yellow(NON_PRODUCTION_NOTE)}`);
+
+  const noteLines = resubmissionNoteLines(d);
+  if (noteLines.length > 0) out.push("", ...noteLines);
 
   out.push("");
   out.push(...screenViewLines(d.identifier_screen, 0));
@@ -394,12 +423,21 @@ export function reviewDetailLines(d: PublicationReviewDetail): string[] {
       const withheld = withheldLine(review.evidence);
       if (withheld !== null) out.push(`  ${withheld}`);
     }
+    if (review.reproducibility !== null && review.reproducibility !== undefined) {
+      out.push(
+        "  Review record:",
+        ...reproducibilityLines(review.reproducibility).map((l) => `    ${plain(l)}`),
+      );
+    }
     if (review.override !== null) {
       out.push(
         `  Override: by administrator ${plain(String(review.override.by))} at ${plain(review.override.at)} for ${review.override.reasons.map(plain).join(", ")}`,
       );
     }
   }
+  // ADR 0139, decision 7 (amendment of 2026-11-25): the evidence an administrator recorded.
+  const permission = d.license_permission;
+  if (permission !== null && permission !== undefined) out.push(`  ${plain(permission.line)}`);
   if (standing !== null) out.push(`  ${chalk.dim(plain(standing))}`);
   if (desc.next !== null && desc.next !== undefined) out.push(`  Next: ${plain(desc.next)}`);
 

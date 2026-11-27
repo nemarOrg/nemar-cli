@@ -10,19 +10,18 @@ import { z } from "zod";
 
 import {
   APPROVAL_DISPATCH_TOKEN_HEADER,
-  APPROVAL_IN_FLIGHT_MESSAGE,
-  DENY_AFTER_PUBLISHING_MESSAGE,
   INVALID_DATASET_ID_MESSAGE,
   REQUEST_MISMATCH_MESSAGE,
 } from "../../../../shared/contract/publication.js";
 import { screenGate } from "../../../../shared/identifier-screen-report.js";
+import { RESTORE_DONE, RESTORE_REFUSAL_TEXT } from "../../../../shared/publication-auto-deny.js";
 import {
   ACKNOWLEDGMENT_MAX_LENGTH,
   ACKNOWLEDGMENT_MIN_LENGTH,
   APPROVAL_DISPATCH_ID_RE,
   DENIAL_REASON_MAX_LENGTH,
 } from "../../../../shared/publication-limits.js";
-import { publishingHasStarted, publishingStanding } from "../../../../shared/publication-steps.js";
+import { publishingStanding } from "../../../../shared/publication-steps.js";
 import {
   searchLimitProblem,
   substringLikePattern,
@@ -33,7 +32,9 @@ import {
   APPROVAL_CLAIM_CLEAR_SQL,
   approvalInFlightSql,
 } from "../../services/approval-dispatch";
+import { isValidDatasetId } from "../../services/datasetId";
 import { resolveEmailConfig, sendPublicationDeniedEmail } from "../../services/email";
+import { SCREEN_BATCH_REFUSAL_TEXT, type ScreenBatchRefusal } from "../../services/email";
 import { getDatasetsAuth } from "../../services/github-auth";
 import { signApprovalDispatchToken } from "../../services/github/callback-tokens";
 import {
@@ -54,6 +55,8 @@ import {
   startIdentifierScreen,
   verifyScreenHead,
 } from "../../services/identifier-screen";
+import { restorePublicationRequest } from "../../services/publication-auto-deny";
+import { denyPublicationRequest } from "../../services/publication-deny";
 import {
   acknowledgeIdentifierScreenSchema,
   approveSchema,
@@ -73,6 +76,13 @@ import {
   applyObjectLockBatch,
   lockObjectKeys,
 } from "../../services/s3";
+import {
+  batchClaimGuardSql,
+  noteBatchDispatch,
+  readScreenBatch,
+  settleBatchEntry,
+  settleBatchRefusal,
+} from "../../services/screen-batch";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
 
@@ -97,49 +107,16 @@ const dispatchBodySchema = z
   })
   .strict();
 
-/** The deny route's answer for a dataset with no active request, as it has always been. */
-const DENY_NOT_FOUND = { error: "No active publication request found" };
+/** The answer for a dispatch of a request the batch already screened and counted. */
+const ALREADY_SCREENED = {
+  error: "already_screened",
+  message: `The batch cannot screen this request again: ${SCREEN_BATCH_REFUSAL_TEXT["already-screened"]}.`,
+} as const;
 
-/** The deny route's refusal of a request an approval is running for. */
-const DENY_IN_FLIGHT = { error: "approval_in_flight", message: APPROVAL_IN_FLIGHT_MESSAGE };
-
-/** The statuses of a request the deny route may still act on (`ACTIVE_REQUEST_TAIL_SQL`). */
-const DENIABLE_STATUSES: readonly string[] = ["requested", "approving", "blocked"];
-
-/**
- * Why a request cannot be denied, or null when it can: the deny route's two refusals, in the one
- * order it applies them (started publishing before in flight, so a live run that has gone past
- * the validation steps is told what matters). Read on the first look at the request and again
- * after a lost write, so both answer by the same rule.
- *
- * The first refusal ignores the status and the block reason on purpose, and so differs from the
- * approval's gate (`publishingStanding`, which will not trust the steps of a `requested` row or of
- * a `blocked` one with another reason, so that new content cannot skip the gates). The gate asks
- * whether to trust old steps; a denial asks whether anything irreversible has happened. A run that
- * made the S3 objects public-read and the repository public, and was then walked back for the
- * owner's name, keeps those steps when the owner requests again (the row goes to `requested`, or
- * to a block of the screen's or the minimum's, with `steps_completed` kept; follow-up #1766
- * tracks that), and the data is still public. A request's completed steps are that request's own
- * acts, so one that has started publishing is never denied, whatever its status.
- *
- * The rule is `publishingHasStarted` (shared with the depositor's withdrawal, which refuses on the
- * same terms). It reads two columns, because a step is recorded as done only after it has run. The run
- * sets `current_step` before each step and keeps it when the step fails or is cut off, so a run
- * interrupted inside `s3_public_read` (the first step that changes anything: its bucket-policy
- * write may have landed without being acknowledged) has only validation steps in `steps_completed`
- * and `s3_public_read` in `current_step`. A step outside the validation-only ones in either column
- * means the data may be public (ADR 0105, decision 11).
- */
-function denyRefusal(row: {
-  steps_completed: string | null;
-  current_step: string | null;
-  in_flight: number;
-}): { error: string; message: string } | null {
-  if (publishingHasStarted(row)) {
-    return { error: "deny_after_publishing", message: DENY_AFTER_PUBLISHING_MESSAGE };
-  }
-  return row.in_flight === 1 ? DENY_IN_FLIGHT : null;
-}
+/** The optional body of the screen re-run route: nothing, or exactly a batch id. */
+const identifierScreenBodySchema = z
+  .object({ batch_id: z.number().int().positive().optional() })
+  .strict();
 
 const REQUEST_STATUSES = ["requested", "approving", "blocked", "published", "denied"] as const;
 
@@ -377,60 +354,14 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const adminUser = c.get("user");
     const db = c.env.DB;
 
-    const request = await db
-      .prepare(
-        `SELECT id, requested_by, steps_completed, current_step, updated_at,
-                ${approvalInFlightSql()} AS in_flight ${ACTIVE_REQUEST_TAIL_SQL}`,
-      )
-      .bind(datasetId)
-      .first<{
-        id: number;
-        requested_by: number;
-        steps_completed: string | null;
-        current_step: string | null;
-        updated_at: string;
-        in_flight: number;
-      }>();
-
-    if (!request) return c.json(DENY_NOT_FOUND, 404);
-    if (requestId !== undefined && requestId !== request.id) {
-      return c.json({ error: "request_mismatch", message: REQUEST_MISMATCH_MESSAGE }, 409);
-    }
-    const refused = denyRefusal(request);
-    if (refused) return c.json(refused, 409);
-
-    const denied = await db
-      .prepare(
-        `UPDATE publication_requests
-       SET status = 'denied', denied_at = datetime('now'), denied_by = ?, denied_reason = ?,
-           ${APPROVAL_CLAIM_CLEAR_SQL}, updated_at = datetime('now')
-       WHERE id = ? AND status IN ('requested', 'approving', 'blocked')
-         AND NOT ${approvalInFlightSql()} AND updated_at = ?`,
-      )
-      .bind(adminUser.id, reason, request.id, request.updated_at)
-      .run();
-
-    if ((denied.meta.changes ?? 0) !== 1) {
-      // The request moved after it was read here. Say why, as the dispatch route does for a lost
-      // claim: a request that is no longer active (published, denied) is "not found", and one that
-      // is still active is refused for the reason it has NOW. Anything else (it was only touched,
-      // and nothing is running) reads as a run that is writing to it: the sentence tells the
-      // administrator to wait and deny it again, which is what that case needs.
-      const now = await db
-        .prepare(
-          `SELECT status, steps_completed, current_step, ${approvalInFlightSql()} AS in_flight
-             FROM publication_requests WHERE id = ?`,
-        )
-        .bind(request.id)
-        .first<{
-          status: string;
-          steps_completed: string | null;
-          current_step: string | null;
-          in_flight: number;
-        }>();
-      if (!now || !DENIABLE_STATUSES.includes(now.status)) return c.json(DENY_NOT_FOUND, 404);
-      return c.json(denyRefusal(now) ?? DENY_IN_FLIGHT, 409);
-    }
+    const denied = await denyPublicationRequest(db, {
+      datasetId,
+      requestId,
+      deniedBy: adminUser.id,
+      reason,
+    });
+    if (denied.kind === "refused") return c.json(denied.body, denied.status);
+    const request = { requested_by: denied.requestedBy };
 
     // Notify the requesting user, only now that the denial is recorded
     try {
@@ -461,6 +392,47 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       message: "Publication request denied",
       dataset_id: datasetId,
       reason,
+    });
+  });
+
+  /**
+   * POST /admin/publish/:id/restore - Restore a denied publication request (ADR 0139, decision 4).
+   *
+   * Sets the dataset's newest request back to `requested` when it was denied (by an administrator
+   * or by the automatic denial) and not withdrawn, and no newer request exists; the request then
+   * waits for its decision again. `request_id` may name the request the administrator read: it is
+   * refused when it is not the newest. One batch writes the request and an audit row
+   * (`publication_restore`) together. Admin or owner, like every route of this router. A refusal
+   * answers `{ error: <sentence>, code: <word> }`, the review routes' convention, so the CLI prints
+   * the sentence:
+   *   404 not_found       the dataset has no request
+   *   409 not_denied      the newest request is not denied
+   *   409 withdrawn       the newest request was withdrawn by its depositor
+   *   409 newer_request   `request_id` is not the newest request
+   */
+  const restoreSchema = z.object({ request_id: z.number().int().positive().optional() }).strict();
+
+  admin.post("/publish/:id/restore", zValidator("json", restoreSchema), async (c) => {
+    const datasetId = c.req.param("id");
+    if (!isValidDatasetId(datasetId)) {
+      return c.json({ error: "invalid_dataset_id", message: INVALID_DATASET_ID_MESSAGE }, 400);
+    }
+    const { request_id: requestId } = c.req.valid("json");
+    const outcome = await restorePublicationRequest(c.env.DB, {
+      datasetId,
+      adminId: c.get("user").id,
+      requestId,
+    });
+    if (outcome.kind === "refused") {
+      return c.json(
+        { error: RESTORE_REFUSAL_TEXT[outcome.refusal], code: outcome.refusal },
+        outcome.refusal === "not_found" ? 404 : 409,
+      );
+    }
+    return c.json({
+      message: RESTORE_DONE,
+      dataset_id: datasetId,
+      request_id: outcome.requestId,
     });
   });
 
@@ -1086,11 +1058,77 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                             it passed the screen when it started
    *   409 identifier_screen_pending  a screen dispatched under
    *                             SCREEN_REPORT_DEADLINE_MINUTES ago has not reported
+   *
+   * The body is optional (none, or an empty one, is a single screen): `{ batch_id }` makes this one screen of a paced re-screen
+   * (`services/screen-batch.ts`, `nemar admin dataset publish screen-batch`). The dispatch, the stored
+   * result, the gate and the review are the same; what differs is the mail: no per-request mail to
+   * the administrators and none to the depositor, because the batch sends one digest that names it.
+   * Every answer that means this request will never report (a refusal, a screen that could not
+   * start) counts as settled for the batch, once, so a digest is never waiting on it. A single
+   * screen of a request that an open batch dispatched settles that batch's entry as screened
+   * again outside it.
+   *   400 body_invalid                      not JSON, or a key other than `batch_id`, or a bad id
+   *   400 not_in_batch                      the dataset is not in the batch
+   *   404 screen_batch_not_found
+   *   409 screen_batch_closed               its digest has already been sent
+   *   409 already_screened                  this batch already screened and counted the request;
+   *                                         nothing is settled
    */
   admin.post("/publish/:id/identifier-screen", async (c) => {
     const datasetId = c.req.param("id");
     const adminUser = c.get("user");
     const db = c.env.DB;
+
+    // The optional body: no bytes is no body, and anything else must be exactly `{ batch_id? }`,
+    // so a mistyped key is refused and not read as a single screen.
+    const rawBody = await c.req.text();
+    let batchId: number | null = null;
+    if (rawBody.trim() !== "") {
+      let json: unknown;
+      try {
+        json = JSON.parse(rawBody);
+      } catch {
+        json = undefined;
+      }
+      const parsed = identifierScreenBodySchema.safeParse(json);
+      if (!parsed.success) {
+        return c.json(
+          {
+            error: "body_invalid",
+            message: 'The body, when there is one, is {"batch_id": <a positive whole number>}.',
+          },
+          400,
+        );
+      }
+      batchId = parsed.data.batch_id ?? null;
+    }
+    let batchRequestId: number | null = null;
+    if (batchId !== null) {
+      const batch = await readScreenBatch(c.env, batchId);
+      if (!batch) {
+        return c.json({ error: "screen_batch_not_found", message: "No such screen batch." }, 404);
+      }
+      if (batch.digestSent) {
+        return c.json(
+          {
+            error: "screen_batch_closed",
+            message: "This batch has finished and its digest was sent. Start a new batch.",
+          },
+          409,
+        );
+      }
+      const entry = batch.selection.find((e) => e[1] === datasetId);
+      if (!entry) {
+        return c.json({ error: "not_in_batch", message: "This dataset is not in the batch." }, 400);
+      }
+      batchRequestId = entry[0];
+    }
+    // The batch is waiting on this dataset: every way out below that is not a dispatch records
+    // why, once (`settleBatchRefusal`), and a screen that could not start settles its request
+    // (`settleBatchEntry`).
+    const refused = async (reason: ScreenBatchRefusal): Promise<void> => {
+      if (batchId !== null) await settleBatchRefusal(c.env, batchId, datasetId, reason);
+    };
 
     if (isScreenExempt(datasetId)) {
       return c.json(
@@ -1102,13 +1140,41 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       );
     }
     const request = await db
-      .prepare(`SELECT id, status, steps_completed ${ACTIVE_REQUEST_TAIL_SQL}`)
+      .prepare(
+        `SELECT id, status, steps_completed, identifier_screen_batch_id AS batch,
+                identifier_screen_batch_settled_at AS batch_settled ${ACTIVE_REQUEST_TAIL_SQL}`,
+      )
       .bind(datasetId)
-      .first<{ id: number; status: string; steps_completed: string | null }>();
+      .first<{
+        id: number;
+        status: string;
+        steps_completed: string | null;
+        batch: number | null;
+        batch_settled: string | null;
+      }>();
     if (!request) {
+      await refused("no-request");
       return c.json({ error: "not_found", message: "No active publication request found" }, 404);
     }
+    if (batchRequestId !== null && request.id !== batchRequestId) {
+      // The request the batch selected was withdrawn, denied or replaced since.
+      await refused("request-changed");
+      return c.json(
+        {
+          error: "batch_request_changed",
+          message:
+            "The request this batch selected is no longer the dataset's active request, so it was not screened.",
+        },
+        409,
+      );
+    }
+    if (batchId !== null && request.batch === batchId && request.batch_settled !== null) {
+      // This batch already screened the request and counted it: a second dispatch would count it
+      // twice, so it is refused and nothing is settled.
+      return c.json(ALREADY_SCREENED, 409);
+    }
     if (request.status === "approving" && hasStartedPublishing(request.steps_completed)) {
+      await refused("publishing-started");
       return c.json(APPROVAL_IN_PROGRESS, 409);
     }
     const dataset = await db
@@ -1121,10 +1187,14 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       started = await startIdentifierScreen(
         c.env,
         { requestId: request.id, datasetId, githubRepo: dataset?.github_repo ?? null },
-        RERUN_GUARD_SQL,
+        // A batch's claim also loses to a screen the batch has already counted, atomically: a
+        // settle that lands between the read above and this statement cannot be dispatched over.
+        batchId === null ? RERUN_GUARD_SQL : `${RERUN_GUARD_SQL}${batchClaimGuardSql(batchId)}`,
+        batchId,
       );
     } catch (err) {
       console.error(`[identifier-screen] re-run for ${datasetId} failed:`, errorMessage(err));
+      await refused("write-failed");
       return c.json(
         {
           error: "identifier_screen_rerun_failed",
@@ -1138,9 +1208,33 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       // the true one: the request may have stopped being active (or started
       // publishing) since it was read, or a recent screen is still running.
       const now = await db
-        .prepare("SELECT status, steps_completed FROM publication_requests WHERE id = ?")
+        .prepare(
+          `SELECT status, steps_completed, identifier_screen_batch_id AS batch,
+                  identifier_screen_batch_settled_at AS batch_settled
+             FROM publication_requests WHERE id = ?`,
+        )
         .bind(request.id)
-        .first<{ status: string; steps_completed: string | null }>();
+        .first<{
+          status: string;
+          steps_completed: string | null;
+          batch: number | null;
+          batch_settled: string | null;
+        }>();
+      if (batchId !== null && now?.batch === batchId && now.batch_settled !== null) {
+        // The claim lost to a result this batch had just counted: nothing is settled again.
+        return c.json(ALREADY_SCREENED, 409);
+      }
+      // A repeated call for a request this batch already dispatched finds its screen pending:
+      // that screen is still the batch's to wait for, so it is not settled a second time.
+      if (batchId === null || now?.batch !== batchId) {
+        await refused(
+          !now || !["requested", "blocked", "approving"].includes(now.status)
+            ? "no-request"
+            : now.status === "approving" && hasStartedPublishing(now.steps_completed)
+              ? "publishing-started"
+              : "screen-running",
+        );
+      }
       if (!now || !["requested", "blocked", "approving"].includes(now.status)) {
         return c.json({ error: "not_found", message: "No active publication request found" }, 404);
       }
@@ -1155,7 +1249,23 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         409,
       );
     }
-    if (started.kind === "failed") {
+    // The screen replaced whatever the request carried: an open batch that had dispatched it
+    // (this one on a second dispatch of an unsettled screen excepted) is told it was screened again.
+    if (request.batch !== null && request.batch !== batchId) {
+      await settleBatchRefusal(
+        c.env,
+        request.batch,
+        datasetId,
+        "rescreened",
+        request.batch_settled !== null,
+      );
+    }
+    if (batchId !== null) {
+      // The digest covers the mail of a screen that could not start, and the batch is no longer
+      // waiting on it; a dispatched one reports through the callback, which settles it.
+      if (started.kind === "failed") await settleBatchEntry(c.env, batchId, request.id);
+      else await noteBatchDispatch(c.env, batchId);
+    } else if (started.kind === "failed") {
       await notifyAdminsOfScreen(c.env, request.id);
     }
     try {
@@ -1164,7 +1274,11 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         action: "identifier_screen_rerun",
         resourceType: "dataset",
         resourceId: datasetId,
-        details: JSON.stringify({ request_id: request.id, outcome: started.kind }),
+        details: JSON.stringify({
+          request_id: request.id,
+          outcome: started.kind,
+          ...(batchId === null ? {} : { batch_id: batchId }),
+        }),
       }).run();
     } catch (auditErr) {
       console.error(
