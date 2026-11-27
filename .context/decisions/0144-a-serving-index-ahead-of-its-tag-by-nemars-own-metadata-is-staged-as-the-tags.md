@@ -30,20 +30,25 @@ nemar-process used a row of the index only when the index's `source_commit` was 
    - **Admitted in any form** (set, unset `-`, reset `!` or given a value): `annex.*`, which says where git-annex keeps a file, and `diff` and `merge`, which choose how git shows and merges it; none of them reaches what a checkout writes.
    - **Admitted only as written here:** `filter=annex`, git-annex's own filter, which gives the content git-annex keeps; and `text`, `binary` (`-diff -merge -text`) and `eol=lf`, set. A checkout of LF-stored text writes the same bytes with or without these unless CR LF conversion is in effect for the file, so removing `text` and `eol=lf` lines, as NEMAR's annex policy does, and adding them, are byte-safe.
    - **Refused** (`index_content_changed`): every other form of `eol`, `text` and `binary` (`eol=crlf`, `-eol`, `!eol`, `-text`, `!text`, `text=auto`, `-binary`), `filter` with any other value or form, `working-tree-encoding`, `ident`, and every other name, which may be a macro.
-   - **Refused as well:** any line that can turn CR LF conversion on (`eol=crlf`, or the legacy `crlf` in any form, on a macro definition too), because that is the one condition under which the admitted `text`, `binary` and `eol=lf` change bytes. The patch's own lines, its unchanged context included, are checked, and each changed `.gitattributes` file the edit leaves in place is then read whole at S (one GitHub `contents` request, bounded at 1 MiB; a deleted file has nothing to read, a renamed one is read under its new name), so an unchanged line outside the patch is checked too. A file that cannot be read whole is `github_unreadable`: the run is deferred as for the compare, and nothing is admitted blind.
+   - **Refused as well:** any line that can turn CR LF conversion on (`eol=crlf`, or the legacy `crlf` in any form, on a macro definition too), because that is the one condition under which the admitted `text`, `binary` and `eol=lf` change bytes. The patch's own lines, its unchanged context included, are checked.
+     Then, for a delta that changes any `.gitattributes` (adds, edits, renames or deletes one) and is otherwise admitted, every `.gitattributes` at S, changed or not, is checked whole: an admitted `binary` in one file changes bytes under an `eol=crlf` in another, and an unchanged line outside a patch is not in the patch.
+     One recursive tree listing of S (`git/trees/S?recursive=1`, bounded at 8 MiB, which holds any listing GitHub answers whole) names them, and each is read once (one `contents` request, bounded at 1 MiB), a changed one the listing lacks included.
+     A listing GitHub truncates, one over its bound, or more than 24 `.gitattributes` files is `index_delta_unlisted`: not every file can be read.
+     24 because each file is one request, and a dataset carries one or two (the root's and `.datalad/`'s; none of the 396 repositories GitHub's code search indexed on 2026-11-27 carried more than two).
+     A listing or file that cannot be read is `github_unreadable`: the run is deferred as for the compare, and nothing is admitted blind.
    A `.gitattributes` change whose patch GitHub leaves out (a large or binary diff) is `index_delta_unlisted`.
    This rule differs from the Zarr input's delta roots (`ZARR_SOURCE_DELTA_ROOTS`, `.nemar/` and `.github/` only) because the two prove different things to different readers.
    The Zarr recipe is handed every changed path and validates them against its own roots.
-   Here the Worker alone decides, from the patches, that the files the archive run reads at T and the files the copy was converted from at S are the same.
+   Here the Worker alone decides, from the patches and the `.gitattributes` files at S, that the files the archive run reads at T and the files the copy was converted from at S are the same.
 3. **Anything else is refused with the word that says why, and the run goes ahead without the index at once.**
    - `index_behind_tag`: the compare answers `behind`.
    - `index_diverged`: the compare answers `diverged`, or ahead and behind at once, or there is no comparison (the repository lacks S, or shares no history with it).
    - `index_content_changed`: a path that is not NEMAR-owned metadata, or a `.gitattributes` edit decision 2 does not admit.
-   - `index_delta_unlisted`: 300 or more files, more changed paths than a job can carry (24, below), a body over the compare's bound, or a `.gitattributes` change without its patch.
+   - `index_delta_unlisted`: 300 or more files, more changed paths than a job can carry (24, below), a body over the compare's bound, a `.gitattributes` change without its patch, or, for a delta that changes a `.gitattributes`, a tree listing of S that GitHub truncates or that is over its bound, or more than 24 `.gitattributes` files at S.
 
    `source_commit_differs`, ADR 0141's word for every other commit, is no longer produced and stays a valid recorded word.
 4. **A compare GitHub cannot answer is a fault, never a guess.**
-   It is `github_unreadable`, one of ADR 0141 decision 3's faults: the run is deferred (`serving_index_deferred`) and, 24 hours after its first deferral, runs without the index.
+   It is `github_unreadable`, and so is a tree listing or a `.gitattributes` file it cannot answer, one of ADR 0141 decision 3's faults: the run is deferred (`serving_index_deferred`) and, 24 hours after its first deferral, runs without the index.
    So a compare that can never be answered costs that dataset one 24-hour deferral and then a run without the index.
    Nothing is staged that was not shown to be the tag's data.
 5. **The run is the tag's; the index's commit is provenance.**
@@ -60,7 +65,7 @@ nemar-process used a row of the index only when the index's `source_commit` was 
 ## Consequences
 
 - The identity of a run, its record and its derivative is the tag's everywhere, so a version's digests do not move when NEMAR's metadata does. A later reconversion that only moves NEMAR's metadata changes the index's digest, and so the key, as any new index did under ADR 0141.
-- A nemar-ica dispatch whose index is of another commit makes one more GitHub request, and at most 24 more for the changed `.gitattributes` files of a delta otherwise admitted.
+- A nemar-ica dispatch whose index is of another commit makes one more GitHub request (the compare), and, for a delta that changes a `.gitattributes` and is otherwise admitted, one tree listing and at most 24 file reads more: at most 26 requests a dataset after the tag's commit.
 - A copy built after a content change is still not staged, which is the rest of #2461 (rebuild the copy at the tag, or tag the change).
 - A run handed the attestation needs a runtime image built with nemarOrg/nemar-process#108; an older image refuses the arguments (exit 2, a usage error).
   nemar-ica is no longer a placeholder (#2462), so what keeps such a run from an older image is compute being dark and the release order: #108 merges before nemar-process's 0.1.2 release image, and `COMPUTE_RUNTIME_IMAGE` is repinned to that image before compute is turned on.
@@ -75,5 +80,5 @@ nemar-process used a row of the index only when the index's `source_commit` was 
 ## Receipts
 
 - nemarOrg/nemar-cli#2461 (the count and the sample), nemarOrg/nemar-cli#2460 (ADR 0143, the base of this change).
-- `isNemarOwnedMetadataPath`, `gitattributesPatchProblem` and `servingIndexAheadOfTag` in `backend/src/services/zarr-source-check.ts`; `stageServingIndex` in `backend/src/services/serving-index-staging.ts`; `recipeJobSpec` in `backend/src/services/compute-pipeline.ts`; `keyStamp` in `backend/src/services/compute-derivatives.ts`; `SERVING_INDEX_ABSENT_REASONS` and the job specification's `serving_index` in `shared/contract/compute.ts`.
+- `isNemarOwnedMetadataPath`, `gitattributesPatchProblem`, `gitattributesPathsAt`, `gitattributesFileProblem`, `SERVING_INDEX_MAX_GITATTRIBUTES_FILES` and `servingIndexAheadOfTag` in `backend/src/services/zarr-source-check.ts`; `stageServingIndex` in `backend/src/services/serving-index-staging.ts`; `recipeJobSpec` in `backend/src/services/compute-pipeline.ts`; `keyStamp` in `backend/src/services/compute-derivatives.ts`; `SERVING_INDEX_ABSENT_REASONS` and the job specification's `serving_index` in `shared/contract/compute.ts`.
 - nemar-process `dev`: `recipes/nemar_process/common/serving_index.py` (`ServingIndex.resolve`: a row only when the index's commit is the run's `--source-commit`).

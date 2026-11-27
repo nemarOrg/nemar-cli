@@ -56,10 +56,11 @@
  * 40 GitHub requests and about 80 more statements than the bound above counts, which is as UNVERIFIED as the rest.
  * A credential fault (no GitHub App configuration, or a token that cannot be minted) stops the queue at the
  * first dataset and ends the tick; one repository GitHub cannot answer defers that dataset alone.
- * A recipe that keys the serving index (nemar-ica) adds, for a dataset whose index is ahead of its tag, one compare
- * and at most 24 reads of whole `.gitattributes` files (ADR 0144: one per changed `.gitattributes`, only for a delta
- * otherwise admitted); it is not run by this dispatcher today (`autoDispatch` false), so the tick's bound above is
- * unchanged, and a recipe that keys the index made automatic would add at most 25 GitHub requests a dataset.
+ * A recipe that keys the serving index (nemar-ica) adds, for a dataset whose index is ahead of its tag, one compare,
+ * and, when the delta changes a `.gitattributes` and is otherwise admitted, one recursive tree listing (up to 8 MiB)
+ * and at most 24 reads of whole `.gitattributes` files (ADR 0144: every one at the index's commit, each once, more
+ * refuses); it is not run by this dispatcher today (`autoDispatch` false), so the tick's bound above is unchanged,
+ * and a recipe that keys the index made automatic would add at most 26 GitHub requests a dataset.
  *
  * NO MAIL. Nothing here imports a mail service; the other network is Tapis, through the gateway's own submit.
  */
