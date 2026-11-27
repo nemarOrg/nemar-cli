@@ -1161,6 +1161,7 @@ describe("GET /admin/publish/:id/review", () => {
         "license_permission",
         "history",
         "history_truncated",
+        "decision_card",
       ].sort(),
     );
     expect(Object.keys(d.review ?? {}).sort()).toEqual(

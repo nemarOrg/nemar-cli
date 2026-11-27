@@ -49,8 +49,9 @@ function upstreamSourceOf(attestation: string | null): string | null {
  * A dataset's lineage from its repository files at `ref` (default `main`) and its attestation, by
  * the one shared resolver. `ok: false` when a repository read failed: a lineage is never computed
  * from inputs that could not be read. Also used by the batch acknowledgment (card D3), which reads
- * at the screened commit, and, once phase P4 of epic #2449 builds it, by the decision card, which will resolve the lineage again
- * with its own `resolved_at` (ADR 0142 decision 3).
+ * at the screened commit. The decision card resolves its own lineage again with its own
+ * `resolved_at` (`decision-card-inputs.ts`, ADR 0142 decision 3), over the inputs the review's serve
+ * used (D1's enrichment, not the repository's `.nemar/metadata.json`).
  */
 export async function readDatasetLineage(
   env: Bindings,
