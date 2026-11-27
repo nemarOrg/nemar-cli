@@ -503,6 +503,48 @@ describe("a README DOI that prefixes a declared DOI is that DOI cut short", () =
     expect(attested.dropped).toBe(1);
   });
 
+  test("two distinct README records, one a prefix of the other, are both kept", () => {
+    // The text does not continue the shorter DOI into the longer one: they are two records.
+    const zenodo = sourcesOf({}, "Data: 10.5281/zenodo.1234567 and 10.5281/zenodo.12345678.\n");
+    expect(ids(zenodo)).toEqual([
+      "readme 10.5281/zenodo.1234567",
+      "readme 10.5281/zenodo.12345678",
+    ]);
+    expect(zenodo.dropped).toBe(0);
+    const dataverse = sourcesOf({}, "See doi:10.7910/DVN/ABCDE; also doi:10.7910/DVN/ABCDEF\n");
+    expect(ids(dataverse)).toEqual(["readme 10.7910/dvn/abcde", "readme 10.7910/dvn/abcdef"]);
+    expect(dataverse.dropped).toBe(0);
+    // Nor is a declared DOI enough: the README must itself continue the short one.
+    const declared = sourcesOf(
+      { SourceDatasets: [NM000746] },
+      "Older deposit: 10.5281/zenodo.2231.\n",
+    );
+    expect(ids(declared)).toEqual([
+      "source_datasets 10.5281/zenodo.22314785",
+      "readme 10.5281/zenodo.2231",
+    ]);
+    expect(declared.dropped).toBe(0);
+  });
+
+  test("a declared DOI is never dropped, even when the README continues it into another", () => {
+    const found = sourcesOf(
+      { SourceDatasets: [{ DOI: "10.5281/zenodo.2231" }, NM000746] },
+      NM000746_README,
+    );
+    expect(ids(found)).toEqual([
+      "source_datasets 10.5281/zenodo.2231",
+      "source_datasets 10.5281/zenodo.22314785",
+    ]);
+    // The README's own cut copy is dropped and counted; the declared short DOI stays.
+    expect(found.dropped).toBe(1);
+  });
+
+  test("a wrap with quote markup between the halves is still the same DOI", () => {
+    const found = sourcesOf({ SourceDatasets: [NM000843] }, "> doi:10.5281/zenodo.236\n> 10719\n");
+    expect(ids(found)).toEqual(["source_datasets 10.5281/zenodo.23610719"]);
+    expect(found.dropped).toBe(1);
+  });
+
   test("a README candidate that prefixes another README candidate is dropped", () => {
     const found = sourcesOf(
       {},
@@ -560,6 +602,9 @@ describe("DANDI's license spellings", () => {
     ["cc0_10", "cc0", "1.0"],
     ["CC_BY_40", "cc-by", "4.0"],
     ["cc_by_nc_40", "cc-by-nc", "4.0"],
+    ["cc_by_nd_40", "cc-by-nd", "4.0"],
+    ["cc_by_sa_40", "cc-by-sa", "4.0"],
+    ["cc_by_nc_sa_40", "cc-by-nc-sa", "4.0"],
     ["spdx:CC-BY-4.0", "cc-by", "4.0"],
     ["spdx:CC0-1.0", "cc0", "1.0"],
     ["spdx:CC-BY-NC-ND-4.0", "cc-by-nc-nd", "4.0"],

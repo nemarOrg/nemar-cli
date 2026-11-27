@@ -244,7 +244,9 @@ because the dataset did name a source that could not be read.
 Decision 3 gains two rules, and the resolver becomes `license-lineage/4` because outcomes change.
 
 - **A README DOI that prefixes another declared DOI is that DOI cut short.**
-  A README DOI candidate that is a strict prefix of a DOI declared in `SourceDatasets`, the related identifiers or the attestation, or of another README DOI candidate, is dropped and counted in `dropped_doi_candidates`.
+  A README DOI candidate that is a strict prefix of a DOI declared in `SourceDatasets`, the related identifiers or the attestation, or of another README DOI candidate, is dropped and counted in `dropped_doi_candidates`,
+  but only when the README text itself continues it into that DOI across whitespace (a line break, with any quote or emphasis markup around it: `10.5281/zenodo.2231` then `4785` on the next line).
+  A prefix the text does not continue is a distinct record (`10.5281/zenodo.1234567` beside `10.5281/zenodo.12345678`) and stays a source.
   The cut copy still has its repository's DOI shape (`10.5281/zenodo.2231` beside a declared `10.5281/zenodo.22314785`, measured on nm000746 and nm000843), so the shape rule cannot see it, and it made the lineage `unresolved`.
   A README DOI equal to a declared one is the same source and is de-duplicated, not counted; a declared DOI is never dropped.
 - **DANDI's license spellings are read.**

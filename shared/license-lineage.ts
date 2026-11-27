@@ -897,22 +897,42 @@ export function declaredLicense(datasetDescription: unknown): string | null {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
+/** Markup a wrapped line can carry between the two halves of a DOI: quotes, `>`, emphasis, code. */
+const WRAP_GAP = String.raw`[>"'*_\`~]*\s[\s>"'*_\`~]*`;
+
+const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+/**
+ * Whether the README text itself rebuilds `longer` from its cut copy `short`: `short`, then
+ * whitespace (a line break, with any quote or emphasis markup around it), then the rest of
+ * `longer`, as `10.5281/zenodo.2231\n4785` does. Case is ignored (DOIs are compared lowercased).
+ */
+function readmeRebuilds(readme: string, short: string, longer: string): boolean {
+  const rest = longer.slice(short.length);
+  return new RegExp(`${escapeRegExp(short)}${WRAP_GAP}${escapeRegExp(rest)}`, "i").test(readme);
+}
+
 /**
  * README DOIs that are another declared DOI cut short (ADR 0142 decision 3, amendment of
  * 2026-11-27): a README DOI that is a strict prefix of a DOI declared in SourceDatasets, the
- * related identifiers or the attestation, or of another README DOI, is that DOI wrapped or cut in
- * the text (`10.5281/zenodo.2231` beside a declared `10.5281/zenodo.22314785`), so it is removed.
+ * related identifiers or the attestation, or of another README DOI, AND that the README itself
+ * continues into that DOI across whitespace ({@link readmeRebuilds}: `10.5281/zenodo.2231\n4785`
+ * beside a declared `10.5281/zenodo.22314785`), is that DOI wrapped in the text, so it is removed.
  * Such a cut copy still passes its repository's shape, so {@link isCutDoiCandidate} cannot see it.
- * An equal DOI is not removed here: it is the same source, and de-duplication keeps one.
+ * A prefix the text does not continue is a distinct record (`zenodo.1234567` beside
+ * `zenodo.12345678`) and stays. An equal DOI is not removed here: de-duplication keeps one.
  */
-function dropReadmePrefixes(refs: SourceRef[]): SourceRef[] {
+function dropReadmePrefixes(refs: SourceRef[], readme: string | null): SourceRef[] {
+  if (!readme) return refs;
   const dois = refs.flatMap((r) => (r.kind === "doi" ? [r.doi] : []));
   return refs.filter(
     (r) =>
       !(
         r.kind === "doi" &&
         r.origin === "readme" &&
-        dois.some((d) => d.length > r.doi.length && d.startsWith(r.doi))
+        dois.some(
+          (d) => d.length > r.doi.length && d.startsWith(r.doi) && readmeRebuilds(readme, r.doi, d),
+        )
       ),
   );
 }
@@ -970,7 +990,7 @@ export function extractSources(inputs: SourceInputs): TextSources {
     dropped += found.dropped;
   }
 
-  const prefixed = dropReadmePrefixes(refs);
+  const prefixed = dropReadmePrefixes(refs, inputs.readme);
   dropped += refs.length - prefixed.length;
 
   // A dataset is not its own upstream source, whichever input names it.
