@@ -13,6 +13,7 @@ Files 21 to 32 were fetched on 2026-11-27 for resolver version 3 (epic #2449, ph
 they hold no email address, and the OSF node records were requested without their contributors.
 Files 33 to 35 were fetched on 2026-11-27 for resolver version 4 (ADR 0142 decision 3, amendment of 2026-11-27), the same way, with no edits; they hold no email address.
 Files 36 to 42 were fetched on 2026-11-27 for resolver version 5 (ADR 0139 decision 7, amendment of 2026-11-27), the same way, with no edits; they hold no email address.
+Files 43 to 61 were fetched on 2026-11-27 for the review of resolver version 5 from the figshare and OSF APIs and DataCite, the same way, with no edits; they hold no email address.
 `index.json` lists every recording with its method, URL, HTTP status, file and fetch time;
 `stand-in.ts` serves them to the tests from a local server.
 
@@ -58,6 +59,11 @@ Files 36 to 42 were fetched on 2026-11-27 for resolver version 5 (ADR 0139 decis
   an OSF project, `10.17605/osf.io/f8sq3`, which DataCite holds as `Text` with resourceType `Project` and `cc-by-4.0`;
   a figshare collection version, `10.6084/m9.figshare.c.6979581.v1` (`Collection`, `cc-by-4.0`);
   a PLOS supplementary file, `10.1371/journal.pone.0303144.s001`, which DataCite answers 404 and Crossref holds as `component` with no license and `is-component-of` its article, `10.1371/journal.pone.0303144` (`journal-article`, CC BY 4.0 `vor`).
+- **A figshare collection is judged by its members:** `10.6084/m9.figshare.c.6979581.v1` declares CC BY 4.0 on DataCite, but figshare's API gives the collection no license and its one member, article 24803499, CC0;
+  `10.6084/m9.figshare.c.3307977` (CC BY 3.0 US on DataCite) has three members, each CC0.
+- **OSF projects read through OSF with their children:** `10.17605/osf.io/c5zbq` is `Text` / `Project` with an empty `rightsList`, no node license and seven child components, one CC BY-NC 4.0 and six with none;
+  `10.17605/osf.io/yb3pq` is `Text` / `Project`, CC BY-NC-SA 4.0, with nine children, one of them CC BY 4.0;
+  `f8sq3`, `wpkrz`, `rmafj`, `j3s7g` and `j7as8` have no children.
 - **Genuine publications in data repositories:** `10.5281/zenodo.6529724` (`JournalArticle`, nm000661's source) and `10.6084/m9.figshare.28309157` (`JournalArticle`, resourceType `Journal contribution`).
 
 ## Recordings
@@ -104,6 +110,25 @@ Files 36 to 42 were fetched on 2026-11-27 for resolver version 5 (ADR 0139 decis
 | `40-crossref-plos-parent.json` | plos-component | crossref | GET https://api.crossref.org/works/10.1371%2Fjournal.pone.0303144 | 200 | 2026-11-27 |
 | `41-datacite-zenodo-article.json` | zenodo-article | datacite | GET https://api.datacite.org/dois/10.5281%2Fzenodo.6529724 | 200 | 2026-11-27 |
 | `42-datacite-figshare-article.json` | figshare-article | datacite | GET https://api.datacite.org/dois/10.6084%2Fm9.figshare.28309157 | 200 | 2026-11-27 |
+| `43-figshare-collection-articles.json` | figshare-collection-v1 | figshare | GET https://api.figshare.com/v2/collections/6979581/articles?page_size=11 | 200 | 2026-11-27 |
+| `44-figshare-article-24803499.json` | figshare-collection-v1 | figshare | GET https://api.figshare.com/v2/articles/24803499 | 200 | 2026-11-27 |
+| `45-osf-children-f8sq3.json` | osf-project | osf | GET https://api.osf.io/v2/nodes/f8sq3/children/?embed=license&page[size]=50 | 200 | 2026-11-27 |
+| `46-osf-osf-f8sq3.json` | osf-project | osf | GET https://api.osf.io/v2/nodes/f8sq3/?embed=license | 200 | 2026-11-27 |
+| `47-osf-children-rmafj.json` | osf-url-sa | osf | GET https://api.osf.io/v2/nodes/rmafj/children/?embed=license&page[size]=50 | 200 | 2026-11-27 |
+| `48-osf-children-j3s7g.json` | osf-url-by | osf | GET https://api.osf.io/v2/nodes/j3s7g/children/?embed=license&page[size]=50 | 200 | 2026-11-27 |
+| `49-osf-children-j7as8.json` | osf-no-rights | osf | GET https://api.osf.io/v2/nodes/j7as8/children/?embed=license&page[size]=50 | 200 | 2026-11-27 |
+| `50-datacite-osf-project-no-rights.json` | osf-project-no-rights | datacite | GET https://api.datacite.org/dois/10.17605%2Fosf.io%2Fc5zbq | 200 | 2026-11-27 |
+| `51-osf-osf-c5zbq.json` | osf-project-no-rights | osf | GET https://api.osf.io/v2/nodes/c5zbq/?embed=license | 200 | 2026-11-27 |
+| `52-osf-children-c5zbq.json` | osf-project-no-rights | osf | GET https://api.osf.io/v2/nodes/c5zbq/children/?embed=license&page[size]=50 | 200 | 2026-11-27 |
+| `53-datacite-osf-project-children.json` | osf-project-children | datacite | GET https://api.datacite.org/dois/10.17605%2Fosf.io%2Fyb3pq | 200 | 2026-11-27 |
+| `54-osf-osf-yb3pq.json` | osf-project-children | osf | GET https://api.osf.io/v2/nodes/yb3pq/?embed=license | 200 | 2026-11-27 |
+| `55-osf-children-yb3pq.json` | osf-project-children | osf | GET https://api.osf.io/v2/nodes/yb3pq/children/?embed=license&page[size]=50 | 200 | 2026-11-27 |
+| `56-osf-osf-wpkrz.json` | osf-datacite-cc-by | osf | GET https://api.osf.io/v2/nodes/wpkrz/?embed=license | 200 | 2026-11-27 |
+| `57-osf-children-wpkrz.json` | osf-datacite-cc-by | osf | GET https://api.osf.io/v2/nodes/wpkrz/children/?embed=license&page[size]=50 | 200 | 2026-11-27 |
+| `58-figshare-collection-3307977-articles.json` | figshare-collection | figshare | GET https://api.figshare.com/v2/collections/3307977/articles?page_size=11 | 200 | 2026-11-27 |
+| `59-figshare-article-3563034.json` | figshare-collection | figshare | GET https://api.figshare.com/v2/articles/3563034 | 200 | 2026-11-27 |
+| `60-figshare-article-3563031.json` | figshare-collection | figshare | GET https://api.figshare.com/v2/articles/3563031 | 200 | 2026-11-27 |
+| `61-figshare-article-3563028.json` | figshare-collection | figshare | GET https://api.figshare.com/v2/articles/3563028 | 200 | 2026-11-27 |
 
 The two OpenNeuro POSTs carry the GraphQL query recorded in `index.json` (`body`).
 

@@ -25,7 +25,7 @@ import {
   declaredLicenseWords,
   extractSources,
   isCutDoiCandidate,
-  isDataciteDataContainer,
+  isOsfProject,
   isValidCachedRecord,
   lineageLines,
   mapCache,
@@ -291,7 +291,19 @@ describe("osf.io URLs map to their DataCite DOI", () => {
     expect(standIn.misses).toEqual([]);
   });
 
-  test("an OSF DOI DataCite holds with rights: DataCite's answer, OSF not asked", async () => {
+  test("an OSF DOI DataCite holds with rights, not as a project: DataCite's answer, OSF not asked", async () => {
+    // wpkrz is registered as a Project (read from OSF since resolver version 5); the same record
+    // with another resourceType is DataCite's answer alone.
+    const rec = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/25-datacite-osf-cc-by.json`,
+      ).text(),
+    );
+    rec.data.attributes.types.resourceType = "Data";
+    standIn.override("datacite /dois/10.17605/osf.io/wpkrz", {
+      status: 200,
+      body: JSON.stringify(rec),
+    });
     const r = await run(inputs("CC0", [{ DOI: "10.17605/OSF.IO/WPKRZ" }]));
     expect(r.sources[0]).toMatchObject({ resolver: "datacite", license: "cc-by" });
     expect(count("osf /v2")).toBe(0);
@@ -434,8 +446,8 @@ describe("a DOI cut out of a README is not a source", () => {
     expect(r.dropped_doi_candidates).toBe(0);
     expect(r.sources.map((s) => [s.id, s.status, s.license])).toEqual([
       ["10.7910/dvn/29379", "resolved", "cc0"],
-      // A collection holds data: its rights apply (resolver version 5).
-      ["10.6084/m9.figshare.c.3307977", "resolved", "cc-by"],
+      // A figshare collection is judged by its members, each CC0 (DataCite says CC BY 3.0 US).
+      ["10.6084/m9.figshare.c.3307977", "resolved", "cc0"],
       ["10.5061/dryad.8pm4nv0/1", "publication", "cc0"],
     ]);
     expect(standIn.misses).toEqual([]);
@@ -694,10 +706,8 @@ describe("a README DOI cut by an ellipsis", () => {
 
 describe("data containers are data; publications stay publications", () => {
   test.each([
-    // nm000812: OSF registers a project as Text / Project.
-    ["10.17605/osf.io/f8sq3", "datacite", "Text"],
-    // nm000832: a figshare collection version.
-    ["10.6084/m9.figshare.c.6979581.v1", "datacite", "Collection"],
+    // nm000812: OSF registers a project as Text / Project; OSF's node says CC BY 4.0, no children.
+    ["10.17605/osf.io/f8sq3", "osf", "Text"],
     // nm000808: a PLOS supplementary file, a Crossref component, licensed through its article.
     ["10.1371/journal.pone.0303144.s001", "crossref", "component"],
   ])("%s (%s %s) reads its rights: compatible_attribution", async (doi, resolver, type) => {
@@ -711,6 +721,225 @@ describe("data containers are data; publications stay publications", () => {
       license_version: "4.0",
     });
     expect(standIn.misses).toEqual([]);
+  });
+
+  test("nm000832's figshare collection is judged by its member (CC0), never by DataCite's CC BY", async () => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.6084/m9.figshare.c.6979581.v1" }]));
+    expect(r.outcome).toBe("compatible");
+    expect(r.sources[0]).toMatchObject({
+      resolver: "figshare",
+      resource_type: "Collection",
+      status: "resolved",
+      license: "cc0",
+    });
+    expect(r.sources[0].declared_licenses).toEqual([
+      { text: "CC0", url: "https://creativecommons.org/publicdomain/zero/1.0/" },
+    ]);
+    expect(standIn.misses).toEqual([]);
+  });
+
+  test("the most restrictive member wins; an unreadable member, no member or too many: unresolved", async () => {
+    const DOI = { DOI: "10.6084/m9.figshare.c.6979581.v1" };
+    const member = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/44-figshare-article-24803499.json`,
+      ).text(),
+    );
+    member.license = {
+      value: 4,
+      name: "CC BY-NC 4.0",
+      url: "https://creativecommons.org/licenses/by-nc/4.0/",
+    };
+    standIn.override("figshare /v2/articles/24803499", {
+      status: 200,
+      body: JSON.stringify(member),
+    });
+    expect((await run(inputs("CC-BY-4.0", [DOI]))).outcome).toBe("needs_permission");
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("figshare /v2/articles/24803499", {
+      status: 200,
+      body: JSON.stringify({ id: 1 }),
+    });
+    const noLicense = await run(inputs("CC-BY-4.0", [DOI]));
+    expect(noLicense.outcome).toBe("unresolved");
+    expect(noLicense.sources[0].license).toBeNull();
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("figshare /v2/articles/24803499", { status: 503 });
+    const failed = await run(inputs("CC-BY-4.0", [DOI]), { retry: NO_RETRY });
+    expect(failed.sources[0].status).toBe("fetch_failed");
+    expect(failed.outcome).toBe("unresolved");
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("figshare /v2/collections/6979581/articles", { status: 200, body: "[]" });
+    expect((await run(inputs("CC-BY-4.0", [DOI]))).outcome).toBe("unresolved");
+    standIn.stop();
+    standIn = startStandIn();
+    const many = JSON.stringify(Array.from({ length: 11 }, (_, i) => ({ id: 100 + i })));
+    standIn.override("figshare /v2/collections/6979581/articles", { status: 200, body: many });
+    expect((await run(inputs("CC-BY-4.0", [DOI]))).outcome).toBe("unresolved");
+    expect(standIn.requests.some((k) => k.includes("/v2/articles/100"))).toBe(false);
+  });
+
+  test("among several members the most restrictive wins; a member with an empty license is unresolved", async () => {
+    // c.3307977 has three CC0 members; make the second NonCommercial.
+    const member = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/60-figshare-article-3563031.json`,
+      ).text(),
+    );
+    member.license = {
+      value: 4,
+      name: "CC BY-NC 4.0",
+      url: "https://creativecommons.org/licenses/by-nc/4.0/",
+    };
+    standIn.override("figshare /v2/articles/3563031", {
+      status: 200,
+      body: JSON.stringify(member),
+    });
+    const DOI = { DOI: "10.6084/m9.figshare.c.3307977" };
+    const r = await run(inputs("CC-BY-4.0", [DOI]));
+    expect(r.sources[0].license).toBe("cc-by-nc");
+    expect(r.outcome).toBe("needs_permission");
+    standIn.stop();
+    standIn = startStandIn();
+    member.license = { value: 0, name: "", url: "" };
+    standIn.override("figshare /v2/articles/3563031", {
+      status: 200,
+      body: JSON.stringify(member),
+    });
+    const empty = await run(inputs("CC-BY-4.0", [DOI]));
+    expect(empty.outcome).toBe("unresolved");
+    expect(empty.sources[0].license).toBeNull();
+  });
+
+  test("a Collection that is not figshare's is unresolved, whatever DataCite's rights say", async () => {
+    const collection = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/37-datacite-figshare-collection-v1.json`,
+      ).text(),
+    );
+    standIn.override("datacite /dois/10.5281/zenodo.24539621", {
+      status: 200,
+      body: JSON.stringify(collection),
+    });
+    const r = await run(inputs("CC-BY-4.0", [ZENODO_BY]));
+    expect(r.outcome).toBe("unresolved");
+    expect(r.sources[0]).toMatchObject({ resource_type: "Collection", license: null });
+    expect(count("figshare")).toBe(0);
+  });
+
+  test("an OSF project with no DataCite rights is read from OSF with its children, never a publication", async () => {
+    // c5zbq: Text / Project, empty rightsList, no node license, seven children (one CC BY-NC).
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.17605/osf.io/c5zbq" }]));
+    expect(r.sources[0]).toMatchObject({
+      resolver: "osf",
+      resource_type: "Text",
+      status: "resolved",
+    });
+    expect(r.outcome).toBe("needs_permission");
+    expect(standIn.misses).toEqual([]);
+  });
+
+  test("an OSF project's children count: the most restrictive of node and children wins", async () => {
+    // yb3pq: CC BY-NC-SA 4.0 node and children, one child CC BY 4.0.
+    const r = await run(inputs("CC-BY-NC-SA-4.0", [{ DOI: "10.17605/osf.io/yb3pq" }]));
+    expect(r.sources[0]).toMatchObject({ resolver: "osf", license: "cc-by-nc-sa" });
+    expect(r.outcome).toBe("compatible_nc");
+    expect(standIn.misses).toEqual([]);
+    // A child under a stricter license than the node decides the outcome.
+    standIn.stop();
+    standIn = startStandIn();
+    const kids = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/45-osf-children-f8sq3.json`,
+      ).text(),
+    );
+    kids.data = [
+      {
+        id: "abcde",
+        relationships: { license: { data: { id: "x", type: "licenses" } } },
+        embeds: {
+          license: {
+            data: {
+              attributes: {
+                name: "CC-BY Attribution-NoDerivatives 4.0 International",
+                url: "https://creativecommons.org/licenses/by-nd/4.0/legalcode",
+              },
+            },
+          },
+        },
+      },
+    ];
+    standIn.override("osf /v2/nodes/f8sq3/children/", { status: 200, body: JSON.stringify(kids) });
+    const nd = await run(inputs("CC-BY-4.0", [{ DOI: "10.17605/osf.io/f8sq3" }]));
+    expect(nd.sources[0].license).toBe("cc-by-nd");
+    expect(nd.outcome).toBe("needs_permission");
+  });
+
+  test("an OSF children list that fails, cannot be parsed, or has more pages leaves no verdict", async () => {
+    const F8 = [{ DOI: "10.17605/osf.io/f8sq3" }];
+    standIn.override("osf /v2/nodes/f8sq3/children/", { status: 503 });
+    const failed = await run(inputs("CC-BY-4.0", F8), { retry: NO_RETRY });
+    expect(failed.sources[0].status).toBe("fetch_failed");
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("osf /v2/nodes/f8sq3/children/", {
+      status: 200,
+      body: JSON.stringify({
+        data: [{ id: "abcde", relationships: { license: { data: {} } } }],
+        links: { next: null },
+      }),
+    });
+    expect((await run(inputs("CC-BY-4.0", F8))).sources[0].status).toBe("unparseable");
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("osf /v2/nodes/f8sq3/children/", {
+      status: 200,
+      body: JSON.stringify({
+        data: [],
+        links: { next: "https://api.osf.io/v2/nodes/f8sq3/children/?page=2" },
+      }),
+    });
+    const paged = await run(inputs("CC-BY-4.0", F8));
+    expect(paged.outcome).toBe("unresolved");
+    expect(paged.sources[0].license).toBeNull();
+  });
+
+  test("an OSF Dataset with DataCite rights but registered as a Project is read from OSF too", async () => {
+    // wpkrz: Dataset / Project with CC BY 4.0 on DataCite; OSF agrees and lists no children.
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.17605/osf.io/wpkrz" }]));
+    expect(r.sources[0]).toMatchObject({
+      resolver: "osf",
+      resource_type: "Dataset",
+      license: "cc-by",
+    });
+    expect(count("/v2/nodes/wpkrz/children/")).toBe(1);
+  });
+
+  test("a component of any publisher but PLOS is unresolved, even with a parent or its own license", async () => {
+    const comp = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/39-crossref-plos-component.json`,
+      ).text(),
+    );
+    comp.message.license = [
+      { "content-version": "vor", URL: "https://creativecommons.org/publicdomain/zero/1.0/" },
+    ];
+    comp.message.relation = {
+      "is-component-of": [
+        { "id-type": "doi", id: "10.1038/s41597-019-0027-4", "asserted-by": "object" },
+      ],
+    };
+    standIn.override("datacite /dois/10.1038/s41597-019-0027-4", { status: 404 });
+    standIn.override("crossref /works/10.1038/s41597-019-0027-4", {
+      status: 200,
+      body: JSON.stringify(comp),
+    });
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.1038/s41597-019-0027-4" }]));
+    expect(r.outcome).toBe("unresolved");
+    expect(r.sources[0]).toMatchObject({ resource_type: "component", license: null });
   });
 
   test("the component's license is its article's version of record, and the evidence says so", async () => {
@@ -792,21 +1021,32 @@ describe("data containers are data; publications stay publications", () => {
     expect(standIn.misses).toEqual([]);
   });
 
-  test("only an OSF Project is a container among Text records; the parent of a component", () => {
-    expect(isDataciteDataContainer("10.17605/osf.io/f8sq3", "Text", "Project")).toBe(true);
-    expect(isDataciteDataContainer("10.5281/zenodo.1", "Text", "Project")).toBe(false);
-    expect(isDataciteDataContainer("10.17605/osf.io/f8sq3", "Text", "Preprint")).toBe(false);
-    expect(isDataciteDataContainer("10.5281/zenodo.1", "Collection", null)).toBe(true);
-    expect(isDataciteDataContainer("10.5281/zenodo.1", "JournalArticle", null)).toBe(false);
+  test("only an OSF DOI registered as a Project is a project; only PLOS components have a parent", () => {
+    expect(isOsfProject("10.17605/osf.io/f8sq3", "Project")).toBe(true);
+    expect(isOsfProject("10.5281/zenodo.1", "Project")).toBe(false);
+    expect(isOsfProject("10.17605/osf.io/f8sq3", "Preprint")).toBe(false);
     expect(componentParentDoi("10.1371/journal.pone.0303144.s001", {})).toBe(
       "10.1371/journal.pone.0303144",
     );
     expect(
+      componentParentDoi("10.1371/x.s001", {
+        relation: { "is-component-of": [{ "id-type": "doi", id: "10.1371/Parent" }] },
+      }),
+    ).toBe("10.1371/parent");
+    // Another publisher's component inherits nothing, by stem or by relation.
+    expect(componentParentDoi("10.9999/x.s001", {})).toBeNull();
+    expect(
       componentParentDoi("10.9999/x.s001", {
         relation: { "is-component-of": [{ "id-type": "doi", id: "10.9999/Parent" }] },
       }),
-    ).toBe("10.9999/parent");
-    expect(componentParentDoi("10.9999/no-suffix", {})).toBeNull();
+    ).toBeNull();
+    expect(componentParentDoi("10.1371/no-suffix", {})).toBeNull();
+    // A PLOS component whose relation names another publisher's work inherits nothing.
+    expect(
+      componentParentDoi("10.1371/x.s001", {
+        relation: { "is-component-of": [{ "id-type": "doi", id: "10.9999/Parent" }] },
+      }),
+    ).toBeNull();
   });
 });
 

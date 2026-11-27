@@ -120,6 +120,7 @@ export function startStandIn(): StandIn {
       openneuro: `${origin}/openneuro`,
       physionet: `${origin}/physionet`,
       osf: `${origin}/osf`,
+      figshare: `${origin}/figshare`,
     },
     origin,
     requests,

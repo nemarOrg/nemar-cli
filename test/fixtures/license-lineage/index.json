@@ -407,5 +407,195 @@
     "status": 200,
     "file": "42-datacite-figshare-article.json",
     "fetched_at": "2026-11-27T17:15:52Z"
+  },
+  {
+    "case": "figshare-collection-v1",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/collections/6979581/articles?page_size=11",
+    "url": "https://api.figshare.com/v2/collections/6979581/articles?page_size=11",
+    "status": 200,
+    "file": "43-figshare-collection-articles.json",
+    "fetched_at": "2026-11-27T17:30:07Z"
+  },
+  {
+    "case": "figshare-collection-v1",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/articles/24803499",
+    "url": "https://api.figshare.com/v2/articles/24803499",
+    "status": 200,
+    "file": "44-figshare-article-24803499.json",
+    "fetched_at": "2026-11-27T17:30:08Z"
+  },
+  {
+    "case": "osf-project",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/f8sq3/children/?embed=license&page[size]=50",
+    "url": "https://api.osf.io/v2/nodes/f8sq3/children/?embed=license&page[size]=50",
+    "status": 200,
+    "file": "45-osf-children-f8sq3.json",
+    "fetched_at": "2026-11-27T17:30:08Z"
+  },
+  {
+    "case": "osf-project",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/f8sq3/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/f8sq3/?embed=license",
+    "status": 200,
+    "file": "46-osf-osf-f8sq3.json",
+    "fetched_at": "2026-11-27T17:30:09Z"
+  },
+  {
+    "case": "osf-url-sa",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/rmafj/children/?embed=license&page[size]=50",
+    "url": "https://api.osf.io/v2/nodes/rmafj/children/?embed=license&page[size]=50",
+    "status": 200,
+    "file": "47-osf-children-rmafj.json",
+    "fetched_at": "2026-11-27T17:30:09Z"
+  },
+  {
+    "case": "osf-url-by",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/j3s7g/children/?embed=license&page[size]=50",
+    "url": "https://api.osf.io/v2/nodes/j3s7g/children/?embed=license&page[size]=50",
+    "status": 200,
+    "file": "48-osf-children-j3s7g.json",
+    "fetched_at": "2026-11-27T17:30:09Z"
+  },
+  {
+    "case": "osf-no-rights",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/j7as8/children/?embed=license&page[size]=50",
+    "url": "https://api.osf.io/v2/nodes/j7as8/children/?embed=license&page[size]=50",
+    "status": 200,
+    "file": "49-osf-children-j7as8.json",
+    "fetched_at": "2026-11-27T17:30:10Z"
+  },
+  {
+    "case": "osf-project-no-rights",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.17605%2Fosf.io%2Fc5zbq",
+    "url": "https://api.datacite.org/dois/10.17605%2Fosf.io%2Fc5zbq",
+    "status": 200,
+    "file": "50-datacite-osf-project-no-rights.json",
+    "fetched_at": "2026-11-27T17:30:11Z"
+  },
+  {
+    "case": "osf-project-no-rights",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/c5zbq/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/c5zbq/?embed=license",
+    "status": 200,
+    "file": "51-osf-osf-c5zbq.json",
+    "fetched_at": "2026-11-27T17:30:11Z"
+  },
+  {
+    "case": "osf-project-no-rights",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/c5zbq/children/?embed=license&page[size]=50",
+    "url": "https://api.osf.io/v2/nodes/c5zbq/children/?embed=license&page[size]=50",
+    "status": 200,
+    "file": "52-osf-children-c5zbq.json",
+    "fetched_at": "2026-11-27T17:30:12Z"
+  },
+  {
+    "case": "osf-project-children",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.17605%2Fosf.io%2Fyb3pq",
+    "url": "https://api.datacite.org/dois/10.17605%2Fosf.io%2Fyb3pq",
+    "status": 200,
+    "file": "53-datacite-osf-project-children.json",
+    "fetched_at": "2026-11-27T17:30:13Z"
+  },
+  {
+    "case": "osf-project-children",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/yb3pq/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/yb3pq/?embed=license",
+    "status": 200,
+    "file": "54-osf-osf-yb3pq.json",
+    "fetched_at": "2026-11-27T17:30:14Z"
+  },
+  {
+    "case": "osf-project-children",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/yb3pq/children/?embed=license&page[size]=50",
+    "url": "https://api.osf.io/v2/nodes/yb3pq/children/?embed=license&page[size]=50",
+    "status": 200,
+    "file": "55-osf-children-yb3pq.json",
+    "fetched_at": "2026-11-27T17:30:15Z"
+  },
+  {
+    "case": "osf-datacite-cc-by",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/wpkrz/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/wpkrz/?embed=license",
+    "status": 200,
+    "file": "56-osf-osf-wpkrz.json",
+    "fetched_at": "2026-11-27T17:30:15Z"
+  },
+  {
+    "case": "osf-datacite-cc-by",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/wpkrz/children/?embed=license&page[size]=50",
+    "url": "https://api.osf.io/v2/nodes/wpkrz/children/?embed=license&page[size]=50",
+    "status": 200,
+    "file": "57-osf-children-wpkrz.json",
+    "fetched_at": "2026-11-27T17:30:15Z"
+  },
+  {
+    "case": "figshare-collection",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/collections/3307977/articles?page_size=11",
+    "url": "https://api.figshare.com/v2/collections/3307977/articles?page_size=11",
+    "status": 200,
+    "file": "58-figshare-collection-3307977-articles.json",
+    "fetched_at": "2026-11-27T17:30:32Z"
+  },
+  {
+    "case": "figshare-collection",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/articles/3563034",
+    "url": "https://api.figshare.com/v2/articles/3563034",
+    "status": 200,
+    "file": "59-figshare-article-3563034.json",
+    "fetched_at": "2026-11-27T17:30:33Z"
+  },
+  {
+    "case": "figshare-collection",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/articles/3563031",
+    "url": "https://api.figshare.com/v2/articles/3563031",
+    "status": 200,
+    "file": "60-figshare-article-3563031.json",
+    "fetched_at": "2026-11-27T17:30:34Z"
+  },
+  {
+    "case": "figshare-collection",
+    "registry": "figshare",
+    "method": "GET",
+    "path": "/v2/articles/3563028",
+    "url": "https://api.figshare.com/v2/articles/3563028",
+    "status": 200,
+    "file": "61-figshare-article-3563028.json",
+    "fetched_at": "2026-11-27T17:30:35Z"
   }
 ]
