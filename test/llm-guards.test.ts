@@ -4,9 +4,11 @@ import { join } from "node:path";
 import {
   EMPTY_DOI_RESOLUTION,
   datasetDoisOf,
+  parseCrossrefWork,
   parseDataCiteJson,
 } from "../backend/src/services/doi-metadata.js";
 import {
+  dropStaleDerivations,
   estimateUsageCostUsd,
   mergeWithExisting,
   pruneUnsourcedDois,
@@ -374,17 +376,30 @@ describe("mergeWithExisting relation locks", () => {
   });
 });
 
-describe("seedFromBids never carries an IsDerivedFrom forward on its own", () => {
+describe("dropStaleDerivations: an IsDerivedFrom is not carried forward once it is shown a publication", () => {
   // nm000830 (2026-11-27): the depositor moved the paper from SourceDatasets to
   // ReferencesAndLinks and named the figshare dataset instead; the earlier enrichment's
-  // IsDerivedFrom on the paper survived re-enrichment.
+  // IsDerivedFrom on the paper survived every re-enrichment.
   const PAPER = "10.1371/journal.pone.0211710";
   const FIGSHARE =
     "https://plos.figshare.com/articles/dataset/Frequency-resolved_analysis_of_coherent_oscillations/7708514";
+  const DEPOSIT = "10.6084/m9.figshare.7666055.v3";
+  const lineageFixture = (name: string): unknown =>
+    JSON.parse(readFileSync(join(import.meta.dir, "fixtures/license-lineage", name), "utf-8"));
+  // This run's Stage 1d: Crossref's real record calls the paper a journal-article, and DataCite's
+  // real record calls nm000275's deposit a Dataset.
+  const RESOLVED = {
+    ...EMPTY_DOI_RESOLUTION,
+    resolved: [
+      parseCrossrefWork(PAPER, lineageFixture("65-crossref-plos-article-0211710.json")),
+      parseDataCiteJson(DEPOSIT, recorded("datacite-figshare-7666055-v3.json")),
+    ].filter((r) => r !== null),
+  };
   const before = {
     version: "2.0" as const,
     related_identifiers: [
       { identifier: PAPER, identifier_type: "DOI" as const, relation_type: "IsDerivedFrom" },
+      { identifier: DEPOSIT, identifier_type: "DOI" as const, relation_type: "IsDerivedFrom" },
       {
         identifier: "https://github.com/nemarDatasets/nm000830",
         identifier_type: "URL" as const,
@@ -397,15 +412,24 @@ describe("seedFromBids never carries an IsDerivedFrom forward on its own", () =>
     SourceDatasets: [{ URL: FIGSHARE }],
     ReferencesAndLinks: [`https://doi.org/${PAPER}`],
   };
+  const pairs = (m: { related_identifiers?: { identifier: string; relation_type: string }[] }) =>
+    m.related_identifiers?.map((r) => [r.identifier, r.relation_type]);
 
-  test("a paper SourceDatasets no longer names is a reference, not a source", () => {
-    const seeded = seedFromBids(description, before);
-    expect(seeded.related_identifiers?.map((r) => [r.identifier, r.relation_type])).toEqual([
-      ["https://github.com/nemarDatasets/nm000830", "IsSupplementTo"],
-      [PAPER, "References"],
+  test("the resolved paper becomes a reference; the resolved Dataset promotion stays", () => {
+    expect(RESOLVED.resolved.map((r) => [r.doi, r.resource_type_general ?? null])).toEqual([
+      [PAPER, null],
+      [DEPOSIT, "Dataset"],
     ]);
-    // The LLM may not promote a paper back: it is not a DataCite Dataset.
-    const merged = mergeWithExisting(seeded, {
+    const seeded = seedFromBids(description, before);
+    const out = dropStaleDerivations(seeded, description, RESOLVED);
+    expect(pairs(out.result)).toEqual([
+      [PAPER, "References"],
+      [DEPOSIT, "IsDerivedFrom"],
+      ["https://github.com/nemarDatasets/nm000830", "IsSupplementTo"],
+    ]);
+    expect(out.demoted).toEqual([PAPER]);
+    // The LLM may not promote the paper back: it is not a DataCite Dataset.
+    const merged = mergeWithExisting(out.result, {
       related_identifiers: [
         { identifier: PAPER, identifier_type: "DOI", relation_type: "IsDerivedFrom" },
       ],
@@ -415,84 +439,55 @@ describe("seedFromBids never carries an IsDerivedFrom forward on its own", () =>
     );
   });
 
-  test("dropped with nothing in its place when no input names it any more", () => {
-    const seeded = seedFromBids({ Name: "x", SourceDatasets: [{ URL: FIGSHARE }] }, before);
-    expect(seeded.related_identifiers?.some((r) => r.identifier === PAPER)).toBe(false);
+  test("a resolved paper no input names any more is dropped", () => {
+    const desc = { Name: "x", SourceDatasets: [{ URL: FIGSHARE }] };
+    const out = dropStaleDerivations(seedFromBids(desc, before), desc, RESOLVED);
+    expect(out.dropped).toEqual([PAPER]);
+    expect(out.result.related_identifiers?.some((r) => r.identifier === PAPER)).toBe(false);
   });
 
-  test("kept while SourceDatasets still names it, in any DOI form or as the same URL", () => {
+  test("a Stage 1d that failed, skipped or found nothing keeps every earlier IsDerivedFrom", () => {
+    const seeded = seedFromBids(description, before);
+    for (const resolution of [
+      { ...EMPTY_DOI_RESOLUTION, failed: [PAPER, DEPOSIT] },
+      { ...EMPTY_DOI_RESOLUTION, skipped: [PAPER, DEPOSIT] },
+      { ...EMPTY_DOI_RESOLUTION, unresolved: [PAPER, DEPOSIT] },
+      EMPTY_DOI_RESOLUTION,
+    ]) {
+      const out = dropStaleDerivations(seeded, description, resolution);
+      expect(out.result.related_identifiers).toEqual(seeded.related_identifiers);
+      expect([...out.demoted, ...out.dropped]).toEqual([]);
+    }
+  });
+
+  test("one SourceDatasets names (any DOI form) is kept even when it resolves to a paper", () => {
+    const desc = { Name: "x", SourceDatasets: [{ DOI: `doi:${PAPER.toUpperCase()}` }] };
+    const out = dropStaleDerivations(
+      {
+        version: "2.0",
+        related_identifiers: [
+          { identifier: PAPER, identifier_type: "DOI", relation_type: "IsDerivedFrom" },
+        ],
+      },
+      desc,
+      RESOLVED,
+    );
+    expect(pairs(out.result)).toEqual([[PAPER, "IsDerivedFrom"]]);
+  });
+
+  test("an upper-case SourceDatasets DOI is seeded once", () => {
     const seeded = seedFromBids(
-      { Name: "x", SourceDatasets: [{ DOI: `doi:${PAPER.toUpperCase()}` }] },
-      before,
+      { Name: "x", SourceDatasets: [{ DOI: PAPER.toUpperCase() }] },
+      {
+        version: "2.0",
+        related_identifiers: [
+          { identifier: PAPER, identifier_type: "DOI", relation_type: "IsDerivedFrom" },
+        ],
+      },
     );
     expect(
-      seeded.related_identifiers?.filter(
-        (r) => r.identifier.toLowerCase() === PAPER && r.relation_type === "IsDerivedFrom",
-      ),
+      seeded.related_identifiers?.filter((r) => r.relation_type === "IsDerivedFrom"),
     ).toHaveLength(1);
-    // An upper-case IsDerivedFrom from an earlier run, named by a lower-case SourceDatasets DOI.
-    const upper = seedFromBids(
-      { Name: "x", SourceDatasets: [{ DOI: PAPER }] },
-      {
-        version: "2.0",
-        related_identifiers: [
-          {
-            identifier: PAPER.toUpperCase(),
-            identifier_type: "DOI",
-            relation_type: "IsDerivedFrom",
-          },
-        ],
-      },
-    );
-    expect(upper.related_identifiers?.map((r) => r.identifier)).toEqual([PAPER.toUpperCase()]);
-    const url = seedFromBids(
-      { Name: "x", SourceDatasets: [{ URL: FIGSHARE }] },
-      {
-        version: "2.0",
-        related_identifiers: [
-          { identifier: FIGSHARE, identifier_type: "URL", relation_type: "IsDerivedFrom" },
-          {
-            identifier: "https://osf.io/abcde",
-            identifier_type: "URL",
-            relation_type: "IsDerivedFrom",
-          },
-        ],
-      },
-    );
-    expect(url.related_identifiers?.map((r) => r.identifier)).toEqual([FIGSHARE]);
-  });
-
-  test("an earlier LLM promotion must be earned again: nm000275's deposit is References until re-promoted", () => {
-    const promoted = {
-      version: "2.0" as const,
-      related_identifiers: [
-        {
-          identifier: "10.6084/m9.figshare.7666055.v3",
-          identifier_type: "DOI" as const,
-          relation_type: "IsDerivedFrom",
-        },
-      ],
-    };
-    const desc = {
-      Name: "x",
-      ReferencesAndLinks: ["https://doi.org/10.6084/m9.figshare.7666055.v3"],
-    };
-    const seeded = seedFromBids(desc, promoted);
-    expect(seeded.related_identifiers?.map((r) => r.relation_type)).toEqual(["References"]);
-    const again = mergeWithExisting(
-      seeded,
-      {
-        related_identifiers: [
-          {
-            identifier: "10.6084/m9.figshare.7666055.v3",
-            identifier_type: "DOI",
-            relation_type: "IsDerivedFrom",
-          },
-        ],
-      },
-      NM000275_DERIVABLE,
-    );
-    expect(again.related_identifiers?.map((r) => r.relation_type)).toEqual(["IsDerivedFrom"]);
   });
 });
 

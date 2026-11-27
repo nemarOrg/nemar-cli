@@ -349,11 +349,81 @@ export function validateLlmResultV2(raw: Record<string, unknown>): LlmEnrichment
  * - DatasetType -> resource_type_general
  * - Dataset platform URLs (GitHub, NEMAR) -> related_identifiers with "IsDescribedBy"
  */
-/** Whether a related identifier is one SourceDatasets names now (a DOI in any form, or the URL). */
-function isNamedBySourceDatasets(r: RelatedIdentifierEntry, keys: ReadonlySet<string>): boolean {
-  return r.identifier_type === "DOI"
-    ? keys.has(normalizeDoiKey(r.identifier))
-    : keys.has(r.identifier.trim());
+/** Every DOI a list of BIDS entries names (`SourceDatasets` objects or ReferencesAndLinks strings), normalized. */
+function doisNamedIn(entries: unknown): Set<string> {
+  const out = new Set<string>();
+  if (!Array.isArray(entries)) return out;
+  for (const e of entries) {
+    const texts =
+      typeof e === "string"
+        ? [e]
+        : e && typeof e === "object"
+          ? [(e as Record<string, unknown>).DOI, (e as Record<string, unknown>).URL]
+          : [];
+    for (const t of texts) {
+      if (typeof t !== "string") continue;
+      const m = t.match(/(?:doi\.org\/|doi:|^)(10\.\d{4,}\/\S+)/i);
+      if (m) out.add(normalizeDoiKey(m[1]));
+    }
+  }
+  return out;
+}
+
+/**
+ * An earlier IsDerivedFrom that the current SourceDatasets does not name and that this run's DOI
+ * lookups resolved to something other than a DataCite `Dataset` (a publication) is not carried
+ * forward (ADR 0139 decision 7, amendment of 2026-11-27): it becomes `References` when
+ * ReferencesAndLinks names it, else it is dropped. Kept: one SourceDatasets names, one resolved to
+ * a Dataset (an earlier rule-checked LLM promotion), one whose lookup failed, was skipped or found
+ * nothing, and every URL entry, since none of those is shown to be a publication. Without this, a
+ * paper a depositor moved from SourceDatasets to ReferencesAndLinks stayed IsDerivedFrom through
+ * every re-enrichment (nm000830), and the license lineage read it as the upstream source.
+ */
+export function dropStaleDerivations(
+  target: NemarMetadataV2,
+  bidsDescription: Record<string, unknown>,
+  resolution: DoiResolution,
+): { result: NemarMetadataV2; demoted: string[]; dropped: string[] } {
+  const rels = target.related_identifiers;
+  if (!rels || rels.length === 0) return { result: target, demoted: [], dropped: [] };
+  const named = doisNamedIn(bidsDescription.SourceDatasets);
+  const referenced = doisNamedIn(bidsDescription.ReferencesAndLinks);
+  const publications = new Set(
+    resolution.resolved
+      .filter((r) => r.resource_type_general?.toLowerCase() !== "dataset")
+      .map((r) => r.doi),
+  );
+  const demoted: string[] = [];
+  const dropped: string[] = [];
+  const kept: RelatedIdentifierEntry[] = [];
+  for (const r of rels) {
+    const key = r.identifier_type === "DOI" ? normalizeDoiKey(r.identifier) : null;
+    if (
+      r.relation_type !== "IsDerivedFrom" ||
+      key === null ||
+      named.has(key) ||
+      !publications.has(key)
+    ) {
+      kept.push(r);
+      continue;
+    }
+    if (referenced.has(key)) {
+      demoted.push(r.identifier);
+      kept.push({ ...r, relation_type: "References" });
+    } else {
+      dropped.push(r.identifier);
+    }
+  }
+  // A demoted entry may meet a References entry for the same DOI: keep one.
+  const seen = new Set<string>();
+  const unique = kept.filter((r) => {
+    if (r.identifier_type !== "DOI") return true;
+    const k = `${normalizeDoiKey(r.identifier)} ${r.relation_type}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return { result: { ...target, related_identifiers: unique }, demoted, dropped };
 }
 
 export function seedFromBids(
@@ -392,23 +462,16 @@ export function seedFromBids(
 
   // Collect SourceDatasets DOIs first so we can clean stale entries
   const sourceDatasetDois = new Set<string>();
-  // Every identifier SourceDatasets names now (DOIs normalized, URLs as written), so an
-  // IsDerivedFrom from an earlier run that it no longer names is not carried forward.
-  const sourceDatasetKeys = new Set<string>();
   if (Array.isArray(bidsDescription.SourceDatasets)) {
     for (const src of bidsDescription.SourceDatasets) {
       if (!src || typeof src !== "object") continue;
       const obj = src as Record<string, unknown>;
-      if (typeof obj.URL === "string" && obj.URL.trim()) sourceDatasetKeys.add(obj.URL.trim());
       let doi = typeof obj.DOI === "string" ? obj.DOI.replace(/^doi:/, "") : "";
       if (!doi && typeof obj.URL === "string") {
         const urlDoi = obj.URL.match(/(?:doi\.org\/|doi:)(10\.\d{4,}\/.+)/);
         if (urlDoi) doi = urlDoi[1];
       }
-      if (doi && doiPattern.test(doi)) {
-        sourceDatasetDois.add(doi);
-        sourceDatasetKeys.add(normalizeDoiKey(doi));
-      }
+      if (doi && doiPattern.test(doi)) sourceDatasetDois.add(doi);
     }
   }
 
@@ -417,15 +480,12 @@ export function seedFromBids(
   // and drop the retired legacy NEMAR landing URL so re-enrichment REPLACES it
   // with the canonical datasetLandingUrl below (epic #837) rather than letting
   // the old `dataexplorer/detail` and new `/dataset/` IsDescribedBy URLs accumulate.
-  // An IsDerivedFrom is never carried forward on its own (ADR 0139 decision 7, amendment of
-  // 2026-11-27): one that SourceDatasets no longer names is dropped here, and the LLM stage may
-  // add it again only under its Dataset rule (`mergeWithExisting`'s `derivableDois`). Kept, a
-  // paper a depositor moved from SourceDatasets to ReferencesAndLinks stayed IsDerivedFrom forever
-  // (nm000830), and the license lineage read it as the upstream source.
+  // An earlier IsDerivedFrom SourceDatasets no longer names is kept here: whether it still holds
+  // is decided after this run resolves the DOIs (`dropStaleDerivations`), because a run whose
+  // lookups failed must not turn a real dataset relation into a reference.
   const relatedIds: RelatedIdentifierEntry[] = (existing?.related_identifiers || []).filter(
     (r) =>
       !r.identifier.includes("nemar.org/dataexplorer/") &&
-      (r.relation_type !== "IsDerivedFrom" || isNamedBySourceDatasets(r, sourceDatasetKeys)) &&
       (!sourceDatasetDois.has(r.identifier) || r.relation_type === "IsDerivedFrom"),
   );
 

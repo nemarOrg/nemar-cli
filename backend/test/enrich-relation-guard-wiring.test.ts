@@ -91,6 +91,17 @@ describe("IsDerivedFrom evidence and the registry cache are passed through", () 
     expect(ENRICH_SOURCE).toContain("const derivableDois = datasetDoisOf(doiResolution);");
   });
 
+  test("stale IsDerivedFrom entries are judged on this run's resolution, before the LLM merge", () => {
+    const calls = callArguments(ENRICH_SOURCE, "dropStaleDerivations");
+    expect(calls).toEqual(["seededWithOrcids, bidsDescription, doiResolution"]);
+    const at = ENRICH_SOURCE.indexOf("dropStaleDerivations(");
+    expect(at).toBeGreaterThan(
+      ENRICH_SOURCE.indexOf("doiResolution = await resolveDoisForEnrichment("),
+    );
+    expect(at).toBeLessThan(ENRICH_SOURCE.indexOf("mergeWithExisting(seededWithOrcids"));
+    expect(ENRICH_SOURCE).toContain("seededWithOrcids = stale.result;");
+  });
+
   test("ORCID discovery (both passes) and DOI resolution share one cache", () => {
     const orcidCalls = callArguments(ENRICH_SOURCE, "discoverOrcidsFromReferencedDois");
     expect(orcidCalls).toHaveLength(2);

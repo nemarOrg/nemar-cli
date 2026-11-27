@@ -68,6 +68,7 @@ import {
   type LlmUsageTotals,
   type RelationGuardContext,
   correctFromFeedback,
+  dropStaleDerivations,
   enforceNeverDataPaper,
   enrichFromReadme,
   estimateUsageCostUsd,
@@ -798,6 +799,15 @@ export async function enrichDataset(
     guardContext = { datasetId, resolvedTitles: titlesByDoi(doiResolution) };
     // Only a DataCite `Dataset` may be marked IsDerivedFrom by the LLM.
     const derivableDois = datasetDoisOf(doiResolution);
+    // An earlier IsDerivedFrom that SourceDatasets no longer names and that this run resolved to
+    // a publication is not carried forward; one that could not be resolved is kept.
+    const stale = dropStaleDerivations(seededWithOrcids, bidsDescription, doiResolution);
+    if (stale.demoted.length > 0 || stale.dropped.length > 0) {
+      console.log(
+        `[llm-enrich] Stage 1d (stale IsDerivedFrom): ${datasetId} - demoted to References: ${stale.demoted.join(", ") || "none"}; dropped: ${stale.dropped.join(", ") || "none"}`,
+      );
+    }
+    seededWithOrcids = stale.result;
     const resolveDemote = enforceNeverDataPaper(seededWithOrcids, guardContext);
     logDemote("resolve", resolveDemote);
     seededWithOrcids = resolveDemote.result;
