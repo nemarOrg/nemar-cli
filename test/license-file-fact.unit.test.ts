@@ -502,25 +502,98 @@ describe("a notice rule that ends inside the license's own identifier is not a s
     expect(identify(m.text, m.field, scan).fact.state).toBe("unrecognized");
   });
 
-  test("the same notice on a line where the license's span does not continue it is not subsumed", () => {
-    const g = caseOf("gate-cc-by-nc-4.0-a");
-    const lines = g.text.split("\n");
-    // Line 3 names CC-BY-4.0 itself: the notice "distributed under CC-BY-" is then a real CC-BY-4.0
-    // notice, and no match of CC-BY-NC-4.0 on the line continues it.
-    lines[2] = (lines[2] as string).replace(
-      "distributed under CC-BY-NC-4.0,",
-      "distributed under CC-BY-4.0 and CC-BY-NC-4.0,",
-    );
-    const text = lines.join("\n");
-    expect(subsumedLicenses(scanOf(g), "CC-BY-NC-4.0", text)).toEqual(new Set());
-    expect(identify(text, g.field, scanOf(g)).fact.state).toBe("unrecognized");
-  });
+  test.each([
+    ["header-cc-by-4.0-and-cc-by-nc-4.0", "distributed under CC-BY-4.0 and CC-BY-NC-4.0,"],
+    ["header-cc-by-nc-4.0-or-cc-by-4.0", "distributed under CC-BY-NC-4.0 or CC-BY-4.0,"],
+  ] as const)(
+    "%s: a header that names CC-BY-4.0 itself stays compound (real scan)",
+    (name, words) => {
+      const h = caseOf(name);
+      expect(h.text.split("\n")[2]).toContain(words);
+      const scan = scanOf(h);
+      expect(scan.detected_license_expression_spdx).toBe(
+        "(CC-BY-NC-4.0 AND CC-BY-4.0) AND CC-BY-NC-4.0",
+      );
+      expect(subsumedLicenses(scan, "CC-BY-NC-4.0", h.text)).toEqual(new Set());
+      const id = identify(h.text, h.field, scan);
+      expect(id.fact.state).toBe("unrecognized");
+      expect(id.fact.expression).toBe("(CC-BY-NC-4.0 AND CC-BY-4.0) AND CC-BY-NC-4.0");
+    },
+  );
 
   test("an OR is ScanCode's choice: a subsumed term joined by OR stays compound", () => {
     const subsumed = new Set(["CC-BY-4.0"]);
     expect(isCompound("CC-BY-NC-4.0 AND CC-BY-4.0", "CC-BY-NC-4.0", subsumed)).toBe(false);
     expect(isCompound("CC-BY-NC-4.0 OR CC-BY-4.0", "CC-BY-NC-4.0", subsumed)).toBe(true);
     expect(isCompound("CC-BY-NC-4.0 AND CC-BY-4.0", "CC-BY-NC-4.0")).toBe(true);
+  });
+});
+
+describe("subsumption, position by position (hand-built matches on a hand-written line)", () => {
+  // Position-level cases: each ScanMatch is written here, not scanned, to put one clause of the
+  // rule at its boundary. The real scans above show the rule on ScanCode's own output.
+  const P = "CC-BY-NC-4.0";
+  const at = (
+    license: string,
+    line: number,
+    span: string,
+    endLine = line,
+  ): ScanFile["matches"][number] => ({
+    license_expression_spdx: license,
+    start_line: line,
+    end_line: endLine,
+    score: 100,
+    matched_length: 4,
+    match_coverage: 100,
+    matched_text: span,
+    matched_text_diagnostics: span,
+  });
+  const scanWith = (matches: ScanFile["matches"]): ScanFile => ({
+    detected_license_expression_spdx: null,
+    matches,
+    clues: [],
+    copyrights: [],
+    scan_errors: 0,
+  });
+  const subsumed = (text: string, other: ScanFile["matches"][number], own: string) =>
+    subsumedLicenses(scanWith([other, at(P, 1, own)]), P, text).has("CC-BY-4.0");
+
+  test("the measured shape: begins before the declared match and ends inside it", () => {
+    const text = "distributed under CC-BY-NC-4.0, ok";
+    expect(subsumed(text, at("CC-BY-4.0", 1, "distributed under CC-BY-"), "CC-BY-NC-4.0,")).toBe(
+      true,
+    );
+  });
+
+  test("a notice that ends exactly where the declared match ends is not subsumed", () => {
+    const text = "distributed under CC-BY-NC-4.0, ok";
+    expect(subsumed(text, at("CC-BY-4.0", 1, "distributed under CC-BY-NC"), "CC-BY-NC")).toBe(
+      false,
+    );
+  });
+
+  test("a match that starts at the declared match's column is not subsumed", () => {
+    const text = "distributed under CC-BY-NC-4.0, ok";
+    expect(subsumed(text, at("CC-BY-4.0", 1, "CC-BY-"), "CC-BY-NC-4.0,")).toBe(false);
+  });
+
+  test("a match that starts inside the declared match is not subsumed", () => {
+    const text = "distributed under CC-BY-NC-4.0, ok";
+    expect(subsumed(text, at("CC-BY-4.0", 1, "BY-NC"), "CC-BY-NC-4.0,")).toBe(false);
+  });
+
+  test("a match over two lines is not subsumed, even when its text is found on the first", () => {
+    const text = "distributed under CC-BY-NC-4.0, ok\nmore";
+    expect(subsumed(text, at("CC-BY-4.0", 1, "distributed under CC-BY-", 2), "CC-BY-NC-4.0,")).toBe(
+      false,
+    );
+  });
+
+  test("a span whose text occurs twice on the line is not placed, so not subsumed", () => {
+    const text = "distributed under CC-BY-NC-4.0, distributed under CC-BY-";
+    expect(subsumed(text, at("CC-BY-4.0", 1, "distributed under CC-BY-"), "CC-BY-NC-4.0,")).toBe(
+      false,
+    );
   });
 });
 
