@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.47 - 2026-11-27
+
 ### Changed
 
 - **The publication review's platform allowance is 500 model calls a day (was 150; ADR 0102 amendment).**
@@ -25,6 +27,9 @@ earlier releases are described only by their generated notes.
   It takes one dataset id, never `--all`, and a start without `--again` still answers `has_result`.
   The re-review also counts in the depositor's 24-hour tally, so repeated comparisons can decline that depositor's next screen-started review with `depositor_limit` (an administrator's start is not held by it).
   If the new run cannot be handed over or is declined, the old review stays superseded and approval is blocked until the new review is restarted with `start <dataset-id>`.
+- **The publication review signs in to an Anthropic organization of its own (#2441, ADR 0102 amendment).**
+  `run-publication-review.yml` reads four variables of its own (`ANTHROPIC_PUBLICATION_REVIEW_FEDERATION_RULE_ID`, `_SERVICE_ACCOUNT_ID`, `_ORGANIZATION_ID`, `_WORKSPACE_ID`), and each review's federation check refuses a rule or service account that is the other review's.
+  The deployed copies changed in nemarDatasets/.github#162 and #163.
 - **The publication review accepts reports made on Sonnet 5.5 and Opus 5.5 (ADR 0102 amendment).**
   The review still calls Haiku 5.5 at high effort. The wider list lets the owner compare models and efforts on the real queue without a release: a branch of the review script that calls another model, checked out by the workflow in `nemarDatasets/.github`, reports results the Worker accepts.
   A first run in the confirming run's exact shape (Sonnet 5.5 at `max`) is still refused, and a first run made on Sonnet 5.5 never starts a confirming run, because the automatic denial needs two different models to agree (ADR 0139).
