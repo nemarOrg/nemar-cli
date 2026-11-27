@@ -37,6 +37,11 @@ import {
   publicationRequestNotice,
 } from "../../shared/identifier-screen-report.js";
 import {
+  LICENSE_MATCHER_VERSION,
+  reproduceCommands,
+  scancodeRequirementsUrl,
+} from "../../shared/license-file.js";
+import {
   DEFAULT_BASES,
   type LineageInputs,
   type RegistryBases,
@@ -325,6 +330,7 @@ import {
 } from "../lib/upload/transfer.js";
 import { requireUserDatasetArgs } from "../lib/user-dataset-args.js";
 import { isMirror, refuseMirrorMajor } from "../lib/version-policy.js";
+import { version as cliVersion } from "../lib/version.js";
 
 /**
  * What to call a failed dataset lookup.
@@ -6475,6 +6481,37 @@ function localLineageInputs(root: string): LineageInputs {
   };
 }
 
+/**
+ * How a depositor reproduces the review's identification of LICENSE (ADR 0142): the commands,
+ * printed and never run, with the hashed requirements file at this CLI's release tag. Nothing is
+ * bundled. No LICENSE at the root: nothing to scan, so no commands.
+ */
+function licenseMatcherOf(root: string): {
+  version: typeof LICENSE_MATCHER_VERSION;
+  requirements: string;
+  license_file: string | null;
+  commands: string[];
+} {
+  const licensePath = join(root, "LICENSE");
+  const present = existsSync(licensePath);
+  return {
+    version: LICENSE_MATCHER_VERSION,
+    requirements: scancodeRequirementsUrl(cliVersion),
+    license_file: present ? licensePath : null,
+    commands: present ? reproduceCommands(licensePath, cliVersion) : [],
+  };
+}
+
+function licenseMatcherLines(m: ReturnType<typeof licenseMatcherOf>): string[] {
+  if (m.license_file === null) return ["", "License file: no LICENSE at the dataset root"];
+  return [
+    "",
+    `License file: ${m.license_file}`,
+    `  NEMAR's review identifies it with ScanCode (${m.version}). To run the same scan:`,
+    ...m.commands.map((c) => `    ${c}`),
+  ];
+}
+
 /** Print one line on stderr and exit 1: the check could not read its inputs. */
 function licenseCheckFail(message: string): never {
   console.error(chalk.red(message));
@@ -6499,6 +6536,10 @@ Description:
   README. Each source's license is read from DataCite, Crossref or OpenAlex
   (OpenNeuro's or PhysioNet's own record where the registries hold none).
   The deposit attestation is read only by the server's check.
+
+  It also prints the commands that scan the dataset's LICENSE with the
+  license matcher NEMAR's review uses (ScanCode, pinned), and runs none
+  of them.
 
 Exit codes:
   0  compatible, compatible_attribution or compatible_nc
@@ -6544,7 +6585,10 @@ Examples:
       licenseCheckFail(SOURCE_STATUS_COPY.metadata_unreadable.statement);
     }
     const result = await resolveLicenseLineage(inputs, { bases: licenseCheckBases() });
-    if (options.json) console.log(JSON.stringify(result, null, 2));
-    else for (const line of lineageLines(result)) console.log(line);
+    const matcher = licenseMatcherOf(root);
+    if (options.json) console.log(JSON.stringify({ ...result, license_matcher: matcher }, null, 2));
+    else
+      for (const line of [...lineageLines(result), ...licenseMatcherLines(matcher)])
+        console.log(line);
     process.exit(lineageExitCode(result.outcome));
   });
