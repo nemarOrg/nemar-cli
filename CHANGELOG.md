@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.53 - 2026-11-27
+
 ### Added
 
 - **The administrator's decision card (ADR 0142, decision 4).**
