@@ -17,6 +17,12 @@ earlier releases are described only by their generated notes.
 
 ### Changed
 
+- **The publication review accepts reports made on Sonnet 5.5 and Opus 5.5 (ADR 0102 amendment).**
+  The review still calls Haiku 5.5 at high effort; the wider list lets the owner compare models on the real queue by changing only the workflow's script.
+  A first run in the confirming run's exact shape (Sonnet 5.5 at `max`) is still refused.
+
+### Changed
+
 - **The recipes' engine moves to eegprep `871bc7f8` (#2411, nemarOrg/nemar-process#101).**
   `nemar-floor` and `nemar-ica` `1.0.0-b2` now declare `eegprep@0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3`, the commit nemar-process's images install: ICLabel runs its network on ONNX (onnxruntime 1.32.0, stamped in every record), and `nemar-quality` 0.2.0 adds `nemar-quality:mutualInformationReduction` (MIR, through eegprep's `eeg_mir`).
   Recipe versions are unchanged, so the tuple a run stamps differs only in its engine.

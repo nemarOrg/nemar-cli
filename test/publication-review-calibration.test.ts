@@ -91,7 +91,7 @@ import {
   PUBLICATION_OUTCOMES,
   PUBLICATION_REVIEW_MODELS,
   PUBLICATION_RUN_ERRORS,
-  PublicationReviewReportError,
+  type PublicationReviewReportError,
   QUESTIONS,
   REASON_CODES,
   REVIEW_DOCUMENTS,
@@ -1486,10 +1486,10 @@ describe("the outcome is derived, never reported, and facts the calibration cann
   });
 });
 
-describe("the calibration model: Sonnet is accepted here and refused everywhere else", () => {
+describe("the calibration model: a listed model is accepted, an unlisted one is refused", () => {
   const SONNET = "claude-sonnet-5-5";
 
-  test("a Sonnet report parses with the calibration list and is refused by the default parser", () => {
+  test("a Sonnet report parses with either list; a model on neither is refused", () => {
     const { facts } = evidenceOf(readEntry(join(mutatedCorpus, "nm000001")));
     const report = assemblePublicationReport(PASS_OUTPUT, facts, SONNET);
     expect(report.model).toBe(SONNET);
@@ -1511,15 +1511,18 @@ describe("the calibration model: Sonnet is accepted here and refused everywhere 
       },
     };
     expect(parsePublicationReviewReport(raw, { models: CALIBRATION_MODELS }).model).toBe(SONNET);
-    expect(() => parsePublicationReviewReport(raw)).toThrow(PublicationReviewReportError);
-    try {
-      parsePublicationReviewReport(raw);
-    } catch (e) {
-      expect((e as PublicationReviewReportError).code).toBe("bad_model");
+    expect(parsePublicationReviewReport(raw).model).toBe(SONNET);
+    // A model on neither list is refused by both parsers.
+    const unlisted = { ...raw, model: "claude-haiku-4-5" };
+    for (const options of [{}, { models: CALIBRATION_MODELS }]) {
+      try {
+        parsePublicationReviewReport(unlisted, options);
+        throw new Error("parsed");
+      } catch (e) {
+        expect((e as PublicationReviewReportError).code).toBe("bad_model");
+      }
     }
-    expect([...PUBLICATION_REVIEW_MODELS]).not.toContain(SONNET);
-    // The calibration list names exactly the production model and Sonnet.
-    expect([...CALIBRATION_MODELS]).toEqual(["claude-haiku-5-5", SONNET]);
+    expect([...CALIBRATION_MODELS]).toEqual([...PUBLICATION_REVIEW_MODELS]);
   });
 
   test("calibrate sends the model it was given and records it", async () => {
@@ -1908,7 +1911,7 @@ describe('main(["calibrate", ...]) never posts, and refuses everything that woul
       ["--limit", "3", "--limit", "4"],
       ["--limit", "0"],
       ["--limit", "two"],
-      ["--model", "claude-opus-5-5"],
+      ["--model", "claude-opus-4-5"],
       ["--model", "claude-haiku-5-5-latest"],
     ];
     for (const extra of cases) {

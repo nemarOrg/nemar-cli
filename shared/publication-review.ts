@@ -80,8 +80,17 @@ export const PUBLICATION_REVIEW_EFFORT = "high";
 export const RECORDED_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type RecordedEffort = (typeof RECORDED_EFFORTS)[number];
 
-/** The models a production report may name. A closed set, so a model change is a reviewed code change. */
-export const PUBLICATION_REVIEW_MODELS = ["claude-haiku-5-5"] as const;
+/**
+ * The models a production report may name. A closed set, so a model change is a reviewed code change.
+ * The first is the one the review calls; the others are accepted so the owner can compare models on
+ * the real queue (2026-11-27) by changing which model the workflow's script calls, and so a record
+ * made on any of them still reads back.
+ */
+export const PUBLICATION_REVIEW_MODELS = [
+  "claude-haiku-5-5",
+  "claude-sonnet-5-5",
+  "claude-opus-5-5",
+] as const;
 export type PublicationReviewModel = (typeof PUBLICATION_REVIEW_MODELS)[number];
 
 /**
@@ -89,7 +98,11 @@ export type PublicationReviewModel = (typeof PUBLICATION_REVIEW_MODELS)[number];
  * this list to {@link parsePublicationReviewReport}; the Worker's parser accepts the production
  * list alone. Verify the second id against the live model list when the calibration runs.
  */
-export const CALIBRATION_MODELS = ["claude-haiku-5-5", "claude-sonnet-5-5"] as const;
+export const CALIBRATION_MODELS = [
+  "claude-haiku-5-5",
+  "claude-sonnet-5-5",
+  "claude-opus-5-5",
+] as const;
 export type CalibrationModel = (typeof CALIBRATION_MODELS)[number];
 
 /** Any model a parsed report may name: the production list, or the calibration's. */

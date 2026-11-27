@@ -484,6 +484,34 @@ describe("disagreement goes to the administrators", () => {
       expect(h.review(id)).toMatchObject({ state: "errored", detail: "report_invalid" });
     });
   });
+
+  // The owner compares models on the real queue (2026-11-27): a first run on any listed model is
+  // stored, unless it is in the confirming run's exact shape (the case above).
+  for (const [model, effort, dataset] of [
+    ["claude-opus-5-5", "medium", "nm000482"],
+    ["claude-sonnet-5-5", "high", "nm000483"],
+    ["claude-haiku-5-5", "max", "nm000484"],
+  ] as const) {
+    test(`a first run on ${model} at ${effort} is stored as reported`, async () => {
+      await accounts();
+      await withFakeResend(async () => {
+        const { requestId } = seedScreenedRequest(h.db, { datasetId: dataset, mailed: false });
+        const id = seedPublicationReview(h.db, {
+          requestId,
+          datasetId: dataset,
+          state: "dispatched",
+          claimed: true,
+        });
+        const body = reportBody({ model: model === HAIKU ? "claude-opus-5-5" : model, effort });
+        body.model = model;
+        (body.record as { models: Array<{ model: string; effort: string }> }).models = [
+          { model, effort },
+        ];
+        await h.result(id, { outcome: "reported", report: body }, undefined, undefined, dataset);
+        expect(h.review(id)).toMatchObject({ state: "reported" });
+      });
+    });
+  }
 });
 
 // Each `{ outcome, report }` passed through `confirmRun` above: a bare body is the default shape.
