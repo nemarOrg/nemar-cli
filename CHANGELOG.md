@@ -18,9 +18,10 @@ earlier releases are described only by their generated notes.
 ### Changed
 
 - **nemar-ica is handed a serving index built after its version's tag when only NEMAR's own metadata changed since (ADR 0144).**
-  One GitHub compare of the tag's commit and the index's admits the index when every path between them is under `.nemar/` or `.github/`, or is a `.gitattributes` file; the job's specification records both commits (`ahead_of_tag`), and the run is handed the index's commit as `--source-commit`, which is the one the recipe accepts the index with.
+  One GitHub compare of the tag's commit and the index's admits the index when every path between them is under `.nemar/` or `.github/`, or is a `.gitattributes` file whose patch adds or removes no `eol=crlf`, `working-tree-encoding`, `ident` or non-annex `filter`.
+  The run stays the tag's: it is handed the tag's commit and keyed by it, and the job's specification records the index's own commit as provenance (`ahead_of_tag`).
   Any other commit is refused with a word that says why (`index_behind_tag`, `index_diverged`, `index_content_changed`, `index_delta_unlisted`) and the run goes ahead without the index; a compare GitHub cannot answer defers the run.
-  Of 40 sampled datasets whose index is newer than their tag, 33 are now admitted (#2461).
+  The recipe uses an admitted index's rows once nemar-process takes the arguments that admit it; until then it skips those views.
 
 ### Fixed
 

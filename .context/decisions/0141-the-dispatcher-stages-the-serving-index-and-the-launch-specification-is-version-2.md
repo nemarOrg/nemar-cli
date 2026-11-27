@@ -12,7 +12,7 @@ Every key ADR 0140 defines keeps its bytes.
 
 Refined by [ADR 0143](0143-every-worker-dispatched-run-of-the-archive-is-handed-its-tags-commit-or-waits-for-it.md) (2026-11-27), which also supersedes the last clause of ADR 0121 decision 10: every Worker-dispatched run of the archive is handed its tag's commit, staged index or not, and the tag is read before the index; a GitHub fault reading it defers the run without end and an absent tag refuses it, so decision 3's deferral covers the index's own faults only.
 
-Decision 2 is superseded in part by [ADR 0144](0144-a-serving-index-ahead-of-its-tag-by-nemars-own-metadata-is-staged-with-its-commit.md) (2026-11-27): an index whose commit is ahead of the tag's by NEMAR-owned metadata only (`.nemar/`, `.github/`, `.gitattributes`) is staged, recorded with both commits, and the run is handed the index's commit; any other commit is refused with a word that says why.
+Decision 2 is superseded in part by [ADR 0144](0144-a-serving-index-ahead-of-its-tag-by-nemars-own-metadata-is-staged-as-the-tags.md) (2026-11-27): an index whose commit is ahead of the tag's by NEMAR-owned metadata only (`.nemar/`, `.github/`, and a `.gitattributes` edit that cannot change checkout bytes) is staged as the tag's, its own commit recorded as provenance, and the run is still handed the tag's commit; any other commit is refused with a word that says why.
 
 ## Context
 

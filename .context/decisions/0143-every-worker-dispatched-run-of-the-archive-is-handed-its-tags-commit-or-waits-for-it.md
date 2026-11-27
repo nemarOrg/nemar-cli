@@ -8,8 +8,6 @@ Supersedes the last clause of [ADR 0121](0121-a-job-names-its-executor-and-its-a
 Refines [ADR 0141](0141-the-dispatcher-stages-the-serving-index-and-the-launch-specification-is-version-2.md) decisions 3 and 4: the tag's commit is read before the serving index, a fault reading it defers without end, and an absent tag refuses.
 Ruled on 2026-11-27, with nemarOrg/nemar-cli#2460 and the data mismatch of nemarOrg/nemar-cli#2461.
 
-Refined by [ADR 0144](0144-a-serving-index-ahead-of-its-tag-by-nemars-own-metadata-is-staged-with-its-commit.md) (2026-11-27): a run handed a serving index admitted ahead of its tag is handed that index's commit instead of the tag's.
-
 ## Context
 
 [ADR 0123](0123-derivatives-live-in-a-keyed-store-named-by-what-they-read.md) decision 3 keys a derivative of the archive (`bids`) by `git:` and the commit its files were read at, and the recipe states that commit only when it is handed one (`--source-commit`, recorded as `extensions.nemar.dataset.source_commit`).
