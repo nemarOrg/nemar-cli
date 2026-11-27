@@ -654,7 +654,7 @@
     "test/api-export-surface.unit.test.ts": 34,
     "test/apply-flag.unit.test.ts": 17,
     "test/approval-dispatch-token.test.ts": 18,
-    "test/approve-publication-probe.unit.test.ts": 1708,
+    "test/approve-publication-path.unit.test.ts": 1708,
     "test/attestation.unit.test.ts": 28,
     "test/audit-log-statement.unit.test.ts": 3,
     "test/audit-manifest-checksums.test.ts": 18,

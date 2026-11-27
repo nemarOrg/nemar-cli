@@ -47,6 +47,10 @@
  * FAILURE MODES, each for the next `times` matching requests (default 1), consumed in order:
  *  - `fail(route, status)`: that HTTP status with a JSON error body;
  *  - `hang(route)`: never answers until the client gives up;
+ *  - `delay(route, ms)`: waits `ms` milliseconds, then answers as it would have (a slow tenant; what
+ *    the request does, such as recording a subscription, happens only after the wait). A request takes
+ *    ONE mode from the queue, so a `delay` uses up that request's slot: it cannot be combined with
+ *    `fail`, `hang`, `nonJson` or `respond` on the same request (those apply to the requests after);
  *  - `nonJson(route)`: a 200 whose body is HTML, as a proxy's error page is;
  *  - `respond(route, status, body, times, headers)`: that status, body and headers, as JSON text unless
  *    the body is a string, a `Uint8Array` (sent as bytes), a `ReadableStream` (sent chunked, with no
@@ -149,6 +153,10 @@ export interface TapisStandin {
   setOutput(uuid: string, path: string, content: string | Uint8Array): void;
   fail(route: StandinRoute, status: number, times?: number): void;
   hang(route: StandinRoute, times?: number): void;
+  /** Answer the route normally, but only after `ms` milliseconds. */
+  delay(route: StandinRoute, ms: number, times?: number): void;
+  /** How many uses of injected modes (`fail`, `hang`, `delay`, ...) are still queued for a route. */
+  queued(route: StandinRoute): number;
   nonJson(route: StandinRoute, times?: number): void;
   respond(
     route: StandinRoute,
@@ -181,6 +189,7 @@ export interface TapisStandin {
 type Behaviour =
   | { route: StandinRoute; kind: "fail"; status: number; left: number }
   | { route: StandinRoute; kind: "hang"; left: number }
+  | { route: StandinRoute; kind: "delay"; ms: number; left: number }
   | { route: StandinRoute; kind: "nonJson"; left: number }
   | {
       route: StandinRoute;
@@ -628,7 +637,11 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
     log.push(entry);
     const answer = async (): Promise<Response> => {
       if (route === "unknown") return json(errorBody("No such route."), 404);
-      const forced = nextBehaviour(route);
+      let forced = nextBehaviour(route);
+      if (forced?.kind === "delay") {
+        await Bun.sleep(forced.ms);
+        forced = undefined;
+      }
       if (forced) {
         if (forced.kind === "fail") {
           return json(errorBody(`Forced ${forced.status}.`), forced.status);
@@ -954,6 +967,9 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
     },
     fail: (route, status, times = 1) => addBehaviour({ route, kind: "fail", status, left: times }),
     hang: (route, times = 1) => addBehaviour({ route, kind: "hang", left: times }),
+    delay: (route, ms, times = 1) => addBehaviour({ route, kind: "delay", ms, left: times }),
+    queued: (route) =>
+      behaviours.filter((b) => b.route === route).reduce((sum, b) => sum + b.left, 0),
     nonJson: (route, times = 1) => addBehaviour({ route, kind: "nonJson", left: times }),
     respond: (route, status, body, times = 1, headers = {}) =>
       addBehaviour({ route, kind: "respond", status, body, left: times, headers }),

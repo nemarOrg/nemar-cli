@@ -35,36 +35,19 @@
 
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
+import {
+  DECLARED_PATH,
+  DEPLOYED_ONBOARD,
+  LIVE_ENV_VAR,
+  declaredRaw,
+} from "./helpers/deployed-dataset-workflows";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const LOCAL_COPY = join(REPO_ROOT, ".github", "dataset-workflows", "onboard-openneuro.yml");
 
-/** Set by the `unit-pure` job to the sparse checkout it made. A relative value is
- *  resolved against the repo root, which is the workflow's working directory. */
-const LIVE_ENV_VAR = "NEMAR_DATASET_WORKFLOW_LIVE";
-const declaredRaw = process.env[LIVE_ENV_VAR];
-const DECLARED_PATH =
-  declaredRaw && declaredRaw.trim() !== ""
-    ? isAbsolute(declaredRaw)
-      ? declaredRaw
-      : join(REPO_ROOT, declaredRaw)
-    : null;
-
-/**
- * Where a `.github` checkout is likely to sit for a developer.
- *
- * This repo is usually a WORKTREE (`epic-import-observability/`, `skew-fix/`, ...)
- * rather than `nemar-cli/` itself, so the search is relative to the repo root
- * whatever it is called. Only consulted when the variable is unset.
- */
-const SIBLING_CANDIDATES = [
-  join(REPO_ROOT, "..", ".github", ".github", "workflows", "onboard-openneuro.yml"),
-  join(REPO_ROOT, "..", "dot-github", ".github", "workflows", "onboard-openneuro.yml"),
-  join(REPO_ROOT, "..", "..", ".github", ".github", "workflows", "onboard-openneuro.yml"),
-];
-
-const found = DECLARED_PATH ?? SIBLING_CANDIDATES.find((p) => existsSync(p)) ?? null;
+/** The deployed copy: the declared path, else a sibling checkout (see the helper). */
+const found = DEPLOYED_ONBOARD;
 
 /**
  * The local copy is checked unconditionally, because it is in this repo and every
