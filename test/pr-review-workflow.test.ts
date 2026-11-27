@@ -286,6 +286,13 @@ describe("what it is allowed to hold", () => {
     expect(env.PR_REVIEW_CALLBACK_TOKEN).toBe("${{ github.event.client_payload.callback_token }}");
   });
 
+  test("the publication review's identity is read only by the federation check, to refuse it", () => {
+    const check = step("Check the federation configuration").env ?? {};
+    expect(check.OTHER_RULE).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_FEDERATION_RULE_ID }}");
+    expect(check.OTHER_ACCOUNT).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_SERVICE_ACCOUNT_ID }}");
+    expect([...SRC.matchAll(/vars\.ANTHROPIC_PUBLICATION_REVIEW_/g)]).toHaveLength(2);
+  });
+
   test("no API key is configured anywhere in the file", () => {
     expect(SRC).not.toMatch(/ANTHROPIC_API_KEY|secrets\.ANTHROPIC/);
   });
@@ -685,8 +692,8 @@ describe("the shell steps, run for real", () => {
     PR_REVIEW_CALLBACK_TOKEN: "token-for-the-test",
   };
 
-  async function runStepScript(name: string, env: Record<string, string>) {
-    const dir = mkdtempSync(join(tmpdir(), "pr-review-step-"));
+  async function runStepScript(name: string, env: Record<string, string>, into?: string) {
+    const dir = into ?? mkdtempSync(join(tmpdir(), "pr-review-step-"));
     const out = join(dir, "output");
     const genv = join(dir, "env");
     writeFileSync(out, "");
@@ -721,6 +728,56 @@ describe("the shell steps, run for real", () => {
       envFile: readFileSync(genv, "utf8"),
     };
   }
+
+  async function runFederationCheck(env: Record<string, string>) {
+    const dir = mkdtempSync(join(tmpdir(), "pr-review-federation-"));
+    // A stand-in for the reporter the validate step writes: it records the word it was given.
+    writeFileSync(
+      join(dir, "report-error.sh"),
+      '#!/usr/bin/env bash\necho "$1" >> "$RUNNER_TEMP/reported"\n',
+      {
+        mode: 0o755,
+      },
+    );
+    const r = await runStepScript("Check the federation configuration", env, dir);
+    const reported = existsSync(join(dir, "reported"))
+      ? readFileSync(join(dir, "reported"), "utf8")
+      : "";
+    return { ...r, reported };
+  }
+
+  const OWN = {
+    ...GOOD,
+    RULE: "fdrl_pull_request",
+    ORG: "org",
+    ACCOUNT: "svac_pull_request",
+    WORKSPACE: "wrkspc",
+    OTHER_RULE: "fdrl_publication",
+    OTHER_ACCOUNT: "svac_publication",
+  };
+
+  test("federation: its own rule and account pass the check", async () => {
+    const r = await runFederationCheck(OWN);
+    expect(r.status).toBe(0);
+    expect(r.reported).toBe("");
+  });
+
+  for (const [what, over] of [
+    ["the rule", { RULE: "fdrl_publication" }],
+    ["the service account", { ACCOUNT: "svac_publication" }],
+  ] as const) {
+    test(`federation: ${what} copied from the publication review is refused as a sign-in failure`, async () => {
+      const r = await runFederationCheck({ ...OWN, ...over });
+      expect(r.status).toBe(1);
+      expect(r.reported).toBe("auth_failed\n");
+      expect(r.stdout).toContain("also the publication review's");
+    });
+  }
+
+  test("federation: the publication review unset (today) is not a match", async () => {
+    const r = await runFederationCheck({ ...OWN, OTHER_RULE: "", OTHER_ACCOUNT: "" });
+    expect(r.status).toBe(0);
+  });
 
   test("validate: a good dispatch picks the origin from the table and writes an executable reporter", async () => {
     const r = await runStepScript("Validate the dispatch", GOOD);

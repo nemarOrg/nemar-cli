@@ -446,8 +446,16 @@ describe("what it is allowed to hold", () => {
     expect(env.ACCOUNT).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_SERVICE_ACCOUNT_ID }}");
     expect(env.ORG).toBe("${{ vars.ANTHROPIC_ORGANIZATION_ID }}");
     expect(env.WORKSPACE).toBe("${{ vars.ANTHROPIC_WORKSPACE_ID }}");
-    // Another review's identity is never the one this job signs in with.
-    expect(SRC).not.toMatch(/vars\.ANTHROPIC_(FEDERATION_RULE_ID|SERVICE_ACCOUNT_ID)\b/);
+    // The pull-request review's identity is read only by this check, and only to refuse it; the
+    // model step never signs in with it.
+    expect(env.OTHER_RULE).toBe("${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}");
+    expect(env.OTHER_ACCOUNT).toBe("${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}");
+    const others = [...SRC.matchAll(/vars\.ANTHROPIC_(FEDERATION_RULE_ID|SERVICE_ACCOUNT_ID)\b/g)];
+    expect(others).toHaveLength(2);
+    const model = step("Review").env ?? {};
+    expect(JSON.stringify(model)).not.toMatch(
+      /vars\.ANTHROPIC_(FEDERATION_RULE_ID|SERVICE_ACCOUNT_ID)\b/,
+    );
   });
 
   test("no API key is configured anywhere in the file", () => {
@@ -639,7 +647,7 @@ describe("failure and logging", () => {
         ).toEqual({ kind: "error", error: word as never });
       }
     }
-    expect(seen).toBe(2);
+    expect(seen).toBe(3);
   });
 
   test("a missing federation variable is reported as a sign-in failure, with a clear message", () => {
@@ -762,6 +770,56 @@ describe("the shell steps, run for real", () => {
       envFile: readFileSync(genv, "utf8"),
     };
   }
+
+  async function runFederationCheck(env: Record<string, string>) {
+    const dir = mkdtempSync(join(tmpdir(), "publication-review-federation-"));
+    // A stand-in for the reporter the validate step writes: it records the word it was given.
+    writeFileSync(
+      join(dir, "report-error.sh"),
+      '#!/usr/bin/env bash\necho "$1" >> "$RUNNER_TEMP/reported"\n',
+      {
+        mode: 0o755,
+      },
+    );
+    const r = await runStepScript("Check the federation configuration", env, dir);
+    const reported = existsSync(join(dir, "reported"))
+      ? readFileSync(join(dir, "reported"), "utf8")
+      : "";
+    return { ...r, reported };
+  }
+
+  const OWN = {
+    ...GOOD,
+    RULE: "fdrl_publication",
+    ORG: "org",
+    ACCOUNT: "svac_publication",
+    WORKSPACE: "wrkspc",
+    OTHER_RULE: "fdrl_pull_request",
+    OTHER_ACCOUNT: "svac_pull_request",
+  };
+
+  test("federation: its own rule and account pass the check", async () => {
+    const r = await runFederationCheck(OWN);
+    expect(r.status).toBe(0);
+    expect(r.reported).toBe("");
+  });
+
+  for (const [what, over] of [
+    ["the rule", { RULE: "fdrl_pull_request" }],
+    ["the service account", { ACCOUNT: "svac_pull_request" }],
+  ] as const) {
+    test(`federation: ${what} copied from the pull-request review is refused as a sign-in failure`, async () => {
+      const r = await runFederationCheck({ ...OWN, ...over });
+      expect(r.status).toBe(1);
+      expect(r.reported).toBe("auth_failed\n");
+      expect(r.stdout).toContain("also the pull-request review's");
+    });
+  }
+
+  test("federation: the pull-request review unset is not a match", async () => {
+    const r = await runFederationCheck({ ...OWN, OTHER_RULE: "", OTHER_ACCOUNT: "" });
+    expect(r.status).toBe(0);
+  });
 
   test("validate: a good dispatch picks the origin from the table and writes an executable reporter", async () => {
     const r = await runStepScript("Validate the dispatch", GOOD);
