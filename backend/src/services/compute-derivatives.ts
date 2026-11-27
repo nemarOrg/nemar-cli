@@ -43,6 +43,8 @@
 import {
   COMPUTE_RECIPES,
   RECIPE_PRODUCT_OUTPUT_PREFIX,
+  RECIPE_SERVING_INDEX_COMMIT_FLAG,
+  RECIPE_SERVING_INDEX_DELTA_PATH_FLAG,
   RECIPE_SERVING_INDEX_FLAG,
   RECIPE_SOURCE_COMMIT_FLAG,
   type RecipeInput,
@@ -402,18 +404,20 @@ function tableHasTransientCode(text: string): boolean | null {
   return false;
 }
 
-/** Every value a specification's arguments hand as `--source-commit` (the flag and its value, or `flag=value`). */
-function handedSourceCommits(args: readonly string[]): string[] {
+/** Every value a specification's arguments hand with `flag` (the flag and its value, or `flag=value`). */
+function flagValues(args: readonly string[], flag: string): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i] as string;
-    if (a === RECIPE_SOURCE_COMMIT_FLAG) out.push(args[i + 1] ?? "");
-    else if (a.startsWith(`${RECIPE_SOURCE_COMMIT_FLAG}=`)) {
-      out.push(a.slice(RECIPE_SOURCE_COMMIT_FLAG.length + 1));
-    }
+    if (a === flag) out.push(args[i + 1] ?? "");
+    else if (a.startsWith(`${flag}=`)) out.push(a.slice(flag.length + 1));
   }
   return out;
 }
+
+/** Every value a specification's arguments hand as `--source-commit`. */
+const handedSourceCommits = (args: readonly string[]): string[] =>
+  flagValues(args, RECIPE_SOURCE_COMMIT_FLAG);
 
 /**
  * Decide one stamp, in the order of ADR 0123 decision 7 and card V1b item 9, the first check that fails
@@ -460,9 +464,37 @@ export async function keyStamp(stores: Stores, stamp: CandidateStamp): Promise<K
         if (flagged !== 1 || at < 0 || spec.args[at + 1] !== SERVING_INDEX_CONTAINER_PATH) {
           return unkeyable("serving_index_unattested");
         }
+        // An index admitted ahead of its tag (ADR 0144) is handed with the TAG's commit, the one its admission
+        // was compared with, and attested with the index's own commit and the recorded number of changed paths;
+        // the index's commit is provenance and is not keyed. An index of the tag's own commit is attested by
+        // nothing.
+        const ahead = staged.ahead_of_tag;
+        const attested = flagValues(spec.args, RECIPE_SERVING_INDEX_COMMIT_FLAG);
+        const deltaPaths = flagValues(spec.args, RECIPE_SERVING_INDEX_DELTA_PATH_FLAG);
+        if (ahead !== undefined) {
+          const handed = handedSourceCommits(spec.args);
+          if (
+            handed.length !== 1 ||
+            handed[0] !== ahead.tag_commit ||
+            attested.length !== 1 ||
+            attested[0] !== ahead.index_commit ||
+            deltaPaths.length !== ahead.changed_path_count
+          ) {
+            return unkeyable("serving_index_unattested");
+          }
+        } else if (attested.length > 0 || deltaPaths.length > 0) {
+          return unkeyable("serving_index_unattested");
+        }
         servingIndex = `sha256:${staged.sha256}`;
       } else {
-        if (flagged > 0) return unkeyable("serving_index_unattested");
+        // No index staged: nothing names one, and nothing attests one.
+        if (
+          flagged > 0 ||
+          flagValues(spec.args, RECIPE_SERVING_INDEX_COMMIT_FLAG).length > 0 ||
+          flagValues(spec.args, RECIPE_SERVING_INDEX_DELTA_PATH_FLAG).length > 0
+        ) {
+          return unkeyable("serving_index_unattested");
+        }
         servingIndex = SERVING_INDEX_NONE;
       }
     }

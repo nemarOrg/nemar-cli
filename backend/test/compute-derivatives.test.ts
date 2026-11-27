@@ -2605,7 +2605,8 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     if (commit.kind !== "commit") throw new Error(`no commit: ${commit.kind}`);
     const decided = await servingIndexForRun(env, ica, "bids", id, "v1.0.0", commit.commit);
     if (decided.kind !== "run") throw new Error(`not run: ${decided.kind}`);
-    expect(decided.servingIndex).toMatchObject({ staged: false, reason: "source_commit_differs" });
+    // GitHub shows no comparison of the two commits here: not on the tag's line, so not admitted (ADR 0144).
+    expect(decided.servingIndex).toMatchObject({ staged: false, reason: "index_diverged" });
     const image = { ref: RUNTIME_IMAGE, digest: RUNTIME_IMAGE_DIGEST };
     const spec = recipeJobSpec(ica, {
       datasetId: id,
@@ -2661,6 +2662,100 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     expect(await skipWord(env, made.stampId)).toBeUndefined();
   });
 
+  test("a run handed an index admitted ahead of its tag (ADR 0144) is still handed the tag's commit, and is keyed by git: and the TAG's commit and the index's digest; the index's commit is provenance (MUTATION: hand the index's commit)", async () => {
+    const env = envOf();
+    const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
+    const id = await dataset();
+    // Built from SOURCE, ahead of the tag (COMMIT) by NEMAR's own metadata only.
+    github.index(id, { source_commit: SOURCE, store_count: 0, stores: [] });
+    github.compare(id, COMMIT, SOURCE, {
+      status: "ahead",
+      behind_by: 0,
+      ahead_by: 2,
+      files: [
+        { filename: ".nemar/metadata.json", status: "modified" },
+        {
+          filename: ".gitattributes",
+          status: "modified",
+          patch:
+            "@@ -1 +1 @@\n-*.tsv text eol=lf annex.largefiles=largerthan=1mb\n+*.tsv text eol=lf",
+        },
+      ],
+    });
+    // Every `.gitattributes` at the index's commit is listed and read whole: here the changed one alone.
+    github.tree(id, SOURCE, {
+      paths: [".gitattributes", ".nemar/metadata.json", "participants.tsv"],
+    });
+    github.contents(id, SOURCE, ".gitattributes", "* annex.backend=SHA256E\n*.tsv text eol=lf\n");
+    const commit = await sourceCommitForRun(env, ica, "bids", id, "v1.0.0");
+    if (commit.kind !== "commit") throw new Error(`no commit: ${commit.kind}`);
+    const decided = await servingIndexForRun(env, ica, "bids", id, "v1.0.0", commit.commit);
+    if (decided.kind !== "run" || !decided.servingIndex.staged) throw new Error("not staged");
+    const spec = recipeJobSpec(ica, {
+      datasetId: id,
+      tag: "v1.0.0",
+      input: "bids",
+      image: { ref: RUNTIME_IMAGE, digest: RUNTIME_IMAGE_DIGEST },
+      env: { ENVIRONMENT: "development" },
+      sourceCommit: commit.commit,
+      servingIndex: decided.servingIndex,
+    });
+    const base = recipeArguments({
+      datasetId: id,
+      tag: "v1.0.0",
+      imageDigest: RUNTIME_IMAGE_DIGEST,
+    });
+    const added = spec.args.slice(base.length);
+    expect(added).toEqual([
+      "--serving-index",
+      SERVING_INDEX_CONTAINER_PATH,
+      RECIPE_SOURCE_COMMIT_FLAG,
+      COMMIT,
+      "--serving-index-commit",
+      SOURCE,
+      "--serving-index-delta-path",
+      ".gitattributes",
+      "--serving-index-delta-path",
+      ".nemar/metadata.json",
+    ]);
+    expect(spec.serving_index).toMatchObject({
+      ahead_of_tag: { tag_commit: COMMIT, index_commit: SOURCE, changed_path_count: 2 },
+    });
+    // The recipe states the commit it is handed, the tag's (nemar-process `identity.source_commit`).
+    const made = await icaBidsJob({
+      id,
+      sourceCommit: COMMIT,
+      recorded: { serving_index: spec.serving_index, args: added },
+    });
+    expect(await syncAll(env)).toMatchObject({
+      created: 1,
+      stored: 1,
+      derivative_unkeyable: {},
+      errored: 0,
+    });
+    const row = (await one(env)) as Der & { serving_index: string | null };
+    const index = `sha256:${decided.servingIndex.sha256}`;
+    expect([row.serving_index, row.input_digest]).toEqual([index, `git:${COMMIT}`]);
+    const stamp = await env.DB.prepare(
+      "SELECT version, recipe_version, engine FROM compute_pipeline_stamps WHERE id = ?1",
+    )
+      .bind(made.stampId)
+      .first<Record<string, string>>();
+    expect(row.key).toBe(
+      await derivativeKey({
+        dataset: id,
+        version: stamp?.version as string,
+        recipe: "nemar-ica",
+        recipe_version: stamp?.recipe_version as string,
+        engine: stamp?.engine as string,
+        input: "bids",
+        profile: "archive",
+        input_digest: `git:${COMMIT}`,
+        serving_index: index,
+      }),
+    );
+  });
+
   test("a run recorded with no index staged is keyed none, and the word does not reach the key", async () => {
     const env = envOf();
     await icaBidsJob({
@@ -2694,6 +2789,86 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
       {
         serving_index: { reason: "no_index" },
         args: ["--serving-index", SERVING_INDEX_CONTAINER_PATH],
+      },
+    ],
+    [
+      "an index admitted ahead of its tag handed with another commit than the tag commit it was compared with (ADR 0144)",
+      {
+        serving_index: {
+          sha256: STAGED_HEX,
+          size: 812,
+          ahead_of_tag: {
+            tag_commit: "7".repeat(40),
+            index_commit: "8".repeat(40),
+            changed_path_count: 1,
+          },
+        },
+        args: STAGED_ARGS,
+      },
+    ],
+    [
+      "an index admitted ahead of its tag whose index commit the arguments do not attest (ADR 0144)",
+      {
+        serving_index: {
+          sha256: STAGED_HEX,
+          size: 812,
+          ahead_of_tag: {
+            tag_commit: COMMIT40,
+            index_commit: "8".repeat(40),
+            changed_path_count: 1,
+          },
+        },
+        args: [...STAGED_ARGS, "--serving-index-delta-path", ".nemar/x"],
+      },
+    ],
+    [
+      "an index admitted ahead of its tag attested with another index commit",
+      {
+        serving_index: {
+          sha256: STAGED_HEX,
+          size: 812,
+          ahead_of_tag: {
+            tag_commit: COMMIT40,
+            index_commit: "8".repeat(40),
+            changed_path_count: 1,
+          },
+        },
+        args: [
+          ...STAGED_ARGS,
+          "--serving-index-commit",
+          "9".repeat(40),
+          "--serving-index-delta-path",
+          ".nemar/x",
+        ],
+      },
+    ],
+    [
+      "an index admitted ahead of its tag attested with another number of changed paths",
+      {
+        serving_index: {
+          sha256: STAGED_HEX,
+          size: 812,
+          ahead_of_tag: {
+            tag_commit: COMMIT40,
+            index_commit: "8".repeat(40),
+            changed_path_count: 1,
+          },
+        },
+        args: [...STAGED_ARGS, "--serving-index-commit", "8".repeat(40)],
+      },
+    ],
+    [
+      "an index of the tag's own commit attested as if it were ahead",
+      {
+        serving_index: { sha256: STAGED_HEX, size: 812 },
+        args: [...STAGED_ARGS, "--serving-index-commit", "8".repeat(40)],
+      },
+    ],
+    [
+      "no index staged, but an attestation in the arguments",
+      {
+        serving_index: { reason: "no_index" },
+        args: ["--source-commit", COMMIT40, "--serving-index-delta-path", ".nemar/x"],
       },
     ],
   ] as const) {

@@ -687,11 +687,14 @@ export const COMPUTE_SERVING_INDEX_MAX_BYTES = 64 * 1024 * 1024;
 
 /**
  * Why the Worker staged no serving index for a job of a recipe that keys one (ADR 0141), recorded in the
- * job's specification: a fixed word, never a path or a message. `source_commit_differs` is an index built
- * from another commit than the version's tag (a later conversion, or a commit that differs by metadata only,
- * which the Zarr input's `metadata_only` allows and this never does); `index_unusable` is an index the recipe
- * would refuse (not strict JSON, or not the shape it reads); the others say the index or the tag could not
- * be read, or the copy could not be kept.
+ * job's specification: a fixed word, never a path or a message. `index_unusable` is an index the recipe would
+ * refuse (not strict JSON, or not the shape it reads). An index built from another commit than the version's
+ * tag is staged when that commit is ahead of the tag by NEMAR-owned metadata only (ADR 0144); otherwise the word
+ * says why not: `index_behind_tag` (the tag is ahead of the index's commit), `index_diverged` (neither contains
+ * the other, or the repository does not have the index's commit), `index_content_changed` (a path between them
+ * is not NEMAR-owned metadata), `index_delta_unlisted` (GitHub lists too many changed files to show them all).
+ * `source_commit_differs` is the word ADR 0141 recorded before the comparison existed. The others say the index or
+ * GitHub could not be read, or the copy could not be kept.
  */
 export const SERVING_INDEX_ABSENT_REASONS = [
   "no_index",
@@ -705,18 +708,48 @@ export const SERVING_INDEX_ABSENT_REASONS = [
   "no_github_credentials",
   "token_mint_failed",
   "index_not_stored",
+  "index_behind_tag",
+  "index_diverged",
+  "index_content_changed",
+  "index_delta_unlisted",
 ] as const;
 
 export type ServingIndexAbsentReason = (typeof SERVING_INDEX_ABSENT_REASONS)[number];
 
+/** A full commit id: 40 lowercase hexadecimal digits. */
+const commitSchema = z.string().regex(/^[0-9a-f]{40}$/);
+
+/**
+ * What was admitted when a staged index was built from a commit AHEAD of the version's tag by NEMAR-owned
+ * metadata only (ADR 0144), as provenance: the tag's commit (the run's `--source-commit` and identity), the index's
+ * commit, and how many paths changed between them. Absent when the index's commit is the tag's.
+ */
+const servingIndexAheadSchema = z
+  .object({
+    tag_commit: commitSchema,
+    index_commit: commitSchema,
+    changed_path_count: safeInt(0, 600),
+  })
+  .strict()
+  .refine((a) => a.tag_commit !== a.index_commit, {
+    message: "an index ahead of its tag names two commits",
+  });
+
 /**
  * What a recipe job's specification records of the serving index (ADR 0141): the SHA-256 and size of the
- * bytes the Worker staged, or the word for why it staged none. Only a recipe job carries it (a person's
- * job is refused it); it is the platform's statement of what the run was handed, which the derivative key
- * reads (ADR 0140).
+ * bytes the Worker staged, with what was admitted when the index is ahead of the tag (ADR 0144), or the word
+ * for why it staged none. Only a recipe job carries it (a person's job is refused it); it is the platform's
+ * statement of what the run was handed, which the derivative key reads (ADR 0140). The launch specification
+ * carries only the digest and size.
  */
 const servingIndexRefSchema = z.union([
-  z.object({ sha256: sha256Schema, size: safeInt(1, COMPUTE_SERVING_INDEX_MAX_BYTES) }).strict(),
+  z
+    .object({
+      sha256: sha256Schema,
+      size: safeInt(1, COMPUTE_SERVING_INDEX_MAX_BYTES),
+      ahead_of_tag: servingIndexAheadSchema.optional(),
+    })
+    .strict(),
   z.object({ reason: z.enum(SERVING_INDEX_ABSENT_REASONS) }).strict(),
 ]);
 

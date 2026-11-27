@@ -649,6 +649,61 @@ export function recipeSourceCommitArguments(sourceCommit: string): string[] {
 }
 
 /**
+ * The flag that attests the commit a staged serving index was built from, when it is ahead of the version's tag
+ * by NEMAR-owned metadata only (ADR 0144; nemar-process `nemar_ica/options.py`, nemarOrg/nemar-process#108).
+ */
+export const RECIPE_SERVING_INDEX_COMMIT_FLAG = "--serving-index-commit";
+/** The repeatable flag that names one path changed between the tag's commit and the index's (nemar-process#108). */
+export const RECIPE_SERVING_INDEX_DELTA_PATH_FLAG = "--serving-index-delta-path";
+
+/**
+ * The most changed paths a run handed an index ahead of its tag can carry. The recipe takes 32; a job's argument
+ * vector is at most 64 strings (`JobSpecSchema`), of which a run of the archive with an attested index uses 16
+ * (the archive's 10, `--serving-index` and its path, `--source-commit` and the tag's commit,
+ * `--serving-index-commit` and the index's), so 24 is what fits. The Worker refuses a larger delta
+ * (`index_delta_unlisted`) rather than pass part of it. The count is the only bound applied at admission: a
+ * non-ASCII path costs six bytes a UTF-16 unit in the launch specification, so 24 long non-ASCII paths can exceed
+ * `LAUNCH_VARIABLE_BYTES_MAX`, and then the specification does not build and the dispatch answers `invalid_spec`
+ * before the claim, with nothing written.
+ */
+export const RECIPE_SERVING_INDEX_MAX_DELTA_PATHS = 24;
+
+/**
+ * The arguments that attest an index built ahead of the version's tag (ADR 0144): `--serving-index-commit` and the
+ * index's commit, then one `--serving-index-delta-path` per changed path, a renamed file's old name included. They
+ * follow {@link recipeServingIndexArguments}, which hands the tag's commit as `--source-commit`. A commit that is not
+ * 40 lowercase hex digits or is the tag's, a path that is empty or given twice, or more paths than
+ * {@link RECIPE_SERVING_INDEX_MAX_DELTA_PATHS} is a programming error, never passed on: the Worker decides the paths
+ * and their rule (`isNemarOwnedMetadataPath`), and the recipe checks them again.
+ */
+export function recipeServingIndexAttestationArguments(input: {
+  tagCommit: string;
+  indexCommit: string;
+  deltaPaths: readonly string[];
+}): string[] {
+  if (!isSourceCommit(input.tagCommit) || !isSourceCommit(input.indexCommit)) {
+    throw new RangeError("a commit is 40 lowercase hex digits");
+  }
+  if (input.indexCommit === input.tagCommit) {
+    throw new RangeError("an index of the tag's own commit needs no attestation");
+  }
+  if (input.deltaPaths.length > RECIPE_SERVING_INDEX_MAX_DELTA_PATHS) {
+    throw new RangeError("more changed paths than a job can carry");
+  }
+  if (
+    input.deltaPaths.some((path) => typeof path !== "string" || path === "") ||
+    new Set(input.deltaPaths).size !== input.deltaPaths.length
+  ) {
+    throw new RangeError("a changed path is a non-empty string, given once");
+  }
+  return [
+    RECIPE_SERVING_INDEX_COMMIT_FLAG,
+    input.indexCommit,
+    ...input.deltaPaths.flatMap((path) => [RECIPE_SERVING_INDEX_DELTA_PATH_FLAG, path]),
+  ];
+}
+
+/**
  * The image digest a recipe job's arguments pass, or null when there is not exactly one well-formed
  * value for the flag (none, two, or a value that is not `sha256:` and 64 lowercase hex digits). Exactly
  * one: a second flag would let the recipe and the Worker read different values.
