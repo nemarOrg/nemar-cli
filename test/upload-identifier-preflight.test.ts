@@ -44,6 +44,7 @@ import {
   walkDatasetTree,
 } from "../src/lib/upload/identifier-preflight";
 import { version } from "../src/lib/version";
+import { overlapPaths, overlapRegistry } from "./helpers/overlap-readers";
 
 // ---------------------------------------------------------------------------------------
 // Real files
@@ -839,5 +840,18 @@ describe("a scan that threw is described by fixed words alone", () => {
 
   test("the contract's own word is kept, since it names the field and never a value", () => {
     expect(failureWord(new ReportError("scan-status"))).toBe("report-scan-status");
+  });
+});
+
+describe("heavy readers are bounded in the upload preflight (risk R15)", () => {
+  test("at most 2 EEGLAB scans overlap; BrainVision files still read in parallel", async () => {
+    const { readers, heavy, light } = overlapRegistry();
+    write("dataset_description.json", JSON.stringify({ Name: "Fixture", BIDSVersion: "1.9.0" }));
+    for (const path of overlapPaths(12, 24)) write(path, "x".repeat(64));
+    const scan = await scanLocalDataset(root, undefined, { readers });
+    expect(scan.read_by_format?.eeglab?.read).toBe(12);
+    expect(scan.read_by_format?.brainvision?.read).toBe(24);
+    expect(heavy.max).toBe(2);
+    expect(light.max).toBeGreaterThan(2);
   });
 });

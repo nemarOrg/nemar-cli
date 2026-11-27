@@ -53,6 +53,7 @@ import {
   tempDir,
 } from "./helpers/dataset-screen-fixture";
 import { gitAnnexGate } from "./helpers/git-annex-gate";
+import { overlapPaths, overlapRegistry } from "./helpers/overlap-readers";
 
 afterAll(cleanScratch);
 
@@ -804,4 +805,18 @@ describe("unreadable is not absent", () => {
       expect((await working(repo)).report.scan?.read_by_format?.edf?.read).toBe(1);
     },
   );
+});
+
+describe("heavy readers are bounded on the depositor's machine (risk R15)", () => {
+  test("at most 2 EEGLAB scans overlap; BrainVision files still read in parallel", async () => {
+    const { readers, heavy, light } = overlapRegistry();
+    const repo = new Repo("overlap", { git: false });
+    repo.file("dataset_description.json", DESCRIPTION);
+    for (const path of overlapPaths(12, 24)) repo.file(path, "x".repeat(64));
+    const screen = await screenLocalDataset(repo.dir, { committed: false, readers });
+    expect(screen.report.scan?.read_by_format?.eeglab?.read).toBe(12);
+    expect(screen.report.scan?.read_by_format?.brainvision?.read).toBe(24);
+    expect(heavy.max).toBe(2);
+    expect(light.max).toBeGreaterThan(2);
+  });
 });

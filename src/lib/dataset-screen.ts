@@ -64,7 +64,10 @@ import {
   ReadFailure,
   readerFor,
 } from "../../shared/identifier-readers.js";
-import { readerForEntry } from "../../shared/identifier-report-builder.js";
+import {
+  LOCAL_READER_CLASS_LIMITS,
+  readerForEntry,
+} from "../../shared/identifier-report-builder.js";
 import {
   type Copy,
   LOCAL_COPY,
@@ -597,6 +600,8 @@ export async function screenLocalDataset(
     const fromDisk = createLocalReader(readable);
     const ctx = createContext({
       fileConcurrency: 16,
+      // At most 2 MAT/EEGLAB, HDF5 or ZIP files at once on the depositor's machine (risk R15).
+      readerClassLimits: LOCAL_READER_CLASS_LIMITS,
       workerConcurrency: 1,
       limits: { ...LOCAL_SCAN_LIMITS },
       // A scan of given entries never fetches a manifest or a token. If it ever did, these make

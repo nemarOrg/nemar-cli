@@ -56,6 +56,8 @@ import {
   createContext,
   scanDatasetFromManifest,
 } from "../../../scripts/identifier-fleet-lib.js";
+import type { FormatReader } from "../../../shared/identifier-readers.js";
+import { LOCAL_READER_CLASS_LIMITS } from "../../../shared/identifier-report-builder.js";
 import { ACKNOWLEDGE_WHY, PREFLIGHT_REFUSAL } from "../../../shared/identifier-screen-copy.js";
 import {
   type AcknowledgedVia,
@@ -218,15 +220,19 @@ export function createLocalReader(
  * Screen a dataset directory and return the scan, in the contract's vocabulary. Throws when no
  * verdict could be produced (a bug, never a property of the dataset); the caller fails closed.
  * `planned` holds headers the upload will write before it sends anything (ADR 0091), by absolute
- * path: the scan is then of the tree as it will be sent.
+ * path: the scan is then of the tree as it will be sent. `readers` replaces the registry (tests
+ * register stand-in readers through it, as `nemar dataset screen` allows).
  */
 export async function scanLocalDataset(
   root: string,
   planned?: ReadonlyMap<string, Uint8Array>,
+  options: { readers?: readonly FormatReader[] } = {},
 ): Promise<PreflightScan> {
   const tree = walkDatasetTree(root);
   const ctx = createContext({
     fileConcurrency: PREFLIGHT_CONCURRENCY,
+    // At most 2 MAT/EEGLAB, HDF5 or ZIP files at once on the depositor's machine (risk R15).
+    readerClassLimits: LOCAL_READER_CLASS_LIMITS,
     workerConcurrency: 1,
     limits: { ...LOCAL_SCAN_LIMITS },
     readEntryHead: createLocalReader(tree.readable, planned),
@@ -240,6 +246,7 @@ export async function scanLocalDataset(
   });
   const record = await scanDatasetFromManifest(ctx, "local", null, tree.entries, "clone", {
     extraIncompleteReasons: tree.unlisted > 0 ? ["tree-truncated"] : [],
+    ...(options.readers ? { readers: options.readers } : {}),
   });
   // Only the fields a preflight carries. `finding_fields`, the distinct-value counts and the
   // sampling table stay behind: a preflight is kinds and counts, and names no dataset.

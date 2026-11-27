@@ -28,6 +28,7 @@ import {
 } from "../shared/identifier-readers";
 import {
   type ClassifyInput,
+  type ReaderClassLimit,
   type RecordingEntry,
   classifyDataset,
   coverageFields,
@@ -483,6 +484,12 @@ export interface FleetContext {
   userAgent: string;
   /** Concurrent file reads within one dataset. */
   fileConcurrency: number;
+  /**
+   * Tighter bounds for classes of readers within `fileConcurrency` (the local scans pass
+   * `LOCAL_READER_CLASS_LIMITS`). Absent, as for the CI screen and the fleet scan, every recording
+   * shares `fileConcurrency` alone.
+   */
+  readerClassLimits?: readonly ReaderClassLimit[];
   /** Bounds every request to the Worker across all datasets. */
   workerLimit: Limiter;
   timeoutMs: number;
@@ -651,6 +658,7 @@ export function createContext(options: ContextOptions = {}): FleetContext {
         readVersionManifestViaAws(id, version, { timeoutMs: awsTimeoutMs, env: options.awsEnv })),
     githubToken: options.githubToken ?? createGithubTokenReader(),
     ...(options.readEntryHead ? { readEntryHead: options.readEntryHead } : {}),
+    ...(options.readerClassLimits ? { readerClassLimits: options.readerClassLimits } : {}),
   };
 }
 
@@ -1190,6 +1198,7 @@ export async function scanDatasetFromManifest(
     readers,
     open: (entry) => entrySource(ctx, entry),
     concurrency: ctx.fileConcurrency,
+    ...(ctx.readerClassLimits ? { readerClassLimits: ctx.readerClassLimits } : {}),
     now: ctx.now,
     datasetTimeMs: ctx.limits.datasetTimeMs,
     failureClass,

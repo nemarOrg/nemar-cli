@@ -38,6 +38,7 @@ import {
   formatCoverage,
   readerFor,
 } from "../shared/identifier-readers";
+import { LOCAL_READER_CLASS_LIMITS } from "../shared/identifier-report-builder";
 import { shapeOf } from "../shared/identifier-scan";
 import {
   INCOMPLETE_COPY,
@@ -62,6 +63,7 @@ import {
   parseScreenReport,
   screenGate,
 } from "../shared/identifier-screen-report";
+import { overlapPaths, overlapRegistry } from "./helpers/overlap-readers";
 
 const HEAD = "a".repeat(40);
 const SCANNER = "identifier-scan@abcdef1";
@@ -911,5 +913,35 @@ describe("seam review: the builder's own failure paths", () => {
     // Measured at about 100 ms with one lowercased set per dataset (and about 1,240 ms with one
     // per file, the quadratic build this replaces); 5x the linear time is the bound.
     expect(elapsed).toBeLessThan(500);
+  });
+});
+
+describe("seam review: heavy readers are bounded in the local scans (risk R15)", () => {
+  const filesFor = (paths: readonly string[]) =>
+    Object.fromEntries(paths.map((p) => [p, bytes(64)])) as Record<string, Uint8Array>;
+
+  test("with the local class limits at most 2 heavy scans overlap, light ones keep the pool", async () => {
+    const { readers, heavy, light } = overlapRegistry();
+    const { report } = await scan(filesFor(overlapPaths(12, 24)), readers, {
+      fileConcurrency: 16,
+      readerClassLimits: LOCAL_READER_CLASS_LIMITS,
+    });
+    expect(report.scan?.read_by_format?.eeglab?.read).toBe(12);
+    expect(report.scan?.read_by_format?.brainvision?.read).toBe(24);
+    expect(heavy.started).toBe(12);
+    expect(heavy.max).toBe(2);
+    expect(light.max).toBeGreaterThan(2);
+  });
+
+  test("without class limits, as the CI screen runs, heavy scans share the whole pool", async () => {
+    const { readers, heavy } = overlapRegistry();
+    await scan(filesFor(overlapPaths(12, 0)), readers, { fileConcurrency: 16 });
+    expect(heavy.max).toBeGreaterThan(2);
+  });
+
+  test("the local limits name the MAT, HDF5 and ZIP readers and no other", () => {
+    expect(LOCAL_READER_CLASS_LIMITS).toEqual([
+      { readers: ["eeglab", "homer-nirs", "mat", "snirf", "hdf5", "zip"], concurrency: 2 },
+    ]);
   });
 });

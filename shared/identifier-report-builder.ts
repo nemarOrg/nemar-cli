@@ -144,7 +144,43 @@ export interface RecordingReadOptions<E extends RecordingEntry> {
   isAbsent?: (error: unknown) => boolean;
   /** Which of a reader's files to read; the rest stay unread (counted). Default: all. */
   select?: (reader: FormatReader, entries: readonly E[]) => E[];
+  /**
+   * Classes of readers whose files share a tighter bound than `concurrency`: at most
+   * `concurrency` files of a class are read at once, while files of no class keep the pool's
+   * full width. Absent, every file shares `concurrency` alone.
+   */
+  readerClassLimits?: readonly ReaderClassLimit[];
 }
+
+/** At most `concurrency` files read by any of `readers` at once (see {@link LOCAL_READER_CLASS_LIMITS}). */
+export interface ReaderClassLimit {
+  readers: readonly ReaderId[];
+  concurrency: number;
+}
+
+/**
+ * The readers that hold a whole decoded structure in memory: the MAT v5 walker (EEGLAB `.set`,
+ * Homer `.nirs`, `.mat`; up to 256 MiB inflated per file, and about 1 GB of peak RSS measured on
+ * a large `.set`), the HDF5 walker (SNIRF, NWB and other HDF5) and the ZIP reader.
+ */
+export const HEAVY_READERS: readonly ReaderId[] = [
+  "eeglab",
+  "homer-nirs",
+  "mat",
+  "snirf",
+  "hdf5",
+  "zip",
+];
+
+/**
+ * The bound for scans on the depositor's own machine (`nemar dataset screen` and the upload
+ * preflight, risk R15): at most 2 heavy files at once, so 16 concurrent `.set` reads cannot add
+ * up to many gigabytes on a laptop. Other files keep the full concurrency. The CI screen and the
+ * fleet scan pass no class limits and are unchanged: they run on runners sized for the job.
+ */
+export const LOCAL_READER_CLASS_LIMITS: readonly ReaderClassLimit[] = [
+  { readers: HEAVY_READERS, concurrency: 2 },
+];
 
 export interface RecordingsOutcome {
   findings: Finding[];
@@ -199,11 +235,66 @@ function withTimer<T>(work: Promise<T>, ms: number): Promise<T> {
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** Run `fn` over `items`, at most `size` at once; every worker finishes before a throw is rethrown. */
-async function pool<T>(items: readonly T[], size: number, fn: (item: T) => Promise<void>) {
-  let next = 0;
+/**
+ * Run `fn` over `items`, at most `size` at once, and at most a class's own limit at once for the
+ * items `classOf` puts in a class. A worker takes the earliest item it may start, so a class at
+ * its limit never holds up an item outside it. Every worker finishes before a throw is rethrown.
+ */
+async function pool<T>(
+  items: readonly T[],
+  size: number,
+  fn: (item: T) => Promise<void>,
+  classOf: (item: T) => number = () => -1,
+  classLimits: readonly number[] = [],
+) {
+  // One queue of item indexes per class, plus the unclassed (-1, the last queue).
+  const queues: number[][] = Array.from({ length: classLimits.length + 1 }, () => []);
+  items.forEach((item, i) => {
+    const c = classOf(item);
+    (queues[c < 0 ? classLimits.length : c] as number[]).push(i);
+  });
+  const heads = queues.map(() => 0);
+  const running = classLimits.map(() => 0);
+  let remaining = items.length;
+  let wake: (() => void)[] = [];
+  // The earliest item at the head of a queue that may start, or null when none may.
+  const take = (): number | null => {
+    let best = -1;
+    let bestIndex = Number.POSITIVE_INFINITY;
+    for (let q = 0; q < queues.length; q++) {
+      const head = (queues[q] as number[])[heads[q] as number];
+      if (head === undefined) continue;
+      if (q < classLimits.length && (running[q] as number) >= (classLimits[q] as number)) continue;
+      if (head < bestIndex) {
+        best = q;
+        bestIndex = head;
+      }
+    }
+    if (best < 0) return null;
+    if (best < classLimits.length) running[best] = (running[best] as number) + 1;
+    heads[best] = (heads[best] as number) + 1;
+    remaining--;
+    return bestIndex;
+  };
   const workers = Array.from({ length: Math.min(Math.max(1, size), items.length) }, async () => {
-    while (next < items.length) await fn(items[next++] as T);
+    while (remaining > 0) {
+      const index = take();
+      if (index === null) {
+        // Every item left is in a class at its limit: wait for one of that class to finish.
+        await new Promise<void>((resolve) => wake.push(resolve));
+        continue;
+      }
+      const item = items[index] as T;
+      try {
+        await fn(item);
+      } finally {
+        const c = classOf(item);
+        if (c >= 0) running[c] = (running[c] as number) - 1;
+        const waiting = wake;
+        wake = [];
+        for (const resolve of waiting) resolve();
+      }
+    }
   });
   const settled = await Promise.allSettled(workers);
   const failed = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
@@ -324,6 +415,11 @@ export async function readRecordings<E extends RecordingEntry>(
     out.failures[key] = (out.failures[key] ?? 0) + 1;
   };
   const started = options.now();
+  const classLimits = options.readerClassLimits ?? [];
+  const classOfReader = new Map<ReaderId, number>();
+  classLimits.forEach((limit, c) => {
+    for (const id of limit.readers) if (!classOfReader.has(id)) classOfReader.set(id, c);
+  });
 
   const readOne = async ({ entry, reader }: { entry: E; reader: FormatReader }) => {
     const t = out.tallies[reader.id];
@@ -427,7 +523,13 @@ export async function readRecordings<E extends RecordingEntry>(
     if (limited) out.reasons.add("limit");
     if (result.coverage === "partial" && result.incomplete) out.reasons.add(result.incomplete);
   };
-  await pool(work, options.concurrency, readOne);
+  await pool(
+    work,
+    options.concurrency,
+    readOne,
+    ({ reader }) => classOfReader.get(reader.id) ?? -1,
+    classLimits.map((limit) => Math.max(1, limit.concurrency)),
+  );
 
   // A reader other than EDF/BDF whose files did not all get a full or partial read: the EDF/BDF
   // shortfall has its own words (`edf-headers-unread`, `edf-headers-sampled`).
