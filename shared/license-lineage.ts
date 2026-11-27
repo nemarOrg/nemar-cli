@@ -721,10 +721,13 @@ export const DATA_REPOSITORY_DOI_SHAPES: Record<
   "10.18112": /^openneuro\.ds\d{6}(?:\.v[0-9][\w.-]*)?$/,
   "10.5281": /^zenodo\.\d+$/,
   "10.13026": /^[a-z0-9][a-z0-9-]{4,}$/,
-  "10.6084": /^m9\.figshare\.\d+(?:\.v\d+)?$/,
+  // An item or a collection (`m9.figshare.c.3307977`), with or without a version.
+  "10.6084": /^m9\.figshare\.(?:c\.)?\d+(?:\.v\d+)?$/,
   "10.17605": /^osf\.io\/[a-z0-9]{5}$/,
-  "10.5061": /^dryad\.[a-z0-9]+$/,
-  "10.7910": /^dvn\/[a-z0-9]{6,}(?:\/[a-z0-9]+)?$/,
+  // A dataset, or one of its files (`dryad.8pm4nv0/1`).
+  "10.5061": /^dryad\.[a-z0-9]+(?:\/\d+)?$/,
+  // Harvard Dataverse's older five-character identifiers (`DVN/29379`) as well as the newer six.
+  "10.7910": /^dvn\/[a-z0-9]{5,}(?:\/[a-z0-9]+)?$/,
 };
 
 /**
@@ -1851,7 +1854,9 @@ export async function resolveLicenseLineage(
   ];
   const at = now().toISOString();
   return {
-    outcome: combineOutcomes(sources),
+    // A README that names a source only as a DOI cut short has declared one: `unresolved` (the
+    // check could not read it), never `no_upstream_declared`, which reads as nothing to do.
+    outcome: sources.length === 0 && dropped > 0 ? "unresolved" : combineOutcomes(sources),
     inputs: states,
     target_license: target.license,
     target_license_raw: targetRaw,

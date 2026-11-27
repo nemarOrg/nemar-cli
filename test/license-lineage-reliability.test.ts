@@ -363,6 +363,14 @@ describe("a DOI cut out of a README is not a source", () => {
     ["10.6084/m9.figshare.6427334.v5", true, false],
     ["10.13026/c28g6p", true, false],
     ["10.7910/dvn/abcdef", true, false],
+    // Real shapes from DataCite (fixtures 30 to 32): a five-character Dataverse id, a figshare
+    // collection, a Dryad file.
+    ["10.7910/dvn/29379", true, false],
+    ["10.6084/m9.figshare.c.3307977", true, false],
+    ["10.5061/dryad.8pm4nv0/1", true, false],
+    ["10.7910/dvn/2937", true, true],
+    ["10.6084/m9.figshare.c.", true, true],
+    ["10.5061/dryad.8pm4nv0/", true, true],
     ["10.5061/dryad.x3ffbg7k8", true, false],
     // An attestation takes any DOI and checks only the length.
     ["10.1234/any.publisher.doi", false, false],
@@ -412,9 +420,34 @@ describe("a DOI cut out of a README is not a source", () => {
     expect(found.refs).toHaveLength(1);
   });
 
-  test("a dropped candidate never makes the lineage unresolved, and is shown", async () => {
+  test("README DOIs of these shapes are sources, read from their records", async () => {
+    const r = await run(
+      inputs(
+        "CC0",
+        [],
+        "Data: https://doi.org/10.7910/DVN/29379, collection 10.6084/m9.figshare.c.3307977 and file 10.5061/dryad.8pm4nv0/1.\n",
+      ),
+    );
+    expect(r.dropped_doi_candidates).toBe(0);
+    expect(r.sources.map((s) => [s.id, s.status, s.license])).toEqual([
+      ["10.7910/dvn/29379", "resolved", "cc0"],
+      ["10.6084/m9.figshare.c.3307977", "publication", "cc-by"],
+      ["10.5061/dryad.8pm4nv0/1", "publication", "cc0"],
+    ]);
+    expect(standIn.misses).toEqual([]);
+  });
+
+  test("a dropped candidate beside a real source leaves that source's outcome", async () => {
+    const r = await run(
+      inputs("CC0", [], "Data: https://doi.org/10.7910/DVN/29379; also 10.17605/o\nsf.io/rmafj\n"),
+    );
+    expect(r.dropped_doi_candidates).toBe(1);
+    expect(r.outcome).toBe("compatible");
+  });
+
+  test("only dropped candidates: unresolved with the count, never no_upstream_declared", async () => {
     const r = await run(inputs("CC0", [], "Raw data: https://doi.org/10.17605/o\nsf.io/rmafj\n"));
-    expect(r.outcome).toBe("no_upstream_declared");
+    expect(r.outcome).toBe("unresolved");
     expect(r.sources).toEqual([]);
     expect(r.dropped_doi_candidates).toBe(1);
     expect(lineageLines(r)).toContain(
