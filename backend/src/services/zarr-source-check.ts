@@ -523,8 +523,7 @@ async function metadataOnlyDelta(
  * Whether a changed path is NEMAR-owned metadata, which NEMAR changes without a new tag (ADR 0144): anything under
  * `.nemar/` (NEMAR's own records) or `.github/` (NEMAR's workflows), or a `.gitattributes` file at any depth, which
  * NEMAR's annex policy rewrites across the fleet (`src/lib/fleet-annex-policy.ts`, ADR 0060). A `.gitattributes`
- * edit is admitted only when it cannot change the bytes a checkout gives ({@link gitattributesPatchProblem}); this
- * rule decides the path alone. A data file, a BIDS file (`participants.tsv`, `README`, a sidecar) and `.bidsignore`,
+ * edit is admitted only when its patch passes {@link gitattributesPatchProblem}; this rule decides the path alone. A data file, a BIDS file (`participants.tsv`, `README`, a sidecar) and `.bidsignore`,
  * which the dataset's authors own too, are not; neither is a path that is not a plain path.
  */
 export function isNemarOwnedMetadataPath(path: string): boolean {
@@ -563,39 +562,69 @@ function lineAttributes(line: string): string[] {
   return rest.split(/\s+/).filter((token) => token !== "");
 }
 
-/**
- * Whether one attribute, set, unset (`-`), reset (`!`) or given a value, can change the bytes a checkout gives for
- * a file it applies to: `eol=crlf` (line endings written as CR LF), `working-tree-encoding` (the text re-encoded),
- * `ident` (`$Id$` expanded) or a `filter` that is not git-annex's own (a smudge filter rewrites the file). An
- * `annex.*` attribute only says where git-annex keeps a file, and `text`, `eol=lf`, `binary`, `diff` and `merge`
- * either leave the bytes of an LF checkout as they are or never touch them.
- */
-function changesCheckoutBytes(token: string): boolean {
-  const bare = token.replace(/^[-!]/, "");
+/** An attribute token as git reads it: set (`name`), unset (`-name`), reset (`!name`) or given a value. */
+function parseAttribute(token: string): {
+  form: "set" | "unset" | "reset" | "value";
+  name: string;
+  value: string | null;
+} {
+  const prefix = token[0] === "-" ? "unset" : token[0] === "!" ? "reset" : null;
+  const bare = prefix === null ? token : token.slice(1);
   const eq = bare.indexOf("=");
-  const name = eq < 0 ? bare : bare.slice(0, eq);
-  const value = eq < 0 ? null : bare.slice(eq + 1);
-  if (name === "eol") return value === "crlf";
-  if (name === "working-tree-encoding" || name === "ident") return true;
-  if (name === "filter") return token !== "filter=annex";
+  if (eq >= 0) return { form: "value", name: bare.slice(0, eq), value: bare.slice(eq + 1) };
+  return { form: prefix ?? "set", name: bare, value: null };
+}
+
+/**
+ * Whether one attribute on a line a `.gitattributes` edit adds or removes is ADMITTED (ADR 0144): an allow-list,
+ * because a name this does not know may be a macro whose definition, on a line the edit does not touch, carries
+ * anything. Admitted:
+ *  - `annex.*` in any form: it says where git-annex keeps a file, never what a checkout writes;
+ *  - `diff` and `merge` in any form: they choose how git shows and merges a file, never what a checkout writes;
+ *  - `filter=annex`, git-annex's own filter, which gives the content git-annex keeps;
+ *  - `text`, `binary` (`-diff -merge -text`) and `eol=lf`, set: a checkout of LF-stored text writes the same bytes
+ *    with or without them unless CR LF conversion is in effect for the file, which needs `eol=crlf` or the legacy
+ *    `crlf`; a patch that shows either anywhere is refused ({@link gitattributesPatchProblem}).
+ * Refused: `eol` in any other form (`eol=crlf`, `-eol`, `!eol`), `text` and `binary` unset, reset or valued
+ * (`-text`, `!text`, `text=auto`), `filter` with any other value or form, `working-tree-encoding`, `ident`, and every
+ * other name.
+ */
+function isAdmittedAttribute(token: string): boolean {
+  const { form, name, value } = parseAttribute(token);
+  if (name.startsWith("annex.")) return true;
+  if (name === "diff" || name === "merge") return true;
+  if (name === "filter") return form === "value" && value === "annex";
+  if (name === "eol") return form === "value" && value === "lf";
+  if (name === "text" || name === "binary") return form === "set";
   return false;
+}
+
+/** Whether an attribute can turn CR LF conversion on: `eol=crlf`, or the legacy `crlf` in any form. */
+function enablesCrlf(token: string): boolean {
+  const { name, value } = parseAttribute(token);
+  return (name === "eol" && value === "crlf") || name === "crlf";
 }
 
 /**
  * Why a `.gitattributes` edit cannot be admitted, from the patch GitHub's compare gives for it, or null when it can
- * (ADR 0144): `index_delta_unlisted` when there is no patch to read (GitHub leaves it out of a large or binary
- * change), and `index_content_changed` when a line it adds or removes carries an attribute that
- * {@link changesCheckoutBytes}. So annex rules may change, and `text` and `eol=lf` lines may go, but `eol=crlf`,
- * `working-tree-encoding`, `ident` or another filter may neither come nor go.
+ * (ADR 0144). The patch is hunk lines only (`@@`, then lines starting with `+`, `-` or a space, and `\` notes); a
+ * line that starts `+++` or `---` is an added or removed line like any other.
+ *  - `index_delta_unlisted` when there is no patch to read (GitHub leaves it out of a large or binary change);
+ *  - `index_content_changed` when a line the edit adds or removes carries an attribute that is not
+ *    {@link isAdmittedAttribute} (on a macro definition, `[attr]name`, the definition's attributes), or when any line
+ *    of the patch, the unchanged context included, can turn CR LF conversion on ({@link enablesCrlf}).
+ * So annex rules may change, `text` and `eol=lf` lines may come and go, and nothing else may.
  */
 export function gitattributesPatchProblem(
   patch: unknown,
 ): "index_content_changed" | "index_delta_unlisted" | null {
   if (typeof patch !== "string") return "index_delta_unlisted";
   for (const line of patch.split("\n")) {
-    if (!(line.startsWith("+") || line.startsWith("-"))) continue;
-    if (line.startsWith("+++") || line.startsWith("---")) continue;
-    if (lineAttributes(line.slice(1)).some(changesCheckoutBytes)) return "index_content_changed";
+    const mark = line[0];
+    if (mark !== "+" && mark !== "-" && mark !== " ") continue;
+    const attributes = lineAttributes(line.slice(1));
+    if (attributes.some(enablesCrlf)) return "index_content_changed";
+    if (mark !== " " && !attributes.every(isAdmittedAttribute)) return "index_content_changed";
   }
   return null;
 }

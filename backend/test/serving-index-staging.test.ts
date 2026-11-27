@@ -1304,6 +1304,78 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
       "index_content_changed",
     ],
     ["a comment that names eol=crlf", attrs("@@ -0,0 +1 @@\n+# eol=crlf is not used here"), 1],
+    // The allow-list (round 2): an unset or reset eol or text, a macro, and lines that read like file headers.
+    [
+      "a .gitattributes line that resets eol",
+      attrs("@@ -0,0 +1 @@\n+*.tsv !eol"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that unsets eol",
+      attrs("@@ -0,0 +1 @@\n+*.tsv -eol"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that unsets text",
+      attrs("@@ -0,0 +1 @@\n+*.tsv -text"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that uses a macro",
+      attrs("@@ -0,0 +1 @@\n+*.tsv m"),
+      "index_content_changed",
+    ],
+    [
+      "a macro used on an added line, defined as eol=crlf on an unchanged one",
+      attrs("@@ -1 +1,2 @@\n [attr]m eol=crlf\n+*.tsv m"),
+      "index_content_changed",
+    ],
+    [
+      "an added line that starts like a file header",
+      attrs("@@ -0,0 +1 @@\n+++x eol=crlf"),
+      "index_content_changed",
+    ],
+    [
+      "a removed line that starts like a file header",
+      attrs("@@ -1 +0,0 @@\n---y working-tree-encoding=UTF-16"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line with text=auto",
+      attrs("@@ -0,0 +1 @@\n+*.tsv text=auto"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line with the legacy crlf",
+      attrs("@@ -0,0 +1 @@\n+*.tsv crlf"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that unsets binary",
+      attrs("@@ -0,0 +1 @@\n+*.edf -binary"),
+      "index_content_changed",
+    ],
+    [
+      "a removed line that unset text",
+      attrs("@@ -1 +0,0 @@\n-*.tsv -text"),
+      "index_content_changed",
+    ],
+    [
+      "an added text line beside an unchanged eol=crlf",
+      attrs("@@ -1 +1,2 @@\n *.txt eol=crlf\n+*.tsv text"),
+      "index_content_changed",
+    ],
+    ["a .gitattributes line that sets binary", attrs("@@ -0,0 +1 @@\n+*.edf binary"), 1],
+    [
+      "diff and merge in any form",
+      attrs("@@ -0,0 +1 @@\n+*.tsv -diff merge=union !merge diff=tsv"),
+      1,
+    ],
+    [
+      "a macro defined with annex rules only",
+      attrs("@@ -0,0 +1 @@\n+[attr]nemar annex.largefiles=nothing -annex.numcopies"),
+      1,
+    ],
     [
       "a .gitattributes edit with no patch (a large or binary diff)",
       attrs(undefined),
