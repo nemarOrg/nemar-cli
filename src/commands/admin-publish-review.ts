@@ -273,7 +273,16 @@ async function startOne(datasetId: string, json: boolean, again: boolean): Promi
     case "has_review":
       // The review exists, which is what was asked for: said, and not a failure.
       if (json) console.log(JSON.stringify(answer.body, null, 2));
-      else console.log(chalk.yellow(withWord(`${datasetId}: ${answer.sentence}`, answer.word)));
+      else {
+        console.log(chalk.yellow(withWord(`${datasetId}: ${answer.sentence}`, answer.word)));
+        if (answer.word === "has_result" && !again) {
+          console.log(
+            chalk.dim(
+              `  nemar admin dataset publish start ${datasetId} --again   review it once more`,
+            ),
+          );
+        }
+      }
       return;
     case "not_started":
       failMessage(withWord(`${datasetId}: ${answer.sentence}`, answer.word), {

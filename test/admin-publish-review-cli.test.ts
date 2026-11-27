@@ -764,6 +764,7 @@ describe("start", () => {
     expect(r.exitCode).toBe(0);
     expect(output(r)).toContain(START_REFUSALS.has_result.error);
     expect(output(r)).toContain("(has_result)");
+    expect(output(r)).toContain("nemar admin dataset publish start nm000480 --again");
     expect(dispatchedDatasets()).toEqual([]);
   });
 
