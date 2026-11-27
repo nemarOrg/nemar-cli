@@ -818,6 +818,7 @@
     "test/import-upstream-tag.test.ts": 49,
     "test/key-registration.test.ts": 6369,
     "test/license-file-fact.unit.test.ts": 60,
+    "test/license-lineage-reliability.test.ts": 200,
     "test/license-lineage.test.ts": 255,
     "test/license-permission.unit.test.ts": 34,
     "test/license-provenance.test.ts": 37,

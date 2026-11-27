@@ -6457,6 +6457,7 @@ function licenseCheckBases(): RegistryBases {
     openalex: env.NEMAR_LICENSE_OPENALEX_URL || DEFAULT_BASES.openalex,
     openneuro: env.NEMAR_LICENSE_OPENNEURO_URL || DEFAULT_BASES.openneuro,
     physionet: env.NEMAR_LICENSE_PHYSIONET_URL || DEFAULT_BASES.physionet,
+    osf: env.NEMAR_LICENSE_OSF_URL || DEFAULT_BASES.osf,
   };
 }
 
