@@ -355,12 +355,22 @@ describe("apply", () => {
     // The ineligible ones were never sent, and nothing was recorded for them.
     for (const id of [LOCAL_PATH, DIRECT]) expect(ackRow(id)?.identifier_screen_ack_at).toBeNull();
 
+    // The batch acknowledges its datasets concurrently, so the audit rows' order is not part of
+    // the contract: compare them as a set and read each row by its dataset.
     const audits = auditRows();
-    expect(audits.map((a) => [a.user_id, a.resource_id])).toEqual([
-      [adminId, ELIGIBLE],
-      [adminId, IMAGES],
-    ]);
-    const details = JSON.parse(audits[0].details);
+    expect(
+      audits
+        .map((a) => [a.user_id, a.resource_id])
+        .sort((x, y) => String(x[1]).localeCompare(String(y[1]))),
+    ).toEqual(
+      [
+        [adminId, ELIGIBLE],
+        [adminId, IMAGES],
+      ].sort((x, y) => String(x[1]).localeCompare(String(y[1]))),
+    );
+    const eligibleAudit = audits.find((a) => a.resource_id === ELIGIBLE);
+    expect(eligibleAudit).toBeDefined();
+    const details = JSON.parse(eligibleAudit?.details as string);
     expect(details.via).toBe("acknowledge-batch");
     expect(details.lineage.outcome).toBe("compatible");
     expect(details.lineage.sources[0].id).toBe("10.18112/openneuro.ds003645.v2.0.2");
