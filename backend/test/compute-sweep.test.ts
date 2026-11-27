@@ -1009,10 +1009,12 @@ describe("Tapis unconfigured in a Worker that runs runner jobs only (ADR 0118 am
     });
     const result = await sweepTenantJobs(env({ ...NO_TAPIS, DB: hook.db }), "live");
     expect(result?.errors).toEqual(["tenant_unreadable"]);
+    expect(result?.errorClass).toBe("Error");
     expect(result && "tapisUnconfigured" in result).toBe(false);
     const log = result ? tenantLogLine(result) : null;
     expect(log?.level).toBe("error");
     expect(log?.line).toContain("errors=tenant_unreadable");
+    expect(log?.line).toContain("class=Error");
   });
 
   test("a Tapis configuration present but unusable, or a stray credential, stays loud with no live job", async () => {
