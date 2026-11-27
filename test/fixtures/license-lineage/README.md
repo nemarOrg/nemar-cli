@@ -12,6 +12,7 @@ Resolver version 2 (epic #2182, card B4) also reads each record's title, creator
 Files 21 to 32 were fetched on 2026-11-27 for resolver version 3 (epic #2449, phase 3; ADR 0142 decision 3), the same way, with no edits:
 they hold no email address, and the OSF node records were requested without their contributors.
 Files 33 to 35 were fetched on 2026-11-27 for resolver version 4 (ADR 0142 decision 3, amendment of 2026-11-27), the same way, with no edits; they hold no email address.
+Files 36 to 42 were fetched on 2026-11-27 for resolver version 5 (ADR 0139 decision 7, amendment of 2026-11-27), the same way, with no edits; they hold no email address.
 `index.json` lists every recording with its method, URL, HTTP status, file and fetch time;
 `stand-in.ts` serves them to the tests from a local server.
 
@@ -53,6 +54,11 @@ Files 33 to 35 were fetched on 2026-11-27 for resolver version 4 (ADR 0142 decis
   The cut copies are never fetched.
 - **DANDI's license spelling:** `10.48324/dandi.001535/0.250714.1218` (a production source, nm001003);
   its `rightsList` holds only `rightsIdentifier` `cc_by_40` (scheme SPDX), the name of dandischema's `LicenseType.CC_BY_40`.
+- **Data containers that are not `Dataset` records** (production sources of nm000812, nm000832, nm000808):
+  an OSF project, `10.17605/osf.io/f8sq3`, which DataCite holds as `Text` with resourceType `Project` and `cc-by-4.0`;
+  a figshare collection version, `10.6084/m9.figshare.c.6979581.v1` (`Collection`, `cc-by-4.0`);
+  a PLOS supplementary file, `10.1371/journal.pone.0303144.s001`, which DataCite answers 404 and Crossref holds as `component` with no license and `is-component-of` its article, `10.1371/journal.pone.0303144` (`journal-article`, CC BY 4.0 `vor`).
+- **Genuine publications in data repositories:** `10.5281/zenodo.6529724` (`JournalArticle`, nm000661's source) and `10.6084/m9.figshare.28309157` (`JournalArticle`, resourceType `Journal contribution`).
 
 ## Recordings
 
@@ -91,6 +97,13 @@ Files 33 to 35 were fetched on 2026-11-27 for resolver version 4 (ADR 0142 decis
 | `33-datacite-zenodo-22314785.json` | zenodo-readme-prefix-a | datacite | GET https://api.datacite.org/dois/10.5281%2Fzenodo.22314785 | 200 | 2026-11-27 |
 | `34-datacite-zenodo-23610719.json` | zenodo-readme-prefix-b | datacite | GET https://api.datacite.org/dois/10.5281%2Fzenodo.23610719 | 200 | 2026-11-27 |
 | `35-datacite-dandi-cc-by.json` | dandi-cc-by | datacite | GET https://api.datacite.org/dois/10.48324%2Fdandi.001535%2F0.250714.1218 | 200 | 2026-11-27 |
+| `36-datacite-osf-project.json` | osf-project | datacite | GET https://api.datacite.org/dois/10.17605%2Fosf.io%2Ff8sq3 | 200 | 2026-11-27 |
+| `37-datacite-figshare-collection-v1.json` | figshare-collection-v1 | datacite | GET https://api.datacite.org/dois/10.6084%2Fm9.figshare.c.6979581.v1 | 200 | 2026-11-27 |
+| `38-datacite-plos-component.json` | plos-component | datacite | GET https://api.datacite.org/dois/10.1371%2Fjournal.pone.0303144.s001 | 404 | 2026-11-27 |
+| `39-crossref-plos-component.json` | plos-component | crossref | GET https://api.crossref.org/works/10.1371%2Fjournal.pone.0303144.s001 | 200 | 2026-11-27 |
+| `40-crossref-plos-parent.json` | plos-component | crossref | GET https://api.crossref.org/works/10.1371%2Fjournal.pone.0303144 | 200 | 2026-11-27 |
+| `41-datacite-zenodo-article.json` | zenodo-article | datacite | GET https://api.datacite.org/dois/10.5281%2Fzenodo.6529724 | 200 | 2026-11-27 |
+| `42-datacite-figshare-article.json` | figshare-article | datacite | GET https://api.datacite.org/dois/10.6084%2Fm9.figshare.28309157 | 200 | 2026-11-27 |
 
 The two OpenNeuro POSTs carry the GraphQL query recorded in `index.json` (`body`).
 

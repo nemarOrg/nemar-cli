@@ -39,10 +39,12 @@ import { normalizeDoiKey } from "./never-data-paper.js";
  * record gains a field (version 2: each source's title, creators and publisher, epic #2182 card B4;
  * version 3: the declared license, osf.io sources, cut README DOIs dropped, retried fetches, and
  * `resolved_at`, ADR 0142 decision 3; version 4: README DOIs that prefix another declared DOI
- * dropped, and DANDI's license spellings read, ADR 0142 decision 3, amendment of 2026-11-27);
+ * dropped, and DANDI's license spellings read, ADR 0142 decision 3, amendment of 2026-11-27;
+ * version 5: README DOIs cut by an ellipsis dropped, and data containers (collections, OSF
+ * projects, Crossref components) read as data, ADR 0139 decision 7, amendment of 2026-11-27);
  * the cache key carries it, so a record of an older version is never served.
  */
-export const RESOLVER_VERSION = "license-lineage/4";
+export const RESOLVER_VERSION = "license-lineage/5";
 
 /** The User-Agent of every registry request. It carries no contact details on purpose. */
 export const LICENSE_CHECK_USER_AGENT = "nemar-license-check/1";
@@ -1386,6 +1388,88 @@ export function crossrefLicenses(license: unknown): RecordLicenses {
 
 const CROSSREF_DATA_TYPES = new Set(["dataset", "database"]);
 
+/**
+ * DataCite records that hold data although their resourceTypeGeneral is not `Dataset` (ADR 0139
+ * decision 7, amendment of 2026-11-27; measured on DataCite): a `Collection` (a figshare
+ * collection, `10.6084/m9.figshare.c.6979581.v1`), and an OSF project, which OSF registers as
+ * `Text` with resourceType `Project` (`10.17605/osf.io/f8sq3`). Their rights are the data's.
+ * Every other non-Dataset record (a `JournalArticle`, other `Text`) stays a publication.
+ */
+export function isDataciteDataContainer(
+  doi: string,
+  resourceTypeGeneral: string | null,
+  resourceType: unknown,
+): boolean {
+  if (resourceTypeGeneral === "Collection") return true;
+  return resourceTypeGeneral === "Text" && resourceType === "Project" && OSF_DOI.test(doi);
+}
+
+/** A supplementary file's DOI stem (`10.1371/journal.pone.0303144.s001` -> `...0303144`). */
+const COMPONENT_SUFFIX = /^(.+)\.s\d{1,4}$/;
+
+/** The article a Crossref `component` belongs to: its `is-component-of` DOI, else its DOI stem. */
+export function componentParentDoi(doi: string, msg: Record<string, unknown>): string | null {
+  const rel = isRecord(msg.relation) ? msg.relation["is-component-of"] : null;
+  if (Array.isArray(rel)) {
+    for (const r of rel) {
+      if (isRecord(r) && r["id-type"] === "doi" && typeof r.id === "string" && r.id.trim()) {
+        return normalizeDoiKey(r.id);
+      }
+    }
+  }
+  return COMPONENT_SUFFIX.exec(doi)?.[1] ?? null;
+}
+
+/**
+ * A Crossref `component` (supplementary material, such as a PLOS `.s001` file) holds data: it takes
+ * the license Crossref gives it, else its parent article's version-of-record license (ADR 0139
+ * decision 7, amendment of 2026-11-27). With neither, its license is unknown (null), so the source
+ * is `unresolved`, never compatible by default; a parent that cannot be read leaves it failed.
+ */
+async function resolveComponent(
+  doi: string,
+  msg: Record<string, unknown>,
+  crUrl: string,
+  o: FetchContext,
+): Promise<SourceRecord> {
+  const base = {
+    id: doi,
+    resolver: "crossref" as const,
+    resource_type: "component",
+    ...crossrefDescribed(msg),
+  };
+  const own = crossrefLicenses(msg.license);
+  if (own.values.length > 0) {
+    return withLicense({ ...base, evidence_url: crUrl }, own.values, own.raws, true, own.declared);
+  }
+  const parent = componentParentDoi(doi, msg);
+  const unknown: SourceRecord = {
+    ...base,
+    evidence_url: crUrl,
+    license: null,
+    license_version: null,
+    raw: null,
+    declared_licenses: [],
+    status: "resolved",
+  };
+  if (parent === null || parent === doi) return unknown;
+  const pUrl = `${o.bases.crossref}/works/${encodeURIComponent(parent)}`;
+  const p = await o.get(pUrl);
+  if (p.kind === "failed") return failedRecord(doi, p.status, pUrl);
+  if (p.kind === "absent") return unknown;
+  const pm = isRecord(p.body) ? p.body.message : null;
+  if (!isRecord(pm)) return failedRecord(doi, "unparseable", pUrl);
+  const inherited = crossrefLicenses(pm.license);
+  if (inherited.values.length === 0) return { ...unknown, evidence_url: pUrl };
+  return withLicense(
+    { ...base, evidence_url: pUrl },
+    inherited.values,
+    inherited.raws,
+    true,
+    inherited.declared,
+  );
+}
+
 async function resolveOpenNeuro(
   id: string,
   ds: string,
@@ -1590,6 +1674,7 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
     const rtg = typeof types.resourceTypeGeneral === "string" ? types.resourceTypeGeneral : null;
     const { values, raws, declared: declaredLicenses } = dataciteLicenses(a.rightsList);
     const isDataset = rtg === "Dataset";
+    const dataLike = isDataset || isDataciteDataContainer(doi, rtg, types.resourceType);
     const landing = typeof a.url === "string" ? a.url : "";
     if (isDataset && values.length === 0) {
       const on = OPENNEURO_DOI.exec(doi);
@@ -1612,7 +1697,7 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
       }
     }
     const osf = OSF_DOI.exec(doi);
-    if (osf && values.length === 0 && (isDataset || rtg === null)) {
+    if (osf && values.length === 0 && (dataLike || rtg === null)) {
       return resolveOsf(doi, osf[1], rtg, dataciteDescribed(a), o);
     }
     return withLicense(
@@ -1625,7 +1710,7 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
       },
       values,
       raws,
-      isDataset,
+      dataLike,
       declaredLicenses,
     );
   }
@@ -1641,6 +1726,7 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
     if (!isRecord(msg)) return failedRecord(doi, "unparseable", crUrl);
     const type = typeof msg.type === "string" ? msg.type : null;
     const { values, raws, declared: declaredLicenses } = crossrefLicenses(msg.license);
+    if (type === "component") return resolveComponent(doi, msg, crUrl, o);
     return withLicense(
       {
         id: doi,
@@ -1697,6 +1783,8 @@ export function isValidCachedRecord(hit: unknown): hit is SourceRecord {
     Array.isArray(hit.declared_licenses) &&
     (SOURCE_STATUSES as readonly string[]).includes(hit.status) &&
     CACHEABLE.has(hit.status as SourceStatus) &&
+    // A record read but with no license is an `unresolved` source, never served from the cache.
+    !(hit.status === "resolved" && hit.license === null) &&
     (hit.license === null ||
       (NORMALIZED_LICENSES as readonly string[]).includes(String(hit.license)))
   );
@@ -1711,7 +1799,7 @@ async function cached(
   const hit = await cache?.get(k).catch(() => undefined);
   if (isValidCachedRecord(hit)) return hit;
   const rec = await run();
-  if (cache && CACHEABLE.has(rec.status)) await cache.put(k, rec).catch(() => undefined);
+  if (cache && isValidCachedRecord(rec)) await cache.put(k, rec).catch(() => undefined);
   return rec;
 }
 

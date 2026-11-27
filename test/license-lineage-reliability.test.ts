@@ -20,10 +20,12 @@ import {
   NO_RETRY,
   RESOLVER_VERSION,
   type ResolveOptions,
+  componentParentDoi,
   dataciteLicenses,
   declaredLicenseWords,
   extractSources,
   isCutDoiCandidate,
+  isDataciteDataContainer,
   isValidCachedRecord,
   lineageLines,
   mapCache,
@@ -70,8 +72,8 @@ const ZENODO_BY_KEY = "datacite /dois/10.5281/zenodo.24539621";
 const count = (part: string) => standIn.requests.filter((k) => k.includes(part)).length;
 
 describe("resolver version", () => {
-  test("is 4, since outcomes change", () => {
-    expect(RESOLVER_VERSION).toBe("license-lineage/4");
+  test("is 5, since outcomes change", () => {
+    expect(RESOLVER_VERSION).toBe("license-lineage/5");
   });
 });
 
@@ -432,7 +434,8 @@ describe("a DOI cut out of a README is not a source", () => {
     expect(r.dropped_doi_candidates).toBe(0);
     expect(r.sources.map((s) => [s.id, s.status, s.license])).toEqual([
       ["10.7910/dvn/29379", "resolved", "cc0"],
-      ["10.6084/m9.figshare.c.3307977", "publication", "cc-by"],
+      // A collection holds data: its rights apply (resolver version 5).
+      ["10.6084/m9.figshare.c.3307977", "resolved", "cc-by"],
       ["10.5061/dryad.8pm4nv0/1", "publication", "cc0"],
     ]);
     expect(standIn.misses).toEqual([]);
@@ -659,6 +662,124 @@ describe("a README DOI cut by an ellipsis", () => {
     expect(r.dropped_doi_candidates).toBe(1);
     expect(r.sources.map((x) => x.id)).toEqual([doi]);
     expect(standIn.misses).toEqual([]);
+  });
+});
+
+describe("data containers are data; publications stay publications", () => {
+  test.each([
+    // nm000812: OSF registers a project as Text / Project.
+    ["10.17605/osf.io/f8sq3", "datacite", "Text"],
+    // nm000832: a figshare collection version.
+    ["10.6084/m9.figshare.c.6979581.v1", "datacite", "Collection"],
+    // nm000808: a PLOS supplementary file, a Crossref component, licensed through its article.
+    ["10.1371/journal.pone.0303144.s001", "crossref", "component"],
+  ])("%s (%s %s) reads its rights: compatible_attribution", async (doi, resolver, type) => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: doi }]));
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(r.sources[0]).toMatchObject({
+      resolver,
+      resource_type: type,
+      status: "resolved",
+      license: "cc-by",
+      license_version: "4.0",
+    });
+    expect(standIn.misses).toEqual([]);
+  });
+
+  test("the component's license is its article's version of record, and the evidence says so", async () => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]));
+    expect(r.sources[0].evidence_url).toEndWith("/works/10.1371%2Fjournal.pone.0303144");
+    expect(r.sources[0].declared_licenses).toEqual([
+      { text: null, url: "http://creativecommons.org/licenses/by/4.0/" },
+    ]);
+    // A CC0 target is allowed; the attribution duty persists.
+    expect((await run(inputs("CC0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]))).outcome).toBe(
+      "compatible_attribution",
+    );
+  });
+
+  test("a component's own license wins over its article's", async () => {
+    const own = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/39-crossref-plos-component.json`,
+      ).text(),
+    );
+    own.message.license = [
+      { "content-version": "vor", URL: "https://creativecommons.org/publicdomain/zero/1.0/" },
+    ];
+    standIn.override("crossref /works/10.1371/journal.pone.0303144.s001", {
+      status: 200,
+      body: JSON.stringify(own),
+    });
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]));
+    expect(r.outcome).toBe("compatible");
+    expect(r.sources[0]).toMatchObject({ license: "cc0", resource_type: "component" });
+    expect(count("/works/10.1371/journal.pone.0303144?")).toBe(0);
+  });
+
+  test("a component with no license of its own or its article's is unresolved, and never cached", async () => {
+    standIn.override("crossref /works/10.1371/journal.pone.0303144?", {
+      status: 200,
+      body: JSON.stringify({ status: "ok", message: { type: "journal-article", license: [] } }),
+    });
+    const cache = mapCache();
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]), {
+      cache,
+    });
+    expect(r.outcome).toBe("unresolved");
+    expect(r.sources[0]).toMatchObject({ status: "resolved", license: null });
+    const again = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]), {
+      cache,
+    });
+    expect(again.outcome).toBe("unresolved");
+    expect(count("/works/10.1371/journal.pone.0303144.s001")).toBe(2);
+  });
+
+  test("a component whose article is not in Crossref is unresolved; one that fails is fetch_failed", async () => {
+    standIn.override("crossref /works/10.1371/journal.pone.0303144?", { status: 404 });
+    const absent = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]));
+    expect(absent.outcome).toBe("unresolved");
+    expect(absent.sources[0].license).toBeNull();
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("crossref /works/10.1371/journal.pone.0303144?", { status: 503 });
+    const failed = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]), {
+      retry: NO_RETRY,
+    });
+    expect(failed.outcome).toBe("unresolved");
+    expect(failed.sources[0].status).toBe("fetch_failed");
+  });
+
+  test.each([
+    // nm000661: a journal article deposited on Zenodo.
+    ["10.5281/zenodo.6529724"],
+    ["10.6084/m9.figshare.28309157"],
+  ])("%s, a JournalArticle, stays source_is_publication", async (doi) => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: doi }]));
+    expect(r.outcome).toBe("source_is_publication");
+    expect(r.sources[0]).toMatchObject({
+      resolver: "datacite",
+      resource_type: "JournalArticle",
+      status: "publication",
+    });
+    expect(standIn.misses).toEqual([]);
+  });
+
+  test("only an OSF Project is a container among Text records; the parent of a component", () => {
+    expect(isDataciteDataContainer("10.17605/osf.io/f8sq3", "Text", "Project")).toBe(true);
+    expect(isDataciteDataContainer("10.5281/zenodo.1", "Text", "Project")).toBe(false);
+    expect(isDataciteDataContainer("10.17605/osf.io/f8sq3", "Text", "Preprint")).toBe(false);
+    expect(isDataciteDataContainer("10.5281/zenodo.1", "Collection", null)).toBe(true);
+    expect(isDataciteDataContainer("10.5281/zenodo.1", "JournalArticle", null)).toBe(false);
+    expect(componentParentDoi("10.1371/journal.pone.0303144.s001", {})).toBe(
+      "10.1371/journal.pone.0303144",
+    );
+    expect(
+      componentParentDoi("10.9999/x.s001", {
+        relation: { "is-component-of": [{ "id-type": "doi", id: "10.9999/Parent" }] },
+      }),
+    ).toBe("10.9999/parent");
+    expect(componentParentDoi("10.9999/no-suffix", {})).toBeNull();
   });
 });
 

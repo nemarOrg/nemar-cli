@@ -337,5 +337,75 @@
     "status": 200,
     "file": "35-datacite-dandi-cc-by.json",
     "fetched_at": "2026-11-27T16:22:45Z"
+  },
+  {
+    "case": "osf-project",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.17605%2Fosf.io%2Ff8sq3",
+    "url": "https://api.datacite.org/dois/10.17605%2Fosf.io%2Ff8sq3",
+    "status": 200,
+    "file": "36-datacite-osf-project.json",
+    "fetched_at": "2026-11-27T17:15:48Z"
+  },
+  {
+    "case": "figshare-collection-v1",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.6084%2Fm9.figshare.c.6979581.v1",
+    "url": "https://api.datacite.org/dois/10.6084%2Fm9.figshare.c.6979581.v1",
+    "status": 200,
+    "file": "37-datacite-figshare-collection-v1.json",
+    "fetched_at": "2026-11-27T17:15:48Z"
+  },
+  {
+    "case": "plos-component",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.1371%2Fjournal.pone.0303144.s001",
+    "url": "https://api.datacite.org/dois/10.1371%2Fjournal.pone.0303144.s001",
+    "status": 404,
+    "file": "38-datacite-plos-component.json",
+    "fetched_at": "2026-11-27T17:15:49Z"
+  },
+  {
+    "case": "plos-component",
+    "registry": "crossref",
+    "method": "GET",
+    "path": "/works/10.1371%2Fjournal.pone.0303144.s001",
+    "url": "https://api.crossref.org/works/10.1371%2Fjournal.pone.0303144.s001",
+    "status": 200,
+    "file": "39-crossref-plos-component.json",
+    "fetched_at": "2026-11-27T17:15:50Z"
+  },
+  {
+    "case": "plos-component",
+    "registry": "crossref",
+    "method": "GET",
+    "path": "/works/10.1371%2Fjournal.pone.0303144",
+    "url": "https://api.crossref.org/works/10.1371%2Fjournal.pone.0303144",
+    "status": 200,
+    "file": "40-crossref-plos-parent.json",
+    "fetched_at": "2026-11-27T17:15:50Z"
+  },
+  {
+    "case": "zenodo-article",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.5281%2Fzenodo.6529724",
+    "url": "https://api.datacite.org/dois/10.5281%2Fzenodo.6529724",
+    "status": 200,
+    "file": "41-datacite-zenodo-article.json",
+    "fetched_at": "2026-11-27T17:15:51Z"
+  },
+  {
+    "case": "figshare-article",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.6084%2Fm9.figshare.28309157",
+    "url": "https://api.datacite.org/dois/10.6084%2Fm9.figshare.28309157",
+    "status": 200,
+    "file": "42-datacite-figshare-article.json",
+    "fetched_at": "2026-11-27T17:15:52Z"
   }
 ]
