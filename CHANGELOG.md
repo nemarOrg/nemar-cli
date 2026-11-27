@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.49 - 2026-11-27
+
 ### Changed
 
 - **Automatic denial runs in shadow mode in production (ADR 0139 amendment).**
