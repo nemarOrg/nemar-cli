@@ -1207,9 +1207,9 @@ function parseLineage(raw: unknown, v3: boolean): ReviewLineage | null {
 }
 
 /** One SPDX-listed identifier, as the job's decision rule takes it: no `LicenseRef-`, no operator. */
-const SPDX_ID_RE = /^(?!LicenseRef-)[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/;
+export const SPDX_ID_RE = /^(?!LicenseRef-)[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/;
 /** ScanCode's file expression: identifiers, `LicenseRef-` terms, operators and parentheses only. */
-const LICENSE_EXPRESSION_RE = /^[A-Za-z0-9.+\-() ]{1,512}$/;
+export const LICENSE_EXPRESSION_RE = /^[A-Za-z0-9.+\-() ]{1,512}$/;
 
 /**
  * The LICENSE identification (ADR 0142, decision 1), and its agreement with itself and with the
