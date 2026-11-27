@@ -990,11 +990,23 @@ describe("LICENSE in prompt version 3 (ADR 0142)", () => {
     expect(digest({ ...NONE, matcher: "unavailable" })).not.toBe(a);
   });
 
-  test("question 3 says to trust the identification, and that matches_other is license_inconsistent", () => {
-    const q3 = PUBLICATION_SYSTEM_PROMPT.split("\n\n").find((p) =>
-      p.startsWith("3. authors_and_license"),
+  test("question 3 trusts only a conclusive identification, and matches_other is license_inconsistent", () => {
+    const q3 =
+      PUBLICATION_SYSTEM_PROMPT.split("\n\n").find((p) => p.startsWith("3. authors_and_license")) ??
+      "";
+    // The trust is conditional: it is said only of a conclusive identification.
+    expect(q3).toContain(
+      'When license_file is "matches" or "matches_other", trust the identification',
     );
-    expect(q3).toContain("trust the identification");
+    expect(q3.match(/trust the identification/g)).toHaveLength(1);
+    // Not identified (every review before deploy 3): the model still checks the text against the
+    // field itself.
+    const notIdentified = q3.slice(q3.indexOf('When license_file is "not_identified"'));
+    expect(notIdentified.length).toBeLessThan(q3.length);
+    expect(notIdentified).toContain(
+      "judge from its text which license it is, and whether it is the license the License field names",
+    );
+    expect(notIdentified).toContain("inconsistency");
     expect(q3).toMatch(/"matches_other" means[^.]*different license/);
     expect(q3).toContain('code "license_inconsistent"');
     for (const word of ['"none"', '"additions_only"', '"file"', '"not_identified"', '"identified"'])
