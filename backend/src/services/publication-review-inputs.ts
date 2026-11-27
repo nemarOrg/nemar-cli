@@ -24,7 +24,6 @@
  * never what it found. No finding kind and no finding count leaves this module.
  */
 
-import { resolveLicenseLineage } from "../../../shared/license-lineage.js";
 import { permissionBasisOf } from "../../../shared/license-permission.js";
 import { CONFIRMING_EFFORT, CONFIRMING_MODEL } from "../../../shared/publication-auto-deny.js";
 import {
@@ -45,7 +44,7 @@ import { AUTO_DENY_AUDIT_ACTION, readResubmissionNote } from "../../../shared/re
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getFileContent } from "./github.js";
-import { workerLineageCache } from "./license-lineage-cache.js";
+import { resolveWorkerLineage } from "./license-lineage-cache.js";
 import { SHA40, errorWords } from "./publication-review-log.js";
 import { readReview } from "./publication-review-rows.js";
 import { extractRepoName } from "./repo-metadata.js";
@@ -392,17 +391,15 @@ export async function publicationReviewInputs(
     return { kind: "unavailable" };
   }
 
-  const lineage = await resolveLicenseLineage(
-    {
-      datasetDescription: description,
-      // D1's copy of `.nemar/metadata.json`: the same document the enrichment section shows, so
-      // the two cannot disagree. One that does not parse is the resolver's `metadata_unreadable`.
-      nemarMetadata: dataset.enrichment_json,
-      attestationUpstreamSource: upstreamSourceOf(dataset.attestation),
-      readme,
-    },
-    { cache: workerLineageCache() },
-  );
+  // Resolved again at review time, failed fetches asked again (ADR 0142 decision 3).
+  const lineage = await resolveWorkerLineage({
+    datasetDescription: description,
+    // D1's copy of `.nemar/metadata.json`: the same document the enrichment section shows, so
+    // the two cannot disagree. One that does not parse is the resolver's `metadata_unreadable`.
+    nemarMetadata: dataset.enrichment_json,
+    attestationUpstreamSource: upstreamSourceOf(dataset.attestation),
+    readme,
+  });
 
   const anonymous = request.anonymous === 1;
   const body: ReviewInputsBody = {
@@ -436,6 +433,7 @@ export async function publicationReviewInputs(
         outcome: s.outcome,
       })),
       resolver_version: lineage.resolver_version,
+      resolved_at: lineage.resolved_at,
     },
     resubmission_note: note.note,
     previous_denial: await previousDenialOf(db, datasetId, request.previous_request_id),

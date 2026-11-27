@@ -6457,6 +6457,7 @@ function licenseCheckBases(): RegistryBases {
     openalex: env.NEMAR_LICENSE_OPENALEX_URL || DEFAULT_BASES.openalex,
     openneuro: env.NEMAR_LICENSE_OPENNEURO_URL || DEFAULT_BASES.openneuro,
     physionet: env.NEMAR_LICENSE_PHYSIONET_URL || DEFAULT_BASES.physionet,
+    osf: env.NEMAR_LICENSE_OSF_URL || DEFAULT_BASES.osf,
   };
 }
 
@@ -6590,5 +6591,7 @@ Examples:
     else
       for (const line of [...lineageLines(result), ...licenseMatcherLines(matcher)])
         console.log(line);
+    // Exit 2 is the outcome, the command's answer: no bug-report prompt (ADR 0142 decision 3).
+    markReportedExit();
     process.exit(lineageExitCode(result.outcome));
   });

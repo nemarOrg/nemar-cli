@@ -692,6 +692,11 @@ export interface ReviewInputsBody {
     target_license: string | null;
     sources: InputSource[];
     resolver_version: string;
+    /**
+     * When the Worker resolved this lineage, at serve time (ADR 0142 decision 3); null from a
+     * Worker of resolver version 2, which sent none.
+     */
+    resolved_at: string | null;
   };
   /** The request's resubmission note (ADR 0139, decision 5), or null. */
   resubmission_note: string | null;
@@ -859,6 +864,14 @@ export function parseReviewInputs(raw: unknown): ReviewInputsBody {
       target_license: strOrNullIn(lineage.target_license),
       sources,
       resolver_version: lineage.resolver_version as string,
+      // Null from a Worker of resolver version 2; anything else must be an instant.
+      resolved_at:
+        lineage.resolved_at === null || lineage.resolved_at === undefined
+          ? null
+          : typeof lineage.resolved_at === "string" &&
+              LINEAGE_RESOLVED_AT_RE.test(lineage.resolved_at)
+            ? lineage.resolved_at
+            : badInputs(),
     },
     resubmission_note: strOrNullIn(r.resubmission_note),
     coverage: { source: coverage.source as CoverageSource, formats },

@@ -455,11 +455,22 @@ describe("the job never reviews on part of its inputs", () => {
       },
       { ...good, lineage: { ...good.lineage, outcome: "fine" } },
       { ...good, lineage: { ...good.lineage, resolver_version: "x" } },
+      // `resolved_at` is an instant or null (ADR 0142 decision 3), never free text.
+      { ...good, lineage: { ...good.lineage, resolved_at: "yesterday" } },
+      { ...good, lineage: { ...good.lineage, resolved_at: "2026-11-27T12:00:00Z\nx" } },
+      { ...good, lineage: { ...good.lineage, resolved_at: 1764244800 } },
       { ...good, enrichment: { fields: { methods_description: "x" }, source: null } },
     ]) {
       expect(() => parseReviewInputs(bad)).toThrow(ReviewInputsError);
     }
     expect(parseReviewInputs(JSON.parse(JSON.stringify(fullInputs())))).toEqual(fullInputs());
+    // A Worker of resolver version 2 sends no `resolved_at`: read as null.
+    const { resolved_at: _r, ...older } = good.lineage;
+    expect(parseReviewInputs({ ...good, lineage: older }).lineage.resolved_at).toBeNull();
+    expect(
+      parseReviewInputs({ ...good, lineage: { ...good.lineage, resolved_at: null } }).lineage
+        .resolved_at,
+    ).toBeNull();
   });
 
   test("a fetch that fails, or answers anything but a 200, is inputs_unavailable, before git or a model", async () => {
