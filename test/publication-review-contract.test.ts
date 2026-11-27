@@ -3784,8 +3784,13 @@ describe("version 3 of the report (ADR 0142, decision 2)", () => {
         }),
       ),
     ).toBe("accepted");
-    // A version-3 block is about the widened inputs.
+    // A version-3 block is about the widened inputs: refused by the evidence parser itself, which
+    // the job also calls alone, not only by the report's version check.
     expect(refusal(v3ReportBody({ inputs: null, lineage: null }))).toBe("bad_evidence");
+    expect(() =>
+      parsePublicationReviewEvidence(v3EvidenceBody({ inputs: null, lineage: null })),
+    ).toThrow(PublicationReviewReportError);
+    expect(parsePublicationReviewEvidence(v3EvidenceBody()).license_file?.state).toBe("matches");
   });
 
   test("the record names the matcher: any pinned version or unavailable, and nothing else", () => {
