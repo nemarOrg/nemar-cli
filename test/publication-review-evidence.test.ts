@@ -1643,7 +1643,9 @@ describe("main: the whole script, from git to the callback", () => {
     if (outcome.kind !== "reported") return;
     expect(verdictOf(reportReasons(outcome.report))).toBe("pass");
     expect(outcome.report.evidence.head).toBe(ds.head);
-    expect(log).toBe("review 41 (request 17): reported; callback delivered");
+    expect(log).toBe(
+      "license_file unreadable; matcher unavailable\nreview 41 (request 17): reported; callback delivered",
+    );
   });
 
   test("the production environment posts to the production origin and not the dev one", async () => {
@@ -1721,7 +1723,9 @@ describe("main: the whole script, from git to the callback", () => {
     });
     modelReply = () => messageReply(JSON.stringify({ ...STAND_IN_OUTPUT, summary: modelSummary }));
     const ok = await runMain(argvFor(ds));
-    expect(ok.log).toBe("review 41 (request 17): reported; callback delivered");
+    expect(ok.log).toBe(
+      "license_file unreadable; matcher unavailable\nreview 41 (request 17): reported; callback delivered",
+    );
 
     // And on every failure path: the model's own error text, a refusal and a stale head.
     modelReply = () => failureReply(500, "upstream said ZEBRA-QUOKKA-9137 and PLUM-WALRUS-4421");
@@ -1742,7 +1746,7 @@ describe("main: the whole script, from git to the callback", () => {
       expect(logs, leak).not.toContain(leak);
     }
     expect(failed.log).toBe(
-      "review 41 (request 17): error (model_unavailable; InternalServerError status=500); callback delivered",
+      "license_file unreadable; matcher unavailable\nreview 41 (request 17): error (model_unavailable; InternalServerError status=500); callback delivered",
     );
     expect(stale.log).toContain("(stale_head;");
   });
