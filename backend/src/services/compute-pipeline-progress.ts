@@ -70,7 +70,7 @@ import {
 import { DATA_QUALITY_MAX_BYTES } from "../../../shared/contract/data-quality.js";
 import { sha256HexOfBytes } from "../../../shared/contract/view-digest.js";
 import type { Bindings } from "../types/bindings.js";
-import { RECORD_READ_MAX_BYTES, TABLE_READ_MAX_BYTES } from "./compute-derivatives.js";
+import { RECORD_READ_MAX_BYTES, TABLE_READ_MAX_BYTES } from "./compute-derivative-constants.js";
 import { type PipelineExtensions, pipelineExtensions } from "./data-router.js";
 import {
   CURRENT_PUBLIC_DERIVATIVE_SQL,

@@ -72,16 +72,21 @@ import {
   inputDigestV2,
   validateDerivativeKeyFields,
 } from "../../../shared/contract/derivatives.js";
-import { QUALITY_TABLE_MAX_BYTES } from "../../../shared/contract/quality-route.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { VERSION_DOI_SQL } from "./anonymity.js";
+import {
+  DERIVATIVE_OBJECT_PREFIX,
+  RECORD_READ_MAX_BYTES,
+  TABLE_READ_MAX_BYTES,
+} from "./compute-derivative-constants.js";
 import {
   PIPELINE_ELIGIBLE_SQL,
   type PipelineEnv,
   VERSION_TAG_SQL,
   pipelineEligibleSql,
 } from "./compute-pipeline-eligibility.js";
+import { resolveDecidedStored } from "./compute-pipeline-progress.js";
 import { OUTPUTS_BODY_CEILING_BYTES } from "./compute-records.js";
 import {
   type ComputeS3,
@@ -117,9 +122,6 @@ export const DERIVATIVE_STAMPS_PER_CALL = 20;
 /** The failed or expired rows one call cleans at most. */
 export const DERIVATIVE_ROWS_PER_CLEANUP = 10;
 
-/** The most a derivative row's objects are named by: `d/<key>/<relative path>`. */
-export const DERIVATIVE_OBJECT_PREFIX = "d/";
-
 /** The description a stored derivative carries, beside its files. */
 export const DERIVATIVE_DESCRIPTION_FILE = "derivative.json";
 
@@ -130,15 +132,9 @@ export const DERIVATIVE_DESCRIPTION_FORMAT = "nemar.derivative.v1";
 export const DERIVATIVE_PROMOTE_AUDIT_ACTION = "compute.derivative.promoted";
 export const DERIVATIVE_SYNC_AUDIT_ACTION = "compute.derivatives.sync";
 
-/** The recipe's dataset record is at most 256 KB; the read bound is the stamp sync's own. */
-export const RECORD_READ_MAX_BYTES = 512 * 1024;
-
-/**
- * The recordings table of a dataset of 25,000 stores is a few megabytes; this is a bound, not a size. It is
- * the quality route's own (`QUALITY_TABLE_MAX_BYTES`), so every reader of a run's table (reconciliation,
- * keying, the admin listing and the processing endpoint) takes the same tables.
- */
-export const TABLE_READ_MAX_BYTES = QUALITY_TABLE_MAX_BYTES;
+// Declared in the leaf module the progress and quality modules read them from (no import cycle), and
+// re-exported here for the callers that always took them from the store.
+export { DERIVATIVE_OBJECT_PREFIX, RECORD_READ_MAX_BYTES, TABLE_READ_MAX_BYTES };
 
 /** The most JSON the record's `process` block may be for the description to carry it. */
 const PROCESS_BLOCK_MAX_BYTES = 16 * 1024;
@@ -1304,19 +1300,13 @@ export async function syncDerivatives(
 
   // 4. Each run whose derivative is now decided (a skip logged, a row stored, failed or expired) has its `stored`
   //    checkpoint resolved now, as many as this pass can have decided, so the grid, the coverage and a run's
-  //    detail (which never sync) read the decision at once; the stamp sync resolves any left over. The progress
-  //    module imports this one, so it is imported when called, never at the top.
-  try {
-    const { resolveDecidedStored } = await import("./compute-pipeline-progress.js");
-    const stored = await resolveDecidedStored(
-      db,
-      DERIVATIVE_STAMPS_PER_CALL + DERIVATIVE_ROWS_PER_CLEANUP,
-    );
-    counts.errored += stored.errored;
-  } catch (err) {
-    console.error(`[compute-derivatives] stored_resolve_failed error=${errorName(err)}`);
-    counts.errored++;
-  }
+  //    detail (which never sync) read the decision at once; the stamp sync resolves any left over. It never
+  //    throws: a row that cannot be resolved is logged and counted by it.
+  const stored = await resolveDecidedStored(
+    db,
+    DERIVATIVE_STAMPS_PER_CALL + DERIVATIVE_ROWS_PER_CLEANUP,
+  );
+  counts.errored += stored.errored;
   return { available: true, ...counts };
 }
 
