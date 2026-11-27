@@ -85,6 +85,7 @@ Money must be counted only where an allocation exists, and every job, wherever i
     Superseded 2026-11-27 by [ADR 0143](0143-every-worker-dispatched-run-of-the-archive-is-handed-its-tags-commit-or-waits-for-it.md): every Worker-dispatched run of the archive is handed its tag's commit (`--source-commit`), or is not dispatched, so its record carries the commit and its stamp a `git:` digest.
     The stamp does not recompute the digest from the rows: that check belongs to the derivative store (item 8), which holds the one shared definition of the input digest.
     One ordering changes with it: where a recipe may run (its listed executors) is now asked before the placeholder question, so a placeholder asked to run on an executor it does not list (`nemar-ica` on a runner) is refused as an unlisted executor, not as `recipe_placeholder`; item 3 of the ADR 0118 amendment, which says a placeholder is refused on every path with `recipe_placeholder`, is inexact for that one case.
+    Amended 2026-11-27 (portable compute card Q1z): `nemar-ica` is no longer a placeholder and now also runs on a runner over the Zarr serving copy, so the example above is historical.
 
 ## Consequences
 

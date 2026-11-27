@@ -13,6 +13,7 @@ import {
   RECIPE_SOURCE_COMMIT_FLAG,
   findRecipe,
   recipeArguments,
+  recipeKeysServingIndex,
   recipeServingIndexArguments,
   recipeServingIndexAttestationArguments,
   recipeSourceCommitArguments,
@@ -294,10 +295,13 @@ describe("where the launcher places the index, and the arguments that hand it to
     ).toThrow(RangeError);
   });
 
-  test("nemar-ica is no longer a placeholder, and runs on Tapis only, where the serving index is staged", () => {
+  test("nemar-ica is no longer a placeholder, and keys the serving index on Tapis, where it is staged, and not on a runner", () => {
     const ica = findRecipe("nemar-ica");
     expect(ica?.placeholder).toBe(false);
-    expect(ica?.executors).toEqual(["tapis"]);
+    expect(ica?.executors).toEqual(["tapis", "runner"]);
+    // A runner run reads the serving copy itself (`zarr`): nothing is staged for it.
+    expect(recipeKeysServingIndex(ica as never, "bids")).toBe(true);
+    expect(recipeKeysServingIndex(ica as never, "zarr")).toBe(false);
   });
 });
 
