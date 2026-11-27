@@ -2302,11 +2302,6 @@ export interface LineageSource extends SourceRecord {
 }
 
 /**
- * A reference that names no version and is resolved to the latest one: a version-less OpenNeuro
- * DOI or URL, a figshare article URL or figshare DOI without a version, a PhysioNet project
- * without one.
- */
-/**
  * A Zenodo concept DOI's DataCite record: a `10.5281/` DOI whose record lists versions
  * (`HasVersion`) and is not itself a version of another (`IsVersionOf`). Its title follows the
  * latest version, so it is not the version a dataset was copied from.
@@ -2326,6 +2321,11 @@ export function isLatestSource(ref: SourceRef, rec: SourceRecord): boolean {
   return isLatestRef(ref) || rec.concept === true || rec.resolver === "osf";
 }
 
+/**
+ * A reference that names no version and is resolved to the latest one: a version-less OpenNeuro
+ * DOI or URL, a figshare article URL or figshare DOI without a version, a PhysioNet project
+ * without one.
+ */
 export function isLatestRef(ref: SourceRef): boolean {
   switch (ref.kind) {
     case "openneuro_latest":
