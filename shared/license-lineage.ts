@@ -38,10 +38,11 @@ import { normalizeDoiKey } from "./never-data-paper.js";
  * Stamped on every result, so two results can be compared. Bump it when a rule changes, or when a
  * record gains a field (version 2: each source's title, creators and publisher, epic #2182 card B4;
  * version 3: the declared license, osf.io sources, cut README DOIs dropped, retried fetches, and
- * `resolved_at`, ADR 0142 decision 3);
+ * `resolved_at`, ADR 0142 decision 3; version 4: README DOIs that prefix another declared DOI
+ * dropped, and DANDI's license spellings read, ADR 0142 decision 3, amendment of 2026-11-27);
  * the cache key carries it, so a record of an older version is never served.
  */
-export const RESOLVER_VERSION = "license-lineage/3";
+export const RESOLVER_VERSION = "license-lineage/4";
 
 /** The User-Agent of every registry request. It carries no contact details on purpose. */
 export const LICENSE_CHECK_USER_AGENT = "nemar-license-check/1";
@@ -390,14 +391,18 @@ export const LICENSE_EVIDENCE_ADDRESS = "support@nemar.org";
  * publication status, the notice mail and the CLI.
  *
  * The placeholders are `{sources}` (each source's identifier and license), `{target}` (the
- * dataset's license) and `{dataset}` (the dataset id). `licensePermissionRequest` in
- * `shared/license-permission.ts` fills them from the lineage result's closed words and checked
- * identifiers only, never from free text, and drops ` ({sources})` when no source can be named.
+ * dataset's License as it declares it, `CC-BY-4.0`, when that is a license identifier that reads
+ * as the license the outcome was judged against; otherwise the normalized word) and `{dataset}`
+ * (the dataset id). `licensePermissionRequest` in `shared/license-permission.ts` fills them from
+ * the lineage result's closed words and checked identifiers only, never from free text, and drops
+ * ` ({sources})` when no source can be named. `source_is_publication` has its own sentence (ADR
+ * 0139 decision 7, amendment of 2026-11-27): a paper named as the source is not a license
+ * conflict, and the first remedy is to name the dataset instead.
  */
 export const LINEAGE_PERMISSION_REQUEST: Record<ActionRequiredOutcome, string> = {
   needs_permission: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the original authors that they accept this copy being published under {target}, for example an email from them, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}. An administrator will record it and the review will continue.`,
   share_alike_mismatch: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the original authors that they accept this copy being published under {target}, for example an email from them, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}. An administrator will record it and the review will continue.`,
-  source_is_publication: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the original authors that they accept this copy being published under {target}, for example an email from them, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}. An administrator will record it and the review will continue.`,
+  source_is_publication: `The upstream source you named ({sources}) is a publication, not a dataset, so its license is not the data's license. Name the dataset the data came from in dataset_description.json SourceDatasets (its DOI or repository URL), or send evidence that the original authors accept this copy under {target}, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}.`,
   redistribution_prohibited: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the repository that holds the upstream data, for example PhysioNet, that it permits this copy being published under {target}, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}; its data use agreement may bind the original authors too, so their permission alone may not be enough. An administrator will record it and the review will continue.`,
   unresolved: `NEMAR could not read the upstream license ({sources}); reply to ${LICENSE_EVIDENCE_ADDRESS} with a link to it, quoting {dataset}, or wait for the next check.`,
 };
@@ -486,6 +491,23 @@ export function normalizeLicense(text: string | null | undefined): NormalizedLic
     const map = { by: "odc-by", odbl: "odbl", pddl: "pddl" } as const;
     return { license: map[odcUri[1] as keyof typeof map], version: versionOf(raw) };
   }
+
+  // DANDI (dandischema's LicenseType, ADR 0142 decision 3, amendment of 2026-11-27): its values
+  // carry an `spdx:` prefix (`spdx:CC-BY-4.0`, `spdx:CC0-1.0`), and the DataCite records DANDI
+  // registers give the enum's name as the rightsIdentifier, the version's dot dropped (`cc_by_40`,
+  // `cc0_10`; measured on 10.48324/dandi.001535/0.250714.1218).
+  const spdx = /^spdx:(\S+)$/i.exec(raw);
+  if (spdx) return normalizeLicense(spdx[1]);
+  const dandiCc = /^cc_by((?:_(?:nc|nd|sa))*)_(\d)(\d)$/.exec(lower);
+  if (dandiCc) {
+    const mods = dandiCc[1];
+    return {
+      license: ccFamily(mods.includes("nc"), mods.includes("nd"), mods.includes("sa")),
+      version: `${dandiCc[2]}.${dandiCc[3]}`,
+    };
+  }
+  const dandiCc0 = /^cc0_(\d)(\d)$/.exec(lower);
+  if (dandiCc0) return { license: "cc0", version: `${dandiCc0[1]}.${dandiCc0[2]}` };
 
   // Token forms: SPDX ids ("CC-BY-NC-SA-4.0", "ODC-By-1.0"), OpenAlex ids ("cc-by-nc"), BIDS
   // values ("CC0", "PD").
@@ -875,6 +897,46 @@ export function declaredLicense(datasetDescription: unknown): string | null {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
+/** Markup a wrapped line can carry between the two halves of a DOI: quotes, `>`, emphasis, code. */
+const WRAP_GAP = String.raw`[>"'*_\`~]*\s[\s>"'*_\`~]*`;
+
+const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+/**
+ * Whether the README text itself rebuilds `longer` from its cut copy `short`: `short`, then
+ * whitespace (a line break, with any quote or emphasis markup around it), then the rest of
+ * `longer`, as `10.5281/zenodo.2231\n4785` does. Case is ignored (DOIs are compared lowercased).
+ */
+function readmeRebuilds(readme: string, short: string, longer: string): boolean {
+  const rest = longer.slice(short.length);
+  return new RegExp(`${escapeRegExp(short)}${WRAP_GAP}${escapeRegExp(rest)}`, "i").test(readme);
+}
+
+/**
+ * README DOIs that are another declared DOI cut short (ADR 0142 decision 3, amendment of
+ * 2026-11-27): a README DOI that is a strict prefix of a DOI declared in SourceDatasets, the
+ * related identifiers or the attestation, or of another README DOI, AND that the README itself
+ * continues into that DOI across whitespace ({@link readmeRebuilds}: `10.5281/zenodo.2231\n4785`
+ * beside a declared `10.5281/zenodo.22314785`), is that DOI wrapped in the text, so it is removed.
+ * Such a cut copy still passes its repository's shape, so {@link isCutDoiCandidate} cannot see it.
+ * A prefix the text does not continue is a distinct record (`zenodo.1234567` beside
+ * `zenodo.12345678`) and stays. An equal DOI is not removed here: de-duplication keeps one.
+ */
+function dropReadmePrefixes(refs: SourceRef[], readme: string | null): SourceRef[] {
+  if (!readme) return refs;
+  const dois = refs.flatMap((r) => (r.kind === "doi" ? [r.doi] : []));
+  return refs.filter(
+    (r) =>
+      !(
+        r.kind === "doi" &&
+        r.origin === "readme" &&
+        dois.some(
+          (d) => d.length > r.doi.length && d.startsWith(r.doi) && readmeRebuilds(readme, r.doi, d),
+        )
+      ),
+  );
+}
+
 /** Every declared source, in the decided order, de-duplicated. */
 export function extractSourceRefs(inputs: SourceInputs): SourceRef[] {
   return extractSources(inputs).refs;
@@ -928,13 +990,16 @@ export function extractSources(inputs: SourceInputs): TextSources {
     dropped += found.dropped;
   }
 
+  const prefixed = dropReadmePrefixes(refs, inputs.readme);
+  dropped += refs.length - prefixed.length;
+
   // A dataset is not its own upstream source, whichever input names it.
   const own =
     isRecord(desc) && typeof desc.DatasetDOI === "string" && desc.DatasetDOI.trim()
       ? normalizeDoiKey(desc.DatasetDOI)
       : null;
   const seen = new Set<string>();
-  const unique = refs.filter((r) => {
+  const unique = prefixed.filter((r) => {
     if (own !== null && r.kind === "doi" && r.doi === own) return false;
     const k = refKey(r);
     if (seen.has(k)) return false;

@@ -11,6 +11,7 @@ with two edits, both recorded in `index.json` (`edited`):
 Resolver version 2 (epic #2182, card B4) also reads each record's title, creators and publisher from these same recordings; nothing was recorded again for it.
 Files 21 to 32 were fetched on 2026-11-27 for resolver version 3 (epic #2449, phase 3; ADR 0142 decision 3), the same way, with no edits:
 they hold no email address, and the OSF node records were requested without their contributors.
+Files 33 to 35 were fetched on 2026-11-27 for resolver version 4 (ADR 0142 decision 3, amendment of 2026-11-27), the same way, with no edits; they hold no email address.
 `index.json` lists every recording with its method, URL, HTTP status, file and fetch time;
 `stand-in.ts` serves them to the tests from a local server.
 
@@ -47,6 +48,11 @@ they hold no email address, and the OSF node records were requested without thei
   a Harvard Dataverse DOI with a five-character suffix, `10.7910/DVN/29379` (CC0 Dataset);
   a figshare collection, `10.6084/m9.figshare.c.3307977` (resourceTypeGeneral `Collection`, CC BY 3.0 US);
   a Dryad file-level DOI, `10.5061/dryad.8pm4nv0/1` (resourceTypeGeneral `Other`, CC0).
+- **A README that cuts a declared Zenodo DOI short:** `10.5281/zenodo.22314785` and `10.5281/zenodo.23610719`, the SourceDatasets of two production datasets (nm000746, nm000843) whose READMEs carry `10.5281/zenodo.2231` and `10.5281/zenodo.236`;
+  both are CC BY 4.0 Datasets (the second also lists MIT).
+  The cut copies are never fetched.
+- **DANDI's license spelling:** `10.48324/dandi.001535/0.250714.1218` (a production source, nm001003);
+  its `rightsList` holds only `rightsIdentifier` `cc_by_40` (scheme SPDX), the name of dandischema's `LicenseType.CC_BY_40`.
 
 ## Recordings
 
@@ -82,6 +88,9 @@ they hold no email address, and the OSF node records were requested without thei
 | `30-datacite-dataverse-cc0.json` | dataverse-cc0 | datacite | GET https://api.datacite.org/dois/10.7910%2Fdvn%2F29379 | 200 | 2026-11-27 |
 | `31-datacite-figshare-collection.json` | figshare-collection | datacite | GET https://api.datacite.org/dois/10.6084%2Fm9.figshare.c.3307977 | 200 | 2026-11-27 |
 | `32-datacite-dryad-file.json` | dryad-file | datacite | GET https://api.datacite.org/dois/10.5061%2Fdryad.8pm4nv0%2F1 | 200 | 2026-11-27 |
+| `33-datacite-zenodo-22314785.json` | zenodo-readme-prefix-a | datacite | GET https://api.datacite.org/dois/10.5281%2Fzenodo.22314785 | 200 | 2026-11-27 |
+| `34-datacite-zenodo-23610719.json` | zenodo-readme-prefix-b | datacite | GET https://api.datacite.org/dois/10.5281%2Fzenodo.23610719 | 200 | 2026-11-27 |
+| `35-datacite-dandi-cc-by.json` | dandi-cc-by | datacite | GET https://api.datacite.org/dois/10.48324%2Fdandi.001535%2F0.250714.1218 | 200 | 2026-11-27 |
 
 The two OpenNeuro POSTs carry the GraphQL query recorded in `index.json` (`body`).
 

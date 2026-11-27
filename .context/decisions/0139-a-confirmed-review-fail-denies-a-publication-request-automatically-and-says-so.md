@@ -162,3 +162,20 @@ Decision 9's record gains the license matcher version (`scancode-32.5.0+spdx-3.2
 A LICENSE file that names a different license from the `License` field (`license_file.state` `matches_other`) lowers `authors_and_license` to `unknown`,
 and decision 1 gains a condition: while the state is `matches_other`, a `fail` of `authors_and_license` is not eligible for an automatic denial, whatever finding it carries (`license_inconsistent` included),
 because both runs would see the same platform fact and their agreement would check nothing.
+
+## Amendment 2026-11-27 (owner hotfix): no mail on `unresolved`, and a publication's own request
+
+Decision 7 and the license permission amendment change in two places, after a depositor received license notices that were wrong.
+
+- **`unresolved` mails nobody.**
+  It means NEMAR could not read an upstream record, which is NEMAR's failure, not the depositor's.
+  The notice mail goes out only for `needs_permission`, `share_alike_mismatch`, `redistribution_prohibited` and `source_is_publication` (`DEPOSITOR_NOTICE_OUTCOMES`, `shared/license-permission.ts`).
+  `unresolved` stays a `license_lineage_unconfirmed` reason: the administrators see it on the decision card and in `nemar admin dataset publish show`, and the after-store step logs why it sent nothing.
+- **`source_is_publication` has its own sentence.**
+  A paper named as the upstream source is not a license conflict, so the sentence no longer says that the upstream license "does not permit this copy".
+  It says that the source named is a publication, not a dataset, so its license is not the data's license,
+  and asks the depositor to name the dataset the data came from in `SourceDatasets` (its DOI or repository URL), or to send evidence that the original authors accept this copy under the dataset's license.
+- **The target license is named as the dataset declares it.**
+  Every sentence names the dataset's `License` as written (`CC-BY-4.0`), not the normalized family (`cc-by`), when that value is a license identifier that normalizes to the license the outcome was judged against;
+  otherwise the normalized word stays.
+  The review's basis keeps it as `target_license_declared`; what a permission covers does not read it.

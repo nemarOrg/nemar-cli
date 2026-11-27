@@ -239,6 +239,20 @@ A dropped candidate still never stands beside other sources as `unresolved`;
 when the README's only candidates were dropped and no source remains, the outcome is `unresolved` with the dropped count, never `no_upstream_declared`,
 because the dataset did name a source that could not be read.
 
+## Amendment 2026-11-27 (owner hotfix): README DOI prefixes and DANDI's license spellings
+
+Decision 3 gains two rules, and the resolver becomes `license-lineage/4` because outcomes change.
+
+- **A README DOI that prefixes another declared DOI is that DOI cut short.**
+  A README DOI candidate that is a strict prefix of a DOI declared in `SourceDatasets`, the related identifiers or the attestation, or of another README DOI candidate, is dropped and counted in `dropped_doi_candidates`,
+  but only when the README text itself continues it into that DOI across whitespace (a line break, with any quote or emphasis markup around it: `10.5281/zenodo.2231` then `4785` on the next line).
+  A prefix the text does not continue is a distinct record (`10.5281/zenodo.1234567` beside `10.5281/zenodo.12345678`) and stays a source.
+  The cut copy still has its repository's DOI shape (`10.5281/zenodo.2231` beside a declared `10.5281/zenodo.22314785`, measured on nm000746 and nm000843), so the shape rule cannot see it, and it made the lineage `unresolved`.
+  A README DOI equal to a declared one is the same source and is de-duplicated, not counted; a declared DOI is never dropped.
+- **DANDI's license spellings are read.**
+  The normalizer reads dandischema's `LicenseType` values (`spdx:CC-BY-4.0`, `spdx:CC0-1.0`, any `spdx:` identifier) and the enum names that DANDI's DataCite records give as `rightsIdentifier` (`cc_by_40`, `cc0_10`).
+  `10.48324/dandi.001535/0.250714.1218` (nm001003) declares only `cc_by_40`, which read as `other` and made the lineage `needs_permission`; it is now CC BY 4.0, `compatible_attribution` for a CC-BY-4.0 target.
+
 ## Receipts
 
 - Epic nemarOrg/nemar-cli#2449, issue #2450; the 37-review measurement in the epic.
