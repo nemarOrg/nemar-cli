@@ -1250,12 +1250,12 @@ describe("a stale enrichment relation is not a source", () => {
     expect(r.sources.map((s) => s.id)).toEqual(["10.5281/zenodo.24539621"]);
     expect(r.skipped_stale_relations).toBe(1);
     expect(lineageLines(r)).toContain(
-      "Skipped: 1 publication(s) listed as IsDerivedFrom in .nemar/metadata.json that SourceDatasets does not name (stale enrichment, not sources).",
+      "Skipped: 1 publication(s) listed as IsDerivedFrom or IsIdenticalTo in .nemar/metadata.json that SourceDatasets does not name (stale enrichment, not sources).",
     );
-    // Alone, it leaves nothing declared.
+    // Alone, an administrator decides: unresolved, never no_upstream_declared.
     const alone = await run(withMetadata("CC-BY-4.0", [], metadataWith(PAPER)));
     expect(alone.sources).toEqual([]);
-    expect(alone.outcome).toBe("no_upstream_declared");
+    expect(alone.outcome).toBe("unresolved");
     expect(alone.skipped_stale_relations).toBe(1);
   });
 

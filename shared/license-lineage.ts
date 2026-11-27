@@ -2328,7 +2328,12 @@ export async function resolveLicenseLineage(
   return {
     // A README that names a source only as a DOI cut short has declared one: `unresolved` (the
     // check could not read it), never `no_upstream_declared`, which reads as nothing to do.
-    outcome: sources.length === 0 && dropped > 0 ? "unresolved" : combineOutcomes(sources),
+    // Likewise a stale publication relation that was the only thing named: an administrator
+    // decides (`unresolved`), never `no_upstream_declared`.
+    outcome:
+      sources.length === 0 && (dropped > 0 || skipped > 0)
+        ? "unresolved"
+        : combineOutcomes(sources),
     inputs: states,
     target_license: target.license,
     target_license_raw: targetRaw,
@@ -2439,7 +2444,7 @@ export function lineageLines(result: LineageResult): string[] {
   // `?? 0` and `?? fetched_at`: a Worker of resolver version 2 sends neither field.
   if ((result.skipped_stale_relations ?? 0) > 0) {
     lines.push(
-      `Skipped: ${result.skipped_stale_relations} publication(s) listed as IsDerivedFrom in .nemar/metadata.json that SourceDatasets does not name (stale enrichment, not sources).`,
+      `Skipped: ${result.skipped_stale_relations} publication(s) listed as IsDerivedFrom or IsIdenticalTo in .nemar/metadata.json that SourceDatasets does not name (stale enrichment, not sources).`,
     );
   }
   if ((result.dropped_doi_candidates ?? 0) > 0) {
