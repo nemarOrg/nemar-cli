@@ -17,10 +17,11 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
-- **A nemar-ica run of the archive staged without a serving index can be stored (ADR 0141 amendment).**
-  The dispatcher now hands such a run `--source-commit` and the tag's commit whenever it read it, so the run's record states the commit and its derivative is keyed `none` and stored.
-  Before, the run's stamp had no input digest and its derivative was skipped for good (`no_input_digest`), which every run whose serving index is absent or built from another commit than the tag's would have hit.
-  A `nemar-floor` run of the archive is still handed no commit, so its derivative is still not keyed.
+- **Every Worker-dispatched run of the archive is handed its version's tag commit, so its derivative can be stored (ADR 0143).**
+  The dispatcher now reads the commit of the version's tag on GitHub at every `bids` dispatch, of every recipe (`nemar-floor` included), and hands it as `--source-commit`; the run's record states it and its derivative is keyed by `git:` and that commit.
+  Before, only a nemar-ica run with a staged serving index got a commit, so every other run of the archive was skipped for good by the derivative store (`no_input_digest`).
+  A run whose commit GitHub cannot give is deferred (`source_commit_deferred`, 503, a refused stamp; the next pass tries again, and it stops a run over the queue), and a version whose tag is missing from its repository is refused (`version_tag_absent`, 409, nothing written).
+  The derivative store also refuses to key a BIDS stamp whose stated commit is not the one its specification handed (`digest_mismatch`).
 - **A derivative the store decides not to keep reads the same in the pipeline grid, the coverage and a run's detail.**
   The derivative store's pass now resolves the `stored` checkpoint of each run it decided, so the read-only views no longer show it pending until the next stamp sync.
   The coverage's `complete` no longer counts a run whose derivative was skipped for good or lost.
