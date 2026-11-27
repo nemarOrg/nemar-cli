@@ -26,8 +26,17 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { RECIPE_INPUTS, findRecipe, recipeRequiredOutputs } from "../../shared/compute-recipes";
-import { resultsOutputKey } from "../../shared/contract/compute-launch";
+import {
+  RECIPE_INPUTS,
+  RECIPE_SERVING_INDEX_FLAG,
+  RECIPE_SOURCE_COMMIT_FLAG,
+  findRecipe,
+  recipeRequiredOutputs,
+} from "../../shared/compute-recipes";
+import {
+  SERVING_INDEX_CONTAINER_PATH,
+  resultsOutputKey,
+} from "../../shared/contract/compute-launch";
 import {
   PIPELINE_CANDIDATES_SQL,
   type StampRow,
@@ -39,7 +48,7 @@ import {
   syncPipelineStamps,
   tupleHeld,
 } from "../src/services/compute-pipeline";
-import { sha256Hex } from "../src/services/compute-records";
+import { recordKey, servingIndexKey, sha256Hex } from "../src/services/compute-records";
 import type { Bindings } from "../src/types/bindings";
 import {
   COMPUTE_KEYS,
@@ -471,18 +480,16 @@ describe("an input the executor does not run is refused before anything is writt
     expect(await snapshot(w.d1)).toEqual(before);
   });
 
-  test("where it runs, nemar-ica is no longer refused as a placeholder: the dry run gives the run's verdict and an administrator's run dispatches it on Tapis (MUTATION: set placeholder back to true)", async () => {
-    const [w] = worlds() as [World];
-    await ready(w);
-    // Its pool is the GPU allocation: a job of 10 cores and a GPU for 12 hours is held against it.
-    await fundPipelines(w.env(), 100_000_000, true);
+  /** The job's RECORDED specification: what the launcher is handed and what the derivative key reads. */
+  async function recordedSpec(jobId: string): Promise<Record<string, unknown>> {
+    const object = await fx.harness.records.get(recordKey(jobId, "spec.json"));
+    if (object === null) throw new Error("no recorded specification");
+    return JSON.parse(await object.text());
+  }
+
+  /** An administrator's run of nemar-ica over one dataset through the real route, and the job it made. */
+  async function icaRun(w: World, id: string) {
     const env = w.env();
-    const id = await dataset(w);
-    const dry = await pipelineDryRun(env, { recipe: "nemar-ica", datasetId: id });
-    expect(dry).toMatchObject({
-      ok: true,
-      would_dispatch: [{ dataset_id: id, version: "v1.0.0" }],
-    });
     const r = await call(
       "POST",
       "/compute/pipeline/run",
@@ -502,6 +509,74 @@ describe("an input the executor does not run is refused before anything is writt
       .bind(stamp?.job_id)
       .first<{ executor: string; source: string }>();
     expect(job).toEqual({ executor: "tapis", source: "pipeline" });
+    return { jobId: stamp?.job_id as string, spec: await recordedSpec(stamp?.job_id as string) };
+  }
+
+  const servingCopies = async (): Promise<string[]> =>
+    (await fx.harness.records.list({ prefix: "serving-index/" })).objects.map((o) => o.key);
+
+  test("where it runs, nemar-ica is no longer refused as a placeholder: the dry run gives the run's verdict and an administrator's run dispatches it on Tapis, recording that the index it could not use was not staged (MUTATION: set placeholder back to true)", async () => {
+    const [w] = worlds() as [World];
+    await ready(w);
+    // Its pool is the GPU allocation: a job of 10 cores and a GPU for 12 hours is held against it.
+    await fundPipelines(w.env(), 100_000_000, true);
+    const env = w.env();
+    // The world's index names the tag's commit but lists no stores, which the recipe could not use.
+    const id = await dataset(w);
+    const dry = await pipelineDryRun(env, { recipe: "nemar-ica", datasetId: id });
+    expect(dry).toMatchObject({
+      ok: true,
+      would_dispatch: [{ dataset_id: id, version: "v1.0.0" }],
+    });
+    const { spec } = await icaRun(w, id);
+    expect(spec.serving_index).toEqual({ reason: "index_unusable" });
+    expect(spec.args as string[]).not.toContain(RECIPE_SERVING_INDEX_FLAG);
+    expect(await servingCopies()).toEqual([]);
+  });
+
+  test("an administrator's run with a well-formed index of the tag's commit stages it: the specification records its digest and size, hands the run its path and the commit, and the copy is kept under its digest (MUTATION: stage nothing on the route's path)", async () => {
+    const [w] = worlds() as [World];
+    await ready(w);
+    await fundPipelines(w.env(), 100_000_000, true);
+    const id = await dataset(w);
+    github.index(id, {
+      format_version: 3,
+      dataset_id: id,
+      source_commit: COMMIT,
+      store_count: 1,
+      stores: [
+        {
+          path: "sub-01/eeg/sub-01_task-rest_eeg.set",
+          zarr: "sub-01/eeg/sub-01_task-rest_eeg.zarr",
+          groups: [
+            {
+              name: "eeg_250hz",
+              modality: "EEG",
+              rate: 250,
+              n_channels: 64,
+              n_samples: 75000,
+            },
+          ],
+        },
+      ],
+    });
+    const { spec } = await icaRun(w, id);
+    const staged = spec.serving_index as { sha256: string; size: number };
+    expect(Object.keys(staged).sort()).toEqual(["sha256", "size"]);
+    expect(staged.sha256).toMatch(/^[0-9a-f]{64}$/);
+    const args = spec.args as string[];
+    const at = args.indexOf(RECIPE_SERVING_INDEX_FLAG);
+    expect(args.slice(at, at + 4)).toEqual([
+      RECIPE_SERVING_INDEX_FLAG,
+      SERVING_INDEX_CONTAINER_PATH,
+      RECIPE_SOURCE_COMMIT_FLAG,
+      COMMIT,
+    ]);
+    expect(SERVING_INDEX_CONTAINER_PATH).toBe("/data/serving-index/index.json");
+    expect(await servingCopies()).toEqual([servingIndexKey(staged.sha256)]);
+    const kept = await fx.harness.records.get(servingIndexKey(staged.sha256));
+    const bytes = new Uint8Array(await (kept as R2ObjectBody).arrayBuffer());
+    expect([bytes.byteLength, await sha256Hex(bytes)]).toEqual([staged.size, staged.sha256]);
   });
 
   test("a word that is not an input is invalid_body, not a refusal of the registry", async () => {
