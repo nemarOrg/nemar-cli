@@ -24,9 +24,13 @@ nemar-process used a row of the index only when the index's `source_commit` was 
    It stages the index only when the compare answers `ahead`, `behind_by` 0 and fewer than 300 files, and every changed path, and a renamed file's previous path, is NEMAR-owned metadata (`isNemarOwnedMetadataPath`): anything under `.nemar/` or `.github/`, or a `.gitattributes` file at any depth.
    `.bidsignore` is not (the dataset's authors own it, and it is BIDS configuration), nor is any other `.datalad/` file, a data file, a BIDS file or a path that is not a plain path.
 2. **A `.gitattributes` edit is admitted only when it cannot change the bytes of a checkout.**
-   Git attributes can change those bytes: `eol=crlf` writes line endings as CR LF, `working-tree-encoding` re-encodes text, `ident` expands `$Id$`, and a smudge `filter` other than git-annex's rewrites the file.
-   So the Worker reads each `.gitattributes` file's patch from the compare (`gitattributesPatchProblem`), and refuses (`index_content_changed`) any line, added or removed, that carries one of those, whether set, unset or given a value.
-   Annex rules (`annex.*`), git-annex's own `filter=annex`, and `text`, `eol=lf`, `binary`, `diff` or `merge` lines are admitted: they say where git keeps a file, or leave an LF checkout as it was.
+   Git attributes can change those bytes: `eol=crlf` writes line endings as CR LF, `working-tree-encoding` re-encodes text, `ident` expands `$Id$`, a smudge `filter` other than git-annex's rewrites the file, and unsetting `text` or `eol` turns a CR LF conversion off.
+   So the Worker reads each `.gitattributes` file's patch from the compare (`gitattributesPatchProblem`) and admits an edit only by an allow-list over every attribute of every line it adds or removes, the definition of a macro (`[attr]name`) included, and a line that starts `+++` or `---` is such a line (a compare's patch holds hunk lines only).
+   An allow-list, because a name it does not know may be a macro whose definition, on a line the edit does not touch, carries anything.
+   - **Admitted in any form** (set, unset `-`, reset `!` or given a value): `annex.*`, which says where git-annex keeps a file, and `diff` and `merge`, which choose how git shows and merges it; none of them reaches what a checkout writes.
+   - **Admitted only as written here:** `filter=annex`, git-annex's own filter, which gives the content git-annex keeps; and `text`, `binary` (`-diff -merge -text`) and `eol=lf`, set. A checkout of LF-stored text writes the same bytes with or without these unless CR LF conversion is in effect for the file, so removing `text` and `eol=lf` lines, as NEMAR's annex policy does, and adding them, are byte-safe.
+   - **Refused** (`index_content_changed`): every other form of `eol`, `text` and `binary` (`eol=crlf`, `-eol`, `!eol`, `-text`, `!text`, `text=auto`, `-binary`), `filter` with any other value or form, `working-tree-encoding`, `ident`, and every other name, which may be a macro.
+   - **Refused as well:** any line of the patch, the unchanged context included, that can turn CR LF conversion on (`eol=crlf`, or the legacy `crlf` in any form), because that is the one condition under which the admitted `text`, `binary` and `eol=lf` change bytes. An `eol=crlf` on an unchanged line outside the patch's context is not seen; NEMAR's own policy writes `eol=lf` only.
    A `.gitattributes` change whose patch GitHub leaves out (a large or binary diff) is `index_delta_unlisted`.
    This rule differs from the Zarr input's delta roots (`ZARR_SOURCE_DELTA_ROOTS`, `.nemar/` and `.github/` only) because the two prove different things to different readers.
    The Zarr recipe is handed every changed path and validates them against its own roots.
@@ -34,7 +38,7 @@ nemar-process used a row of the index only when the index's `source_commit` was 
 3. **Anything else is refused with the word that says why, and the run goes ahead without the index at once.**
    - `index_behind_tag`: the compare answers `behind`.
    - `index_diverged`: the compare answers `diverged`, or ahead and behind at once, or there is no comparison (the repository lacks S, or shares no history with it).
-   - `index_content_changed`: a path that is not NEMAR-owned metadata, or a `.gitattributes` edit that can change bytes.
+   - `index_content_changed`: a path that is not NEMAR-owned metadata, or a `.gitattributes` edit decision 2 does not admit.
    - `index_delta_unlisted`: 300 or more files, more changed paths than a job can carry (24, below), a body over the compare's bound, or a `.gitattributes` change without its patch.
 
    `source_commit_differs`, ADR 0141's word for every other commit, is no longer produced and stays a valid recorded word.
@@ -58,7 +62,8 @@ nemar-process used a row of the index only when the index's `source_commit` was 
 - The identity of a run, its record and its derivative is the tag's everywhere, so a version's digests do not move when NEMAR's metadata does. A later reconversion that only moves NEMAR's metadata changes the index's digest, and so the key, as any new index did under ADR 0141.
 - A nemar-ica dispatch whose index is of another commit makes one more GitHub request.
 - A copy built after a content change is still not staged, which is the rest of #2461 (rebuild the copy at the tag, or tag the change).
-- A run handed the attestation needs a runtime image built with nemarOrg/nemar-process#108; an older image refuses the arguments (exit 2, a usage error), so the image must move before nemar-ica runs over an admitted index.
+- A run handed the attestation needs a runtime image built with nemarOrg/nemar-process#108; an older image refuses the arguments (exit 2, a usage error).
+  nemar-ica is no longer a placeholder (#2462), so what keeps such a run from an older image is compute being dark and the release order: #108 merges before nemar-process's 0.1.2 release image, and `COMPUTE_RUNTIME_IMAGE` is repinned to that image before compute is turned on.
 
 ## Alternatives considered
 

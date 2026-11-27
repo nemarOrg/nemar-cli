@@ -22,10 +22,11 @@ earlier releases are described only by their generated notes.
   It is still never run by the daily dispatcher (`autoDispatch` is false), still runs on Tapis only, and still needs the owner's compute switches, the Tapis configuration and a funded GPU pool.
   The pipeline grid and coverage now report it with `placeholder: false`, so the admin page no longer says it is a placeholder.
 - **nemar-ica is handed a serving index built after its version's tag when only NEMAR's own metadata changed since (ADR 0144).**
-  One GitHub compare of the tag's commit and the index's admits the index when every path between them is under `.nemar/` or `.github/`, or is a `.gitattributes` file whose patch adds or removes no `eol=crlf`, `working-tree-encoding`, `ident` or non-annex `filter`.
+  One GitHub compare of the tag's commit and the index's admits the index when every path between them is under `.nemar/` or `.github/`, or is a `.gitattributes` file whose patch adds or removes only `annex.*`, `diff`, `merge`, `filter=annex`, `text`, `binary` or `eol=lf` attributes and shows no `eol=crlf` at all.
   The run stays the tag's: it is handed the tag's commit and keyed by it, and the job's specification records the index's own commit as provenance (`ahead_of_tag`).
   Any other commit is refused with a word that says why (`index_behind_tag`, `index_diverged`, `index_content_changed`, `index_delta_unlisted`) and the run goes ahead without the index; a compare GitHub cannot answer defers the run.
-  The run attests the admission to the recipe with `--serving-index-commit` and one `--serving-index-delta-path` per changed path (at most 24, or the index is refused as `index_delta_unlisted`); it needs a runtime image with nemarOrg/nemar-process#108.
+  The run attests the admission to the recipe with `--serving-index-commit` and one `--serving-index-delta-path` per changed path (at most 24, or the index is refused as `index_delta_unlisted`).
+  **Deploy order:** merge nemarOrg/nemar-process#108 before nemar-process's 0.1.2 release, publish its runtime image, and repin `COMPUTE_RUNTIME_IMAGE` to it before compute is turned on: an older image refuses these arguments.
 
 ### Fixed
 
