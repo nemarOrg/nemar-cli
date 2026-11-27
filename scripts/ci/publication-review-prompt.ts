@@ -51,7 +51,8 @@ import { fence } from "../../shared/untrusted-text";
 import { isCleared, isInputCleared } from "./publication-review-presend";
 
 /** The model that reviews. One place, one reviewed change to move it. */
-export const PUBLICATION_REVIEW_MODEL = PUBLICATION_REVIEW_MODELS[0];
+// TEST BRANCH ONLY: Opus 5.5 (on the production list since 0.10.47).
+export const PUBLICATION_REVIEW_MODEL = "claude-opus-5-5" satisfies (typeof PUBLICATION_REVIEW_MODELS)[number];
 
 export const PUBLICATION_SYSTEM_PROMPT = `You review a request to publish a neuroscience dataset on NEMAR, an open data archive. The depositor has asked for exactly this content to become public. A human administrator makes the final decision. You give a careful, evidence-based opinion on four questions about the documents you are shown.
 

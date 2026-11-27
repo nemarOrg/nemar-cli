@@ -110,7 +110,7 @@ export const CONFIRM_DEADLINE_MS = 12 * 60_000;
 
 /** How one call is made: the review's own effort and budget, or the confirming run's. */
 export interface ModelCallShape {
-  effort: "high" | "max";
+  effort: "medium" | "high" | "max";
   maxTokens: number;
   /** Set for a streamed call: abort it after this long. */
   deadlineMs?: number;
@@ -118,8 +118,10 @@ export interface ModelCallShape {
 
 /** The review's own call. */
 export const REVIEW_CALL: ModelCallShape = {
+  // TEST BRANCH ONLY: streamed, Opus 5.5's full 128,000-token output, the confirming run's deadline.
   effort: PUBLICATION_REVIEW_EFFORT,
-  maxTokens: MAX_TOKENS,
+  maxTokens: 128_000,
+  deadlineMs: CONFIRM_DEADLINE_MS,
 };
 
 /** The run errors this script may post: everything the Worker does not write itself. */
