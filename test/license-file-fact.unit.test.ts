@@ -533,6 +533,22 @@ describe("the states that come before the scan", () => {
   test.each([
     ["absent", "absent"],
     ["annexed", "annexed"],
+  ] as const)(
+    "with no scan directory, a LICENSE that is %s is still %s, matcher unavailable",
+    (docState, want) => {
+      const id = identifyLicenseFile({
+        document: { state: docState, text: null },
+        licenseField: c.field,
+        scan: null,
+      });
+      expect(id.fact).toEqual({ state: want, spdx: null, additions: false, expression: null });
+      expect(id.matcher).toBe("unavailable");
+    },
+  );
+
+  test.each([
+    ["absent", "absent"],
+    ["annexed", "annexed"],
     ["unreadable", "unreadable"],
     ["not_utf8", "unreadable"],
   ] as const)("a LICENSE that is %s is %s, with the matcher's word", (docState, want) => {
