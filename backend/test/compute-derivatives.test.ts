@@ -2706,6 +2706,12 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
       SERVING_INDEX_CONTAINER_PATH,
       RECIPE_SOURCE_COMMIT_FLAG,
       COMMIT,
+      "--serving-index-commit",
+      SOURCE,
+      "--serving-index-delta-path",
+      ".gitattributes",
+      "--serving-index-delta-path",
+      ".nemar/metadata.json",
     ]);
     expect(spec.serving_index).toMatchObject({
       ahead_of_tag: { tag_commit: COMMIT, index_commit: SOURCE, changed_path_count: 2 },
@@ -2793,6 +2799,71 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
           },
         },
         args: STAGED_ARGS,
+      },
+    ],
+    [
+      "an index admitted ahead of its tag whose index commit the arguments do not attest (ADR 0144)",
+      {
+        serving_index: {
+          sha256: STAGED_HEX,
+          size: 812,
+          ahead_of_tag: {
+            tag_commit: COMMIT40,
+            index_commit: "8".repeat(40),
+            changed_path_count: 1,
+          },
+        },
+        args: [...STAGED_ARGS, "--serving-index-delta-path", ".nemar/x"],
+      },
+    ],
+    [
+      "an index admitted ahead of its tag attested with another index commit",
+      {
+        serving_index: {
+          sha256: STAGED_HEX,
+          size: 812,
+          ahead_of_tag: {
+            tag_commit: COMMIT40,
+            index_commit: "8".repeat(40),
+            changed_path_count: 1,
+          },
+        },
+        args: [
+          ...STAGED_ARGS,
+          "--serving-index-commit",
+          "9".repeat(40),
+          "--serving-index-delta-path",
+          ".nemar/x",
+        ],
+      },
+    ],
+    [
+      "an index admitted ahead of its tag attested with another number of changed paths",
+      {
+        serving_index: {
+          sha256: STAGED_HEX,
+          size: 812,
+          ahead_of_tag: {
+            tag_commit: COMMIT40,
+            index_commit: "8".repeat(40),
+            changed_path_count: 1,
+          },
+        },
+        args: [...STAGED_ARGS, "--serving-index-commit", "8".repeat(40)],
+      },
+    ],
+    [
+      "an index of the tag's own commit attested as if it were ahead",
+      {
+        serving_index: { sha256: STAGED_HEX, size: 812 },
+        args: [...STAGED_ARGS, "--serving-index-commit", "8".repeat(40)],
+      },
+    ],
+    [
+      "no index staged, but an attestation in the arguments",
+      {
+        serving_index: { reason: "no_index" },
+        args: ["--source-commit", COMMIT40, "--serving-index-delta-path", ".nemar/x"],
       },
     ],
   ] as const) {

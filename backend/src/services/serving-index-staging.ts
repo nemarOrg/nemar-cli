@@ -14,7 +14,7 @@
  * path between them NEMAR-owned metadata, which changes without a new tag (`.nemar/`, `.github/`, and a
  * `.gitattributes` edit that cannot change checkout bytes): the data and events the copy was built from are then the
  * tag's. The run's identity stays the tag's: it is handed the TAG's commit as `--source-commit`, and the index's own
- * commit is recorded as provenance (`ahead`: both commits and the number of changed paths). An index behind the tag,
+ * commit is recorded as provenance (`ahead`: both commits and the changed paths). An index behind the tag,
  * diverged from it, or ahead by any other change is refused with the word that says which; a compare GitHub could
  * not answer is a fault (`github_unreadable`), which defers the run: nothing is staged blind.
  *
@@ -64,7 +64,7 @@ export type StagedServingIndex =
        * Present when the index's `source_commit` is not the tag's: what was admitted (ADR 0144), as provenance. The
        * run's identity is the tag's commit either way. Absent, the index's commit is the tag's.
        */
-      ahead?: { tagCommit: string; indexCommit: string; changedPathCount: number };
+      ahead?: { tagCommit: string; indexCommit: string; deltaPaths: readonly string[] };
     }
   | { staged: false; reason: ServingIndexAbsentReason };
 
@@ -333,19 +333,15 @@ export async function stageServingIndex(
     const source = indexSourceCommit(index.bytes);
     if (!source.ok) return absent(source.reason);
     // The tag's commit, or one ahead of it by NEMAR-owned metadata only, shown by one compare (ADR 0144).
-    let ahead: { tagCommit: string; indexCommit: string; changedPathCount: number } | undefined;
+    let ahead: { tagCommit: string; indexCommit: string; deltaPaths: string[] } | undefined;
     if (source.commit !== tagCommit) {
       const access = await githubAccess(env);
       if (!access.ok) return absent(access.reason);
       const compared = await servingIndexAheadOfTag(datasetId, tagCommit, source.commit, access);
       if (!compared.ok) return absent(compared.reason);
-      ahead = {
-        tagCommit,
-        indexCommit: source.commit,
-        changedPathCount: compared.changedPathCount,
-      };
+      ahead = { tagCommit, indexCommit: source.commit, deltaPaths: compared.deltaPaths };
       console.log(
-        `[serving-index] index_ahead_admitted changed_path_count=${compared.changedPathCount}`,
+        `[serving-index] index_ahead_admitted changed_path_count=${compared.deltaPaths.length}`,
       );
     }
     const sha256 = await sha256Hex(index.bytes);

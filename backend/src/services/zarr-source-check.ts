@@ -60,6 +60,7 @@
  * local stack's user agent, not the Worker's.
  */
 
+import { RECIPE_SERVING_INDEX_MAX_DELTA_PATHS } from "../../../shared/compute-recipes.js";
 import { computeIsWellFormed, launchStringBytes } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
@@ -534,6 +535,8 @@ export function isNemarOwnedMetadataPath(path: string): boolean {
   }
   const parts = path.split("/");
   if (parts.some((part) => part === "" || part === "." || part === "..")) return false;
+  // A lone surrogate has no UTF-8 form, so the recipe could not be handed it (nemar-process#108).
+  if (!computeIsWellFormed(path)) return false;
   return (
     path.startsWith(".nemar/") || path.startsWith(".github/") || parts.at(-1) === ".gitattributes"
   );
@@ -610,8 +613,10 @@ export type ServingIndexAheadRefusal =
  * bound as the Zarr check's): `ahead`, `behind_by` 0, fewer than 300 files listed, every changed path (and a
  * renamed file's previous path) {@link isNemarOwnedMetadataPath}, and every `.gitattributes` edit one that cannot
  * change the bytes of a checkout ({@link gitattributesPatchProblem}). A compare that lists no file at all (commits
- * that change nothing) is admitted. A compare body over its bound is `index_delta_unlisted`: what changed cannot be
- * shown. A compare GitHub could not answer, or answered in a shape this does not read, is `github_unreadable`, a
+ * that change nothing) is admitted. The changed paths, a renamed file's old name included, each once and in
+ * code-unit order, are what the run is handed (`--serving-index-delta-path`), so more than a job can carry
+ * ({@link RECIPE_SERVING_INDEX_MAX_DELTA_PATHS}) is `index_delta_unlisted` and never cut short; so is a compare
+ * body over its bound: what changed cannot be shown. A compare GitHub could not answer, or answered in a shape this does not read, is `github_unreadable`, a
  * fault: the caller defers, and never stages an index it could not show to be the tag's data. Never throws.
  */
 export async function servingIndexAheadOfTag(
@@ -620,7 +625,7 @@ export async function servingIndexAheadOfTag(
   indexCommit: string,
   access: GithubAccess & { ok: true },
 ): Promise<
-  | { ok: true; changedPathCount: number }
+  | { ok: true; deltaPaths: string[] }
   | { ok: false; reason: ServingIndexAheadRefusal | "github_unreadable" }
 > {
   try {
@@ -673,11 +678,17 @@ export async function servingIndexAheadOfTag(
         if (problem !== null) return { ok: false, reason: problem };
       }
     }
-    return { ok: true, changedPathCount: paths.size };
+    // Every path is handed to the run, so a delta that does not fit is refused whole.
+    if (paths.size > RECIPE_SERVING_INDEX_MAX_DELTA_PATHS) {
+      return { ok: false, reason: "index_delta_unlisted" };
+    }
+    return { ok: true, deltaPaths: [...paths].sort(compareCodeUnits) };
   } catch {
     return { ok: false, reason: "github_unreadable" };
   }
 }
+
+const compareCodeUnits = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 // --- The verdict -------------------------------------------------------------------------------------------
 

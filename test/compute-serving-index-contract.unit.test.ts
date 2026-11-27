@@ -6,11 +6,15 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  RECIPE_SERVING_INDEX_COMMIT_FLAG,
+  RECIPE_SERVING_INDEX_DELTA_PATH_FLAG,
   RECIPE_SERVING_INDEX_FLAG,
+  RECIPE_SERVING_INDEX_MAX_DELTA_PATHS,
   RECIPE_SOURCE_COMMIT_FLAG,
   findRecipe,
   recipeArguments,
   recipeServingIndexArguments,
+  recipeServingIndexAttestationArguments,
   recipeSourceCommitArguments,
 } from "../shared/compute-recipes";
 import {
@@ -218,6 +222,56 @@ describe("where the launcher places the index, and the arguments that hand it to
     ).toEqual(recipeSourceCommitArguments(COMMIT));
     for (const bad of ["abc", COMMIT.toUpperCase(), `${COMMIT}\n`, ""]) {
       expect(() => recipeSourceCommitArguments(bad)).toThrow(RangeError);
+    }
+  });
+
+  test("an index ahead of its tag is attested with its commit and every changed path, as nemar-process#108 reads them (ADR 0144)", () => {
+    const index = "c".repeat(40);
+    expect(RECIPE_SERVING_INDEX_COMMIT_FLAG).toBe("--serving-index-commit");
+    expect(RECIPE_SERVING_INDEX_DELTA_PATH_FLAG).toBe("--serving-index-delta-path");
+    expect(
+      recipeServingIndexAttestationArguments({
+        tagCommit: COMMIT,
+        indexCommit: index,
+        deltaPaths: [".gitattributes", ".nemar/a.json"],
+      }),
+    ).toEqual([
+      "--serving-index-commit",
+      index,
+      "--serving-index-delta-path",
+      ".gitattributes",
+      "--serving-index-delta-path",
+      ".nemar/a.json",
+    ]);
+    // Commits that change no file: the commit alone.
+    expect(
+      recipeServingIndexAttestationArguments({
+        tagCommit: COMMIT,
+        indexCommit: index,
+        deltaPaths: [],
+      }),
+    ).toEqual(["--serving-index-commit", index]);
+    // The argument budget: 64 strings, 16 fixed, so 24 paths (the recipe takes 32).
+    expect(RECIPE_SERVING_INDEX_MAX_DELTA_PATHS).toBe((64 - 16) / 2);
+    const paths = (n: number) => Array.from({ length: n }, (_, i) => `.nemar/${i}`);
+    expect(
+      recipeServingIndexAttestationArguments({
+        tagCommit: COMMIT,
+        indexCommit: index,
+        deltaPaths: paths(24),
+      }),
+    ).toHaveLength(50);
+    for (const bad of [
+      { tagCommit: COMMIT, indexCommit: COMMIT, deltaPaths: [] },
+      { tagCommit: COMMIT, indexCommit: "abc", deltaPaths: [] },
+      { tagCommit: "C".repeat(40), indexCommit: index, deltaPaths: [] },
+      { tagCommit: COMMIT, indexCommit: index, deltaPaths: paths(25) },
+      { tagCommit: COMMIT, indexCommit: index, deltaPaths: [""] },
+      { tagCommit: COMMIT, indexCommit: index, deltaPaths: [".nemar/a", ".nemar/a"] },
+    ]) {
+      expect(() => recipeServingIndexAttestationArguments(bad), JSON.stringify(bad)).toThrow(
+        RangeError,
+      );
     }
   });
 

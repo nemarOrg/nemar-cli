@@ -61,6 +61,7 @@ import {
   recipeRunsInput,
   recipeRunsOn,
   recipeServingIndexArguments,
+  recipeServingIndexAttestationArguments,
   recipeSourceCommitArguments,
   recipeZarrArguments,
   recipeZarrBase,
@@ -456,7 +457,8 @@ const partitionOf = (recipe: ComputeRecipe) => recipe.partition as PartitionName
  * A `bids` run is handed the commit of its version's tag (`sourceCommit`, `--source-commit`, ADR 0143), which its
  * record states as the `git:` input digest its derivative is keyed by: alone when no serving index was staged, and
  * with a staged index as the index's own arguments end (ADR 0141). An index admitted ahead of the tag (ADR 0144)
- * changes none of that: the run is still the tag's, and the index's own commit is provenance in the record. A `bids`
+ * changes none of that: the run is still the tag's, and the arguments then attest the index's own commit and every
+ * changed path (`--serving-index-commit`, `--serving-index-delta-path`), which the record keeps as provenance. A `bids`
  * run with no commit, or an admitted index that names another tag commit than the one handed, or one whose index
  * commit is the tag's, is a programming error here.
  */
@@ -533,9 +535,15 @@ export function recipeJobSpec(
                 sourceCommit: input.sourceCommit as string,
               })
             : recipeSourceCommitArguments(input.sourceCommit as string)),
-          // PLUMBING STILL TO COME (ADR 0144): the arguments that tell the recipe an index built at `ahead.indexCommit`
-          // is admitted for the tag's commit, once nemar-process names them (feat/serving-index-attested-commit).
-          // Until then the recipe uses no row of an admitted index (`serving_index_stale`).
+          // An index admitted ahead of the tag (ADR 0144): the commit it was built from and every changed path, so
+          // the recipe uses its rows for the tag's commit (nemarOrg/nemar-process#108).
+          ...(ahead === undefined
+            ? []
+            : recipeServingIndexAttestationArguments({
+                tagCommit: ahead.tagCommit,
+                indexCommit: ahead.indexCommit,
+                deltaPaths: ahead.deltaPaths,
+              })),
         ],
     ...(staged === null
       ? {}
@@ -550,7 +558,7 @@ export function recipeJobSpec(
                       ahead_of_tag: {
                         tag_commit: staged.ahead.tagCommit,
                         index_commit: staged.ahead.indexCommit,
-                        changed_path_count: staged.ahead.changedPathCount,
+                        changed_path_count: staged.ahead.deltaPaths.length,
                       },
                     }),
               }

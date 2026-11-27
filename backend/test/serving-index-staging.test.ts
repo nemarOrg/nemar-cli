@@ -190,7 +190,7 @@ describe("the index is staged only when it was built from the tag's own commit",
       staged: true,
       sha256: sha(bytes),
       size: bytes.length,
-      ahead: { tagCommit: T, indexCommit: S, changedPathCount: 1 },
+      ahead: { tagCommit: T, indexCommit: S, deltaPaths: [".nemar/zarr.json"] },
     });
     expect(compareRequests().map((r) => r.path)).toEqual([
       `/repos/nemarDatasets/${ID}/compare/${T}...${S}`,
@@ -935,15 +935,24 @@ describe("nemar-ica's archive job names what was staged", () => {
   });
 
   test("an admitted index is handed with the tag's commit and recorded with both; an admission that does not fit the commit handed is a programming error (ADR 0144)", () => {
-    const ahead = { tagCommit: T, indexCommit: S, changedPathCount: 2 };
+    const ahead = { tagCommit: T, indexCommit: S, deltaPaths: [".gitattributes", ".nemar/a.json"] };
     const spec = icaSpec({ ...STAGED, ahead });
+    // The exact vector nemar-process#108 reads: the tag's commit, then the index's and every changed path.
     expect(spec.args).toEqual([
       ...base,
       RECIPE_SERVING_INDEX_FLAG,
       SERVING_INDEX_CONTAINER_PATH,
       RECIPE_SOURCE_COMMIT_FLAG,
       T,
+      "--serving-index-commit",
+      S,
+      "--serving-index-delta-path",
+      ".gitattributes",
+      "--serving-index-delta-path",
+      ".nemar/a.json",
     ]);
+    // An index of the tag's own commit is attested by nothing (MUTATION: attest every staged index).
+    expect(icaSpec(STAGED).args).not.toContain("--serving-index-commit");
     expect(spec.serving_index).toEqual({
       sha256: HEX,
       size: 812,
@@ -1076,14 +1085,24 @@ describe("an index built from another commit than the tag's (on007823 in the loc
       size: decided.servingIndex.size,
       ahead_of_tag: { tag_commit: T, index_commit: S, changed_path_count: 5 },
     });
-    // The run's identity is the tag's: the data and events the copy was built from are the tag's (ADR 0144).
-    expect(spec.args.slice(-4)).toEqual([
+    // The run's identity is the tag's: the data and events the copy was built from are the tag's (ADR 0144). The
+    // index's commit and the five paths, in code-unit order, attest it (nemar-process#108).
+    expect(spec.args).toEqual([
+      ...recipeArguments({ datasetId: ID, tag: TAG, imageDigest: RUNTIME_IMAGE_DIGEST }),
       RECIPE_SERVING_INDEX_FLAG,
       SERVING_INDEX_CONTAINER_PATH,
       RECIPE_SOURCE_COMMIT_FLAG,
       T,
+      "--serving-index-commit",
+      S,
+      ...[
+        ".gitattributes",
+        ".github/workflows/bids-validation.yml",
+        ".github/workflows/version-check.yml",
+        ".nemar/availability-report.json",
+        ".nemar/metadata.json",
+      ].flatMap((path) => ["--serving-index-delta-path", path]),
     ]);
-    expect(spec.args).not.toContain(S);
     const job = await icaJob(env, decided.servingIndex);
     const launch = await launchOf(env, job.id);
     // The launch carries the digest and size only: the launcher's schema is closed (ADR 0141 decision 1).
@@ -1298,16 +1317,77 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
       github.compare(ID, T, S, answer as never);
       const staged = await stageServingIndex(devEnv(), ID, T);
       if (typeof expected === "number") {
-        expect(staged).toMatchObject({
-          staged: true,
-          ahead: { tagCommit: T, indexCommit: S, changedPathCount: expected },
-        });
+        expect(staged).toMatchObject({ staged: true, ahead: { tagCommit: T, indexCommit: S } });
+        expect(staged.staged && staged.ahead?.deltaPaths).toHaveLength(expected);
       } else {
         expect(staged).toEqual({ staged: false, reason: expected });
         expect(await servingCopies()).toEqual([]);
       }
     });
   }
+
+  test("the changed paths are handed each once, in code-unit order, a renamed file's old name included", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [
+        { filename: ".nemar/new.json", previous_filename: ".nemar/old.json", status: "renamed" },
+        { filename: ".github/x.yml", status: "modified" },
+        { filename: ".nemar/new.json", status: "modified" },
+      ],
+    } as never);
+    const staged = await stageServingIndex(devEnv(), ID, T);
+    expect(staged.staged && staged.ahead?.deltaPaths).toEqual([
+      ".github/x.yml",
+      ".nemar/new.json",
+      ".nemar/old.json",
+    ]);
+  });
+
+  /** `count` changed paths under `.nemar/`, each 512 characters, the longest the rule takes. */
+  const longPaths = (count: number) =>
+    Array.from({ length: count }, (_, i) => {
+      const head = `.nemar/${String(i).padStart(3, "0")}-`;
+      return { filename: `${head}${"a".repeat(512 - head.length)}`, status: "added" };
+    });
+
+  test("24 changed paths of the longest length fit a job: staged, and the specification builds (MUTATION: lower the bound below the argument budget)", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, { status: "ahead", behind_by: 0, files: longPaths(24) } as never);
+    const staged = await stageServingIndex(devEnv(), ID, T);
+    expect(staged.staged && staged.ahead?.deltaPaths).toHaveLength(24);
+    const spec = icaSpec(staged);
+    expect(spec.args).toHaveLength(64);
+    expect(spec.args.filter((a) => a === "--serving-index-delta-path")).toHaveLength(24);
+  });
+
+  test("25 changed paths do not fit: index_delta_unlisted, never a delta cut short (MUTATION: drop the bound)", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, { status: "ahead", behind_by: 0, files: longPaths(25) } as never);
+    expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
+      staged: false,
+      reason: "index_delta_unlisted",
+    });
+    expect(await servingCopies()).toEqual([]);
+  });
+
+  test("a path with a lone surrogate has no UTF-8 form for the recipe: index_content_changed", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [{ filename: ".nemar/a\ud800.json", status: "added" }],
+    } as never);
+    expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
+      staged: false,
+      reason: "index_content_changed",
+    });
+  });
 
   test("a compare too large to read is index_delta_unlisted, not a fault: the run goes ahead at once without the index (MUTATION: read it as unreadable)", async () => {
     const env = devEnv();
