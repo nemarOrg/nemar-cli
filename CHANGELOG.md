@@ -15,6 +15,13 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Changed
+
+- **License lineage is more reliable (resolver version 3; ADR 0142 decision 3).**
+  A registry that does not answer is asked again (two retries with backoff, within a fixed fetch budget), and no `unresolved` source is served from the cache; each lineage records `resolved_at`.
+  An `https://osf.io/<id>` source maps to `10.17605/osf.io/<id>` and falls back to the license OSF declares for the node; a DOI cut short in a README is dropped and counted; an access-rights word such as `openAccess` is not read as a license.
+  `needs_permission` and `unresolved` sources show the license the source declares, and `nemar dataset license-check` and `nemar admin dataset publish license-lineage` no longer print a bug-report prompt for an outcome.
+
 ## 0.10.48 - 2026-11-27
 
 ### Changed
