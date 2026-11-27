@@ -15,6 +15,15 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Owner steps and order
+
+- **Owner steps and order (epic #2324).**
+  After this epic reaches `dev`: nemarOrg/nemar-process#101 merges into nemar-process's epic branch, then nemarOrg/nemar-process#98 into nemar-process `dev`.
+  Then the nemar-process pin `a5125c7b` is removed (#2411, the test workflow's checkout back to `ref: dev`).
+  Then nemarOrg/website#608 merges into `staging` and the website is released; the new `processing/<recording>` route must be live before the quality plugins are.
+  Then nemarOrg/docs#146 merges (after the nemar-cli release that carries this epic) and nemarOrg/docs#144 (after the website release).
+  No switch is added: compute stays dark (`COMPUTE_ENABLED`, `COMPUTE_PIPELINES_DISPATCH_ENABLED` and `COMPUTE_RUNNERS_ENABLED` stay the owner's), and the new public routes only read.
+
 ### Added
 
 - **Live progress of NEMAR's pipeline runs (ADR 0134, epic #2324 phase 2).**

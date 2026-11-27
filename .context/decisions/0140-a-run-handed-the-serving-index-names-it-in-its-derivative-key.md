@@ -2,7 +2,7 @@
 
 **Status:** accepted
 **Date:** 2026-11-25
-**Accepted:** 2026-11-26
+**Accepted:** 2026-11-27
 **Owner:** Seyed Yahya Shirazi
 
 Decision 3 is refined by [ADR 0141](0141-the-dispatcher-stages-the-serving-index-and-the-launch-specification-is-version-2.md) decision 6: the dispatcher now stages the index and records its digest.
