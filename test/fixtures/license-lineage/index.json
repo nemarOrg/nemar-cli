@@ -307,5 +307,35 @@
     "status": 200,
     "file": "32-datacite-dryad-file.json",
     "fetched_at": "2026-11-27T13:06:11Z"
+  },
+  {
+    "case": "zenodo-readme-prefix-a",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.5281%2Fzenodo.22314785",
+    "url": "https://api.datacite.org/dois/10.5281%2Fzenodo.22314785",
+    "status": 200,
+    "file": "33-datacite-zenodo-22314785.json",
+    "fetched_at": "2026-11-27T16:22:43Z"
+  },
+  {
+    "case": "zenodo-readme-prefix-b",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.5281%2Fzenodo.23610719",
+    "url": "https://api.datacite.org/dois/10.5281%2Fzenodo.23610719",
+    "status": 200,
+    "file": "34-datacite-zenodo-23610719.json",
+    "fetched_at": "2026-11-27T16:22:44Z"
+  },
+  {
+    "case": "dandi-cc-by",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.48324%2Fdandi.001535%2F0.250714.1218",
+    "url": "https://api.datacite.org/dois/10.48324%2Fdandi.001535%2F0.250714.1218",
+    "status": 200,
+    "file": "35-datacite-dandi-cc-by.json",
+    "fetched_at": "2026-11-27T16:22:45Z"
   }
 ]

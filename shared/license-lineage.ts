@@ -38,10 +38,11 @@ import { normalizeDoiKey } from "./never-data-paper.js";
  * Stamped on every result, so two results can be compared. Bump it when a rule changes, or when a
  * record gains a field (version 2: each source's title, creators and publisher, epic #2182 card B4;
  * version 3: the declared license, osf.io sources, cut README DOIs dropped, retried fetches, and
- * `resolved_at`, ADR 0142 decision 3);
+ * `resolved_at`, ADR 0142 decision 3; version 4: README DOIs that prefix another declared DOI
+ * dropped, and DANDI's license spellings read, ADR 0142 decision 3, amendment of 2026-11-27);
  * the cache key carries it, so a record of an older version is never served.
  */
-export const RESOLVER_VERSION = "license-lineage/3";
+export const RESOLVER_VERSION = "license-lineage/4";
 
 /** The User-Agent of every registry request. It carries no contact details on purpose. */
 export const LICENSE_CHECK_USER_AGENT = "nemar-license-check/1";
@@ -487,6 +488,23 @@ export function normalizeLicense(text: string | null | undefined): NormalizedLic
     return { license: map[odcUri[1] as keyof typeof map], version: versionOf(raw) };
   }
 
+  // DANDI (dandischema's LicenseType, ADR 0142 decision 3, amendment of 2026-11-27): its values
+  // carry an `spdx:` prefix (`spdx:CC-BY-4.0`, `spdx:CC0-1.0`), and the DataCite records DANDI
+  // registers give the enum's name as the rightsIdentifier, the version's dot dropped (`cc_by_40`,
+  // `cc0_10`; measured on 10.48324/dandi.001535/0.250714.1218).
+  const spdx = /^spdx:(\S+)$/i.exec(raw);
+  if (spdx) return normalizeLicense(spdx[1]);
+  const dandiCc = /^cc_by((?:_(?:nc|nd|sa))*)_(\d)(\d)$/.exec(lower);
+  if (dandiCc) {
+    const mods = dandiCc[1];
+    return {
+      license: ccFamily(mods.includes("nc"), mods.includes("nd"), mods.includes("sa")),
+      version: `${dandiCc[2]}.${dandiCc[3]}`,
+    };
+  }
+  const dandiCc0 = /^cc0_(\d)(\d)$/.exec(lower);
+  if (dandiCc0) return { license: "cc0", version: `${dandiCc0[1]}.${dandiCc0[2]}` };
+
   // Token forms: SPDX ids ("CC-BY-NC-SA-4.0", "ODC-By-1.0"), OpenAlex ids ("cc-by-nc"), BIDS
   // values ("CC0", "PD").
   const token = raw.toUpperCase().replace(/[\s_]+/g, "-");
@@ -875,6 +893,26 @@ export function declaredLicense(datasetDescription: unknown): string | null {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
+/**
+ * README DOIs that are another declared DOI cut short (ADR 0142 decision 3, amendment of
+ * 2026-11-27): a README DOI that is a strict prefix of a DOI declared in SourceDatasets, the
+ * related identifiers or the attestation, or of another README DOI, is that DOI wrapped or cut in
+ * the text (`10.5281/zenodo.2231` beside a declared `10.5281/zenodo.22314785`), so it is removed.
+ * Such a cut copy still passes its repository's shape, so {@link isCutDoiCandidate} cannot see it.
+ * An equal DOI is not removed here: it is the same source, and de-duplication keeps one.
+ */
+function dropReadmePrefixes(refs: SourceRef[]): SourceRef[] {
+  const dois = refs.flatMap((r) => (r.kind === "doi" ? [r.doi] : []));
+  return refs.filter(
+    (r) =>
+      !(
+        r.kind === "doi" &&
+        r.origin === "readme" &&
+        dois.some((d) => d.length > r.doi.length && d.startsWith(r.doi))
+      ),
+  );
+}
+
 /** Every declared source, in the decided order, de-duplicated. */
 export function extractSourceRefs(inputs: SourceInputs): SourceRef[] {
   return extractSources(inputs).refs;
@@ -928,13 +966,16 @@ export function extractSources(inputs: SourceInputs): TextSources {
     dropped += found.dropped;
   }
 
+  const prefixed = dropReadmePrefixes(refs);
+  dropped += refs.length - prefixed.length;
+
   // A dataset is not its own upstream source, whichever input names it.
   const own =
     isRecord(desc) && typeof desc.DatasetDOI === "string" && desc.DatasetDOI.trim()
       ? normalizeDoiKey(desc.DatasetDOI)
       : null;
   const seen = new Set<string>();
-  const unique = refs.filter((r) => {
+  const unique = prefixed.filter((r) => {
     if (own !== null && r.kind === "doi" && r.doi === own) return false;
     const k = refKey(r);
     if (seen.has(k)) return false;
