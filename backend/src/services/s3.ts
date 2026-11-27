@@ -1667,7 +1667,11 @@ export async function getBucketPolicy(options: PresignedUrlOptions): Promise<Buc
 /**
  * Overwrite the bucket policy with the given document.
  */
-async function putBucketPolicy(options: PresignedUrlOptions, policy: BucketPolicy): Promise<void> {
+/** Overwrite the bucket policy; returns the written document's size in bytes. */
+async function putBucketPolicy(
+  options: PresignedUrlOptions,
+  policy: BucketPolicy,
+): Promise<number> {
   const size = policyByteSize(policy);
   if (size > MAX_BUCKET_POLICY_BYTES) {
     // Reached in production on 2026-11-27 (#2497): the private set grew to
@@ -1708,6 +1712,7 @@ async function putBucketPolicy(options: PresignedUrlOptions, policy: BucketPolic
         `(${Math.round((size / MAX_BUCKET_POLICY_BYTES) * 100)}%); new private datasets will be refused at the cap (#2497)`,
     );
   }
+  return size;
 }
 
 /**
@@ -1723,7 +1728,7 @@ async function transitionDatasetVisibility(
   options: PresignedUrlOptions,
   datasetId: string,
   makePrivate: boolean,
-): Promise<void> {
+): Promise<number | null> {
   if (!isValidDatasetId(datasetId)) {
     throw new Error(`Invalid dataset ID for bucket policy: "${datasetId}"`);
   }
@@ -1738,14 +1743,15 @@ async function transitionDatasetVisibility(
     // rewrite (and the concurrent-write race it would invite) on idempotent
     // calls, e.g. deleting an already-public dataset.
     if (isDatasetPrivate(current, bucket, datasetId) === makePrivate) {
-      return;
+      return null;
     }
 
     const next = makePrivate
       ? addPrivateDataset(current, bucket, datasetId)
       : removePrivateDataset(current, bucket, datasetId);
+    let written: number;
     try {
-      await putBucketPolicy(options, next);
+      written = await putBucketPolicy(options, next);
     } catch (putErr) {
       const msg = putErr instanceof Error ? putErr.message : String(putErr);
       throw new Error(
@@ -1758,7 +1764,7 @@ async function transitionDatasetVisibility(
     const verifyPolicy = await getBucketPolicy(options);
     lastSeen = isDatasetPrivate(verifyPolicy, bucket, datasetId);
     if (lastSeen === makePrivate) {
-      return;
+      return written;
     }
     console.warn(
       `[s3] Bucket-policy ${makePrivate ? "private" : "public"} transition for ${datasetId} ` +
@@ -1782,8 +1788,10 @@ async function transitionDatasetVisibility(
 export async function markDatasetPrivate(
   options: PresignedUrlOptions,
   datasetId: string,
-): Promise<void> {
-  await transitionDatasetVisibility(options, datasetId, true);
+): Promise<number | null> {
+  // The written policy's size, or null when no write was needed; callers pass
+  // it to `notifyIfPolicyNearCap` (storage-policy-alert.ts, #2497).
+  return await transitionDatasetVisibility(options, datasetId, true);
 }
 
 /**
