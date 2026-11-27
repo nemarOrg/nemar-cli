@@ -74,6 +74,7 @@ import {
 } from "../../shared/publication-review";
 import {
   type LicenseIdentification,
+  type ReadScanOptions,
   identifyLicenseFile,
   licenseFieldOf,
   readScanOutput,
@@ -186,6 +187,8 @@ export interface ReviewArgs {
   fetchInputs: () => Promise<unknown>;
   /** The workflow's license scan directory (ADR 0142), or undefined when the job ran no scan. */
   licenseScanDir?: string;
+  /** Tests only: the owners the scan files must have (the job's defaults otherwise). */
+  scanOptions?: ReadScanOptions;
   /** Where the fixed log line goes; the job's standard output. */
   log?: (line: string) => void;
 }
@@ -195,7 +198,7 @@ export interface ReviewArgs {
  * text in git and was read in full; its blob id ties the scan to this commit's file.
  */
 export function identifyReviewLicense(
-  args: Pick<ReviewArgs, "licenseScanDir">,
+  args: Pick<ReviewArgs, "licenseScanDir" | "scanOptions">,
   tree: Awaited<ReturnType<typeof readTree>>,
   docs: ReturnType<typeof readRootDocuments>,
 ): LicenseIdentification {
@@ -205,7 +208,10 @@ export function identifyReviewLicense(
   return identifyLicenseFile({
     document: { state: document.state, text: document.text },
     licenseField: licenseFieldOf(docs.dataset_description.text),
-    scan: args.licenseScanDir === undefined ? null : readScanOutput(args.licenseScanDir, oid),
+    scan:
+      args.licenseScanDir === undefined
+        ? null
+        : readScanOutput(args.licenseScanDir, oid, args.scanOptions),
   });
 }
 

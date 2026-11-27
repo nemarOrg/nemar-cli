@@ -21,7 +21,16 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
@@ -1424,6 +1433,99 @@ describe("runPublicationReview: the job around the model call", () => {
 // Reading from the job's real clone: shallow, blob-less, and read with no network at all
 // ---------------------------------------------------------------------------------------------
 
+describe("LICENSE's identification (ADR 0142) changes nothing the model sees in this phase", () => {
+  const FIXTURE = join(import.meta.dir, "fixtures", "license-scan", "cc-by-4.0");
+  const LICENSE_TEXT = readFileSync(join(FIXTURE, "LICENSE"), "utf8");
+  const RESULT = readFileSync(join(FIXTURE, "result.json"), "utf8");
+  const UID = process.getuid?.() ?? 0;
+
+  function licensed(name: string): Dataset {
+    return newDataset(name, {
+      LICENSE: LICENSE_TEXT,
+      "dataset_description.json": JSON.stringify({ ...DESCRIPTION, License: "CC-BY-4.0" }),
+    });
+  }
+
+  /** The scan directory the workflow leaves, over this dataset's LICENSE blob. */
+  function scanDirFor(ds: Dataset): string {
+    const dir = join(root, `scan-${++fileSeq}`);
+    mkdirSync(join(dir, "out"), { recursive: true });
+    writeFileSync(join(dir, "matcher"), "ok\n");
+    writeFileSync(join(dir, "status"), "ok\n");
+    writeFileSync(join(dir, "oid"), `${git(ds.dir, "rev-parse", "HEAD:LICENSE")}\n`);
+    writeFileSync(join(dir, "out", "result.json"), RESULT);
+    for (const f of ["matcher", "status", "oid", "out/result.json"]) chmodSync(join(dir, f), 0o644);
+    return dir;
+  }
+
+  async function run(ds: Dataset, extra: Partial<Parameters<typeof runPublicationReview>[0]>) {
+    modelRequests.length = 0;
+    const lines: string[] = [];
+    const res = await runPublicationReview({ ...args(ds), ...extra, log: (l) => lines.push(l) });
+    if (res.outcome !== "reported") throw new Error(`not reported: ${res.error}`);
+    const { raw } = theRequest();
+    return { res, lines, raw: raw.replace(/[0-9a-f]{32}/g, "NONCE") };
+  }
+
+  test("the request and the digest are byte for byte the same with and without a scan", async () => {
+    const ds = licensed("license-scan-same");
+    const without = await run(ds, {});
+    const withScan = await run(ds, {
+      licenseScanDir: scanDirFor(ds),
+      scanOptions: { resultOwnerUid: UID },
+    });
+    expect(withScan.raw).toBe(without.raw);
+    expect(withScan.res.outcome === "reported" && withScan.res.report.record?.input_digest).toBe(
+      without.res.outcome === "reported" && without.res.report.record?.input_digest,
+    );
+    expect(without.lines).toEqual(["license_file unreadable; matcher unavailable"]);
+    expect(withScan.lines).toEqual(["license_file matches; matcher scancode-32.5.0+spdx-3.27"]);
+    expect(withScan.res.licenseFile?.fact).toEqual({
+      state: "matches",
+      spdx: "CC-BY-4.0",
+      additions: false,
+      expression: null,
+    });
+    // The identifier and the license text never reach the log.
+    for (const line of withScan.lines) {
+      expect(line).not.toContain("CC-BY");
+      expect(line).not.toContain("Attribution");
+    }
+  });
+
+  test("a scan of another blob is not this LICENSE's: unreadable, matcher unavailable", async () => {
+    const ds = licensed("license-scan-other-blob");
+    const dir = scanDirFor(ds);
+    writeFileSync(join(dir, "oid"), `${"c".repeat(40)}\n`);
+    const { lines } = await run(ds, { licenseScanDir: dir, scanOptions: { resultOwnerUid: UID } });
+    expect(lines).toEqual(["license_file unreadable; matcher unavailable"]);
+  });
+
+  test("an annexed LICENSE is never read from the scan directory", async () => {
+    const ds = newDataset("license-scan-annexed", { LICENSE: null });
+    symlinkSync(".git/annex/objects/x/y/SHA256E-s1--k/SHA256E-s1--k", join(ds.dir, "LICENSE"));
+    git(ds.dir, "add", "-A");
+    git(ds.dir, "commit", "-q", "-m", "annexed");
+    const annexed = { dir: ds.dir, head: git(ds.dir, "rev-parse", "HEAD") };
+    const dir = join(root, `scan-${++fileSeq}`);
+    mkdirSync(dir);
+    writeFileSync(join(dir, "matcher"), "ok\n");
+    chmodSync(join(dir, "matcher"), 0o644);
+    const { lines } = await run(annexed, { licenseScanDir: dir });
+    expect(lines).toEqual(["license_file annexed; matcher scancode-32.5.0+spdx-3.27"]);
+  });
+
+  test("the job's own owner rule: a result.json this user wrote is not the scan user's", async () => {
+    const ds = licensed("license-scan-owner");
+    const { lines } = await run(ds, { licenseScanDir: scanDirFor(ds) });
+    expect(lines).toEqual([
+      UID === 65534
+        ? "license_file matches; matcher scancode-32.5.0+spdx-3.27"
+        : "license_file unreadable; matcher unavailable",
+    ]);
+  });
+});
+
 describe("the job's clone: shallow and blob-less, read with no network", () => {
   /**
    * A clone made the way the workflow's fetch step makes one (init, a partial-clone remote, one
@@ -1646,6 +1748,21 @@ describe("main: the whole script, from git to the callback", () => {
     expect(log).toBe(
       "license_file unreadable; matcher unavailable\nreview 41 (request 17): reported; callback delivered",
     );
+  });
+
+  test("--license-scan-dir reaches the identification, and the log names only its words", async () => {
+    const ds = newDataset("main-license-scan");
+    const dir = join(root, "main-license-scan-dir");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "matcher"), "ok\n");
+    chmodSync(join(dir, "matcher"), 0o644);
+    // No status and no result: the matcher installed, but this LICENSE was not scanned.
+    const { code, log } = await runMain(argvFor(ds, { "license-scan-dir": dir }));
+    expect(code).toBe(0);
+    expect(log.split("\n")[0]).toBe("license_file unreadable; matcher unavailable");
+    const bad = await runMain([...argvFor(ds), "--license-scan-dir"]);
+    expect(bad.code).toBe(2);
+    expect(bad.log).toBe("missing --license-scan-dir");
   });
 
   test("the production environment posts to the production origin and not the dev one", async () => {
