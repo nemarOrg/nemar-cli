@@ -993,12 +993,14 @@ describe("Tapis unconfigured in a Worker that runs runner jobs only (ADR 0118 am
   });
 
   test("a live runner job is not a Tapis job: still quiet", async () => {
-    // A pipeline job made through the real `createJob`, moved to the runner executor (the schema allows a
-    // runner for pipeline jobs only); still `created`, so live.
-    await fundPlatform(env().DB, "pipelines", 10_000_000);
-    const made = await makeJob(fx, { source: "pipeline" });
-    fx.harness.db.run("UPDATE compute_jobs SET executor = 'runner' WHERE id = ?", [made.job.id]);
-    expect((await reread(env(), made.job.id)).state).toBe("created");
+    // A runner pipeline job made by the real `createJob` (no hold, `accounting = 'none'`, ADR 0121); it is
+    // `created`, so live.
+    const made = await makeJob(fx, { source: "pipeline", executor: "runner" });
+    expect(await reread(env(), made.job.id)).toMatchObject({
+      executor: "runner",
+      accounting: "none",
+      state: "created",
+    });
     await expectQuiet();
   });
 
