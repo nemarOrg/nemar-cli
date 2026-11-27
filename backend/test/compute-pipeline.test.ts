@@ -562,9 +562,19 @@ describe("what a run refuses, before it writes anything", () => {
       code: "serving_index_deferred",
       reason: "no_github_credentials",
     });
+    // The queue's one candidate is deferred the same way; a deferral is not a word that stops the queue.
     const queue = await dispatchEligible(env, { recipe: "nemar-ica", limit: 3, actor: ADMIN });
-    expect(queue.dispatched).toBe(0);
-    expect(queue.stoppedBy).not.toBe("recipe_placeholder");
+    expect([queue.dispatched, queue.stoppedBy]).toEqual([0, null]);
+    expect(queue.results).toHaveLength(1);
+    for (const result of queue.results) {
+      expect(result).toMatchObject({
+        ok: false,
+        code: "serving_index_deferred",
+        datasetId: "nm000104",
+        version: "v1.0.0",
+        reason: "no_github_credentials",
+      });
+    }
     // A deferral is a refused stamp and nothing else: no job, no hold, no submit.
     expect((await stampsOf(env)).every((s) => s.state === "refused")).toBe(true);
     expect(await jobCount(env)).toBe(0);
