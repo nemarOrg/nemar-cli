@@ -89,8 +89,8 @@ describe("what a job's specification records of the serving index", () => {
     expect(SERVING_INDEX_MAX_BYTES).toBe(COMPUTE_SERVING_INDEX_MAX_BYTES);
   });
 
-  test("a staged index ahead of its tag records both commits and the changed paths, and nothing else (ADR 0144)", () => {
-    const ahead = { tag_commit: COMMIT, index_commit: "c".repeat(40), changed_paths: 5 };
+  test("a staged index ahead of its tag records both commits and the changed-path count, and nothing else (ADR 0144)", () => {
+    const ahead = { tag_commit: COMMIT, index_commit: "c".repeat(40), changed_path_count: 5 };
     expect(
       JobSpecSchema.safeParse(recipeJob({ sha256: HEX, size: 812, ahead_of_tag: ahead })).success,
     ).toBe(true);
@@ -98,8 +98,8 @@ describe("what a job's specification records of the serving index", () => {
       { ...ahead, index_commit: COMMIT },
       { ...ahead, tag_commit: "abc" },
       { ...ahead, index_commit: "C".repeat(40) },
-      { ...ahead, changed_paths: -1 },
-      { ...ahead, changed_paths: 601 },
+      { ...ahead, changed_path_count: -1 },
+      { ...ahead, changed_path_count: 601 },
       { ...ahead, paths: [".nemar/x"] },
       { tag_commit: COMMIT, index_commit: "c".repeat(40) },
     ]) {

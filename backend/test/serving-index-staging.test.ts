@@ -157,12 +157,7 @@ describe("the index is staged only when it was built from the tag's own commit",
     github.index(ID, text);
     const staged = await stageServingIndex(devEnv(), ID, T);
     const bytes = new TextEncoder().encode(text);
-    expect(staged).toEqual({
-      staged: true,
-      sha256: sha(bytes),
-      size: bytes.length,
-      sourceCommit: T,
-    });
+    expect(staged).toEqual({ staged: true, sha256: sha(bytes), size: bytes.length });
     const kept = await fx.harness.records.get(servingIndexKey(sha(bytes)));
     expect(new Uint8Array(await (kept as R2ObjectBody).arrayBuffer())).toEqual(bytes);
     // Staging is handed the tag's commit and asks GitHub nothing: no tag, no compare.
@@ -195,8 +190,7 @@ describe("the index is staged only when it was built from the tag's own commit",
       staged: true,
       sha256: sha(bytes),
       size: bytes.length,
-      sourceCommit: S,
-      ahead: { tagCommit: T, indexCommit: S, changedPaths: 1 },
+      ahead: { tagCommit: T, indexCommit: S, changedPathCount: 1 },
     });
     expect(compareRequests().map((r) => r.path)).toEqual([
       `/repos/nemarDatasets/${ID}/compare/${T}...${S}`,
@@ -875,7 +869,7 @@ const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>
 const floor = findRecipe("nemar-floor") as NonNullable<ReturnType<typeof findRecipe>>;
 const image = { ref: RUNTIME_IMAGE, digest: RUNTIME_IMAGE_DIGEST };
 const HEX = "7".repeat(64);
-const STAGED = { staged: true as const, sha256: HEX, size: 812, sourceCommit: T };
+const STAGED = { staged: true as const, sha256: HEX, size: 812 };
 
 function icaSpec(
   servingIndex: Parameters<typeof recipeJobSpec>[1]["servingIndex"],
@@ -938,6 +932,29 @@ describe("nemar-ica's archive job names what was staged", () => {
     expect(() => icaSpec({ staged: false, reason: "no_index" }, T.slice(0, 12))).toThrow(
       RangeError,
     );
+  });
+
+  test("an admitted index is handed with the tag's commit and recorded with both; an admission that does not fit the commit handed is a programming error (ADR 0144)", () => {
+    const ahead = { tagCommit: T, indexCommit: S, changedPathCount: 2 };
+    const spec = icaSpec({ ...STAGED, ahead });
+    expect(spec.args).toEqual([
+      ...base,
+      RECIPE_SERVING_INDEX_FLAG,
+      SERVING_INDEX_CONTAINER_PATH,
+      RECIPE_SOURCE_COMMIT_FLAG,
+      T,
+    ]);
+    expect(spec.serving_index).toEqual({
+      sha256: HEX,
+      size: 812,
+      ahead_of_tag: { tag_commit: T, index_commit: S, changed_path_count: 2 },
+    });
+    // Compared with another tag commit than the one handed (MUTATION: drop the check).
+    expect(() => icaSpec({ ...STAGED, ahead: { ...ahead, tagCommit: S, indexCommit: T } })).toThrow(
+      RangeError,
+    );
+    // Ahead by nothing: the index's commit is the tag's (MUTATION: drop the check).
+    expect(() => icaSpec({ ...STAGED, ahead: { ...ahead, indexCommit: T } })).toThrow(RangeError);
   });
 
   test("a recipe that keys the index cannot be specified without what was staged", () => {
@@ -1009,17 +1026,43 @@ const tokenOf = async (env: Bindings, jobId: string) =>
     CALLBACK_SECRET,
   );
 
-describe("an index built from another commit than the tag's (on007823 in the local run of 2026-11-27)", () => {
-  /** on007823's delta between its tag and its index's commit, as GitHub's compare lists it. */
-  const ON007823_DELTA = [
-    ".gitattributes",
-    ".github/workflows/bids-validation.yml",
-    ".github/workflows/version-check.yml",
-    ".nemar/availability-report.json",
-    ".nemar/metadata.json",
-  ].map((filename) => ({ filename, status: "modified" }));
+/** The `.gitattributes` patch of on007823 between its tag and its index's commit, as GitHub's compare gave it. */
+const ON007823_GITATTRIBUTES_PATCH = [
+  "@@ -1,15 +1,8 @@",
+  " * annex.backend=SHA256E",
+  " **/.git* annex.largefiles=nothing",
+  "-*.bval annex.largefiles=nothing",
+  "-*.bvec annex.largefiles=nothing",
+  "-*.json text eol=lf annex.largefiles=largerthan=1mb",
+  "-*.tsv text eol=lf annex.largefiles=largerthan=1mb",
+  "-phenotype/*.tsv annex.largefiles=anything",
+  "-dataset_description.json annex.largefiles=nothing",
+  "-datacite.yml annex.largefiles=nothing",
+  "-datacite.yaml annex.largefiles=nothing",
+  "-.bidsignore annex.largefiles=nothing",
+  "-CHANGES text eol=lf annex.largefiles=nothing",
+  "-README* text eol=lf annex.largefiles=nothing",
+  "-LICENSE* text eol=lf annex.largefiles=nothing",
+  "-CITATION.cff text eol=lf annex.largefiles=nothing",
+  "+*.json text eol=lf",
+  "+*.tsv text eol=lf",
+  "+CHANGES text eol=lf",
+  "+README* text eol=lf",
+].join("\n");
 
-  test("ahead by NEMAR's own metadata (on007823's delta): staged, recorded with both commits, and the run is handed the index's commit (MUTATION: hand the tag's commit with an admitted index)", async () => {
+describe("an index built from another commit than the tag's (on007823 in the local run of 2026-11-27)", () => {
+  /** on007823's delta between its tag and its index's commit, as GitHub's compare lists it, patch included. */
+  const ON007823_DELTA = [
+    { filename: ".gitattributes", status: "modified", patch: ON007823_GITATTRIBUTES_PATCH },
+    ...[
+      ".github/workflows/bids-validation.yml",
+      ".github/workflows/version-check.yml",
+      ".nemar/availability-report.json",
+      ".nemar/metadata.json",
+    ].map((filename) => ({ filename, status: "modified" })),
+  ];
+
+  test("ahead by NEMAR's own metadata (on007823's delta): staged, the index's commit recorded as provenance, and the run is still handed the TAG's commit (MUTATION: hand the index's commit)", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
     github.tag(ID, TAG, T);
@@ -1031,16 +1074,16 @@ describe("an index built from another commit than the tag's (on007823 in the loc
     expect(spec.serving_index).toEqual({
       sha256: decided.servingIndex.sha256,
       size: decided.servingIndex.size,
-      ahead_of_tag: { tag_commit: T, index_commit: S, changed_paths: 5 },
+      ahead_of_tag: { tag_commit: T, index_commit: S, changed_path_count: 5 },
     });
-    // The recipe uses a row only when the index's commit is its --source-commit: the index's commit, S.
+    // The run's identity is the tag's: the data and events the copy was built from are the tag's (ADR 0144).
     expect(spec.args.slice(-4)).toEqual([
       RECIPE_SERVING_INDEX_FLAG,
       SERVING_INDEX_CONTAINER_PATH,
       RECIPE_SOURCE_COMMIT_FLAG,
-      S,
+      T,
     ]);
-    expect(spec.args).not.toContain(T);
+    expect(spec.args).not.toContain(S);
     const job = await icaJob(env, decided.servingIndex);
     const launch = await launchOf(env, job.id);
     // The launch carries the digest and size only: the launcher's schema is closed (ADR 0141 decision 1).
@@ -1076,7 +1119,23 @@ describe("an index built from another commit than the tag's (on007823 in the loc
 });
 
 describe("what an index ahead of its tag is admitted for, and the word for what is not (ADR 0144)", () => {
-  const files = (...names: string[]) => names.map((filename) => ({ filename, status: "modified" }));
+  /** A changed file; a `.gitattributes` one carries an annex-only patch unless a case gives its own. */
+  const files = (...names: string[]) =>
+    names.map((filename) =>
+      filename.split("/").at(-1) === ".gitattributes"
+        ? {
+            filename,
+            status: "modified",
+            patch: "@@ -1 +1 @@\n-* annex.largefiles=nothing\n+* annex.backend=SHA256E",
+          }
+        : { filename, status: "modified" },
+    );
+  /** A `.gitattributes` change with this patch, alone. */
+  const attrs = (patch: unknown) => ({
+    status: "ahead",
+    behind_by: 0,
+    files: [{ filename: ".gitattributes", status: "modified", patch }],
+  });
   const cases: Array<[string, unknown, string | number]> = [
     ["only .nemar/", { status: "ahead", behind_by: 0, files: files(".nemar/metadata.json") }, 1],
     [
@@ -1153,6 +1212,84 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
       "index_delta_unlisted",
     ],
     ["an answer that is not a comparison", { status: "weird" }, "github_unreadable"],
+    [
+      "status identical, which two different commits never are",
+      { status: "identical", behind_by: 0, files: [] },
+      "github_unreadable",
+    ],
+    ["status ahead with no behind_by", { status: "ahead", files: [] }, "github_unreadable"],
+    [
+      "a file entry that is not an object",
+      { status: "ahead", behind_by: 0, files: ["x"] },
+      "github_unreadable",
+    ],
+    [
+      "a file entry with no filename",
+      { status: "ahead", behind_by: 0, files: [{ status: "added" }] },
+      "github_unreadable",
+    ],
+    [
+      "a filename that is not text",
+      { status: "ahead", behind_by: 0, files: [{ filename: 7 }] },
+      "github_unreadable",
+    ],
+    [
+      "a previous filename that is not text",
+      { status: "ahead", behind_by: 0, files: [{ filename: ".nemar/x", previous_filename: 7 }] },
+      "github_unreadable",
+    ],
+    // .gitattributes: admitted only when the edit cannot change the bytes of a checkout (ADR 0144).
+    [
+      "a .gitattributes edit to annex rules, removing text and eol=lf lines",
+      attrs(ON007823_GITATTRIBUTES_PATCH),
+      1,
+    ],
+    [
+      "a .gitattributes line that adds eol=crlf",
+      attrs("@@ -0,0 +1 @@\n+*.tsv text eol=crlf"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that removes eol=crlf",
+      attrs("@@ -1 +0,0 @@\n-*.tsv eol=crlf"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that adds working-tree-encoding",
+      attrs("@@ -0,0 +1 @@\n+*.txt working-tree-encoding=UTF-16"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that adds ident",
+      attrs("@@ -0,0 +1 @@\n+*.m ident"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that unsets ident",
+      attrs("@@ -0,0 +1 @@\n+*.m -ident"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that adds a filter other than git-annex's",
+      attrs("@@ -0,0 +1 @@\n+*.edf filter=lfs diff=lfs merge=lfs -text"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that adds git-annex's filter",
+      attrs("@@ -0,0 +1 @@\n+* filter=annex"),
+      1,
+    ],
+    [
+      "a quoted pattern with a space and a byte-changing attribute",
+      attrs('@@ -0,0 +1 @@\n+"a b.txt" eol=crlf'),
+      "index_content_changed",
+    ],
+    ["a comment that names eol=crlf", attrs("@@ -0,0 +1 @@\n+# eol=crlf is not used here"), 1],
+    [
+      "a .gitattributes edit with no patch (a large or binary diff)",
+      attrs(undefined),
+      "index_delta_unlisted",
+    ],
   ];
   for (const [label, answer, expected] of cases) {
     test(`${label}: ${typeof expected === "number" ? `staged, ${expected} changed paths` : expected}`, async () => {
@@ -1163,8 +1300,7 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
       if (typeof expected === "number") {
         expect(staged).toMatchObject({
           staged: true,
-          sourceCommit: S,
-          ahead: { tagCommit: T, indexCommit: S, changedPaths: expected },
+          ahead: { tagCommit: T, indexCommit: S, changedPathCount: expected },
         });
       } else {
         expect(staged).toEqual({ staged: false, reason: expected });
@@ -1172,6 +1308,23 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
       }
     });
   }
+
+  test("a compare too large to read is index_delta_unlisted, not a fault: the run goes ahead at once without the index (MUTATION: read it as unreadable)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [],
+      padding: "x".repeat(8 * 1024 * 1024 + 1),
+    } as never);
+    expect(await servingIndexForRun(env, ica, "bids", ID, TAG, T)).toEqual({
+      kind: "run",
+      servingIndex: { staged: false, reason: "index_delta_unlisted" },
+    });
+  });
 
   test("a compare GitHub cannot answer is a fault: the run is deferred, and nothing is staged blind (MUTATION: stage on an unread compare)", async () => {
     const env = devEnv();

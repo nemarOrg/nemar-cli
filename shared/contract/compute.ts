@@ -721,14 +721,14 @@ const commitSchema = z.string().regex(/^[0-9a-f]{40}$/);
 
 /**
  * What was admitted when a staged index was built from a commit AHEAD of the version's tag by NEMAR-owned
- * metadata only (ADR 0144): the tag's commit, the index's commit (the run's `--source-commit`), and how many
- * paths changed between them. Absent when the index's commit is the tag's.
+ * metadata only (ADR 0144), as provenance: the tag's commit (the run's `--source-commit` and identity), the index's
+ * commit, and how many paths changed between them. Absent when the index's commit is the tag's.
  */
 const servingIndexAheadSchema = z
   .object({
     tag_commit: commitSchema,
     index_commit: commitSchema,
-    changed_paths: safeInt(0, 600),
+    changed_path_count: safeInt(0, 600),
   })
   .strict()
   .refine((a) => a.tag_commit !== a.index_commit, {

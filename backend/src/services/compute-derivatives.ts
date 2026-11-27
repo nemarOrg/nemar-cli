@@ -460,11 +460,12 @@ export async function keyStamp(stores: Stores, stamp: CandidateStamp): Promise<K
         if (flagged !== 1 || at < 0 || spec.args[at + 1] !== SERVING_INDEX_CONTAINER_PATH) {
           return unkeyable("serving_index_unattested");
         }
-        // An index admitted ahead of its tag (ADR 0144) is handed with ITS commit, the one the record names.
+        // An index admitted ahead of its tag (ADR 0144) is handed with the TAG's commit, the one its admission
+        // was compared with; the index's own commit is provenance and is not keyed.
         const ahead = staged.ahead_of_tag;
         if (ahead !== undefined) {
           const handed = handedSourceCommits(spec.args);
-          if (handed.length !== 1 || handed[0] !== ahead.index_commit) {
+          if (handed.length !== 1 || handed[0] !== ahead.tag_commit) {
             return unkeyable("serving_index_unattested");
           }
         }

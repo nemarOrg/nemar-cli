@@ -455,8 +455,10 @@ const partitionOf = (recipe: ComputeRecipe) => recipe.partition as PartitionName
  *
  * A `bids` run is handed the commit of its version's tag (`sourceCommit`, `--source-commit`, ADR 0143), which its
  * record states as the `git:` input digest its derivative is keyed by: alone when no serving index was staged, and
- * with a staged index as the index's own arguments end (ADR 0141), with the INDEX's commit, which is the tag's or
- * one ahead of it by NEMAR-owned metadata only (ADR 0144). A `bids` run with no commit is a programming error.
+ * with a staged index as the index's own arguments end (ADR 0141). An index admitted ahead of the tag (ADR 0144)
+ * changes none of that: the run is still the tag's, and the index's own commit is provenance in the record. A `bids`
+ * run with no commit, or an admitted index that names another tag commit than the one handed, or one whose index
+ * commit is the tag's, is a programming error here.
  */
 export function recipeJobSpec(
   recipe: ComputeRecipe,
@@ -491,6 +493,18 @@ export function recipeJobSpec(
   if (!zarr && input.sourceCommit === undefined) {
     throw new RangeError("a run of the archive is handed the commit of its version's tag");
   }
+  const ahead = staged?.staged === true ? staged.ahead : undefined;
+  if (ahead !== undefined) {
+    // The admission was decided against the commit the run is handed, and names a commit ahead of it.
+    if (ahead.tagCommit !== input.sourceCommit) {
+      throw new RangeError(
+        "an admitted index was compared with another tag commit than the one handed",
+      );
+    }
+    if (ahead.indexCommit === ahead.tagCommit) {
+      throw new RangeError("an index ahead of its tag names another commit than the tag's");
+    }
+  }
   return JobSpecSchema.parse({
     name: `${recipe.name} ${input.datasetId} ${input.tag}`.slice(0, 80),
     runtime: "image",
@@ -511,15 +525,17 @@ export function recipeJobSpec(
             tag: input.tag,
             imageDigest: input.image.digest,
           }),
-          // The tag's commit alone when no index was staged (ADR 0143); with a staged index, its file and the
-          // index's own commit (ADR 0141), which is the tag's or one ahead of it by NEMAR-owned metadata only
-          // (ADR 0144): the recipe uses a row only when the two agree.
+          // The tag's commit, always (ADR 0143): after the staged index's file when one was staged (ADR 0141), and
+          // alone otherwise. An index admitted ahead of the tag is still handed with the TAG's commit (ADR 0144).
           ...(staged?.staged === true
             ? recipeServingIndexArguments({
                 path: SERVING_INDEX_CONTAINER_PATH,
-                sourceCommit: staged.sourceCommit,
+                sourceCommit: input.sourceCommit as string,
               })
             : recipeSourceCommitArguments(input.sourceCommit as string)),
+          // PLUMBING STILL TO COME (ADR 0144): the arguments that tell the recipe an index built at `ahead.indexCommit`
+          // is admitted for the tag's commit, once nemar-process names them (feat/serving-index-attested-commit).
+          // Until then the recipe uses no row of an admitted index (`serving_index_stale`).
         ],
     ...(staged === null
       ? {}
@@ -534,7 +550,7 @@ export function recipeJobSpec(
                       ahead_of_tag: {
                         tag_commit: staged.ahead.tagCommit,
                         index_commit: staged.ahead.indexCommit,
-                        changed_paths: staged.ahead.changedPaths,
+                        changed_path_count: staged.ahead.changedPathCount,
                       },
                     }),
               }

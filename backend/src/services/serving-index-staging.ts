@@ -11,12 +11,12 @@
  * THE COMMIT IS THE TAG'S, OR AHEAD OF IT BY NEMAR'S OWN METADATA ONLY (ADR 0144, refining ADR 0141 decision 2). An
  * index whose own `source_commit` is the commit of the version's tag is staged. An index built from another commit
  * is staged only when one GitHub compare (`servingIndexAheadOfTag`) shows that commit AHEAD of the tag and every
- * path between them NEMAR-owned metadata, which changes without a new tag (`.nemar/`, `.github/`, `.gitattributes`):
- * the files the recipe reads are then the tag's, byte for byte. Such an index is recorded with what was admitted
- * (`ahead`: both commits and the number of changed paths), and the run is handed the INDEX's commit as
- * `--source-commit`, because the recipe uses a row only when the index's commit is its `--source-commit`. An index
- * behind the tag, diverged from it, or ahead by any other path is refused with the word that says which; a compare
- * GitHub could not answer is a fault (`github_unreadable`), which defers the run: nothing is staged blind.
+ * path between them NEMAR-owned metadata, which changes without a new tag (`.nemar/`, `.github/`, and a
+ * `.gitattributes` edit that cannot change checkout bytes): the data and events the copy was built from are then the
+ * tag's. The run's identity stays the tag's: it is handed the TAG's commit as `--source-commit`, and the index's own
+ * commit is recorded as provenance (`ahead`: both commits and the number of changed paths). An index behind the tag,
+ * diverged from it, or ahead by any other change is refused with the word that says which; a compare GitHub could
+ * not answer is a fault (`github_unreadable`), which defers the run: nothing is staged blind.
  *
  * A FAULT DEFERS, ANYTHING ELSE DISPATCHES WITHOUT (ADR 0141, amended). When the index cannot be read, or the
  * copy cannot be kept (`SERVING_INDEX_FAULT_REASONS`), the dispatcher defers the run for up to 24 hours
@@ -27,9 +27,8 @@
  * handed an index it would refuse.
  *
  * THE TAG'S COMMIT IS THE DISPATCHER'S, READ FIRST (ADR 0143). Every Worker-dispatched run of the archive is handed
- * the commit of its version's tag (`--source-commit`), or, with an index admitted ahead of it, that index's commit
- * (ADR 0144), so its record states the commit whose files it read, the `git:` input digest a BIDS derivative is
- * keyed by (ADR 0123 decision 3). The dispatcher reads the tag's commit before anything here (`versionTagCommit`),
+ * the commit of its version's tag (`--source-commit`), staged index or not, so its record states the commit its
+ * files were read at, the `git:` input digest a BIDS derivative is keyed by (ADR 0123 decision 3). The dispatcher reads the tag's commit before anything here (`versionTagCommit`),
  * defers a run whose commit GitHub could not give and refuses one whose tag is absent, and hands staging the
  * commit it read: staging reads the index, and asks GitHub only to compare an index of another commit.
  *
@@ -62,12 +61,10 @@ export type StagedServingIndex =
       sha256: string;
       size: number;
       /**
-       * The index's `source_commit`: the tag's commit, or a commit ahead of it by NEMAR-owned metadata only
-       * (`ahead`). The run's `--source-commit` either way, because the recipe uses a row only when they agree.
+       * Present when the index's `source_commit` is not the tag's: what was admitted (ADR 0144), as provenance. The
+       * run's identity is the tag's commit either way. Absent, the index's commit is the tag's.
        */
-      sourceCommit: string;
-      /** Present when the index's commit is not the tag's: what was admitted (ADR 0144). */
-      ahead?: { tagCommit: string; indexCommit: string; changedPaths: number };
+      ahead?: { tagCommit: string; indexCommit: string; changedPathCount: number };
     }
   | { staged: false; reason: ServingIndexAbsentReason };
 
@@ -336,14 +333,20 @@ export async function stageServingIndex(
     const source = indexSourceCommit(index.bytes);
     if (!source.ok) return absent(source.reason);
     // The tag's commit, or one ahead of it by NEMAR-owned metadata only, shown by one compare (ADR 0144).
-    let ahead: { tagCommit: string; indexCommit: string; changedPaths: number } | undefined;
+    let ahead: { tagCommit: string; indexCommit: string; changedPathCount: number } | undefined;
     if (source.commit !== tagCommit) {
       const access = await githubAccess(env);
       if (!access.ok) return absent(access.reason);
       const compared = await servingIndexAheadOfTag(datasetId, tagCommit, source.commit, access);
       if (!compared.ok) return absent(compared.reason);
-      ahead = { tagCommit, indexCommit: source.commit, changedPaths: compared.changedPaths };
-      console.log(`[serving-index] index_ahead_admitted changed_paths=${compared.changedPaths}`);
+      ahead = {
+        tagCommit,
+        indexCommit: source.commit,
+        changedPathCount: compared.changedPathCount,
+      };
+      console.log(
+        `[serving-index] index_ahead_admitted changed_path_count=${compared.changedPathCount}`,
+      );
     }
     const sha256 = await sha256Hex(index.bytes);
     let kept: boolean;
@@ -362,7 +365,6 @@ export async function stageServingIndex(
       staged: true,
       sha256,
       size: index.bytes.byteLength,
-      sourceCommit: source.commit,
       ...(ahead === undefined ? {} : { ahead }),
     };
   } catch (err) {

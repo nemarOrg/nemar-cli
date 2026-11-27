@@ -2662,7 +2662,7 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     expect(await skipWord(env, made.stampId)).toBeUndefined();
   });
 
-  test("a run handed an index admitted ahead of its tag (ADR 0144) is handed the index's commit, and is keyed by the index's digest and that commit (MUTATION: hand the tag's commit with an admitted index)", async () => {
+  test("a run handed an index admitted ahead of its tag (ADR 0144) is still handed the tag's commit, and is keyed by git: and the TAG's commit and the index's digest; the index's commit is provenance (MUTATION: hand the index's commit)", async () => {
     const env = envOf();
     const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
     const id = await dataset();
@@ -2674,7 +2674,12 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
       ahead_by: 2,
       files: [
         { filename: ".nemar/metadata.json", status: "modified" },
-        { filename: ".gitattributes", status: "modified" },
+        {
+          filename: ".gitattributes",
+          status: "modified",
+          patch:
+            "@@ -1 +1 @@\n-*.tsv text eol=lf annex.largefiles=largerthan=1mb\n+*.tsv text eol=lf",
+        },
       ],
     });
     const commit = await sourceCommitForRun(env, ica, "bids", id, "v1.0.0");
@@ -2700,12 +2705,15 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
       "--serving-index",
       SERVING_INDEX_CONTAINER_PATH,
       RECIPE_SOURCE_COMMIT_FLAG,
-      SOURCE,
+      COMMIT,
     ]);
-    // The recipe states the commit it is handed, the index's (nemar-process `identity.source_commit`).
+    expect(spec.serving_index).toMatchObject({
+      ahead_of_tag: { tag_commit: COMMIT, index_commit: SOURCE, changed_path_count: 2 },
+    });
+    // The recipe states the commit it is handed, the tag's (nemar-process `identity.source_commit`).
     const made = await icaBidsJob({
       id,
-      sourceCommit: SOURCE,
+      sourceCommit: COMMIT,
       recorded: { serving_index: spec.serving_index, args: added },
     });
     expect(await syncAll(env)).toMatchObject({
@@ -2716,7 +2724,7 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     });
     const row = (await one(env)) as Der & { serving_index: string | null };
     const index = `sha256:${decided.servingIndex.sha256}`;
-    expect([row.serving_index, row.input_digest]).toEqual([index, `git:${SOURCE}`]);
+    expect([row.serving_index, row.input_digest]).toEqual([index, `git:${COMMIT}`]);
     const stamp = await env.DB.prepare(
       "SELECT version, recipe_version, engine FROM compute_pipeline_stamps WHERE id = ?1",
     )
@@ -2731,7 +2739,7 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
         engine: stamp?.engine as string,
         input: "bids",
         profile: "archive",
-        input_digest: `git:${SOURCE}`,
+        input_digest: `git:${COMMIT}`,
         serving_index: index,
       }),
     );
@@ -2773,7 +2781,7 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
       },
     ],
     [
-      "an index admitted ahead of its tag handed with another commit than the admitted one (ADR 0144)",
+      "an index admitted ahead of its tag handed with another commit than the tag commit it was compared with (ADR 0144)",
       {
         serving_index: {
           sha256: STAGED_HEX,
@@ -2781,7 +2789,7 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
           ahead_of_tag: {
             tag_commit: "7".repeat(40),
             index_commit: "8".repeat(40),
-            changed_paths: 1,
+            changed_path_count: 1,
           },
         },
         args: STAGED_ARGS,

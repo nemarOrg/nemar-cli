@@ -209,9 +209,16 @@ async function readBounded(res: Response, max: number): Promise<string | null> {
   return new TextDecoder().decode(bytes);
 }
 
-type Got = { kind: "ok"; body: unknown } | { kind: "absent" } | { kind: "unreadable" };
+type Got =
+  | { kind: "ok"; body: unknown }
+  | { kind: "absent" }
+  | { kind: "unreadable" }
+  | { kind: "too_large" };
 
-/** One bounded GET of JSON: 404 and 422 are `absent`, every other failure (a throw, a status, a size) is `unreadable`. */
+/**
+ * One bounded GET of JSON: 404 and 422 are `absent`, a body over `maxBytes` is `too_large` (a caller that reads it
+ * as any other failure treats it as `unreadable`), and every other failure (a throw, a status) is `unreadable`.
+ */
 async function getJson(
   url: string,
   headers: Record<string, string>,
@@ -245,7 +252,7 @@ async function getJson(
   }
   try {
     const text = await readBounded(res, maxBytes);
-    if (text === null) return { kind: "unreadable" };
+    if (text === null) return { kind: "too_large" };
     return { kind: "ok", body: JSON.parse(text) };
   } catch {
     return { kind: "unreadable" };
@@ -514,9 +521,10 @@ async function metadataOnlyDelta(
 /**
  * Whether a changed path is NEMAR-owned metadata, which NEMAR changes without a new tag (ADR 0144): anything under
  * `.nemar/` (NEMAR's own records) or `.github/` (NEMAR's workflows), or a `.gitattributes` file at any depth, which
- * NEMAR's annex policy rewrites across the fleet (`src/lib/fleet-annex-policy.ts`, ADR 0060) and which governs how
- * git stores a file, never its bytes. A data file, a BIDS file (`participants.tsv`, `README`, a sidecar) and
- * `.bidsignore`, which the dataset's authors own too, are not; neither is a path that is not a plain path.
+ * NEMAR's annex policy rewrites across the fleet (`src/lib/fleet-annex-policy.ts`, ADR 0060). A `.gitattributes`
+ * edit is admitted only when it cannot change the bytes a checkout gives ({@link gitattributesPatchProblem}); this
+ * rule decides the path alone. A data file, a BIDS file (`participants.tsv`, `README`, a sidecar) and `.bidsignore`,
+ * which the dataset's authors own too, are not; neither is a path that is not a plain path.
  */
 export function isNemarOwnedMetadataPath(path: string): boolean {
   if (path === "" || path.length > ZARR_SOURCE_DELTA_PATH_MAX) return false;
@@ -531,6 +539,64 @@ export function isNemarOwnedMetadataPath(path: string): boolean {
   );
 }
 
+/** Whether a path is a `.gitattributes` file, at any depth. */
+const isGitattributes = (path: string): boolean => path.split("/").at(-1) === ".gitattributes";
+
+/**
+ * The attributes of one `.gitattributes` line, without its pattern: whitespace-separated after the pattern, which may
+ * be a quoted string (git's own quoting). A blank line or a comment has none.
+ */
+function lineAttributes(line: string): string[] {
+  const text = line.trim();
+  if (text === "" || text.startsWith("#")) return [];
+  let rest: string;
+  if (text.startsWith('"')) {
+    let at = 1;
+    while (at < text.length && text[at] !== '"') at += text[at] === "\\" ? 2 : 1;
+    rest = text.slice(at + 1);
+  } else {
+    rest = text.replace(/^\S+/, "");
+  }
+  return rest.split(/\s+/).filter((token) => token !== "");
+}
+
+/**
+ * Whether one attribute, set, unset (`-`), reset (`!`) or given a value, can change the bytes a checkout gives for
+ * a file it applies to: `eol=crlf` (line endings written as CR LF), `working-tree-encoding` (the text re-encoded),
+ * `ident` (`$Id$` expanded) or a `filter` that is not git-annex's own (a smudge filter rewrites the file). An
+ * `annex.*` attribute only says where git-annex keeps a file, and `text`, `eol=lf`, `binary`, `diff` and `merge`
+ * either leave the bytes of an LF checkout as they are or never touch them.
+ */
+function changesCheckoutBytes(token: string): boolean {
+  const bare = token.replace(/^[-!]/, "");
+  const eq = bare.indexOf("=");
+  const name = eq < 0 ? bare : bare.slice(0, eq);
+  const value = eq < 0 ? null : bare.slice(eq + 1);
+  if (name === "eol") return value === "crlf";
+  if (name === "working-tree-encoding" || name === "ident") return true;
+  if (name === "filter") return token !== "filter=annex";
+  return false;
+}
+
+/**
+ * Why a `.gitattributes` edit cannot be admitted, from the patch GitHub's compare gives for it, or null when it can
+ * (ADR 0144): `index_delta_unlisted` when there is no patch to read (GitHub leaves it out of a large or binary
+ * change), and `index_content_changed` when a line it adds or removes carries an attribute that
+ * {@link changesCheckoutBytes}. So annex rules may change, and `text` and `eol=lf` lines may go, but `eol=crlf`,
+ * `working-tree-encoding`, `ident` or another filter may neither come nor go.
+ */
+export function gitattributesPatchProblem(
+  patch: unknown,
+): "index_content_changed" | "index_delta_unlisted" | null {
+  if (typeof patch !== "string") return "index_delta_unlisted";
+  for (const line of patch.split("\n")) {
+    if (!(line.startsWith("+") || line.startsWith("-"))) continue;
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (lineAttributes(line.slice(1)).some(changesCheckoutBytes)) return "index_content_changed";
+  }
+  return null;
+}
+
 /** Why an index built from another commit than its tag's is not admitted (fixed words of the serving index). */
 export type ServingIndexAheadRefusal =
   | "index_behind_tag"
@@ -541,10 +607,12 @@ export type ServingIndexAheadRefusal =
 /**
  * Whether the serving index's commit `indexCommit` is ahead of the version's tag `tagCommit` by NEMAR-owned
  * metadata only (ADR 0144), from ONE GitHub compare of `tagCommit...indexCommit` (the same request, timeout and
- * bound as the Zarr check's): `ahead`, `behind_by` 0, fewer than 300 files listed, and every changed path (and a
- * renamed file's previous path) {@link isNemarOwnedMetadataPath}. A compare that lists no file at all (commits
- * that change nothing) is admitted. A compare GitHub could not answer is `github_unreadable`, a fault: the
- * caller defers, and never stages an index it could not show to be the tag's data. Never throws.
+ * bound as the Zarr check's): `ahead`, `behind_by` 0, fewer than 300 files listed, every changed path (and a
+ * renamed file's previous path) {@link isNemarOwnedMetadataPath}, and every `.gitattributes` edit one that cannot
+ * change the bytes of a checkout ({@link gitattributesPatchProblem}). A compare that lists no file at all (commits
+ * that change nothing) is admitted. A compare body over its bound is `index_delta_unlisted`: what changed cannot be
+ * shown. A compare GitHub could not answer, or answered in a shape this does not read, is `github_unreadable`, a
+ * fault: the caller defers, and never stages an index it could not show to be the tag's data. Never throws.
  */
 export async function servingIndexAheadOfTag(
   repo: string,
@@ -552,7 +620,7 @@ export async function servingIndexAheadOfTag(
   indexCommit: string,
   access: GithubAccess & { ok: true },
 ): Promise<
-  | { ok: true; changedPaths: number }
+  | { ok: true; changedPathCount: number }
   | { ok: false; reason: ServingIndexAheadRefusal | "github_unreadable" }
 > {
   try {
@@ -567,6 +635,8 @@ export async function servingIndexAheadOfTag(
     // The tag's commit was just read, so a 404 or 422 says the repository does not have the index's commit or
     // shares no history with it: the copy was not built on this version's line.
     if (got.kind === "absent") return { ok: false, reason: "index_diverged" };
+    // A comparison too large to read in full cannot show what changed; a retry would read the same.
+    if (got.kind === "too_large") return { ok: false, reason: "index_delta_unlisted" };
     if (got.kind !== "ok" || !isRecord(got.body)) return { ok: false, reason: "github_unreadable" };
     const body = got.body;
     if (body.status === "behind") return { ok: false, reason: "index_behind_tag" };
@@ -597,8 +667,13 @@ export async function servingIndexAheadOfTag(
         if (!isNemarOwnedMetadataPath(name)) return { ok: false, reason: "index_content_changed" };
         paths.add(name);
       }
+      // A `.gitattributes` edit, by its patch: it may move files between git and git-annex, never change bytes.
+      if (names.some(isGitattributes)) {
+        const problem = gitattributesPatchProblem(file.patch);
+        if (problem !== null) return { ok: false, reason: problem };
+      }
     }
-    return { ok: true, changedPaths: paths.size };
+    return { ok: true, changedPathCount: paths.size };
   } catch {
     return { ok: false, reason: "github_unreadable" };
   }
