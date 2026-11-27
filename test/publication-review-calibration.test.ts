@@ -104,6 +104,7 @@ import {
   isPlaceholderAuthor,
   submissionMinimumFailures,
 } from "../shared/submission-minimums";
+import { type StandInMessage, replyFor, standInMessage } from "./helpers/anthropic-sse";
 import { emptyInputs } from "./helpers/review-inputs";
 
 let root: string;
@@ -986,18 +987,12 @@ const PASS_OUTPUT = {
   steering: false,
 };
 
-/** A Messages API reply whose one text block holds `text`. */
-function messageReply(text: string, stopReason = "end_turn"): Response {
-  return Response.json({
-    id: "msg_stand_in",
-    type: "message",
-    role: "assistant",
-    model: "claude-haiku-5-5",
-    content: [{ type: "text", text }],
-    stop_reason: stopReason,
-    stop_sequence: null,
-    usage: USAGE,
-  });
+/**
+ * A Messages API answer whose one text block holds `text`. The review streams, so the server below
+ * sends it as server-sent events (`replyFor` checks the request's `stream: true`).
+ */
+function messageReply(text: string, stopReason = "end_turn"): StandInMessage {
+  return standInMessage(text, { stop_reason: stopReason, usage: USAGE });
 }
 
 /** A failure the SDK must not retry, so a test is not slowed by its backoff. */
@@ -1008,7 +1003,8 @@ function failureReply(status: number, message: string): Response {
   });
 }
 
-let modelReply: (req: ModelRequest) => Response = () => messageReply(JSON.stringify(PASS_OUTPUT));
+let modelReply: (req: ModelRequest) => StandInMessage | Response = () =>
+  messageReply(JSON.stringify(PASS_OUTPUT));
 let modelServer: ReturnType<typeof Bun.serve>;
 const SDK_ENV = [
   "ANTHROPIC_API_KEY",
@@ -1039,7 +1035,7 @@ beforeAll(() => {
         body: JSON.parse(raw || "{}") as Record<string, unknown>,
       };
       modelRequests.push(request);
-      return modelReply(request);
+      return replyFor(request.body, modelReply(request));
     },
   });
   for (const k of SDK_ENV) {
@@ -1119,12 +1115,14 @@ describe("calibrate runs the production review over every entry and records one 
     expect(new Set(records.map((r) => r.label)).size).toBe(1 + DEFECTS.length);
   });
 
-  test("the request is the production request: Haiku, high effort, the schema, no tools", async () => {
+  test("the request is the production request: Haiku, max effort, streamed, 128,000 tokens, no tools", async () => {
     await run(oneEntryCorpus("nm000001"));
     expect(modelRequests).toHaveLength(1);
     const body = (modelRequests[0] as ModelRequest).body;
     expect(body.model).toBe("claude-haiku-5-5");
-    expect((body.output_config as { effort: string }).effort).toBe("high");
+    expect((body.output_config as { effort: string }).effort).toBe("max");
+    expect(body.max_tokens).toBe(128_000);
+    expect(body.stream).toBe(true);
     expect(Object.keys(body)).not.toContain("tools");
     expect(Object.keys(body)).not.toContain("tool_choice");
   });

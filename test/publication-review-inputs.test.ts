@@ -294,7 +294,7 @@ describe("the input digest", () => {
     expect(report.v).toBe(PUBLICATION_REPORT_VERSION);
     expect(report.record).toEqual({
       prompt_version: "publication-review-prompt/2",
-      models: [{ model: "claude-haiku-5-5", effort: "high" }],
+      models: [{ model: "claude-haiku-5-5", effort: "max" }],
       input_digest: d,
       resolver_version: body.lineage.resolver_version,
       enrichment_source: null,

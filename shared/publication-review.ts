@@ -69,8 +69,11 @@ export type PublicationReportVersion = (typeof PUBLICATION_REPORT_VERSIONS)[numb
  */
 export const PUBLICATION_PROMPT_VERSION = "publication-review-prompt/2";
 
-/** The effort every call of the review is made at. One word, recorded with the model. */
-export const PUBLICATION_REVIEW_EFFORT = "high";
+/**
+ * The effort every call of the review is made at. One word, recorded with the model. `max` since
+ * 2026-11-27 (owner): on 37 queue requests it gave the same verdicts as Opus 5.5 at medium.
+ */
+export const PUBLICATION_REVIEW_EFFORT = "max";
 
 /**
  * Every effort a record may name: the review's, and the others a call can be made at (the

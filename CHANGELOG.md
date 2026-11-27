@@ -15,6 +15,13 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.48 - 2026-11-27
+
+### Changed
+
+- **The publication review calls Haiku 5.5 at max effort (was high; ADR 0102 amendment).**
+  On 37 queue requests it gave the same verdicts as Opus 5.5 at medium. The call streams with a 128,000-token budget, because thinking counts toward it.
+
 ## 0.10.47 - 2026-11-27
 
 ### Changed
