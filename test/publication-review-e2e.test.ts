@@ -70,6 +70,7 @@ import type {
   StartPublicationReviewResponse,
 } from "../shared/contract/publication-review-admin";
 import { NOT_ASSESSED_LINE } from "../shared/publication-review";
+import { replyFor, standInMessage } from "./helpers/anthropic-sse";
 
 setDefaultTimeout(60_000);
 
@@ -135,52 +136,8 @@ function modelOutput(): Record<string, unknown> {
   };
 }
 
-/** A streamed answer, as the Messages API sends one (the confirming run streams). */
-function streamedAnswer(model: string): Response {
-  const text = JSON.stringify(modelOutput());
-  const events: [string, Record<string, unknown>][] = [
-    [
-      "message_start",
-      {
-        type: "message_start",
-        message: {
-          id: "msg_stand_in_stream",
-          type: "message",
-          role: "assistant",
-          model,
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: 10, output_tokens: 1 },
-        },
-      },
-    ],
-    [
-      "content_block_start",
-      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-    ],
-    [
-      "content_block_delta",
-      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
-    ],
-    ["content_block_stop", { type: "content_block_stop", index: 0 }],
-    [
-      "message_delta",
-      {
-        type: "message_delta",
-        delta: { stop_reason: "end_turn", stop_sequence: null },
-        usage: { output_tokens: 10 },
-      },
-    ],
-    ["message_stop", { type: "message_stop" }],
-  ];
-  return new Response(
-    events.map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`).join(""),
-    { headers: { "content-type": "text/event-stream" } },
-  );
-}
-
-function modelAnswer(): Response {
+/** The model's answer, streamed when the request asked to stream (both of the job's calls do). */
+function modelAnswer(asked: Record<string, unknown>): Response {
   if (modelStatus !== 200) {
     return new Response(
       JSON.stringify({ type: "error", error: { type: "api_error", message: "unavailable" } }),
@@ -191,16 +148,13 @@ function modelAnswer(): Response {
       },
     );
   }
-  return Response.json({
-    id: "msg_stand_in",
-    type: "message",
-    role: "assistant",
-    model: "claude-haiku-5-5",
-    content: [{ type: "text", text: JSON.stringify(modelOutput()) }],
-    stop_reason: "end_turn",
-    stop_sequence: null,
-    usage: { input_tokens: 10, output_tokens: 10 },
-  });
+  return replyFor(
+    asked,
+    standInMessage(JSON.stringify(modelOutput()), {
+      model: String(asked.model),
+      usage: { input_tokens: 10, output_tokens: 10 },
+    }),
+  );
 }
 
 const SDK_ENV = [
@@ -279,10 +233,7 @@ beforeAll(() => {
     async fetch(req) {
       const text = await req.text();
       modelRequests.push(text);
-      const asked = JSON.parse(text) as { model: string; stream?: boolean };
-      return asked.stream === true && modelStatus === 200
-        ? streamedAnswer(asked.model)
-        : modelAnswer();
+      return modelAnswer(JSON.parse(text) as Record<string, unknown>);
     },
   });
   for (const k of SDK_ENV) {
@@ -687,7 +638,7 @@ describe("a request whose review passes", () => {
         scanner_id: "identifier-scan@abcdef1",
         prompt_version: "publication-review-prompt/2",
         resolver_version: "license-lineage/2",
-        models: JSON.stringify([{ model: "claude-haiku-5-5", effort: "high" }]),
+        models: JSON.stringify([{ model: "claude-haiku-5-5", effort: "max" }]),
       });
       expect(String(reviews()[0]?.input_digest)).toMatch(/^[0-9a-f]{64}$/);
 
@@ -909,7 +860,7 @@ describe("a request whose review fails, under the automatic denial (ADR 0139)", 
       await app.settled();
       expect(dispatches).toHaveLength(1);
 
-      // The first run: the review's own model, at its effort, not streamed.
+      // The first run: the review's own model, at its effort, streamed.
       const first = await runWorkflow(dispatches[0] as Dispatch, ds);
       expect(first.claimed).toBe(true);
       expect(first.exit).toBe(0);
@@ -918,9 +869,10 @@ describe("a request whose review fails, under the automatic denial (ADR 0139)", 
       const asked1 = JSON.parse(modelRequests[0] as string);
       expect(asked1).toMatchObject({
         model: "claude-haiku-5-5",
-        output_config: { effort: "high" },
+        max_tokens: 128_000,
+        output_config: { effort: "max" },
+        stream: true,
       });
-      expect(asked1.stream).toBeUndefined();
 
       // The Worker found the fail eligible and dispatched the confirming run, through the same
       // event type and payload shape: the workflow is unchanged.
