@@ -1139,3 +1139,34 @@ The per-depositor allowance stays at 5, and an administrator's start still skips
 In the same change, `PUBLICATION_REVIEW_ENABLED = "1"` joins production `[vars]`.
 The items of "Before it is switched on" that remained open are listed in that pull request, and it merged only after the owner confirmed each one.
 ADR 0139 builds on this review.
+
+## Amendment 2026-11-27 (owner, #2441): the review signs in to an Anthropic organization of its own
+
+"Before it is switched on", item 2, shared the organization and workspace variables between the reviews.
+The owner created the publication review's federation rule and service account in a separate Anthropic organization, with its own issuer configuration, so nothing about its sign-in is shared with the pull-request review.
+The workflow reads four variables of its own: `ANTHROPIC_PUBLICATION_REVIEW_FEDERATION_RULE_ID`, `ANTHROPIC_PUBLICATION_REVIEW_SERVICE_ACCOUNT_ID`, `ANTHROPIC_PUBLICATION_REVIEW_ORGANIZATION_ID` and `ANTHROPIC_PUBLICATION_REVIEW_WORKSPACE_ID`.
+Each review's federation check also reads the other review's rule and service account variables, only to refuse a rule or an account that is the same as its own.
+Where this and item 2 differ, this is the later text.
+
+## Amendment 2026-11-27 (owner): Sonnet 5.5 and Opus 5.5 are accepted models
+
+The review still calls Haiku 5.5 at high effort (the first entry of `PUBLICATION_REVIEW_MODELS`).
+The Worker now also accepts a first run's report made on Sonnet 5.5 or Opus 5.5, at any recorded effort, so the owner can compare models and efforts on the real queue without a release: a branch of the review script that calls another model, checked out by the workflow in `nemarDatasets/.github`, reports results the Worker accepts.
+A first run in the confirming run's exact shape (ADR 0139: Sonnet 5.5 at `max`) is still refused, so a confirming report cannot pass as a first run.
+A first run made on Sonnet 5.5, at any effort, never starts a confirming run: the automatic denial rests on two different models agreeing, and the depositor's mail says so.
+Every record names its model and effort, so the comparison is readable from the stored reviews.
+
+## Amendment 2026-11-27 (owner): the platform cap is 500
+
+The owner raised the platform's allowance from 150 to 500 model calls in any 24 hours, so the whole publication queue (more than 360 requests) and the model comparison on it can run in a day.
+The per-depositor allowance stays at 5, and an administrator's start still skips it.
+
+## Amendment 2026-11-27 (owner): an administrator may re-review a reported review
+
+An administrator's start may pass `again`, so the owner can compare models and efforts on the same request at the same commit (migration 0161).
+A review that has reported is then superseded, never overwritten: it keeps its row and its words, gains `superseded_at` and `superseded_by`, and stays in the history; a new first run of the same commit and release kind takes its place.
+The review in force is the newest unsuperseded first run, which every read, the approval gate and an override look at, and the new run counts against the platform's allowance like any administrator's start (the superseded call still counts too).
+It is refused while the automatic denial is confirming that review or has acted on it or is waiting on its daily cap and digest (`auto_deny_active`), and a confirming row is never superseded.
+The re-review also counts in the depositor's 24-hour tally (`DEPOSITOR_RANK_SQL`), so repeated comparisons can decline that depositor's next screen-started review with `depositor_limit`; an administrator's own start is not held by it.
+If the new run cannot be handed over or is declined, the old review stays superseded and the approval gate blocks until the new review is restarted (`start <dataset-id>` restarts it); nothing is rolled back.
+Where section 8 says a reported review is never started again, this is the later text for an administrator who passes `again`; every start without it is unchanged.

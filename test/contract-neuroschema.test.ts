@@ -452,6 +452,19 @@ describe("neuroschema bundle: record root and processing extensions", () => {
     expect(record({ ...doc, modality: undefined })).toBe(false);
   });
 
+  test("a document stamped by an earlier release still validates: the bundle never checks the stamp", () => {
+    // Stored documents (records.json, quality documents) keep the version they were written with; the
+    // 0.6.1 bundle is 0.6.0's schemas, and its schema_version is a plain string (#2411).
+    const record = compileNeuroschemaRecordValidator();
+    const doc = fixture("record-ds002718-processing.json");
+    const dataset = fixture("dataset-ds002718-processing.json");
+    for (const stamp of ["0.6.0", "0.4.1", "0.3.0"]) {
+      if (!record({ ...doc, schema_version: stamp })) throw new Error(formatAjvErrors(record));
+      if (!validate({ ...dataset, schema_version: stamp }))
+        throw new Error(formatAjvErrors(validate));
+    }
+  });
+
   test("a single schema compiles by its id, and a fragment by id#pointer", () => {
     const counts = compileNeuroschemaValidator("nsc:/definitions/checkpointCounts.schema.json");
     expect(counts({ passed: 1, failed: 0, skipped: 0, total: 1 })).toBe(true);
@@ -479,7 +492,9 @@ describe("neuroschema bundle: record root and processing extensions", () => {
 describe("neuroschema 0.6.0: views and the vendored view files", () => {
   const VENDOR_DIR = join(import.meta.dir, "../shared/contract/neuroschema");
   const VIEWS_DIR = join(VENDOR_DIR, "views");
-  const RELEASE_COMMIT = "e09ed40791b68c35d9698f3b663bfc4a998f3986";
+  // neuroschema 0.6.1 (tag v0.6.1): 0.6.0's schemas with the sensor vectors regenerated at the recipes'
+  // eegprep commit (nemarOrg/neuroschema#40, #2411).
+  const RELEASE_COMMIT = "86f28d186ade3bad5250e112812f79a5133f9f36";
   const bundle = JSON.parse(readFileSync(join(VENDOR_DIR, "dataset.bundle.json"), "utf8")) as {
     _provenance: { neuroschema_version: string; source_commit: string };
     schemas: { $id: string }[];
@@ -494,12 +509,12 @@ describe("neuroschema 0.6.0: views and the vendored view files", () => {
     JSON.parse(readFileSync(join(import.meta.dir, "fixtures/neuroschema", name), "utf8"));
   const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-  test("the bundle and the view files are stamped 0.6.0 at the release commit (tag v0.6.0)", () => {
-    expect(NEUROSCHEMA_VERSION).toBe("0.6.0");
-    expect(bundle._provenance.neuroschema_version).toBe("0.6.0");
+  test("the bundle and the view files are stamped 0.6.1 at the release commit (tag v0.6.1)", () => {
+    expect(NEUROSCHEMA_VERSION).toBe("0.6.1");
+    expect(bundle._provenance.neuroschema_version).toBe("0.6.1");
     expect(bundle._provenance.source_commit).toBe(RELEASE_COMMIT);
     expect(sums.format).toBe("nemar.vendored-files.v1");
-    expect(sums.neuroschema_version).toBe("0.6.0");
+    expect(sums.neuroschema_version).toBe("0.6.1");
     expect(sums.source_commit).toBe(RELEASE_COMMIT);
   });
 

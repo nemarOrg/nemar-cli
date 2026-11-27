@@ -1,10 +1,11 @@
 # ADR 0137: Quality views are declared data drawn in the browser, and no figure image is stored
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-23
+**Accepted:** 2026-11-27
 **Owner:** Seyed Yahya Shirazi
 
-This record moves to accepted when the nemar-process and website epics that build the rest of it reach their integration branches; the nemar-cli epic (#2324) alone does not complete it.
+Completed by nemarOrg/nemar-cli#2412 on `dev`, nemarOrg/nemar-process#98 on nemar-process `dev`, nemarOrg/website#608 on website `staging` and nemarOrg/nemar-cli#2439 on `dev`.
 
 Partially supersedes [ADR 0134](0134-pipelines-report-checkpoints-live-and-quality-metrics-are-reviewed-plugins.md) where it names figures or a floor value:
 its decisions 2, 6, 7 and 9 (the `figures` checkpoint, figure formats and caps, the first figure plugins, a plugin that re-reports a floor value, and the homes of figure rules), and its rejected alternative of array outputs;
@@ -56,6 +57,7 @@ neuroschema states it: the layout's theta and radius, EEGLAB's plotting and inte
 It also states what eegprep leaves implicit: sensors closer than 10⁻³ layout units are merged and their values averaged, and fewer than 8 interpolated sensors draw no map (`too_few_sensors`).
 The map interpolates each value's deviation from the mean and adds the mean back.
 eegprep's `topoplot` at commit `edf694c8` is the reference implementation; where the two differ, neuroschema's `docs/views/sensor-field.md` decides, and the amendment of 2026-11-24 lists the differences.
+Note (#2411): the reference is now eegprep `871bc7f8`, the recipes' engine; neuroschema 0.6.1 regenerated the vectors there, within the regeneration tolerance of the `edf694c8` ones.
 The website's renderer and a Python reference renderer in neuroschema are held to the same vectors: every cell within 10⁻⁶ of the reference map's range plus 10⁻¹² of its magnitude (a map of zeros is compared exactly), and the same masked cells.
 Montages with duplicate positions and with rank-deficient interpolation matrices are among the vectors.
 `nemar.sensor-layout.v1` (positions to layout) and `nemar.ic-activity.v1` are specified and tested the same way.
@@ -195,11 +197,11 @@ Decisions 1 and 3 above are corrected to match, and this section records what ch
 Where this amendment and the decisions above differ, this amendment holds.
 
 **Scalp maps (`nemar.sensor-field.v1`).**
-- Parity is with eegprep's `topoplot` and `griddata_v4` at `edf694c8`, which follow EEGLAB's `topoplot` and its v4 interpolation.
+- Parity is with eegprep's `topoplot` and `griddata_v4` at `edf694c8` (`871bc7f8` since neuroschema 0.6.1, #2411), which follow EEGLAB's `topoplot` and its v4 interpolation.
   Where they differ, `docs/views/sensor-field.md` decides:
   the map interpolates each value's deviation from the mean and adds the mean back, z = m + spline(v − m), because the biharmonic spline has no constant term and a shared offset (a spectrum's decibels) would ripple across the color axis;
-  sensors within 10⁻³ merge at their mean, where eegprep gives an empty map for duplicates;
-  a sensor whose value is not finite is dropped with its value, where eegprep shifts the later values onto the wrong sensors;
+  sensors within 10⁻³ merge at their mean, where eegprep at `edf694c8` gives an empty map for duplicates (fixed at `871bc7f8` by sccn/eegprep#672, which averages coincident sensors with MATLAB's much smaller tolerance; the merge still decides);
+  a sensor whose value is not finite is dropped with its value, where eegprep at `edf694c8` shifts the later values onto the wrong sensors (fixed at `871bc7f8` by sccn/eegprep#672, which drops both; the drop rule still decides);
   the `minmax` axis widens by 5% of the range on each side, where EEGLAB moves each limit away from zero and clips a map of one sign (the `absmax` axis stays EEGLAB's);
   the nose is EEGLAB's, not eegprep's triangle, and the head outline is a circle on the layout's equator (`0.5 * squeezefac`), as eegprep draws it and 0.35% outside EEGLAB's;
   and fewer than 8 sensors, a grid past the head and an interpolation that overflows are refused with a word, where eegprep draws or returns an empty map.
@@ -311,7 +313,7 @@ because no value may be drawn at another sensor's place.
 
 - The live-views design for epic nemarOrg/nemar-cli#2324 and its review, 2026-11-23.
 - nemarOrg/nemar-process#76 (`figures_on_hold`, `plugin_failed`, plugin identity in the plan hash).
-- eegprep `functions/sigprocfunc/topoplot.py` and `griddata_v4` at edf694c8.
+- eegprep `functions/sigprocfunc/topoplot.py` and `griddata_v4` at edf694c8, and at 871bc7f8 since neuroschema 0.6.1 (#2411).
 - `sccn/NEMAR-pipeline` `nemar_plugins/`.
 - neuroschema `schema/extensions/dataQuality.schema.json` (0.5.0) and `docs/views.md` (neuroschema 0.6.0, tag `v0.6.0`, nemarOrg/neuroschema#21).
 - signalJourney `qualityMetricsObject`, `outputTarget`, `extensions/nemar` (signalJourney#7 and #8).

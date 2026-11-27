@@ -133,7 +133,7 @@ export function recipeRecord(over: Record<string, unknown> = {}): string {
     extensions: {
       nemar: {
         recipe: { id: "nemar-floor", version: "1.0.0-b2" },
-        engine: { package: "eegprep", version: "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8" },
+        engine: { package: "eegprep", version: "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3" },
         counts: { discovered: 2, succeeded: 2, failed: 0, skipped: 0 },
         ...over,
       },

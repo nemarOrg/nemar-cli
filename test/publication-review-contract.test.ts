@@ -509,8 +509,16 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
     ]);
     expect([...PUBLICATION_DECLINE_DETAILS]).toEqual(["depositor_limit", "platform_limit"]);
     expect([...PUBLICATION_OUTCOMES]).toEqual(["pass", "fail", "action_required"]);
-    expect([...PUBLICATION_REVIEW_MODELS]).toEqual(["claude-haiku-5-5"]);
-    expect([...CALIBRATION_MODELS]).toEqual(["claude-haiku-5-5", "claude-sonnet-5-5"]);
+    expect([...PUBLICATION_REVIEW_MODELS]).toEqual([
+      "claude-haiku-5-5",
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+    ]);
+    expect([...CALIBRATION_MODELS]).toEqual([
+      "claude-haiku-5-5",
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+    ]);
     expect([...PUBLICATION_REPORT_ERRORS]).toEqual([
       "not_an_object",
       "unknown_key",
@@ -576,7 +584,7 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
 
   test("caps, timings and the standing line", () => {
     expect(DEPOSITOR_DAILY_CAP).toBe(5);
-    expect(PLATFORM_DAILY_CAP).toBe(150);
+    expect(PLATFORM_DAILY_CAP).toBe(500);
     expect(PUBLICATION_REVIEW_DEADLINE_MINUTES).toBe(30);
     expect(REVIEW_OVERDUE_VIEW_MINUTES).toBe(PUBLICATION_REVIEW_DEADLINE_MINUTES + 30);
     expect(NOT_ASSESSED_LINE).toBe("Not assessed: whether the text names the depositors.");
@@ -600,6 +608,7 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "screen_not_ready",
       "running",
       "has_result",
+      "auto_deny_active",
       "platform_limit",
     ]);
     expect([...START_NOT_HANDED_OVER_REASONS]).toEqual([
@@ -615,6 +624,7 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
     expect(START_REASONS as readonly string[]).not.toContain("depositor_limit");
     expect([...PUBLICATION_REVIEW_ERROR_CODES]).toEqual([
       "bad_dataset",
+      "invalid_body",
       "not_found",
       "origin_not_allowed",
       "review_disabled",
@@ -624,6 +634,7 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "screen_not_ready",
       "running",
       "has_result",
+      "auto_deny_active",
       "platform_limit",
       "dispatch_failed",
       "dispatch_unconfigured",
@@ -696,10 +707,11 @@ describe("the parser refuses what the job must never send", () => {
     // Version 2 carries the fifth answer and the record; a version-1 body that says 2 is refused.
     expect(refusal(reportBody({ v: 2 }))).toBe("unknown_key");
     expect(refusal(reportBody({ v: "1" }))).toBe("bad_version");
-    expect(refusal(reportBody({ model: "claude-sonnet-5-5" }))).toBe("bad_model");
-    expect(
-      refusal(reportBody({ model: "claude-sonnet-5-5" }), { models: CALIBRATION_MODELS }),
-    ).toBe("accepted");
+    expect(refusal(reportBody({ model: "claude-haiku-4-5" }))).toBe("bad_model");
+    expect(refusal(reportBody({ model: "claude-haiku-4-5" }), { models: CALIBRATION_MODELS })).toBe(
+      "bad_model",
+    );
+    expect(refusal(reportBody({ model: "claude-sonnet-5-5" }))).toBe("accepted");
     // Even the calibration cannot name a model outside its own list, by cast or otherwise.
     expect(refusal(reportBody({ model: "gpt-x" }), { models: ["gpt-x"] })).toBe("bad_model");
     expect(refusal(reportBody({ steering: "false" }))).toBe("bad_steering");

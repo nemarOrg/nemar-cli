@@ -229,6 +229,14 @@ export interface PublicationReviewHistoryEntry {
   stored_verdict: PublicationOutcome | null;
   created_at: string;
   decided_at: string | null;
+  /**
+   * When an administrator's re-review took this review's place, or null: a superseded review is
+   * kept as history and is never the review in force (ADR 0102, amendment of 2026-11-27). Optional
+   * because an older Worker sends none.
+   */
+  superseded_at?: string | null;
+  /** The review that replaced it; null unless `superseded_at` is set. Optional for the same reason. */
+  superseded_by?: number | null;
 }
 
 /**
@@ -347,6 +355,7 @@ export const START_REFUSED_REASONS = [
   "screen_not_ready",
   "running",
   "has_result",
+  "auto_deny_active",
   "platform_limit",
 ] as const;
 export type StartRefusedReason = (typeof START_REFUSED_REASONS)[number];
@@ -366,12 +375,28 @@ export const START_REASONS = [
 ] as const;
 export type StartReason = (typeof START_REASONS)[number];
 
+/**
+ * The optional body of `POST /admin/publish/:id/review/start`. `again` (default false) is an
+ * administrator's re-review (ADR 0102, amendment of 2026-11-27): when the review of the request's
+ * screened commit has reported, a new first run takes its place and the reported one is kept in the
+ * history. Anything other than a boolean is refused (`invalid_body`). Without it, or with `false`, a
+ * review that has reported answers `has_result`, as before.
+ */
+export interface StartPublicationReviewBody {
+  again?: boolean;
+}
+
 /** `POST /admin/publish/:id/review/start`, HTTP 202: a run is going. It always has a review. */
 export interface StartedPublicationReview {
   environment: PublicationReviewEnvironment;
   started: true;
   reason: StartStartedReason;
   review_id: number;
+  /**
+   * Present only for an administrator's re-review that replaced a review: the id of the review
+   * that was superseded, now history. Absent otherwise, and from an older Worker.
+   */
+  superseded_review_id?: number;
 }
 
 /**
@@ -407,6 +432,7 @@ export type StartPublicationReviewResponse =
  */
 export const PUBLICATION_REVIEW_ERROR_CODES = [
   "bad_dataset",
+  "invalid_body",
   "not_found",
   "origin_not_allowed",
   "review_disabled",
@@ -416,6 +442,7 @@ export const PUBLICATION_REVIEW_ERROR_CODES = [
   "screen_not_ready",
   "running",
   "has_result",
+  "auto_deny_active",
   "platform_limit",
   "dispatch_failed",
   "dispatch_unconfigured",

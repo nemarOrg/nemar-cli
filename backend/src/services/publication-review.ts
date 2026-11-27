@@ -255,8 +255,8 @@ export type StartNotStartedReason = Exclude<StartResult, StartStartedReason>;
  * the review it concerns.
  */
 export type StartOutcome =
-  | { started: true; reason: StartStartedReason; reviewId: number }
-  | { started: false; reason: StartNotStartedReason; reviewId: number | null };
+  | { started: true; reason: StartStartedReason; reviewId: number; superseded?: number }
+  | { started: false; reason: StartNotStartedReason; reviewId: number | null; superseded?: number };
 
 /**
  * The one place a {@link StartOutcome} is made. The overloads keep a started word from being
@@ -289,15 +289,19 @@ interface RequestRow {
 type Plan =
   | { kind: "insert" }
   | { kind: "restart"; row: PublicationReviewRow; extraCalls: number }
+  | { kind: "supersede"; row: PublicationReviewRow }
   | { kind: "refuse"; reason: StartNotStartedReason };
 
 /**
  * A screen result starts a review only for a commit that has none, or whose last attempt never
  * reached a model (a new result is the retry). An administrator's start also restarts a row that
  * was declined, ended in an error, never reported, or is past its deadline and so is read as
- * never reported; it never restarts one that is running or has a result.
+ * never reported; it never restarts one that is running or has a result, except that an
+ * administrator who asks to start `again` supersedes a row that has reported (ADR 0102, amendment
+ * of 2026-11-27): the row is kept as history and a new first run takes its place. `again` changes
+ * nothing for any other row: it restarts under the rules above.
  */
-function planFor(existing: PublicationReviewRow | null, admin: boolean): Plan {
+function planFor(existing: PublicationReviewRow | null, admin: boolean, again: boolean): Plan {
   if (existing === null) return { kind: "insert" };
   // A call the row already spent is a second one when the attempt is made again.
   const extraCalls = attemptReachedModel(existing) ? 1 : 0;
@@ -305,7 +309,9 @@ function planFor(existing: PublicationReviewRow | null, admin: boolean): Plan {
   if (!admin) return { kind: "refuse", reason: "duplicate" };
   switch (existing.state) {
     case "reported":
-      return { kind: "refuse", reason: "has_result" };
+      return again
+        ? { kind: "supersede", row: existing }
+        : { kind: "refuse", reason: "has_result" };
     default:
       // A `dispatched` row is restarted only once overdue, which the compare-and-set decides in
       // SQL on the clock the watchdog uses ({@link restartGuard}); a fresh row matches nothing.
@@ -379,6 +385,49 @@ export async function startPublicationReviewForScreen(
 export interface StartOptions {
   /** Try the request's admin mail when a start ends in a state that is final. Default true. */
   mail?: boolean;
+  /**
+   * An administrator's re-review (ADR 0102, amendment of 2026-11-27): when the review of the
+   * request's screened commit has reported, supersede it with a new first run instead of refusing
+   * `has_result`. Only an administrator's start may pass it (a screen result's never does); any
+   * other row is started under the ordinary rules. Default false.
+   */
+  again?: boolean;
+}
+
+/**
+ * The automatic denial's words that still let an administrator review a reported first run again:
+ * nothing happened (`none`, with no confirming run on record, see {@link SUPERSEDE_GUARD_SQL}), or
+ * the automatic denial ended with a person to decide and no action taken. Every other word means a
+ * confirmed `fail` was acted on or is waiting on the daily digest and cap (`denied`, `would_deny`,
+ * `capped`, `no_service_account`, `restored`), and superseding that review would hide it.
+ */
+const SUPERSEDE_AUTO_DENY_STATES = ["none", "not_eligible", "disagreed", "confirm_failed"] as const;
+
+/**
+ * What a supersede's first write is conditioned on, in one statement, so it is decided in the same
+ * transaction as the write: the row is the reported first run that was read, not yet superseded,
+ * the request is still waiting for its decision (one that has just become `approving` is not
+ * reviewed again), and the automatic denial is neither in progress (a confirming run is on record while the word is
+ * still `none`) nor acted.
+ */
+const SUPERSEDE_GUARD_SQL = `id = ? AND state = 'reported' AND superseded_at IS NULL
+    AND confirm_of IS NULL
+    AND EXISTS (SELECT 1 FROM publication_requests AS q
+                 WHERE q.id = publication_reviews.request_id AND q.status = 'requested')
+    AND auto_deny_state IN (${SUPERSEDE_AUTO_DENY_STATES.map(sqlWord).join(", ")})
+    AND (auto_deny_state <> 'none'
+         OR NOT EXISTS (SELECT 1 FROM publication_reviews AS c
+                         WHERE c.confirm_of = publication_reviews.id))`;
+
+/** Whether the automatic denial holds a reported first run: see {@link SUPERSEDE_GUARD_SQL}. */
+async function autoDenyHolds(db: Db, row: PublicationReviewRow): Promise<boolean> {
+  if (!(SUPERSEDE_AUTO_DENY_STATES as readonly string[]).includes(row.autoDenyState)) return true;
+  if (row.autoDenyState !== "none") return false;
+  const confirming = await db
+    .prepare("SELECT 1 AS found FROM publication_reviews WHERE confirm_of = ?")
+    .bind(row.id)
+    .first<{ found: number }>();
+  return confirming !== null;
 }
 
 /**
@@ -395,6 +444,9 @@ export async function startPublicationReview(
   const db = env.DB;
   const admin = args.adminUserId !== undefined;
   const mail = options.mail !== false;
+  const again = options.again === true;
+  // A caller's bug, not a request's state: the re-review is the administrator's alone.
+  if (again && !admin) throw new TypeError("a re-review is an administrator's start");
 
   if (!reviewEnabled(env)) return answer("review_disabled");
   // The `nemarDatasets` org is shared between the two Workers and their D1s are not: each starts
@@ -432,8 +484,69 @@ export async function startPublicationReview(
   // an administrator, the watchdog, a report). Each lost race is re-read and planned again.
   for (let attempt = 0; attempt < 3; attempt++) {
     const existing = await readReviewByKey(db, request.id, head, anonymous);
-    const plan = planFor(existing, admin);
+    const plan = planFor(existing, admin, again);
     if (plan.kind === "refuse") return answer(plan.reason, existing?.id ?? null);
+
+    if (plan.kind === "supersede") {
+      if (await autoDenyHolds(db, plan.row)) return answer("auto_deny_active", plan.row.id);
+      if (missing.length > 0 || !secret) {
+        // Nothing is written: the review in force stays the one that reported.
+        console.warn(
+          `[publication-review] ${request.dataset_id} request ${request.id}: re-review not started (${missing.join(", ")})`,
+        );
+        return answer("dispatch_unconfigured");
+      }
+      // The new row is held by the platform's allowance after it is written, as every start is.
+      // Asked before as well, so a spent allowance does not replace a review that reported with a
+      // declined one; a start that races past this check is still declined by the later count.
+      const spent = await db
+        .prepare(PLATFORM_RANK_SQL)
+        .bind(Number.MAX_SAFE_INTEGER)
+        .first<{ n: number }>();
+      if ((spent?.n ?? 0) + 1 > PLATFORM_DAILY_CAP) return answer("platform_limit", plan.row.id);
+
+      const nonce = crypto.randomUUID();
+      const created = await supersede(
+        db,
+        plan.row,
+        request,
+        head,
+        anonymous,
+        args.adminUserId,
+        nonce,
+      );
+      // Another writer moved the old row first (a second re-review, or the automatic denial): it is
+      // read again and planned again, and a re-review that won answers `running`.
+      if (created === null) {
+        // Or the request stopped waiting (an approval began): that is the answer, not a retry.
+        const now = await db
+          .prepare("SELECT status FROM publication_requests WHERE id = ?")
+          .bind(request.id)
+          .first<{ status: string }>();
+        if (now?.status !== "requested") return answer("request_not_requested", plan.row.id);
+        continue;
+      }
+      try {
+        // The old row is history from here on, whatever the hand-over comes to: the answer names
+        // it, so a caller can say that a review was replaced.
+        const handed = await handOver(env, {
+          reviewId: created,
+          rankId: created,
+          restarted: false,
+          request,
+          head,
+          anonymous,
+          nonce,
+          secret,
+          admin,
+          mail,
+        });
+        return { ...handed, superseded: plan.row.id };
+      } catch (err) {
+        await markDispatchFailed(db, created, nonce);
+        throw err;
+      }
+    }
 
     if (missing.length > 0 || !secret) {
       return await recordUnconfigured(
@@ -457,7 +570,8 @@ export async function startPublicationReview(
           `INSERT INTO publication_reviews
              (request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, nonce)
            VALUES (?, ?, ?, ?, ?, ?, 'dispatched', ?)
-           ON CONFLICT (request_id, head_sha, anonymous) WHERE confirm_of IS NULL DO NOTHING`,
+           ON CONFLICT (request_id, head_sha, anonymous)
+             WHERE confirm_of IS NULL AND superseded_at IS NULL DO NOTHING`,
         )
         .bind(
           request.id,
@@ -533,6 +647,76 @@ export async function startPublicationReview(
 }
 
 /**
+ * An administrator's re-review, atomically (one D1 batch, one transaction): the reported first run
+ * is marked superseded, a new first run of the same commit and release kind is inserted in its
+ * place, and the old row names it. The insert and the naming are conditioned on the first write
+ * having landed in this same batch, so a second re-review that lost the race changes nothing
+ * (the key is the new row's now, and the partial unique index would refuse a second one anyway).
+ * Returns the new row's id, or null when nothing was written.
+ */
+async function supersede(
+  db: Db,
+  old: PublicationReviewRow,
+  request: RequestRow,
+  head: string,
+  anonymous: boolean,
+  adminUserId: number | undefined,
+  nonce: string,
+): Promise<number | null> {
+  const [marked, inserted, named] = await db.batch([
+    db
+      .prepare(
+        `UPDATE publication_reviews SET superseded_at = datetime('now') WHERE ${SUPERSEDE_GUARD_SQL}`,
+      )
+      .bind(old.id),
+    db
+      .prepare(
+        `INSERT INTO publication_reviews
+           (request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, nonce)
+         SELECT ?, ?, ?, ?, ?, ?, 'dispatched', ?
+          WHERE EXISTS (SELECT 1 FROM publication_reviews
+                         WHERE id = ? AND superseded_at IS NOT NULL AND superseded_by IS NULL)
+         ON CONFLICT (request_id, head_sha, anonymous)
+           WHERE confirm_of IS NULL AND superseded_at IS NULL DO NOTHING`,
+      )
+      .bind(
+        request.id,
+        request.dataset_id,
+        head,
+        anonymous ? 1 : 0,
+        request.requested_by,
+        adminUserId ?? null,
+        nonce,
+        old.id,
+      ),
+    db
+      .prepare(
+        `UPDATE publication_reviews
+            SET superseded_by = (SELECT id FROM publication_reviews
+                                  WHERE request_id = ? AND head_sha = ? AND anonymous = ?
+                                    AND confirm_of IS NULL AND superseded_at IS NULL)
+          WHERE id = ? AND superseded_at IS NOT NULL AND superseded_by IS NULL`,
+      )
+      .bind(request.id, head, anonymous ? 1 : 0, old.id),
+  ]);
+  if ((marked.meta.changes ?? 0) !== 1) return null;
+  if ((inserted.meta.changes ?? 0) !== 1) {
+    // Not reachable while the key is free (the first write freed it), but a review that reported
+    // must never be left superseded by nothing: give it its place back.
+    await db
+      .prepare(
+        "UPDATE publication_reviews SET superseded_at = NULL WHERE id = ? AND superseded_by IS NULL",
+      )
+      .bind(old.id)
+      .run();
+    return null;
+  }
+  // The same batch named the new row; a missing name would leave the old row superseded by nothing.
+  if ((named.meta.changes ?? 0) !== 1) throw new Error("a superseded review names no successor");
+  return Number(inserted.meta.last_row_id);
+}
+
+/**
  * What the Worker lacks to hand a review over, as fixed words for a log line: the callback secret
  * (`callback_secret unset`) and a credential for the `nemarDatasets` org (`github_credential
  * unusable`, with the words of the error that said so, never its message). Empty when it can.
@@ -574,7 +758,8 @@ async function recordUnconfigured(
            (request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, detail,
             nonce, decided_at)
          VALUES (?, ?, ?, ?, ?, ?, 'errored', 'dispatch_unconfigured', NULL, datetime('now'))
-         ON CONFLICT (request_id, head_sha, anonymous) WHERE confirm_of IS NULL DO NOTHING`,
+         ON CONFLICT (request_id, head_sha, anonymous)
+           WHERE confirm_of IS NULL AND superseded_at IS NULL DO NOTHING`,
       )
       .bind(
         request.id,
@@ -684,7 +869,8 @@ export async function startConfirmingReview(
       `INSERT INTO publication_reviews
          (request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, nonce,
           confirm_of)
-       VALUES (?, ?, ?, ?, ?, NULL, 'dispatched', ?, ?)
+       SELECT ?, ?, ?, ?, ?, NULL, 'dispatched', ?, ?
+        WHERE EXISTS (SELECT 1 FROM publication_reviews WHERE id = ? AND superseded_at IS NULL)
        ON CONFLICT (confirm_of) WHERE confirm_of IS NOT NULL DO NOTHING`,
     )
     .bind(
@@ -695,8 +881,12 @@ export async function startConfirmingReview(
       first.requestedBy,
       nonce,
       first.id,
+      first.id,
     )
     .run();
+  // Nothing inserted: a confirming run is already on record, or an administrator's re-review
+  // superseded this first run since it was read, so no call is spent confirming a history row.
+  // Neither marks the first run (the caller treats `duplicate` as no failure).
   if ((inserted.meta.changes ?? 0) !== 1) return answer("duplicate");
   const reviewId = Number(inserted.meta.last_row_id);
   try {
@@ -1250,12 +1440,18 @@ export async function storePublicationReviewResult(
 export type AfterStore = (env: Bindings, reviewId: number) => Promise<void>;
 
 /**
- * Whether a report was made on the model and effort its row asks for: a first run on the review's
- * model (the parser already allows no other for it), a confirming run on {@link CONFIRMING_MODEL}
- * at {@link CONFIRMING_EFFORT}, recorded as its one call.
+ * Whether a report was made on the model and effort its row asks for: a first run on one of the
+ * review's models but never in the confirming run's exact shape ({@link CONFIRMING_MODEL} at
+ * {@link CONFIRMING_EFFORT}), so a confirming report cannot pass as a first run; a confirming run
+ * in that shape, recorded as its one call.
  */
 function reportFitsRow(report: PublicationReviewReport, row: PublicationReviewRow): boolean {
-  if (row.confirmOf === null) return isOneOf(PUBLICATION_REVIEW_MODELS, report.model);
+  if (row.confirmOf === null) {
+    const confirmingShape = (report.record?.models ?? []).some(
+      (c) => c.model === CONFIRMING_MODEL && c.effort === CONFIRMING_EFFORT,
+    );
+    return isOneOf(PUBLICATION_REVIEW_MODELS, report.model) && !confirmingShape;
+  }
   const calls = report.record?.models ?? [];
   return (
     report.model === CONFIRMING_MODEL &&

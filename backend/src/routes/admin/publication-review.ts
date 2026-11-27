@@ -7,7 +7,9 @@
  *                                          of earlier reviews
  *   POST /admin/publish/:id/review/start   start the review of the active request's current
  *                                          screened commit, or start again one that was declined,
- *                                          errored, never reported or is past its deadline
+ *                                          errored, never reported or is past its deadline;
+ *                                          a body of {"again": true} replaces a review that
+ *                                          has reported with a new one (it stays as history)
  *
  * Admin-only through the router's `authMiddleware` and `adminMiddleware`. A read needs no switch:
  * `PUBLICATION_REVIEW_ENABLED` gates the REVIEW, not the view of it, so with the review off a
@@ -30,6 +32,7 @@ import {
   START_NOT_HANDED_OVER_REASONS,
   START_REFUSED_REASONS,
   type StartNotHandedOverReason,
+  type StartPublicationReviewBody,
   type StartRefusedReason,
   type StartedPublicationReview,
 } from "../../../../shared/contract/publication-review-admin";
@@ -53,6 +56,28 @@ function refuse(
 ) {
   const body: PublicationReviewErrorBody = { error, code };
   return c.json(body, status);
+}
+
+/**
+ * The start's optional JSON body, read strictly: nothing at all (what a start without options
+ * sends) is the default, and anything else must be an object with no key but `again`, which, when
+ * present, is a boolean. Null for a body that is not.
+ */
+async function readStartBody(c: Context): Promise<StartPublicationReviewBody | null> {
+  const text = await c.req.text();
+  if (text.trim() === "") return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  // Only `again` is a key: a misspelling must not read as "no option" and start a review as usual.
+  if (Object.keys(parsed).some((k) => k !== "again")) return null;
+  const again = (parsed as Record<string, unknown>).again;
+  if (again !== undefined && typeof again !== "boolean") return null;
+  return again === undefined ? {} : { again };
 }
 
 /** The sentence of the 500 for a start the service answered in a word an administrator's start never gets. */
@@ -97,6 +122,11 @@ export const START_REFUSALS: Record<StartRefusedReason, PublicationReviewErrorBo
     code: "has_result",
     error:
       "A review of this commit has already reported. A new screened commit starts a new review.",
+  },
+  auto_deny_active: {
+    code: "auto_deny_active",
+    error:
+      "The automatic denial is confirming this review or has acted on it, so it cannot be replaced.",
   },
   platform_limit: {
     code: "platform_limit",
@@ -146,7 +176,13 @@ export function startResponseOf(
   if (outcome.started) {
     return {
       status: 202,
-      body: { environment, started: true, reason: outcome.reason, review_id: outcome.reviewId },
+      body: {
+        environment,
+        started: true,
+        reason: outcome.reason,
+        review_id: outcome.reviewId,
+        ...(outcome.superseded === undefined ? {} : { superseded_review_id: outcome.superseded }),
+      },
     };
   }
   const { reason } = outcome;
@@ -195,6 +231,16 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
     }
     const environment = isNonProductionEnv(c.env) ? "non-production" : "production";
     const userId = c.get("user").id;
+    const body = await readStartBody(c);
+    if (body === null) {
+      return refuse(
+        c,
+        400,
+        "invalid_body",
+        'The body, when there is one, is {"again": true|false}.',
+      );
+    }
+    const again = body.again === true;
 
     let outcome: StartOutcome;
     let requestId: number;
@@ -206,11 +252,11 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
         return refuse(c, 404, "not_found", `${datasetId} has no active publication request.`);
       }
       requestId = request.id;
-      outcome = await startPublicationReview(c.env, {
-        requestId,
-        datasetId,
-        adminUserId: userId,
-      });
+      outcome = await startPublicationReview(
+        c.env,
+        { requestId, datasetId, adminUserId: userId },
+        { again },
+      );
     } catch (err) {
       // Ids and fixed words only: the error text can carry SQL. `startPublicationReview` throws
       // only after a database fault, and has marked a row it wrote as `dispatch_failed` first.
@@ -222,7 +268,7 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
 
     const response = startResponseOf(outcome, environment);
     if (response.status === 202) {
-      await recordStart(c.env.DB, userId, datasetId, requestId, outcome);
+      await recordStart(c.env.DB, userId, datasetId, requestId, outcome, again);
     } else if (response.status === 500) {
       // Every word an administrator's start can end in is answered above. A word that is not one of
       // them (a screen result's) is a fault in this route, not a state of the request.
@@ -246,6 +292,7 @@ async function recordStart(
   datasetId: string,
   requestId: number,
   outcome: StartOutcome,
+  again: boolean,
 ): Promise<void> {
   const reviewId = outcome.reviewId;
   try {
@@ -261,6 +308,8 @@ async function recordStart(
         review_id: reviewId,
         reason: outcome.reason,
         head_sha: row?.headSha ?? null,
+        // Only an administrator's re-review, and only when it replaced a review.
+        ...(again ? { again: true, superseded_review_id: outcome.superseded ?? null } : {}),
       }),
     }).run();
   } catch (err) {

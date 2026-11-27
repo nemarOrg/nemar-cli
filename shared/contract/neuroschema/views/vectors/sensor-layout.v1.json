@@ -5,7 +5,7 @@
   "reference": {
     "implementation": "eegprep",
     "repository": "https://github.com/sccn/eegprep",
-    "commit": "edf694c8344b9c4c68672eac3acf9a819f1462a8",
+    "commit": "871bc7f8a03b6d925330c598e8dcd18b835614d3",
     "numpy": "2.5.5",
     "scipy": "1.18.1",
     "frames": "https://github.com/bids-standard/bids-specification/blob/147b46d771cd2b35b31a72b1f1bd1d7dc2d5a88a/src/appendices/coordinate-systems.md",

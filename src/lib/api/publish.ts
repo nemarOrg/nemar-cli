@@ -15,6 +15,7 @@ import {
   type PublicationReviewOverride,
   type PublicationReviewSummary,
   type RequestBlockedRefusalBody,
+  type StartPublicationReviewBody,
   type StartPublicationReviewResponse,
   type StartedPublicationReview,
 } from "../../../shared/contract/publication-review-admin.js";
@@ -534,11 +535,26 @@ export async function getPublicationReview(datasetId: string): Promise<Publicati
  * (`dispatch_claimed`). A request that cannot be started (409) and a review that could not be
  * handed over (502) throw {@link ApiError}, with the closed word in `rawBody.code`
  * ({@link reviewErrorCode}) and the route's sentence as the message.
+ *
+ * `again` is the administrator's re-review: a review that has reported is kept as history and a new
+ * one takes its place. Nothing is sent for the default, so a start without it is the request an
+ * older Worker already understands.
  */
-export async function startPublicationReview(datasetId: string): Promise<StartedPublicationReview> {
+export async function startPublicationReview(
+  datasetId: string,
+  options: { again?: boolean } = {},
+): Promise<StartedPublicationReview> {
+  const path = `/admin/publish/${datasetId}/review/start`;
+  if (options.again !== true)
+    return request<StartedPublicationReview>(path, { method: "POST" }, true);
+  const body: StartPublicationReviewBody = { again: true };
   return request<StartedPublicationReview>(
-    `/admin/publish/${datasetId}/review/start`,
-    { method: "POST" },
+    path,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
     true,
   );
 }

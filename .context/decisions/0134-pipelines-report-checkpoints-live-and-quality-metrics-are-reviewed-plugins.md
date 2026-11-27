@@ -1,12 +1,13 @@
 # ADR 0134: Pipelines report checkpoints live, quality metrics are plugins NEMAR reviews, and the same contract serves every compute job
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-21
+**Accepted:** 2026-11-27
 **Owner:** Seyed Yahya Shirazi
 
-This record moves to accepted when the nemar-process and website epics that build the rest of it reach their integration branches; the nemar-cli epic (#2324) alone does not complete it.
+Completed by nemarOrg/nemar-cli#2412 on `dev`, nemarOrg/nemar-process#98 on nemar-process `dev`, nemarOrg/website#608 on website `staging` and nemarOrg/nemar-cli#2439 on `dev`.
 
-Partially superseded by [ADR 0137](0137-quality-views-are-declared-data-drawn-in-the-browser-and-no-figure-image-is-stored.md) (proposed) where this record names figures or a floor value:
+Partially superseded by [ADR 0137](0137-quality-views-are-declared-data-drawn-in-the-browser-and-no-figure-image-is-stored.md) where this record names figures or a floor value:
 decisions 2, 6, 7 and 9 (the `figures` checkpoint, figure formats and caps, the first figure plugins, a plugin that re-reports a floor value, and the homes of figure rules), and the rejected alternative of array outputs.
 NEMAR stores no figure image: a quality view is declared data that a browser draws, and the word "figures" in decision 1 now reads "views".
 Every other part of this record stands, and its text below is unchanged.

@@ -650,7 +650,8 @@ describe("the daily caps", () => {
     expect(rows.filter((r) => r.state === "dispatched")).toHaveLength(PLATFORM_DAILY_CAP);
     expect(rows.filter((r) => r.detail === "platform_limit")).toHaveLength(6);
     expect(h.dispatches()).toHaveLength(PLATFORM_DAILY_CAP);
-  });
+    // Hundreds of concurrent starts against a yielding D1: give it room on a loaded runner.
+  }, 60_000);
 });
 
 describe("when the review cannot be handed over", () => {

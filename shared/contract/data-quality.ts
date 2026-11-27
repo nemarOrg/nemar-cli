@@ -43,17 +43,17 @@ export const VIEWS_SKIPPED_NEUROSCHEMA_WORDS = [
 
 /**
  * The words nemar-process adds for its own views (`OWN_SKIP_REASONS` in `recipes/nemar_process/common/
- * views.py`, nemar-cli #2341): no two-second window of good samples, a layout of positions known to be
- * turned, the three ways a run of the archive finds no row of the serving index, and an index it was handed
- * but cannot use (`serving_index_unusable`, ADR 0141). A plugin's view can
- * be skipped with `frame_rotated` or `cap_exceeded` while its plugin ran.
+ * views.py`, nemar-cli #2341): no two-second window of good samples, the three ways a run of the archive
+ * finds no row of the serving index, and an index it was handed but cannot use (`serving_index_unusable`,
+ * ADR 0141). A plugin's view can be skipped with `cap_exceeded` while its plugin ran. `frame_rotated` is
+ * gone since nemar-process#101: eegprep now orients the CTF, 4DBti and KitYokogawa frames, and a nemar-ica
+ * recording whose frame it cannot orient fails (detail `iclabel_frame_unoriented`) rather than skipping a view.
  *
  * Like `VIEWS_SKIPPED_NEUROSCHEMA_WORDS`, documentation a contract test holds, not a validation
  * allowlist: a word missing here is still admitted.
  */
 export const VIEWS_SKIPPED_NEMAR_PROCESS_WORDS = [
   "no_good_window",
-  "frame_rotated",
   "no_serving_index",
   "not_in_serving_index",
   "serving_index_stale",

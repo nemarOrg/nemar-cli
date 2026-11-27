@@ -852,6 +852,8 @@ function historyEntryOf(row: PublicationReviewRow): PublicationReviewHistoryEntr
     stored_verdict: isPublicationOutcome(row.verdict) ? row.verdict : null,
     created_at: row.createdAt,
     decided_at: row.decidedAt,
+    superseded_at: row.supersededAt,
+    superseded_by: row.supersededBy,
   };
 }
 

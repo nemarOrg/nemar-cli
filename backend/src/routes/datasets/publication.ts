@@ -929,6 +929,9 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       }
     }
 
+    // Not filtered by `superseded_at`: while an administrator's re-review is running the newest
+    // reported review is the one it replaced, and the depositor keeps seeing that record until the
+    // new run reports (ADR 0102, amendment of 2026-11-27).
     // The reproducibility record of the request's newest reported review (ADR 0139, decision 9):
     // what a depositor needs to see what the review was given and to recompute the evidence.
     // Checked values and fixed words only; a read that fails is no record, never a failed status.

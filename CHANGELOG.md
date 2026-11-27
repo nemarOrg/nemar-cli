@@ -15,6 +15,42 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.47 - 2026-11-27
+
+### Changed
+
+- **The publication review's platform allowance is 500 model calls a day (was 150; ADR 0102 amendment).**
+  The per-depositor allowance stays 5, and an administrator's start skips it.
+- **An administrator can review a reported publication review again (ADR 0102 amendment, migration 0161).**
+  `nemar admin dataset publish start <dataset-id> --again` replaces a review that has reported with a new one of the same commit: the earlier review is kept in the history, marked superseded, and the new one is the review in force, which `show` and the approval gate read.
+  It is one more model call against the platform's allowance, and it is refused while the automatic denial is confirming the review or has acted on it (`auto_deny_active`).
+  It takes one dataset id, never `--all`, and a start without `--again` still answers `has_result`.
+  The re-review also counts in the depositor's 24-hour tally, so repeated comparisons can decline that depositor's next screen-started review with `depositor_limit` (an administrator's start is not held by it).
+  If the new run cannot be handed over or is declined, the old review stays superseded and approval is blocked until the new review is restarted with `start <dataset-id>`.
+- **The publication review signs in to an Anthropic organization of its own (#2441, ADR 0102 amendment).**
+  `run-publication-review.yml` reads four variables of its own (`ANTHROPIC_PUBLICATION_REVIEW_FEDERATION_RULE_ID`, `_SERVICE_ACCOUNT_ID`, `_ORGANIZATION_ID`, `_WORKSPACE_ID`), and each review's federation check refuses a rule or service account that is the other review's.
+  The deployed copies changed in nemarDatasets/.github#162 and #163.
+- **The publication review accepts reports made on Sonnet 5.5 and Opus 5.5 (ADR 0102 amendment).**
+  The review still calls Haiku 5.5 at high effort. The wider list lets the owner compare models and efforts on the real queue without a release: a branch of the review script that calls another model, checked out by the workflow in `nemarDatasets/.github`, reports results the Worker accepts.
+  A first run in the confirming run's exact shape (Sonnet 5.5 at `max`) is still refused, and a first run made on Sonnet 5.5 never starts a confirming run, because the automatic denial needs two different models to agree (ADR 0139).
+- **The recipes' engine moves to eegprep `871bc7f8` (#2411, nemarOrg/nemar-process#101).**
+  `nemar-floor` and `nemar-ica` `1.0.0-b2` now declare `eegprep@0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3`, the commit nemar-process's images install: ICLabel runs its network on ONNX (onnxruntime 1.32.0, stamped in every record), and `nemar-quality` 0.2.0 adds `nemar-quality:mutualInformationReduction` (MIR, through eegprep's `eeg_mir`).
+  Recipe versions are unchanged, so the tuple a run stamps differs only in its engine.
+  **Deploy order (the 0.10.40 procedure):** release nemar-process (after nemarOrg/nemar-process#98), publish the runtime image from its `main`, repin `COMPUTE_RUNTIME_IMAGE`, check the pinned digest's tuple with `nemar-recipe version`, and only then let this reach an environment with compute on.
+  Deployed before the image, one record from the older image holds the recipe's whole claimed tuple (`tuple_mismatch`), and the cron then skips that recipe for every dataset (`registry_drift`).
+  The hold does not clear with time or by repinning the image: only deleting the hold rows or a new registry tuple clears it.
+  Compute stays dark until the owner turns it on.
+- **neuroschema 0.6.1 is vendored (nemarOrg/neuroschema#40).**
+  It is 0.6.0's schemas with the sensor-field and sensor-layout vectors regenerated at eegprep `871bc7f8`; `metadata.json` now says `schema_version` `0.6.1`.
+  Stored documents stamped `0.6.0` or earlier still validate: the bundle never checks the stamp, and the backend validates extension objects by their `nsc:` ids.
+- **The `nemar-ica` quality fixture is nemar-process `90e248d7`'s product**, with `nemar-quality` 0.2.0 and its MIR metric.
+- **`frame_rotated` is retired** from nemar-process's view-skip words: eegprep now orients the CTF, 4DBti and KitYokogawa frames, and a `nemar-ica` recording whose frame it cannot orient fails with the detail `iclabel_frame_unoriented`.
+  A stored record whose `views_skipped` gives `frame_rotated` is still admitted: the list documents the words and never closes them, and a test holds that.
+
+### Continuous integration
+
+- **The test workflow checks out nemar-process `dev` again (#2411)**, removing the `a5125c7b` pin of 0.10.44: the recipe, observation-schema and queue drift tests compare with nemar-process `dev`.
+
 ## 0.10.46 - 2026-11-27
 
 ### Changed
