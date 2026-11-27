@@ -117,6 +117,8 @@ describe("0098 publication_reviews: columns", () => {
     // Migration 0161: an administrator's re-review of a reported review (ADR 0102, amendment 2026-11-27).
     superseded_at: { type: "TEXT", notnull: 0, dflt: null },
     superseded_by: { type: "INTEGER", notnull: 0, dflt: null },
+    // Migration 0162: the license matcher of a version-3 report (ADR 0142).
+    license_matcher: { type: "TEXT", notnull: 0, dflt: null },
   };
 
   test("exactly the declared columns, types, NOT NULLs and defaults", () => {
@@ -608,6 +610,7 @@ describe("the row module", () => {
         "autoDenyState",
         "autoDenyAt",
         "lineageBasis",
+        "licenseMatcher",
       ].sort(),
     );
     expect(row).toMatchObject({
