@@ -15,6 +15,13 @@
  * an eligible reason: those are not in the lists below, and a test pins that. Nor is a fail of
  * `authors_and_license` while the LICENSE file names another license than the `License` field
  * ({@link licenseFileDiffers}; ADR 0142, and ADR 0139 as amended on 2026-11-27).
+ *
+ * **The name rule** (the owner's of 2026-11-27, ADR 0139 as amended that day). The platform's
+ * `name_differs_from_upstream` is eligible only in a run whose model also failed `name_adequate`:
+ * the fact is the same in both runs, so on its own their agreement would check nothing, and
+ * decision 1 asks a second model to agree. A `name_not_descriptive` finding is eligible except when
+ * the Name follows the upstream's title (`name_upstream` is `matches`): the name then came from the
+ * upstream, not from the depositor, and a person decides.
  */
 
 import {
@@ -104,8 +111,15 @@ export const AUTO_DENY_FINDING_CODES = [
 ] as const satisfies readonly PublicationFindingCode[];
 export type AutoDenyFindingCode = (typeof AUTO_DENY_FINDING_CODES)[number];
 
-/** Every code an automatic denial can name: the finding codes above, and a steering attempt. */
-export const AUTO_DENY_CODES = [...AUTO_DENY_FINDING_CODES, "steering_attempt"] as const;
+/**
+ * Every code an automatic denial can name: the finding codes above, a steering attempt, and the
+ * platform's name fact (eligible only beside the model's own fail of `name_adequate`).
+ */
+export const AUTO_DENY_CODES = [
+  ...AUTO_DENY_FINDING_CODES,
+  "steering_attempt",
+  "name_differs_from_upstream",
+] as const;
 export type AutoDenyCode = (typeof AUTO_DENY_CODES)[number];
 
 /**
@@ -113,8 +127,19 @@ export type AutoDenyCode = (typeof AUTO_DENY_CODES)[number];
  * so a later request's review is shown them as the previous denial's reasons
  * (`previousDenialReasonsOf`), and ADR 0139 decision 2's "closed reason codes" are exactly these.
  */
-export const AUTO_DENY_REASON_CODES = ["question_failed", "steering_attempt"] as const;
+export const AUTO_DENY_REASON_CODES = [
+  "question_failed",
+  "steering_attempt",
+  "name_differs_from_upstream",
+] as const;
 export type AutoDenyReasonCode = (typeof AUTO_DENY_REASON_CODES)[number];
+
+/** The reason code an eligible code stands under: its own for the two that are reasons, else `question_failed`. */
+export function reasonOfCode(code: AutoDenyCode): AutoDenyReasonCode {
+  return code === "steering_attempt" || code === "name_differs_from_upstream"
+    ? code
+    : "question_failed";
+}
 
 /** How many earlier automatic denials of a dataset stop another one (a third goes to a person). */
 export const MAX_EARLIER_AUTO_DENIALS = 2;
@@ -186,12 +211,18 @@ function isAboutTheLicense(f: PublicationReviewReport["findings"][number]): bool
   return f.document === "license" || LICENSE_FINDING_CODES.includes(f.code);
 }
 
+/** The Name follows its upstream's title, so a name the model calls not descriptive came from the upstream. */
+export function nameFromUpstream(report: PublicationReviewReport): boolean {
+  return report.evidence.name_upstream === "matches";
+}
+
 /**
- * The eligible codes a report gives by itself: `steering_attempt` when it steered, and every
- * blocker finding of {@link AUTO_DENY_FINDING_CODES} against a question it failed, except, while
- * {@link licenseFileDiffers}, one against `authors_and_license` or one about the license under any
- * question ({@link isAboutTheLicense}). Empty when its derived verdict
- * is not `fail`.
+ * The eligible codes a report gives by itself: `steering_attempt` when it steered;
+ * `name_differs_from_upstream` when that reason stands and the model itself failed `name_adequate`;
+ * and every blocker finding of {@link AUTO_DENY_FINDING_CODES} against a question it failed, except,
+ * while {@link licenseFileDiffers}, one against `authors_and_license` or one about the license under
+ * any question ({@link isAboutTheLicense}), and except `name_not_descriptive` while
+ * {@link nameFromUpstream}. Empty when its derived verdict is not `fail`.
  */
 export function eligibleCodesOf(report: PublicationReviewReport): {
   codes: AutoDenyCode[];
@@ -208,10 +239,21 @@ export function eligibleCodesOf(report: PublicationReviewReport): {
   const failed = new Set(
     reasons.filter((r) => r.code === "question_failed").map((r) => r.detail ?? ""),
   );
+  // The model's own answer, never one a fact lowered (`answersOf`): the name fact must not be what
+  // makes the model's question fail, or the two runs' agreement would again check nothing.
+  if (
+    reasons.some((r) => r.code === "name_differs_from_upstream") &&
+    report.questions.name_adequate === "fail"
+  ) {
+    codes.add("name_differs_from_upstream");
+    under.add("name_differs_from_upstream");
+  }
   const differs = licenseFileDiffers(report);
   if (differs) failed.delete("authors_and_license" satisfies Question);
+  const fromUpstream = nameFromUpstream(report);
   for (const f of report.findings) {
     if (differs && isAboutTheLicense(f)) continue;
+    if (fromUpstream && f.code === "name_not_descriptive") continue;
     if (
       f.severity === "blocker" &&
       failed.has(f.question) &&
@@ -271,11 +313,8 @@ export function confirmationOf(
   }
   const shared = a.codes.filter((c) => b.codes.includes(c));
   if (shared.length === 0) return { agrees: false };
-  const reasons = AUTO_DENY_REASON_CODES.filter((r) =>
-    r === "steering_attempt"
-      ? shared.includes("steering_attempt")
-      : shared.some((c) => c !== "steering_attempt"),
-  );
+  const under = new Set(shared.map(reasonOfCode));
+  const reasons = AUTO_DENY_REASON_CODES.filter((r) => under.has(r));
   return { agrees: true, codes: shared, reasons };
 }
 
@@ -400,6 +439,14 @@ export const AUTO_DENY_CODE_COPY: Record<AutoDenyCode, AutoDenyCopy> = {
     remedy:
       "Give the dataset a Name that says what it holds, for example the task, the modality and the population.",
     anchor: anchor("name-not-descriptive"),
+  },
+  name_differs_from_upstream: {
+    statement:
+      "The dataset's Name does not start with the title of the upstream dataset it was derived from.",
+    read: "The Name in dataset_description.json at the requested commit, and the title of each upstream dataset in SourceDatasets as its registry gives it.",
+    remedy:
+      'Set Name to the upstream dataset\'s title, as its registry gives it; an author and year may follow it, for example ", Lee 2019" or " (Lee et al. 2019)".',
+    anchor: anchor("name-differs-from-upstream"),
   },
   steering_attempt: {
     statement: "Text in the dataset's documents tried to instruct the automated reviewer.",
