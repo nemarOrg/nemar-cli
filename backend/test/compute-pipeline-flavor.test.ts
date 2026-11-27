@@ -7,7 +7,8 @@
  *
  * There is ONE runtime image for every recipe, the CUDA image `COMPUTE_RUNTIME_IMAGE` pins (owner, 2026-11-27):
  * here it holds the reference of nemar-process v0.1.2's CUDA image, the one `test/fixtures/nemar-recipe-version.json`
- * records the version output of. What is pinned, each with the mutation that kills it named in its test:
+ * describes (an assembled version output, whose `provenance` says how it was made). What is pinned, each with the
+ * mutation that kills it named in its test:
  *  - a runner dispatch of `nemar-ica` over `zarr` records a job of that image, one GPU as a ceiling, 16384 MB, the
  *    command `nemar-recipe run nemar-ica --input zarr` and no `--ica-*` argument, so the recipe's own defaults hold;
  *  - with no image configured it is refused `runtime_unavailable` and nothing is written;
@@ -17,10 +18,9 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { findRecipe } from "../../shared/compute-recipes";
 import { type StampRow, dispatchPipelineJob } from "../src/services/compute-pipeline";
+import { submitMemoryForQueue } from "../src/services/compute-queues";
 import { recordKey } from "../src/services/compute-records";
 import type { Bindings } from "../src/types/bindings";
 import { COMPUTE_KEYS, makeComputeApp, seedComputeUsers } from "./helpers/compute-app";
@@ -34,14 +34,7 @@ import {
   type GithubCompareStandin,
   startGithubCompareStandin,
 } from "./helpers/github-compare-standin";
-
-/** The image whose `nemar-recipe version` the fixture records: the CUDA image of nemar-process v0.1.2. */
-const CUDA_REF = (
-  JSON.parse(
-    readFileSync(join(import.meta.dir, "../../test/fixtures/nemar-recipe-version.json"), "utf8"),
-  ) as { image: string }
-).image;
-const CUDA_DIGEST = CUDA_REF.slice(CUDA_REF.indexOf("@") + 1);
+import { CUDA_DIGEST, CUDA_REF } from "./helpers/recipe-version-fixture";
 
 let fx: LifecycleFixture;
 const handle = makeComputeApp();
@@ -145,6 +138,15 @@ async function route(env: Bindings, body: Record<string, unknown>) {
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
+/** The sizes a job row records, as the Tapis submission reads them. */
+interface JobSize {
+  executor: string;
+  partition: string;
+  cores_per_node: number;
+  memory_mb: number;
+  gpus: number;
+}
+
 describe("nemar-ica on a runner over the Zarr serving copy", () => {
   test("a runner dispatch records a job of the CUDA image, one GPU, 16384 MB and the recipe's own defaults (MUTATION: gpus 0; memoryMb removed; an --ica-max-iter argument)", async () => {
     const id = await dataset();
@@ -222,6 +224,38 @@ describe("nemar-ica on a runner over the Zarr serving copy", () => {
       ]);
     }
     expect(await snapshot()).toEqual(before);
+  });
+
+  test("its registry memory is recipe-wide: a BIDS job on Tapis is submitted to gpu-shared with 16384 MB, not the gpus x 94208 default (MUTATION: memoryMb removed)", async () => {
+    await fundPipelines(envOf(), 100_000_000, true);
+    const id = await dataset();
+    const r = await route(envOf(), { recipe: "nemar-ica", dataset: id });
+    expect([r.status, r.body.ok]).toEqual([201, true]);
+    const stamp = await stampOf(id);
+    expect([stamp.input, stamp.state]).toEqual(["bids", "dispatched"]);
+    const job = (await envOf()
+      .DB.prepare(
+        "SELECT executor, partition, cores_per_node, memory_mb, gpus FROM compute_jobs WHERE id = ?1",
+      )
+      .bind(stamp.job_id)
+      .first<JobSize>()) as JobSize;
+    expect(job).toEqual({
+      executor: "tapis",
+      partition: "gpu-shared",
+      cores_per_node: 10,
+      memory_mb: 16384,
+      gpus: 1,
+    });
+    expect(
+      submitMemoryForQueue("gpu-shared", {
+        cores: job.cores_per_node,
+        memory_mb: job.memory_mb,
+        gpus: job.gpus,
+      }),
+    ).toBe(16384);
+    expect(submitMemoryForQueue("gpu-shared", { cores: 10, memory_mb: 16384, gpus: 1 })).toBe(
+      16384,
+    );
   });
 
   test("nemar-floor's runner dispatch is unchanged: no GPU, its own memory and command, on the same image", async () => {

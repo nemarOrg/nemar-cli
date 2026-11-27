@@ -298,6 +298,8 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     nodes: 1,
     cores: 10,
     // The floor's memory: a runner job without it would run unbounded under Apptainer on a shared workstation.
+    // It is recipe-wide, so it is also what a BIDS job on Tapis asks `gpu-shared` for (`submitMemoryForQueue`),
+    // in place of the gpus x 94208 MB default; Tapis is parked (card S3c), and card SZ revises the value.
     memoryMb: 16384,
     // On a runner one GPU is a ceiling the runner may leave unused (the recipe's device is `auto`).
     gpus: 1,
