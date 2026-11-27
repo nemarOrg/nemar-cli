@@ -349,6 +349,13 @@ export function validateLlmResultV2(raw: Record<string, unknown>): LlmEnrichment
  * - DatasetType -> resource_type_general
  * - Dataset platform URLs (GitHub, NEMAR) -> related_identifiers with "IsDescribedBy"
  */
+/** Whether a related identifier is one SourceDatasets names now (a DOI in any form, or the URL). */
+function isNamedBySourceDatasets(r: RelatedIdentifierEntry, keys: ReadonlySet<string>): boolean {
+  return r.identifier_type === "DOI"
+    ? keys.has(normalizeDoiKey(r.identifier))
+    : keys.has(r.identifier.trim());
+}
+
 export function seedFromBids(
   bidsDescription: Record<string, unknown>,
   existing: NemarMetadataV2 | null,
@@ -385,16 +392,23 @@ export function seedFromBids(
 
   // Collect SourceDatasets DOIs first so we can clean stale entries
   const sourceDatasetDois = new Set<string>();
+  // Every identifier SourceDatasets names now (DOIs normalized, URLs as written), so an
+  // IsDerivedFrom from an earlier run that it no longer names is not carried forward.
+  const sourceDatasetKeys = new Set<string>();
   if (Array.isArray(bidsDescription.SourceDatasets)) {
     for (const src of bidsDescription.SourceDatasets) {
       if (!src || typeof src !== "object") continue;
       const obj = src as Record<string, unknown>;
+      if (typeof obj.URL === "string" && obj.URL.trim()) sourceDatasetKeys.add(obj.URL.trim());
       let doi = typeof obj.DOI === "string" ? obj.DOI.replace(/^doi:/, "") : "";
       if (!doi && typeof obj.URL === "string") {
         const urlDoi = obj.URL.match(/(?:doi\.org\/|doi:)(10\.\d{4,}\/.+)/);
         if (urlDoi) doi = urlDoi[1];
       }
-      if (doi && doiPattern.test(doi)) sourceDatasetDois.add(doi);
+      if (doi && doiPattern.test(doi)) {
+        sourceDatasetDois.add(doi);
+        sourceDatasetKeys.add(normalizeDoiKey(doi));
+      }
     }
   }
 
@@ -403,16 +417,24 @@ export function seedFromBids(
   // and drop the retired legacy NEMAR landing URL so re-enrichment REPLACES it
   // with the canonical datasetLandingUrl below (epic #837) rather than letting
   // the old `dataexplorer/detail` and new `/dataset/` IsDescribedBy URLs accumulate.
+  // An IsDerivedFrom is never carried forward on its own (ADR 0139 decision 7, amendment of
+  // 2026-11-27): one that SourceDatasets no longer names is dropped here, and the LLM stage may
+  // add it again only under its Dataset rule (`mergeWithExisting`'s `derivableDois`). Kept, a
+  // paper a depositor moved from SourceDatasets to ReferencesAndLinks stayed IsDerivedFrom forever
+  // (nm000830), and the license lineage read it as the upstream source.
   const relatedIds: RelatedIdentifierEntry[] = (existing?.related_identifiers || []).filter(
     (r) =>
       !r.identifier.includes("nemar.org/dataexplorer/") &&
+      (r.relation_type !== "IsDerivedFrom" || isNamedBySourceDatasets(r, sourceDatasetKeys)) &&
       (!sourceDatasetDois.has(r.identifier) || r.relation_type === "IsDerivedFrom"),
   );
 
   // SourceDatasets -> IsDerivedFrom
   for (const doi of sourceDatasetDois) {
     const alreadyExists = relatedIds.some(
-      (r) => r.identifier === doi && r.relation_type === "IsDerivedFrom",
+      (r) =>
+        r.relation_type === "IsDerivedFrom" &&
+        normalizeDoiKey(r.identifier) === normalizeDoiKey(doi),
     );
     if (!alreadyExists) {
       relatedIds.push({

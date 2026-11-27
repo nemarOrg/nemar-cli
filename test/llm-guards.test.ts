@@ -374,6 +374,128 @@ describe("mergeWithExisting relation locks", () => {
   });
 });
 
+describe("seedFromBids never carries an IsDerivedFrom forward on its own", () => {
+  // nm000830 (2026-11-27): the depositor moved the paper from SourceDatasets to
+  // ReferencesAndLinks and named the figshare dataset instead; the earlier enrichment's
+  // IsDerivedFrom on the paper survived re-enrichment.
+  const PAPER = "10.1371/journal.pone.0211710";
+  const FIGSHARE =
+    "https://plos.figshare.com/articles/dataset/Frequency-resolved_analysis_of_coherent_oscillations/7708514";
+  const before = {
+    version: "2.0" as const,
+    related_identifiers: [
+      { identifier: PAPER, identifier_type: "DOI" as const, relation_type: "IsDerivedFrom" },
+      {
+        identifier: "https://github.com/nemarDatasets/nm000830",
+        identifier_type: "URL" as const,
+        relation_type: "IsSupplementTo",
+      },
+    ],
+  };
+  const description = {
+    Name: "fNIRS and arterial pressure",
+    SourceDatasets: [{ URL: FIGSHARE }],
+    ReferencesAndLinks: [`https://doi.org/${PAPER}`],
+  };
+
+  test("a paper SourceDatasets no longer names is a reference, not a source", () => {
+    const seeded = seedFromBids(description, before);
+    expect(seeded.related_identifiers?.map((r) => [r.identifier, r.relation_type])).toEqual([
+      ["https://github.com/nemarDatasets/nm000830", "IsSupplementTo"],
+      [PAPER, "References"],
+    ]);
+    // The LLM may not promote a paper back: it is not a DataCite Dataset.
+    const merged = mergeWithExisting(seeded, {
+      related_identifiers: [
+        { identifier: PAPER, identifier_type: "DOI", relation_type: "IsDerivedFrom" },
+      ],
+    });
+    expect(merged.related_identifiers?.find((r) => r.identifier === PAPER)?.relation_type).toBe(
+      "References",
+    );
+  });
+
+  test("dropped with nothing in its place when no input names it any more", () => {
+    const seeded = seedFromBids({ Name: "x", SourceDatasets: [{ URL: FIGSHARE }] }, before);
+    expect(seeded.related_identifiers?.some((r) => r.identifier === PAPER)).toBe(false);
+  });
+
+  test("kept while SourceDatasets still names it, in any DOI form or as the same URL", () => {
+    const seeded = seedFromBids(
+      { Name: "x", SourceDatasets: [{ DOI: `doi:${PAPER.toUpperCase()}` }] },
+      before,
+    );
+    expect(
+      seeded.related_identifiers?.filter(
+        (r) => r.identifier.toLowerCase() === PAPER && r.relation_type === "IsDerivedFrom",
+      ),
+    ).toHaveLength(1);
+    // An upper-case IsDerivedFrom from an earlier run, named by a lower-case SourceDatasets DOI.
+    const upper = seedFromBids(
+      { Name: "x", SourceDatasets: [{ DOI: PAPER }] },
+      {
+        version: "2.0",
+        related_identifiers: [
+          {
+            identifier: PAPER.toUpperCase(),
+            identifier_type: "DOI",
+            relation_type: "IsDerivedFrom",
+          },
+        ],
+      },
+    );
+    expect(upper.related_identifiers?.map((r) => r.identifier)).toEqual([PAPER.toUpperCase()]);
+    const url = seedFromBids(
+      { Name: "x", SourceDatasets: [{ URL: FIGSHARE }] },
+      {
+        version: "2.0",
+        related_identifiers: [
+          { identifier: FIGSHARE, identifier_type: "URL", relation_type: "IsDerivedFrom" },
+          {
+            identifier: "https://osf.io/abcde",
+            identifier_type: "URL",
+            relation_type: "IsDerivedFrom",
+          },
+        ],
+      },
+    );
+    expect(url.related_identifiers?.map((r) => r.identifier)).toEqual([FIGSHARE]);
+  });
+
+  test("an earlier LLM promotion must be earned again: nm000275's deposit is References until re-promoted", () => {
+    const promoted = {
+      version: "2.0" as const,
+      related_identifiers: [
+        {
+          identifier: "10.6084/m9.figshare.7666055.v3",
+          identifier_type: "DOI" as const,
+          relation_type: "IsDerivedFrom",
+        },
+      ],
+    };
+    const desc = {
+      Name: "x",
+      ReferencesAndLinks: ["https://doi.org/10.6084/m9.figshare.7666055.v3"],
+    };
+    const seeded = seedFromBids(desc, promoted);
+    expect(seeded.related_identifiers?.map((r) => r.relation_type)).toEqual(["References"]);
+    const again = mergeWithExisting(
+      seeded,
+      {
+        related_identifiers: [
+          {
+            identifier: "10.6084/m9.figshare.7666055.v3",
+            identifier_type: "DOI",
+            relation_type: "IsDerivedFrom",
+          },
+        ],
+      },
+      NM000275_DERIVABLE,
+    );
+    expect(again.related_identifiers?.map((r) => r.relation_type)).toEqual(["IsDerivedFrom"]);
+  });
+});
+
 describe("estimateUsageCostUsd", () => {
   test("applies sonnet-5-5 standard rates", () => {
     // 1M input at $2 + 100k output at $10/M = 2 + 1
