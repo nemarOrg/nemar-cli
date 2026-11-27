@@ -886,4 +886,30 @@ describe("seam review: the builder's own failure paths", () => {
     const fine = await scan({ "sub-01/nirs/a.snirf": bytes(128) }, [...WITHOUT_HDF5, stubReader()]);
     expect(fine.report.scan?.status).toBe("clean");
   });
+
+  test("thousands of .set files naming a missing .fdt are screened in linear time", async () => {
+    const N = 6000;
+    const files: Record<string, Uint8Array> = {};
+    for (let i = 0; i < N; i++) files[`sub-${i}/eeg/sub-${i}_task-a_eeg.set`] = bytes(16);
+    const naming: FormatReader = {
+      id: "eeglab",
+      extensions: [".set"],
+      limits: { ...DEFAULT_READER_LIMITS },
+      version: "test-1",
+      async scan(_src, path) {
+        // A name that differs from every path but in case would still be a match; this one is not.
+        return { findings: [], coverage: "complete", needs: [`${path.split("/").pop()}.FDT`] };
+      },
+    };
+    const startedAt = performance.now();
+    const { report } = await scan(files, [...READERS.filter((r) => r.id !== "eeglab"), naming], {
+      fileConcurrency: 16,
+    });
+    const elapsed = performance.now() - startedAt;
+    expect(report.scan?.companion_missing).toBe(N);
+    expect(report.scan?.read_by_format?.eeglab?.partial).toBe(N);
+    // Measured at about 100 ms with one lowercased set per dataset (and about 1,240 ms with one
+    // per file, the quadratic build this replaces); 5x the linear time is the bound.
+    expect(elapsed).toBeLessThan(500);
+  });
 });

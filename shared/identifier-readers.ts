@@ -447,16 +447,21 @@ export function companionsOf(
  * `paths`. A name must be a bare file name (no `/` or `\\`, not `.` or `..`): one that is not
  * names nothing beside the file, so it counts as missing. Names compare exactly, or else ignoring
  * letter case (a writer on a case-insensitive disk may spell the name differently).
+ *
+ * `lowered` gives the lowercased paths, built once by the caller for all of a dataset's files
+ * (see {@link loweredPaths}): built here per call, a dataset of thousands of `.set` files that
+ * each name a missing `.fdt` would lowercase every path once per file.
  */
 export function namedCompanionsMissing(
   path: string,
   needs: readonly string[] | undefined,
   paths: ReadonlySet<string>,
+  lowered?: () => ReadonlySet<string>,
 ): number {
   if (!needs || needs.length === 0) return 0;
   const slash = path.lastIndexOf("/");
   const dir = slash < 0 ? "" : path.slice(0, slash + 1);
-  let lowered: Set<string> | undefined;
+  const caseless = lowered ?? loweredPaths(paths);
   let missing = 0;
   for (const name of needs) {
     if (name === "" || name === "." || name === ".." || /[/\\]/.test(name)) {
@@ -465,10 +470,18 @@ export function namedCompanionsMissing(
     }
     const candidate = dir + name;
     if (paths.has(candidate)) continue;
-    lowered ??= new Set([...paths].map((p) => p.toLowerCase()));
-    if (!lowered.has(candidate.toLowerCase())) missing++;
+    if (!caseless().has(candidate.toLowerCase())) missing++;
   }
   return missing;
+}
+
+/** The lowercased `paths`, built on the first call and kept: one build per dataset or archive. */
+export function loweredPaths(paths: ReadonlySet<string>): () => ReadonlySet<string> {
+  let built: ReadonlySet<string> | undefined;
+  return () => {
+    built ??= new Set([...paths].map((p) => p.toLowerCase()));
+    return built;
+  };
 }
 
 // ---------------------------------------------------------------------------------------

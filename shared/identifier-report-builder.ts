@@ -26,6 +26,7 @@ import {
   cachedSource,
   companionsOf,
   limitsFor,
+  loweredPaths,
   namedCompanionsMissing,
   readerFor,
   readerMatch,
@@ -268,6 +269,8 @@ export async function readRecordings<E extends RecordingEntry>(
   const allPaths = options.paths ?? options.entries.map((e) => e.path);
   const { missing } = companionsOf(allPaths, readers);
   const pathSet: ReadonlySet<string> = new Set(allPaths);
+  // Lowercased once for the whole dataset, for the case-insensitive companion match.
+  const lowered = loweredPaths(pathSet);
 
   // One entry per reader id, written out: a `Record` literal, so an id added to the union and
   // missing here fails the typecheck.
@@ -389,7 +392,9 @@ export async function readRecordings<E extends RecordingEntry>(
     // Companions the content names (an EEGLAB `.set`'s `.fdt`), checked against the same paths.
     const lacking =
       pairedLacking +
-      (superseded.has(entry) ? 0 : namedCompanionsMissing(entry.path, result.needs, pathSet));
+      (superseded.has(entry)
+        ? 0
+        : namedCompanionsMissing(entry.path, result.needs, pathSet, lowered));
     if (reader.id === "edf") {
       const e = out.edf;
       if (patient !== null && !result.findings.some((f) => f.kind === "edf-unreadable")) {
