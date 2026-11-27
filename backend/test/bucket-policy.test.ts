@@ -1,14 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   type BucketPolicy,
   MAX_BUCKET_POLICY_BYTES,
+  POLICY_WARN_FRACTION,
   PUBLIC_ACCESS_SID,
   STAGING_PREFIX,
   addPrivateDataset,
   buildPublicAccessPolicy,
+  compactPrivateIds,
   derivePublicPrefixes,
   ensurePublicAccessStatement,
+  hasHeadroomForNewDataset,
   isDatasetPrivate,
+  isPolicyNearCap,
   listPrivateDatasets,
   policyByteSize,
   prefixArn,
@@ -278,5 +284,232 @@ describe("prefixIdFromArn", () => {
     expect(prefixIdFromArn(BUCKET, "arn:aws:s3:::other/nm000111/*")).toBeNull();
     expect(prefixIdFromArn(BUCKET, `arn:aws:s3:::${BUCKET}/nm000111`)).toBeNull();
     expect(prefixIdFromArn(BUCKET, `arn:aws:s3:::${BUCKET}/a/b/*`)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Compaction (#2497). Every test below works on a real policy document: the
+// statement the code writes, or one shaped exactly like the live one.
+// ---------------------------------------------------------------------------
+
+/** A policy whose carve-out is the given entries verbatim (as AWS returns it). */
+function rawPolicy(entries: string[]): BucketPolicy {
+  return {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: PUBLIC_ACCESS_SID,
+        Effect: "Allow",
+        Principal: "*",
+        Action: "s3:GetObject",
+        NotResource: entries.map((e) => prefixArn(BUCKET, e)),
+      },
+    ],
+  };
+}
+
+function decade(prefix: string): string[] {
+  return Array.from({ length: 10 }, (_, d) => `${prefix}${d}`);
+}
+
+function notResource(policy: BucketPolicy): string[] {
+  const nr = publicStatement(policy).NotResource;
+  return Array.isArray(nr) ? nr : [nr as string];
+}
+
+describe("compaction: the canonical form", () => {
+  test("a full decade compacts to one ? entry", () => {
+    const policy = buildPublicAccessPolicy(BUCKET, [...decade("nm00054"), "nm000551"]);
+    expect(notResource(policy)).toEqual([
+      stagingArn(),
+      prefixArn(BUCKET, "nm00054?"),
+      prefixArn(BUCKET, "nm000551"),
+    ]);
+  });
+
+  test("nine of ten never compact", () => {
+    const nine = decade("nm00054").slice(0, 9);
+    expect(compactPrivateIds(nine)).toEqual(nine);
+  });
+
+  test("ten full decades of a hundred compact to one ?? entry", () => {
+    const ids: string[] = [];
+    for (let t = 0; t < 10; t++) ids.push(...decade(`nm0005${t}`));
+    expect(compactPrivateIds([...ids, "nm000600"])).toEqual(["nm0005??", "nm000600"]);
+  });
+
+  test("nine full decades stay nine decade entries", () => {
+    const ids: string[] = [];
+    for (let t = 0; t < 9; t++) ids.push(...decade(`nm0005${t}`));
+    expect(compactPrivateIds(ids)).toEqual(Array.from({ length: 9 }, (_, t) => `nm0005${t}?`));
+  });
+
+  test("decades of different prefixes never merge", () => {
+    expect(compactPrivateIds([...decade("nm00054"), ...decade("on00054")])).toEqual([
+      "nm00054?",
+      "on00054?",
+    ]);
+  });
+
+  test("an id of another shape is kept explicit and never grouped", () => {
+    expect(compactPrivateIds(["abc", "nm00054"])).toEqual(["abc", "nm00054"]);
+  });
+
+  test("no wildcard is ever written with * inside the id", () => {
+    const ids: string[] = [];
+    for (let t = 0; t < 10; t++) ids.push(...decade(`nm0005${t}`));
+    for (const arn of notResource(buildPublicAccessPolicy(BUCKET, ids))) {
+      const id = prefixIdFromArn(BUCKET, arn);
+      expect(id?.includes("*")).toBe(false);
+    }
+  });
+});
+
+describe("compaction: reading both forms back", () => {
+  test("explicit and wildcard entries round-trip to the same id set", () => {
+    const ids = [...decade("nm00054"), "nm000551", "on004350"];
+    const explicit = rawPolicy(ids);
+    const compacted = buildPublicAccessPolicy(BUCKET, ids);
+    expect(listPrivateDatasets(compacted, BUCKET)).toEqual([...ids].sort());
+    expect(listPrivateDatasets(explicit, BUCKET)).toEqual([...ids].sort());
+    // Rewriting the explicit form yields exactly the compacted form.
+    expect(ensurePublicAccessStatement(explicit, BUCKET)).toEqual(compacted);
+  });
+
+  test("an id covered by a decade wildcard is private", () => {
+    const policy = rawPolicy(["staging", "nm00054?"]);
+    for (const id of decade("nm00054")) expect(isDatasetPrivate(policy, BUCKET, id)).toBe(true);
+    expect(isDatasetPrivate(policy, BUCKET, "nm000550")).toBe(false);
+    expect(isDatasetPrivate(policy, BUCKET, "nm000539")).toBe(false);
+  });
+
+  test("an id covered by a hundred wildcard is private", () => {
+    const policy = rawPolicy(["nm0005??"]);
+    expect(isDatasetPrivate(policy, BUCKET, "nm000500")).toBe(true);
+    expect(isDatasetPrivate(policy, BUCKET, "nm000599")).toBe(true);
+    expect(isDatasetPrivate(policy, BUCKET, "nm000600")).toBe(false);
+    expect(listPrivateDatasets(policy, BUCKET)).toHaveLength(100);
+  });
+
+  test("derivePublicPrefixes (the migration audit) sees a covered id as private", () => {
+    const policy = rawPolicy(["staging", "nm00054?"]);
+    const pub = derivePublicPrefixes(policy, BUCKET, ["nm000541", "nm000550", "staging"]);
+    expect([...pub]).toEqual(["nm000550"]);
+  });
+
+  test("staging is preserved through every rewrite and never read as an id", () => {
+    const policy = addPrivateDataset(rawPolicy(["staging", ...decade("nm00054")]), BUCKET, "x1");
+    expect(notResource(policy)[0]).toBe(stagingArn());
+    expect(listPrivateDatasets(policy, BUCKET)).not.toContain(STAGING_PREFIX);
+  });
+
+  test("an entry this module does not write is kept verbatim, never widened", () => {
+    const foreign = `arn:aws:s3:::${BUCKET}/nm*/*`;
+    const otherBucket = "arn:aws:s3:::other/nm000111/*";
+    const policy: BucketPolicy = rawPolicy(["staging", "nm000111"]);
+    (publicStatement(policy).NotResource as string[]).push(foreign, otherBucket);
+    const next = removePrivateDataset(policy, BUCKET, "nm000111");
+    expect(notResource(next)).toContain(foreign);
+    expect(notResource(next)).toContain(otherBucket);
+    expect(listPrivateDatasets(next, BUCKET)).toEqual([]);
+  });
+});
+
+describe("compaction: transitions", () => {
+  test("adding the tenth id of a decade compacts it", () => {
+    const nine = rawPolicy(["staging", ...decade("nm00054").slice(0, 9)]);
+    const next = addPrivateDataset(nine, BUCKET, "nm000549");
+    expect(notResource(next)).toEqual([stagingArn(), prefixArn(BUCKET, "nm00054?")]);
+  });
+
+  test("removing one id of a covered decade expands it; the other nine stay private", () => {
+    const policy = rawPolicy(["staging", "nm00054?"]);
+    const next = removePrivateDataset(policy, BUCKET, "nm000543");
+    expect(isDatasetPrivate(next, BUCKET, "nm000543")).toBe(false);
+    for (const id of decade("nm00054").filter((i) => i !== "nm000543")) {
+      expect(isDatasetPrivate(next, BUCKET, id)).toBe(true);
+    }
+    expect(notResource(next)).toHaveLength(10); // staging + nine explicit
+    expect(notResource(next).some((a) => a.includes("?"))).toBe(false);
+  });
+
+  test("removing one id of a covered hundred keeps the other 99 private and compacts the rest", () => {
+    const next = removePrivateDataset(rawPolicy(["nm0005??"]), BUCKET, "nm000543");
+    expect(listPrivateDatasets(next, BUCKET)).toHaveLength(99);
+    expect(isDatasetPrivate(next, BUCKET, "nm000543")).toBe(false);
+    // Nine decades stay wildcards, the broken one is nine explicit ids.
+    expect(notResource(next)).toHaveLength(1 + 9 + 9);
+  });
+
+  test("a non-private id is never covered, whatever the set", () => {
+    const ids = [...decade("nm00054").slice(0, 9), ...decade("nm00055")];
+    const policy = buildPublicAccessPolicy(BUCKET, ids);
+    expect(isDatasetPrivate(policy, BUCKET, "nm000549")).toBe(false);
+    expect(new Set(listPrivateDatasets(policy, BUCKET))).toEqual(new Set(ids));
+  });
+});
+
+describe("compaction: the live carve-out of 2026-11-27 (#2497)", () => {
+  const lines = readFileSync(
+    join(import.meta.dir, "fixtures/bucket-policy/carveout-2026-11-27.txt"),
+    "utf8",
+  )
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+  const ids = lines.filter((l) => l !== STAGING_PREFIX);
+  const live = rawPolicy(lines);
+
+  test("the fixture is the measured list: 628 entries, near the cap", () => {
+    expect(lines).toHaveLength(628);
+    expect(lines).toContain(STAGING_PREFIX);
+    // 20,240 bytes for this statement alone; the live policy measured 20,431
+    // with its second (list-only) statement, against the 20,480 cap.
+    expect(policyByteSize(live)).toBeGreaterThan(20_000);
+  });
+
+  test("compacts below 10 KB and every id stays private", () => {
+    const compacted = ensurePublicAccessStatement(live, BUCKET);
+    const size = policyByteSize(compacted);
+    expect(size).toBeLessThan(10_000);
+    for (const id of ids) expect(isDatasetPrivate(compacted, BUCKET, id)).toBe(true);
+    expect(listPrivateDatasets(compacted, BUCKET)).toEqual([...new Set(ids)].sort());
+    expect(notResource(compacted)[0]).toBe(stagingArn());
+    expect(hasHeadroomForNewDataset(compacted, BUCKET).ok).toBe(true);
+  });
+
+  test("the first transition after deploy writes the compacted form", () => {
+    const next = addPrivateDataset(live, BUCKET, "nm099001");
+    expect(policyByteSize(next)).toBeLessThan(10_000);
+    expect(isDatasetPrivate(next, BUCKET, "nm099001")).toBe(true);
+  });
+});
+
+describe("headroom and the near-cap guard", () => {
+  /** Explicit ids no two of which share a decade, so nothing compacts. */
+  function sparse(n: number): string[] {
+    return Array.from({ length: n }, (_, i) => `nm${String(i * 10).padStart(6, "0")}`);
+  }
+
+  test("refuses exactly when one more explicit entry would exceed the cap", () => {
+    let n = 1;
+    while (hasHeadroomForNewDataset(buildPublicAccessPolicy(BUCKET, sparse(n)), BUCKET).ok) n++;
+    const full = buildPublicAccessPolicy(BUCKET, sparse(n));
+    const fits = buildPublicAccessPolicy(BUCKET, sparse(n - 1));
+    // The last policy with headroom really does take one more id under the cap.
+    expect(policyByteSize(addPrivateDataset(fits, BUCKET, "nm999990"))).toBeLessThanOrEqual(
+      MAX_BUCKET_POLICY_BYTES,
+    );
+    // The refused one really would not.
+    expect(policyByteSize(addPrivateDataset(full, BUCKET, "nm999990"))).toBeGreaterThan(
+      MAX_BUCKET_POLICY_BYTES,
+    );
+    expect(hasHeadroomForNewDataset(full, BUCKET).ok).toBe(false);
+  });
+
+  test("the near-cap guard trips above 80 percent and not at it", () => {
+    const threshold = MAX_BUCKET_POLICY_BYTES * POLICY_WARN_FRACTION;
+    expect(isPolicyNearCap(Math.floor(threshold))).toBe(false);
+    expect(isPolicyNearCap(Math.floor(threshold) + 1)).toBe(true);
   });
 });
