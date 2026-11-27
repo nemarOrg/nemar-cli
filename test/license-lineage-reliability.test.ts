@@ -27,6 +27,7 @@ import {
   isValidCachedRecord,
   lineageLines,
   mapCache,
+  normalizeLicense,
   osfDoiOfUrl,
   resolveLicenseLineage,
 } from "../shared/license-lineage";
@@ -69,8 +70,8 @@ const ZENODO_BY_KEY = "datacite /dois/10.5281/zenodo.24539621";
 const count = (part: string) => standIn.requests.filter((k) => k.includes(part)).length;
 
 describe("resolver version", () => {
-  test("is 3, since outcomes change", () => {
-    expect(RESOLVER_VERSION).toBe("license-lineage/3");
+  test("is 4, since outcomes change", () => {
+    expect(RESOLVER_VERSION).toBe("license-lineage/4");
   });
 });
 
@@ -454,6 +455,183 @@ describe("a DOI cut out of a README is not a source", () => {
       "Dropped: 1 DOI candidate(s) cut short in the README or attestation (not sources).",
     );
     expect(standIn.requests).toEqual([]);
+  });
+});
+
+describe("a README DOI that prefixes a declared DOI is that DOI cut short", () => {
+  // nm000746 and nm000843 (2026-11-27): SourceDatasets declares the whole Zenodo DOI, and the
+  // README's citation wraps it, so the text yields a cut copy that still has Zenodo's shape.
+  const NM000746 = { DOI: "10.5281/zenodo.22314785" };
+  const NM000746_README =
+    "## Citation\n\nIf you use these data, cite the original deposit: Zenodo.\nhttps://doi.org/10.5281/zenodo.2231\n4785\n";
+  const NM000843 = { DOI: "https://doi.org/10.5281/zenodo.23610719" };
+  const NM000843_README =
+    "Source data: doi:10.5281/zenodo.236\n10719 (CC BY 4.0). Code: https://github.com/example/analysis\n";
+
+  const sourcesOf = (desc: unknown, readme: string, attestation: string | null = null) =>
+    extractSources({
+      datasetDescription: desc,
+      relatedIdentifiers: null,
+      attestationUpstreamSource: attestation,
+      readme,
+    });
+  const ids = (found: ReturnType<typeof extractSources>) =>
+    found.refs.map((r) => (r.kind === "doi" ? `${r.origin} ${r.doi}` : r.kind));
+
+  test.each([
+    [NM000746, NM000746_README, "source_datasets 10.5281/zenodo.22314785"],
+    [NM000843, NM000843_README, "source_datasets 10.5281/zenodo.23610719"],
+  ])("SourceDatasets %p: the README's cut copy is dropped and counted", (src, readme, kept) => {
+    const found = sourcesOf({ SourceDatasets: [src] }, readme);
+    expect(ids(found)).toEqual([kept]);
+    expect(found.dropped).toBe(1);
+  });
+
+  test("a prefix of a related identifier or an attestation DOI is dropped too", () => {
+    const related = extractSources({
+      datasetDescription: {},
+      relatedIdentifiers: [
+        { relation_type: "IsDerivedFrom", identifier_type: "DOI", identifier: NM000746.DOI },
+      ],
+      attestationUpstreamSource: null,
+      readme: NM000746_README,
+    });
+    expect(ids(related)).toEqual(["related_identifiers 10.5281/zenodo.22314785"]);
+    expect(related.dropped).toBe(1);
+    const attested = sourcesOf({}, NM000843_README, "From Zenodo, 10.5281/zenodo.23610719.");
+    expect(ids(attested)).toEqual(["attestation 10.5281/zenodo.23610719"]);
+    expect(attested.dropped).toBe(1);
+  });
+
+  test("two distinct README records, one a prefix of the other, are both kept", () => {
+    // The text does not continue the shorter DOI into the longer one: they are two records.
+    const zenodo = sourcesOf({}, "Data: 10.5281/zenodo.1234567 and 10.5281/zenodo.12345678.\n");
+    expect(ids(zenodo)).toEqual([
+      "readme 10.5281/zenodo.1234567",
+      "readme 10.5281/zenodo.12345678",
+    ]);
+    expect(zenodo.dropped).toBe(0);
+    const dataverse = sourcesOf({}, "See doi:10.7910/DVN/ABCDE; also doi:10.7910/DVN/ABCDEF\n");
+    expect(ids(dataverse)).toEqual(["readme 10.7910/dvn/abcde", "readme 10.7910/dvn/abcdef"]);
+    expect(dataverse.dropped).toBe(0);
+    // Nor is a declared DOI enough: the README must itself continue the short one.
+    const declared = sourcesOf(
+      { SourceDatasets: [NM000746] },
+      "Older deposit: 10.5281/zenodo.2231.\n",
+    );
+    expect(ids(declared)).toEqual([
+      "source_datasets 10.5281/zenodo.22314785",
+      "readme 10.5281/zenodo.2231",
+    ]);
+    expect(declared.dropped).toBe(0);
+  });
+
+  test("a declared DOI is never dropped, even when the README continues it into another", () => {
+    const found = sourcesOf(
+      { SourceDatasets: [{ DOI: "10.5281/zenodo.2231" }, NM000746] },
+      NM000746_README,
+    );
+    expect(ids(found)).toEqual([
+      "source_datasets 10.5281/zenodo.2231",
+      "source_datasets 10.5281/zenodo.22314785",
+    ]);
+    // The README's own cut copy is dropped and counted; the declared short DOI stays.
+    expect(found.dropped).toBe(1);
+  });
+
+  test("a wrap with quote markup between the halves is still the same DOI", () => {
+    const found = sourcesOf({ SourceDatasets: [NM000843] }, "> doi:10.5281/zenodo.236\n> 10719\n");
+    expect(ids(found)).toEqual(["source_datasets 10.5281/zenodo.23610719"]);
+    expect(found.dropped).toBe(1);
+  });
+
+  test("a README candidate that prefixes another README candidate is dropped", () => {
+    const found = sourcesOf(
+      {},
+      "Data: 10.5281/zenodo.22314785.\n\nCite as https://doi.org/10.5281/zenodo.2231\n4785\n",
+    );
+    expect(ids(found)).toEqual(["readme 10.5281/zenodo.22314785"]);
+    expect(found.dropped).toBe(1);
+  });
+
+  test("an equal DOI is one source, not a dropped candidate; a DOI that prefixes nothing stays", () => {
+    const same = sourcesOf({ SourceDatasets: [NM000746] }, "Data: 10.5281/zenodo.22314785\n");
+    expect(ids(same)).toEqual(["source_datasets 10.5281/zenodo.22314785"]);
+    expect(same.dropped).toBe(0);
+    // Not a prefix of the declared DOI, so a source of its own.
+    const other = sourcesOf({ SourceDatasets: [NM000746] }, "Also 10.5281/zenodo.2232\n");
+    expect(ids(other)).toEqual([
+      "source_datasets 10.5281/zenodo.22314785",
+      "readme 10.5281/zenodo.2232",
+    ]);
+    expect(other.dropped).toBe(0);
+    // A README alone is read as it is: nothing declared it longer.
+    expect(ids(sourcesOf({}, NM000746_README))).toEqual(["readme 10.5281/zenodo.2231"]);
+    // A declared DOI is never dropped for being a prefix of a README one.
+    const declaredShort = sourcesOf(
+      { SourceDatasets: [{ DOI: "10.5281/zenodo.2231" }] },
+      "10.5281/zenodo.22314785\n",
+    );
+    expect(ids(declaredShort)).toEqual([
+      "source_datasets 10.5281/zenodo.2231",
+      "readme 10.5281/zenodo.22314785",
+    ]);
+  });
+
+  test.each([
+    // The second record lists CC BY 4.0 and MIT; the more restrictive reading is kept.
+    [NM000746, NM000746_README, "cc-by"],
+    [NM000843, NM000843_README, "permissive-attribution"],
+  ])(
+    "the lineage of %p resolves compatible, and the cut copy is never fetched",
+    async (src, readme, license) => {
+      const r = await run(inputs("CC-BY-4.0", [src], readme));
+      expect(r.outcome).toBe("compatible_attribution");
+      expect(r.dropped_doi_candidates).toBe(1);
+      expect(r.sources).toHaveLength(1);
+      expect(r.sources[0]).toMatchObject({ status: "resolved", license });
+      expect(standIn.misses).toEqual([]);
+      expect(standIn.requests).toHaveLength(1);
+    },
+  );
+});
+
+describe("DANDI's license spellings", () => {
+  test.each([
+    ["cc_by_40", "cc-by", "4.0"],
+    ["cc0_10", "cc0", "1.0"],
+    ["CC_BY_40", "cc-by", "4.0"],
+    ["cc_by_nc_40", "cc-by-nc", "4.0"],
+    ["cc_by_nd_40", "cc-by-nd", "4.0"],
+    ["cc_by_sa_40", "cc-by-sa", "4.0"],
+    ["cc_by_nc_sa_40", "cc-by-nc-sa", "4.0"],
+    ["spdx:CC-BY-4.0", "cc-by", "4.0"],
+    ["spdx:CC0-1.0", "cc0", "1.0"],
+    ["spdx:CC-BY-NC-ND-4.0", "cc-by-nc-nd", "4.0"],
+    ["spdx:ODbL-1.0", "odbl", "1.0"],
+    ["spdx:PDDL-1.0", "pddl", "1.0"],
+    // Not a license: never guessed toward a permissive one.
+    ["spdx:", "other", null],
+    ["spdx:LicenseRef-custom", "other", null],
+  ])("%s reads as %s %s", (text, license, version) => {
+    expect(normalizeLicense(text)).toEqual({
+      license: license as ReturnType<typeof normalizeLicense>["license"],
+      version,
+    });
+  });
+
+  test("nm001003's DANDI source is compatible_attribution for a CC-BY-4.0 target (fixture 35)", async () => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.48324/dandi.001535/0.250714.1218" }]));
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(r.sources[0]).toMatchObject({
+      resolver: "datacite",
+      resource_type: "Dataset",
+      license: "cc-by",
+      license_version: "4.0",
+      publisher: "DANDI Archive",
+    });
+    expect(r.sources[0].declared_licenses).toEqual([{ text: "cc_by_40", url: null }]);
+    expect(standIn.misses).toEqual([]);
   });
 });
 
