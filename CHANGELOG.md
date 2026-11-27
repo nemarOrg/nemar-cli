@@ -18,7 +18,7 @@ earlier releases are described only by their generated notes.
 ### Fixed
 
 - **The license-file check no longer calls a NEMAR-headed CC-BY-NC-4.0 or CC-BY-SA-4.0 LICENSE a compound of two licenses (ADR 0142, amendment of 2026-11-27).**
-  ScanCode's notice rule `cc-by-4.0_64.RULE` ("distributed under CC-BY") matches the first words of "distributed under CC-BY-NC-4.0", so a LICENSE whose header says that came out as `(CC-BY-NC-4.0 AND CC-BY-4.0) AND CC-BY-NC-4.0` and was `unrecognized`, which cost the epic gate of 2026-11-27 five of its ten `unknown` answers.
+  ScanCode's notice rule `cc-by-4.0_64.RULE` ("distributed under CC-BY") matches the first words of "distributed under CC-BY-NC-4.0", so a LICENSE whose header says that came out as `(CC-BY-NC-4.0 AND CC-BY-4.0) AND CC-BY-NC-4.0` and was `unrecognized`; in the epic gate run of 2026-11-27 this was the state recorded for five datasets (nm000677, nm000774, nm000968, nm000712, nm000924), whose `authors_and_license` answer was `unknown`.
   A match of another license that lies on one line and ends strictly inside a match of the identified license on that line is now read as part of that license's identifier: it is neither a second license nor leftover text.
   Those five files are now `matches` with `additions` (the header's own sentences are text beyond the license, as for the same header over CC-BY-4.0); a real second license, such as an MIT text after the CC text, is still compound.
 - **Dataset creation works again when the bucket policy is near its cap (#2497; ADR 0145).**
