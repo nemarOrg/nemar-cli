@@ -1059,6 +1059,19 @@ const ON007823_GITATTRIBUTES_PATCH = [
   "+README* text eol=lf",
 ].join("\n");
 
+/** on007823's whole `.gitattributes` at its index's commit, as GitHub's contents API gave it. */
+const ON007823_GITATTRIBUTES_AT_S = [
+  "* annex.backend=SHA256E",
+  "**/.git* annex.largefiles=nothing",
+  "*.json text eol=lf",
+  "*.tsv text eol=lf",
+  "CHANGES text eol=lf",
+  "README* text eol=lf",
+  "LICENSE* text eol=lf",
+  "CITATION.cff text eol=lf",
+  "",
+].join("\n");
+
 describe("an index built from another commit than the tag's (on007823 in the local run of 2026-11-27)", () => {
   /** on007823's delta between its tag and its index's commit, as GitHub's compare lists it, patch included. */
   const ON007823_DELTA = [
@@ -1077,6 +1090,8 @@ describe("an index built from another commit than the tag's (on007823 in the loc
     github.tag(ID, TAG, T);
     github.index(ID, indexText(S));
     github.compare(ID, T, S, { status: "ahead", behind_by: 0, ahead_by: 6, files: ON007823_DELTA });
+    // The whole file at S is read too: it turns no CR LF conversion on.
+    github.contents(ID, S, ".gitattributes", ON007823_GITATTRIBUTES_AT_S);
     const decided = await servingIndexForRun(env, ica, "bids", ID, TAG, T);
     if (decided.kind !== "run" || !decided.servingIndex.staged) throw new Error("not staged");
     const spec = icaSpec(decided.servingIndex);
@@ -1387,6 +1402,19 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
       github.tag(ID, TAG, T);
       github.index(ID, indexText(S));
       github.compare(ID, T, S, answer as never);
+      // Every `.gitattributes` the edit leaves at S is read whole: here on007823's own, which is clean.
+      for (const file of ((answer as { files?: unknown[] }).files ?? []) as Array<{
+        filename?: unknown;
+        status?: unknown;
+      }>) {
+        if (
+          typeof file?.filename === "string" &&
+          file.filename.split("/").at(-1) === ".gitattributes" &&
+          file.status !== "removed"
+        ) {
+          github.contents(ID, S, file.filename, ON007823_GITATTRIBUTES_AT_S);
+        }
+      }
       const staged = await stageServingIndex(devEnv(), ID, T);
       if (typeof expected === "number") {
         expect(staged).toMatchObject({ staged: true, ahead: { tagCommit: T, indexCommit: S } });
@@ -1493,6 +1521,103 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
       reason: "github_unreadable",
     });
     expect(await servingCopies()).toEqual([]);
+  });
+
+  /** A `.gitattributes` edit to annex rules only, with the file at S answered as `atS`. */
+  async function stagedWithFileAtS(atS: string | { http: number } | { body: unknown } | null) {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [
+        {
+          filename: ".gitattributes",
+          status: "modified",
+          patch: "@@ -1 +1 @@\n-* annex.largefiles=nothing\n+* annex.backend=SHA256E",
+        },
+      ],
+    } as never);
+    if (atS !== null) github.contents(ID, S, ".gitattributes", atS);
+    return stageServingIndex(devEnv(), ID, T);
+  }
+
+  test("an unchanged `* text eol=crlf` far from the hunk, read in the whole file at S, refuses (MUTATION: read the patch alone)", async () => {
+    const far = [
+      ...Array.from({ length: 40 }, (_, i) => `sub-${i}/** annex.largefiles=nothing`),
+      "* text eol=crlf",
+      "* annex.backend=SHA256E",
+    ].join("\n");
+    expect(await stagedWithFileAtS(far)).toEqual({
+      staged: false,
+      reason: "index_content_changed",
+    });
+    // A macro definition that turns it on counts too, and so does the legacy crlf.
+    expect(await stagedWithFileAtS("[attr]m eol=crlf\n* annex.backend=SHA256E\n")).toEqual({
+      staged: false,
+      reason: "index_content_changed",
+    });
+    expect(await stagedWithFileAtS("*.txt crlf\n")).toEqual({
+      staged: false,
+      reason: "index_content_changed",
+    });
+    // The file is read at the index's commit, exactly once.
+    expect(
+      github.log.filter((r) => r.path === `/repos/nemarDatasets/${ID}/contents/.gitattributes`),
+    ).toHaveLength(3);
+  });
+
+  test("on007823's real file at S admits", async () => {
+    expect(await stagedWithFileAtS(ON007823_GITATTRIBUTES_AT_S)).toMatchObject({ staged: true });
+  });
+
+  test("a file at S that cannot be read whole defers like the compare, never admits blind (MUTATION: admit on an unread file)", async () => {
+    for (const atS of [null, { http: 500 }, { body: { encoding: "none", content: "" } }]) {
+      github.reset();
+      expect(await stagedWithFileAtS(atS)).toEqual({ staged: false, reason: "github_unreadable" });
+    }
+    github.reset();
+    // Over the read's bound (1 MiB of JSON).
+    expect(
+      await stagedWithFileAtS({ body: { encoding: "base64", content: "A".repeat(1_100_000) } }),
+    ).toEqual({
+      staged: false,
+      reason: "github_unreadable",
+    });
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.reset();
+    await stagedWithFileAtS({ http: 502 });
+    expect(await servingIndexForRun(env, ica, "bids", ID, TAG, T)).toMatchObject({
+      kind: "deferred",
+      reason: "github_unreadable",
+    });
+  });
+
+  test("a deleted .gitattributes has nothing to read; a renamed one is read under its new name", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [
+        {
+          filename: "a/.gitattributes",
+          status: "removed",
+          patch: "@@ -1 +0,0 @@\n-* annex.largefiles=nothing",
+        },
+        {
+          filename: "c/.gitattributes",
+          previous_filename: "b/.gitattributes",
+          status: "renamed",
+          patch: "@@ -1 +1 @@\n-* annex.largefiles=nothing\n+* annex.backend=SHA256E",
+        },
+      ],
+    } as never);
+    github.contents(ID, S, "c/.gitattributes", "* annex.backend=SHA256E\n");
+    expect(await stageServingIndex(devEnv(), ID, T)).toMatchObject({ staged: true });
+    const read = github.log.filter((r) => r.path.includes("/contents/")).map((r) => r.path);
+    expect(read).toEqual([`/repos/nemarDatasets/${ID}/contents/c/.gitattributes`]);
   });
 
   test("an index of the tag's own commit asks no compare and records nothing admitted", async () => {

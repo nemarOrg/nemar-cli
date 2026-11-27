@@ -629,6 +629,46 @@ export function gitattributesPatchProblem(
   return null;
 }
 
+/**
+ * Whether the whole of a `.gitattributes` file, read at the index's commit, can turn CR LF conversion on: any line,
+ * a macro definition included, that carries `eol=crlf` or the legacy `crlf` ({@link enablesCrlf}). The patch shows
+ * only the lines an edit touches and a few around them; this reads the rest. One `contents` request at `ref`,
+ * bounded by {@link ZARR_SOURCE_COMMIT_MAX_BYTES}: a file that cannot be read whole (absent at `ref` though the compare
+ * names it, over the bound, or answered in another shape) is `github_unreadable`, never read as clean.
+ */
+async function gitattributesFileProblem(
+  repo: string,
+  refCommit: string,
+  path: string,
+  access: GithubAccess & { ok: true },
+): Promise<"index_content_changed" | "github_unreadable" | null> {
+  const encoded = path.split("/").map(ref).join("/");
+  const got = await getJson(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${ref(repo)}/contents/${encoded}?ref=${refCommit}`,
+    githubHeaders(access),
+    ZARR_SOURCE_GITHUB_TIMEOUT_MS,
+    ZARR_SOURCE_COMMIT_MAX_BYTES,
+    true,
+    access.onUnauthorized,
+  );
+  if (got.kind !== "ok" || !isRecord(got.body)) return "github_unreadable";
+  const { encoding, content } = got.body;
+  if (encoding !== "base64" || typeof content !== "string") return "github_unreadable";
+  let text: string;
+  try {
+    const binary = atob(content.replace(/\s/g, ""));
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
+      Uint8Array.from(binary, (c) => c.charCodeAt(0)),
+    );
+  } catch {
+    return "github_unreadable";
+  }
+  for (const line of text.split("\n")) {
+    if (lineAttributes(line).some(enablesCrlf)) return "index_content_changed";
+  }
+  return null;
+}
+
 /** Why an index built from another commit than its tag's is not admitted (fixed words of the serving index). */
 export type ServingIndexAheadRefusal =
   | "index_behind_tag"
@@ -643,7 +683,9 @@ export type ServingIndexAheadRefusal =
  * renamed file's previous path) {@link isNemarOwnedMetadataPath}, and every `.gitattributes` edit one that cannot
  * change the bytes of a checkout ({@link gitattributesPatchProblem}). A compare that lists no file at all (commits
  * that change nothing) is admitted. The changed paths, a renamed file's old name included, each once and in
- * code-unit order, are what the run is handed (`--serving-index-delta-path`), so more than a job can carry
+ * code-unit order, are what the run is handed (`--serving-index-delta-path`); each changed `.gitattributes` the edit
+ * leaves in place is then read whole at the index's commit ({@link gitattributesFileProblem}: at most
+ * {@link RECIPE_SERVING_INDEX_MAX_DELTA_PATHS} more requests, only for a delta otherwise admitted), so more than a job can carry
  * ({@link RECIPE_SERVING_INDEX_MAX_DELTA_PATHS}) is `index_delta_unlisted` and never cut short; so is a compare
  * body over its bound: what changed cannot be shown. A compare GitHub could not answer, or answered in a shape this does not read, is `github_unreadable`, a
  * fault: the caller defers, and never stages an index it could not show to be the tag's data. Never throws.
@@ -685,6 +727,8 @@ export async function servingIndexAheadOfTag(
       return { ok: false, reason: "index_delta_unlisted" };
     }
     const paths = new Set<string>();
+    // The `.gitattributes` files the edit leaves at the index's commit, read whole once the rest is admitted.
+    const attributesAtIndex: string[] = [];
     for (const file of files) {
       if (!isRecord(file) || typeof file.filename !== "string") {
         return { ok: false, reason: "github_unreadable" };
@@ -705,11 +749,20 @@ export async function servingIndexAheadOfTag(
       if (names.some(isGitattributes)) {
         const problem = gitattributesPatchProblem(file.patch);
         if (problem !== null) return { ok: false, reason: problem };
+        // A deleted file has nothing to read; a renamed one is read under its new name.
+        if (isGitattributes(file.filename) && file.status !== "removed") {
+          attributesAtIndex.push(file.filename);
+        }
       }
     }
     // Every path is handed to the run, so a delta that does not fit is refused whole.
     if (paths.size > RECIPE_SERVING_INDEX_MAX_DELTA_PATHS) {
       return { ok: false, reason: "index_delta_unlisted" };
+    }
+    // The lines the patch does not show: no changed `.gitattributes` may turn CR LF conversion on anywhere.
+    for (const path of new Set(attributesAtIndex)) {
+      const problem = await gitattributesFileProblem(repo, indexCommit, path, access);
+      if (problem !== null) return { ok: false, reason: problem };
     }
     return { ok: true, deltaPaths: [...paths].sort(compareCodeUnits) };
   } catch {

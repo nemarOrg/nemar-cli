@@ -2682,6 +2682,8 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
         },
       ],
     });
+    // The changed `.gitattributes` is read whole at the index's commit.
+    github.contents(id, SOURCE, ".gitattributes", "* annex.backend=SHA256E\n*.tsv text eol=lf\n");
     const commit = await sourceCommitForRun(env, ica, "bids", id, "v1.0.0");
     if (commit.kind !== "commit") throw new Error(`no commit: ${commit.kind}`);
     const decided = await servingIndexForRun(env, ica, "bids", id, "v1.0.0", commit.commit);

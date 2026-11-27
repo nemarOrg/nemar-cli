@@ -60,6 +60,16 @@ export interface GithubCompareStandin {
   branch(repo: string, name: string, commit: string): void;
   /** The compare of `base...head`, 404 when unset. */
   compare(repo: string, base: string, head: string, answer: CompareAnswer): void;
+  /**
+   * A file of a repository at a commit, as `GET /repos/<org>/<repo>/contents/<path>?ref=<commit>` answers it: the
+   * text (sent base64-encoded, as GitHub sends it), a status, or a whole body. Unset: 404.
+   */
+  contents(
+    repo: string,
+    ref: string,
+    path: string,
+    answer: string | { http: number } | { body: unknown },
+  ): void;
   /** The index of a dataset: a document, or a status (404 when unset); a string is sent as it is. */
   index(
     id: string,
@@ -82,6 +92,7 @@ export function startGithubCompareStandin(): GithubCompareStandin {
   const tags = new Map<string, string | { http: number } | { body: unknown }>();
   const branches = new Map<string, string>();
   const compares = new Map<string, CompareAnswer>();
+  const files = new Map<string, string | { http: number } | { body: unknown }>();
   const indexes = new Map<
     string,
     Record<string, unknown> | string | { http: number } | { stream: string }
@@ -136,6 +147,18 @@ export function startGithubCompareStandin(): GithubCompareStandin {
         }
         return Response.json({ sha: hit, commit: { message: "x" } });
       }
+      m = /^\/repos\/nemarDatasets\/([^/]+)\/contents\/(.+)$/.exec(url.pathname);
+      if (m) {
+        const path = (m[2] as string).split("/").map(decodeURIComponent).join("/");
+        const hit = files.get(`${m[1]}@${url.searchParams.get("ref")}:${path}`);
+        if (hit === undefined) return Response.json({ message: "Not Found" }, { status: 404 });
+        if (typeof hit !== "string") {
+          if ("body" in hit) return Response.json(hit.body);
+          return new Response("{}", { status: hit.http });
+        }
+        const content = Buffer.from(hit, "utf8").toString("base64");
+        return Response.json({ type: "file", encoding: "base64", size: hit.length, path, content });
+      }
       m = /^\/repos\/nemarDatasets\/([^/]+)\/compare\/(.+)$/.exec(url.pathname);
       if (m) {
         const hit = compares.get(`${m[1]}/${decodeURIComponent(m[2] as string)}`);
@@ -181,6 +204,7 @@ export function startGithubCompareStandin(): GithubCompareStandin {
     tag: (repo, name, answer) => void tags.set(`${repo}/${name}`, answer),
     branch: (repo, name, commit) => void branches.set(`${repo}/${name}`, commit),
     compare: (repo, base, head, answer) => void compares.set(`${repo}/${base}...${head}`, answer),
+    contents: (repo, ref, path, answer) => void files.set(`${repo}@${ref}:${path}`, answer),
     index: (id, answer) => void indexes.set(id, answer),
     stall: (ms, scope = "all") => {
       stallMs = ms;
@@ -190,6 +214,7 @@ export function startGithubCompareStandin(): GithubCompareStandin {
       tags.clear();
       branches.clear();
       compares.clear();
+      files.clear();
       indexes.clear();
       log.length = 0;
       stallMs = 0;
