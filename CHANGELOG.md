@@ -13,7 +13,7 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
-## Unreleased
+## 0.10.55 - 2026-11-27
 
 ### Fixed
 
@@ -23,6 +23,11 @@ earlier releases are described only by their generated notes.
   Creation checks the policy's headroom before claiming an id and refuses with 503 when it is full; a carve-out or S3 permission that still fails rolls the create back (repository, S3 permission and record deleted).
   A policy written above 80% (and again above 95%) of the cap, a refused create or visibility change, and a rollback that left something behind are logged with stable tags and mailed to the admins, at most once a day per condition.
 - **A new admin mail category, `storage_alerts` (`nemar admin users email-preferences update --storage-alerts <bool>`), on by default, carries those alerts.**
+
+### Changed
+
+- **The compute tenant sweep stays quiet while Tapis is unconfigured and no Tapis job is live (#2501).**
+  It logs one info line in the weekly pass instead of an error each run; a live Tapis job or an unreadable count is still an error.
 
 ### Added
 
