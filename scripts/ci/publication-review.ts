@@ -102,13 +102,19 @@ const DATASET_ID = /^(nm|xx|on)\d{6}$/;
 export const MAX_TOKENS = 128_000;
 
 /**
- * The confirming run's budget (ADR 0139, decision 1): effort `max` thinks as long as it needs, so
- * it is given room the first run is not, and it streams (the SDK refuses a request this large that
- * does not). The deadline keeps it inside the workflow's 20-minute limit with the steps before it;
- * a run that reaches it ends `model_unavailable`, and a confirming run that does not report never
- * confirms anything.
+ * The confirming run's budget (ADR 0139, decision 1): the same 128,000 tokens as the first run,
+ * because both think at `max` and thinking counts toward the budget (64,000 cut a real review off,
+ * 2026-11-27). Both stream (the SDK refuses a request this large that does not).
  */
-export const CONFIRM_MAX_TOKENS = 64_000;
+export const CONFIRM_MAX_TOKENS = 128_000;
+
+/**
+ * Every call's deadline, the first run's and the confirming run's. It keeps the call inside the
+ * workflow's 20-minute limit with the steps before it; a run that reaches it ends
+ * `model_unavailable`, and a confirming run that does not report never confirms anything. A job
+ * that still runs past 20 minutes is cancelled, reports `workflow_failed`, and the Worker's
+ * 30-minute watchdog is behind that.
+ */
 export const CONFIRM_DEADLINE_MS = 12 * 60_000;
 
 /** How one call is made: the review's own effort and budget, or the confirming run's. */

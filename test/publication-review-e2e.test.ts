@@ -902,6 +902,7 @@ describe("a request whose review fails, under the automatic denial (ADR 0139)", 
       const asked2 = JSON.parse(modelRequests[1] as string);
       expect(asked2).toMatchObject({
         model: "claude-sonnet-5-5",
+        max_tokens: 128_000,
         output_config: { effort: "max" },
         stream: true,
       });

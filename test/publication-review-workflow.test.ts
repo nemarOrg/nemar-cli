@@ -1528,8 +1528,19 @@ describe("the shell steps, run for real", () => {
       async fetch(req) {
         const text = await req.text();
         modelRequests.push(text);
+        const body = JSON.parse(text) as Record<string, unknown>;
+        // The review's own request, or nothing: a stand-in that answered anything would let a
+        // wrong model, effort or a non-streamed call pass this chain.
+        if (
+          body.model !== "claude-haiku-5-5" ||
+          (body.output_config as { effort?: string } | undefined)?.effort !== "max" ||
+          body.stream !== true ||
+          "tools" in body
+        ) {
+          return new Response("unexpected request", { status: 400 });
+        }
         return replyFor(
-          JSON.parse(text) as Record<string, unknown>,
+          body,
           standInMessage(
             JSON.stringify({
               questions: {
