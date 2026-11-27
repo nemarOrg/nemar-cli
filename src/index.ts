@@ -42,6 +42,7 @@ import {
 } from "./lib/argv-shadowing.js";
 import { runComplete } from "./lib/completion/run.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
+import { isLocalOnlyCommand, isLocalOnlyInvocation } from "./lib/dataset-screen.js";
 import {
   enableDebug,
   getLastWriteFailureReason,
@@ -331,6 +332,8 @@ exitIfMovedCommand(program, rawArgs);
 program.hook("preAction", async (_root, actionCommand) => {
   // A moved-command stub runs nothing and makes no request, not even this one (ADR 0135).
   if (isMovedCommandStub(actionCommand)) return;
+  // A command that reads this machine only (`nemar dataset screen`) sends nothing, not this either.
+  if (isLocalOnlyCommand(actionCommand)) return;
   // An automatic re-pull run asks for no notice: the request carries the NEMAR key, and the run
   // checks where its API is before it sends anything there (lib/repull/execute/automatic.ts).
   if (isAutomaticInvocation(rawArgs)) return;
@@ -391,7 +394,10 @@ async function main() {
     await primeEnvironmentSnapshot();
   }
 
-  const pendingUpdate = isCredentialHelper ? null : await initUpdateCheck();
+  // A command that reads this machine only (`nemar dataset screen`) neither asks the registry nor
+  // writes the update cache: no request, no file.
+  const pendingUpdate =
+    isCredentialHelper || isLocalOnlyInvocation(program, rawArgs) ? null : await initUpdateCheck();
 
   if (pendingUpdate) {
     // postAction fires after commands; exit handler covers --help/--version

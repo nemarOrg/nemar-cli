@@ -56,6 +56,7 @@ import {
   PUBLICATION_REVIEW_MODEL,
 } from "../scripts/ci/publication-review-prompt";
 import type { Tree } from "../scripts/identifier-screen-ci-lib";
+import { formatCoverage } from "../shared/identifier-readers";
 import {
   DOCUMENT_BYTE_CEILING,
   DOCUMENT_CHAR_CAPS,
@@ -799,6 +800,38 @@ describe("the structural summary is counts and closed words", () => {
     // With no recording counted, the facts lower the first question to at best unknown.
     const report = await reviewOf(ds);
     expect(answersOf(report).answers.complete_and_honest).toBe("unknown");
+  });
+
+  test("BrainVision and NIRx count under the extensions their readers match (phase A2)", async () => {
+    const ds = newDataset("summary-text-headers", {
+      ...files([
+        "sub-b1/eeg/sub-b1_task-r_eeg.vhdr",
+        "sub-b1/eeg/sub-b1_task-r_eeg.vmrk",
+        "sub-b1/eeg/sub-b1_task-r_eeg.eeg",
+        "sub-b1/nirs/NIRS-2019-10-02_003.hdr",
+        "sub-b1/nirs/NIRS-2019-10-02_003.inf",
+        "sub-b1/nirs/NIRS-2019-10-02_003.wl1",
+        "sub-b1/nirs/NIRS-2019-10-02_003.wl2",
+        "sub-b1/nirs/NIRS-2019-10-02_003.dat",
+      ]),
+      ...WITHOUT_DEFAULT_SUBJECT,
+    });
+    const s = structuralSummary(ds.dir, await readTree(ds.dir, ds.head));
+    // The companions (.eeg, .wl1, .wl2, .dat) are part of their header's recording.
+    expect(s.formats).toEqual({ ".vhdr": 1, ".vmrk": 1, ".hdr": 1, ".inf": 1 });
+    expect(s.recordings).toBe(4);
+    expect(Object.keys(s.formats).every((k) => REVIEW_FORMATS.has(k))).toBe(true);
+  });
+
+  test("a raw .zip counts once, under the ZIP reader's .zip, never as unscreened (phase A6)", async () => {
+    const zip = "sub-z1/eeg/sub-z1_task-r_eeg.zip";
+    const ds = newDataset("summary-zip", { ...files([zip]), ...WITHOUT_DEFAULT_SUBJECT });
+    const s = structuralSummary(ds.dir, await readTree(ds.dir, ds.head));
+    expect(s.formats).toEqual({ ".zip": 1 });
+    expect(s.recordings).toBe(1);
+    // The screen's coverage rule leaves it out of unscreened: its reader counts it.
+    expect(formatCoverage([zip])).toEqual({ byReader: { zip: 1 }, unscreened: {} });
+    // What is inside is the screen's to say, as `zip:<ext>`; the summary reads paths only.
   });
 
   test("no path, file name or label can reach the summary's output", async () => {

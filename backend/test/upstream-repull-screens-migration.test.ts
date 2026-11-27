@@ -32,8 +32,15 @@ import { MIGRATIONS_DIR, applyMigrations, migrationFiles } from "./helpers/minif
 import { startRepullGitHub } from "./helpers/repull-github-standin";
 import { type Row, SHA, rowAt } from "./helpers/repull-rows";
 
-const FILE = "0106_upstream_repull_screens.sql";
-const SQL = readFileSync(join(MIGRATIONS_DIR, FILE), "utf-8");
+/**
+ * The table's words as they stand. Migration 0106 created it; 0155 rebuilt it to add
+ * `partially-screened` (report version 2) to both status CHECKs, so the words are pinned against
+ * the rebuild, which repeats every other line of 0106 verbatim.
+ */
+const WORDS_SQL = readFileSync(
+  join(MIGRATIONS_DIR, "0155_repull_screens_partially_screened.sql"),
+  "utf-8",
+);
 
 const REPORT = '{"version":1,"scanner":"identifier-scan@abcdef1","head":"x"}';
 
@@ -163,21 +170,21 @@ const words = (s: string) => [...s.matchAll(/'([a-z0-9-]+)'/g)].map((m) => m[1] 
 
 describe("the file says the shared words", () => {
   test("the states are the screen's states, and pending and unreported are the waiting ones", () => {
-    const check = /status TEXT NOT NULL CHECK \(status IN \(([^)]*)\)\)/.exec(SQL);
+    const check = /status TEXT NOT NULL CHECK \(status IN \(([^)]*)\)\)/.exec(WORDS_SQL);
     expect(words(check?.[1] ?? "").sort()).toEqual(
       ["pending", ...DATASET_STATUSES, "error", "unreported"].sort(),
     );
   });
 
   test("an acknowledgment is allowed on exactly the states whose gate asks for one", () => {
-    const check = /CHECK \(ack_at IS NULL OR status IN \(([^)]*)\)\)/.exec(SQL);
+    const check = /CHECK \(ack_at IS NULL OR status IN \(([^)]*)\)\)/.exec(WORDS_SQL);
     const asking = DATASET_STATUSES.filter((s) => screenGate(s) === "acknowledge");
     expect(asking.length).toBeGreaterThan(0);
     expect(words(check?.[1] ?? "").sort()).toEqual([...asking].sort());
   });
 
   test("the two pull requests are the re-pull's two", () => {
-    const check = /pr TEXT NOT NULL CHECK \(pr IN \(([^)]*)\)\)/.exec(SQL);
+    const check = /pr TEXT NOT NULL CHECK \(pr IN \(([^)]*)\)\)/.exec(WORDS_SQL);
     expect(words(check?.[1] ?? "").sort()).toEqual([...REPULL_PULL_REQUESTS].sort());
   });
 });

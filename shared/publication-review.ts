@@ -567,9 +567,12 @@ export interface CoverageTally {
 export const COVERAGE_SOURCES = ["screen_v1", "screen_v2", "none"] as const;
 export type CoverageSource = (typeof COVERAGE_SOURCES)[number];
 
-/** A coverage key: a reader id (version 2) or a format the screen names (version 1). Never a path. */
+/**
+ * A coverage key: a reader id (version 2) or a format the screen names, as the screen report's
+ * own format keys are spelled, an archive's inner format (`zip:.xdf`) included. Never a path.
+ */
 export const COVERAGE_KEY =
-  /^(?:[a-z][a-z0-9-]{0,31}|\.[a-z0-9]{1,12}(?:\.[a-z0-9]{1,12})?\/?|\(no extension\))$/;
+  /^(?:[a-z][a-z0-9-]{0,31}|(?:zip:)?(?:\.[a-z0-9]{1,12}(?:\.[a-z0-9]{1,12})?\/?|\(no extension\)))$/;
 /** The most coverage keys an inputs body carries; a screen names far fewer. */
 export const MAX_COVERAGE_KEYS = 64;
 

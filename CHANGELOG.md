@@ -15,6 +15,29 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.43 - 2026-11-26
+
+### Publication queue: evidence (epic #2182)
+
+**Release note.**
+The identifier screen now reads EEG, fNIRS and MATLAB formats beyond EDF and BDF, so far fewer datasets end with recordings that were not screened.
+The Worker accepts screen report version 2 in the same release that starts emitting it; a request screened in the deploy window is re-screened with `nemar admin dataset publish screen-batch`.
+A new CLI that sends a version 2 upload preflight to an older Worker gets a refusal: the CLI prints a warning that the preflight was not recorded (`warnUnrecordedPreflight` in `src/lib/upload/transfer.ts`), and the upload continues.
+
+Owner steps after the release:
+
+- **O2, the quiet re-screen of the queue.** Run `nemar admin dataset publish screen-batch --all-active` as a dry run and read the count, then `nemar admin dataset publish screen-batch --all-active --per-minute 4 --apply`. Wait for the digest, then compare it with the counts in `.context/plans/publication-queue/plan.md`.
+- **O5, SNIRF birth dates in queued conversions.** 29 of 296 public SNIRF files carry a day-precision `DateOfBirth` (ds004514, ds004541, ds005963), so queued conversions that carry one will block. Tell the depositor to scrub it, and consider notifying OpenNeuro.
+
+- **Coverage contract and reader registry (#2374).** Each recording format has a bounded reader (`shared/identifier-readers.ts`) with its own read, byte and time limits over a page-cached range source. Every read ends complete, partial (with a reason), failed, or not read, and one shared builder serves the fleet scan, the CI screen and the upload preflight.
+- **Screen report version 2.** It adds counts per reader (`read_by_format`), missing companions and reader versions. `clean` and `dates-only` now require every recording format to have a reader and every file to be read completely. `partially-screened` replaces `clean-edf-only-others-unscreened` in new reports; both gate to acknowledgment, and `--acknowledge-identifier-preflight` still accepts the old word. Version 1 reports render as before.
+- **Remedies with every finding.** The screen's states, finding kinds and incomplete reasons come from one set of copy tables (`shared/identifier-screen-copy.ts`), each with a remedy and a docs.nemar.org anchor; the identifier-screening docs page is generated from them (#2398), and a test fails when an anchor is missing from the page.
+- **New readers.** BrainVision (`.vhdr`, `.vmrk`) and NIRx (`.hdr`, `.inf`) text headers (#2381); SNIRF and generic HDF5 (`.snirf`, `.h5`, `.hdf5`) through a bounded, dependency-free HDF5 metadata walker checked against h5py (#2378, #2385); EEGLAB `.set` (classic and v7.3), Homer `.nirs` and generic `.mat` through a bounded MAT v5 walker (#2395); and ZIP archives, screened by entry name with small inner recordings read by their own reader (#2392). No reader reads a signal array.
+- **`nemar dataset screen [path] [--json] [--committed]` (#2389).** It reproduces the publication screen on the depositor's own copy, with the server's readers and limits, no login, no network and no write. It says what a local run cannot see. Exit status is 0 for clean, dates-only or no-recordings, 3 for direct identifiers, and 2 otherwise.
+- **Memory on the depositor's machine.** `nemar dataset screen` and the upload preflight read at most 2 MAT/EEGLAB, HDF5 (SNIRF, NWB) or ZIP files at once, and other files 16 at once; the CI screen is unchanged.
+- **Review coverage keys.** The review's coverage counts now carry an archive's unread inner formats (`zip:.xdf`), which the Worker's reading of the screen report dropped before.
+- **Migration 0155** rebuilds `upstream_repull_screens` so that both status checks accept `partially-screened`; rows, ids, the index and the foreign key carry over.
+
 ## 0.10.42 - 2026-11-26
 
 ### Publication queue: decide (epic #2182, ADR 0139)

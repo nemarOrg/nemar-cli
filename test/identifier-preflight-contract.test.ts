@@ -7,6 +7,10 @@
  * identity field, a scanner string with a name in it) is refused with a fixed word that does not
  * quote it; an acknowledgment is present exactly when the verdict needs one; and the words shown
  * to the uploader are the publication screen's words under the preflight's own name.
+ *
+ * This suite holds VERSION 1, the shape every stored preflight before report version 2 has: it
+ * must keep reading back, and saying what it said, unchanged. Version 2 is held in
+ * `identifier-coverage-contract.test.ts`.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -30,6 +34,15 @@ import {
   parseUploaderPreflight,
   screenGate,
 } from "../shared/identifier-screen-report";
+
+/** Version 1 never said `partially-screened`. */
+const V1_STATUSES = DATASET_STATUSES.filter((s) => s !== "partially-screened");
+const V1_ACKNOWLEDGEABLE = PREFLIGHT_ACKNOWLEDGEABLE.filter((s) => s !== "partially-screened");
+const parseV1 = (x: unknown) => parsePreflightScan(x, 1);
+const describeV1 = (
+  scan: Parameters<typeof describePreflight>[0],
+  via: Parameters<typeof describePreflight>[1],
+) => describePreflight(scan, via, 1);
 
 /** A scan whose counts agree with `status`, for every status the scanner can conclude. */
 function scanFor(status: DatasetStatus): Record<string, unknown> {
@@ -99,7 +112,7 @@ function refusal(input: unknown): string {
 
 describe("parseUploaderPreflight: what passes", () => {
   test("a record of every status the scanner can conclude round-trips unchanged", () => {
-    for (const status of DATASET_STATUSES) {
+    for (const status of V1_STATUSES) {
       const input = record(status);
       expect(parseUploaderPreflight(input)).toEqual(input as unknown as UploaderPreflight);
     }
@@ -107,6 +120,7 @@ describe("parseUploaderPreflight: what passes", () => {
 
   test("the acknowledgeable verdicts are exactly the publication gate's acknowledge set", () => {
     const expected: DatasetStatus[] = [
+      "partially-screened",
       "clean-edf-only-others-unscreened",
       "not-screened",
       "review",
@@ -134,7 +148,7 @@ describe("parseUploaderPreflight: what passes", () => {
 
 describe("parseUploaderPreflight: what is refused, without quoting it", () => {
   test("a verdict that needs an acknowledgment cannot be stored without one", () => {
-    for (const status of PREFLIGHT_ACKNOWLEDGEABLE) {
+    for (const status of V1_ACKNOWLEDGEABLE) {
       expect(refusal(record(status, { acknowledged_via: null }))).toBe("preflight-ack");
     }
   });
@@ -209,7 +223,7 @@ describe("parseUploaderPreflight: what is refused, without quoting it", () => {
   });
 
   test("the version and the shape are checked", () => {
-    expect(refusal(record("clean", { version: 2 }))).toBe("preflight-version");
+    expect(refusal(record("clean", { version: 3 }))).toBe("preflight-version");
     expect(refusal([record("clean")])).toBe("preflight-shape");
     expect(refusal(null)).toBe("preflight-shape");
     expect(refusal(record("clean", { scan: "clean" }))).toBe("scan-shape");
@@ -238,8 +252,8 @@ describe("parseUploaderPreflight: what is refused, without quoting it", () => {
 
 describe("parsePreflightScan", () => {
   test("is the scan half of the record, refused the same way", () => {
-    expect(parsePreflightScan(scanFor("review")).status).toBe("review");
-    expect(() => parsePreflightScan({ ...scanFor("review"), id: "nm000186" })).toThrow(ReportError);
+    expect(parseV1(scanFor("review")).status).toBe("review");
+    expect(() => parseV1({ ...scanFor("review"), id: "nm000186" })).toThrow(ReportError);
   });
 });
 
@@ -253,9 +267,9 @@ describe("folding into the vocabulary works on a preflight scan", () => {
       unscreened_formats: { ".dat_backup_of_subject": 1 },
       read_failures: { "json/error-RangeError": 1 },
     };
-    expect(() => parsePreflightScan(raw)).toThrow(ReportError);
+    expect(() => parseV1(raw)).toThrow(ReportError);
     const folded = foldOddFailures(foldOddFormats(raw));
-    const parsed = parsePreflightScan(folded);
+    const parsed = parseV1(folded);
     expect(parsed.unscreened_formats).toEqual({ [OTHER_FORMAT]: 1 });
     expect(parsed.read_failures).toEqual({ "json/error-rangeerror": 1 });
   });
@@ -295,9 +309,9 @@ describe("a preflight names formats from a closed list only", () => {
 
 describe("describePreflight", () => {
   test("says each verdict in the publication screen's words, under its own name", () => {
-    for (const status of DATASET_STATUSES) {
+    for (const status of V1_STATUSES) {
       const screen = describeScreen(status, null);
-      const preflight = describePreflight(parsePreflightScan(scanFor(status)), null);
+      const preflight = describeV1(parseV1(scanFor(status)), null);
       expect(preflight.headline).toBe(
         screen.headline.replace(/^Identifier screen: /, "Identifier preflight: "),
       );
@@ -306,22 +320,22 @@ describe("describePreflight", () => {
   });
 
   test("states the counts and how the uploader acknowledged, and nothing else", () => {
-    const scan = parsePreflightScan(scanFor("clean-edf-only-others-unscreened"));
-    const viaFlag = describePreflight(scan, "flag");
+    const scan = parseV1(scanFor("clean-edf-only-others-unscreened"));
+    const viaFlag = describeV1(scan, "flag");
     expect(viaFlag.lines).toEqual([
       "Files: 12; EDF/BDF headers read: 4 of 4.",
       "Not screened (format x files): .vhdr x2.",
       "Acknowledged by the uploader with --acknowledge-identifier-preflight.",
     ]);
-    expect(describePreflight(scan, "prompt").lines.at(-1)).toBe(
+    expect(describeV1(scan, "prompt").lines.at(-1)).toBe(
       "Acknowledged by the uploader at the prompt.",
     );
-    expect(describePreflight(scan, null).lines).toHaveLength(2);
+    expect(describeV1(scan, null).lines).toHaveLength(2);
   });
 
   test("dates alone: the same clean headline and tone, the counts, then the date warning", () => {
-    const scan = parsePreflightScan(scanFor("dates-only"));
-    const d = describePreflight(scan, null);
+    const scan = parseV1(scanFor("dates-only"));
+    const d = describeV1(scan, null);
     expect(d.headline).toBe("Identifier preflight: clean (acquisition dates only)");
     expect(d.tone).toBe("ok");
     expect(d.lines).toEqual([
@@ -338,12 +352,12 @@ describe("describePreflight", () => {
   });
 
   test("the warning comes before the acknowledgment lines, and only when a date was counted", () => {
-    const review = parsePreflightScan({
+    const review = parseV1({
       ...scanFor("review"),
       findings_by_kind: { "image-or-document-file": 1, "acq-time-dated": 2 },
     });
     const warning = dateWarningLines({ findings_by_kind: { "acq-time-dated": 2 } });
-    expect(describePreflight(review, "flag").lines).toEqual([
+    expect(describeV1(review, "flag").lines).toEqual([
       "Files: 12; EDF/BDF headers read: 4 of 4.",
       "Findings by kind: image-or-document-file x1, acq-time-dated x2.",
       ...warning,
@@ -353,7 +367,7 @@ describe("describePreflight", () => {
 
   test("over every status the parser accepts, a counted date warns and no date does not", () => {
     const isDate = ([kind]: [string, number]) => DATE_KINDS.has(kind as never);
-    for (const status of DATASET_STATUSES) {
+    for (const status of V1_STATUSES) {
       const plain = scanFor(status) as { findings_by_kind: Record<string, number> };
       const plainDates = Object.entries(plain.findings_by_kind)
         .filter(isDate)
@@ -364,9 +378,9 @@ describe("describePreflight", () => {
       };
       // `clean` cannot carry a finding at all: the contract refuses a status cleaner than its counts.
       if (status === "clean") {
-        expect(() => parsePreflightScan(withDates)).toThrow();
+        expect(() => parseV1(withDates)).toThrow();
       } else {
-        const lines = describePreflight(parsePreflightScan(withDates), null).lines;
+        const lines = describeV1(parseV1(withDates), null).lines;
         const warned = lines.filter(isDateWarningLine);
         // The count is the dates there were plus the two added, and a lower bound when incomplete.
         const bound = status === "unchecked" ? "at least " : "";
@@ -378,17 +392,14 @@ describe("describePreflight", () => {
       const without = Object.fromEntries(
         Object.entries(plain.findings_by_kind).filter((entry) => !isDate(entry)),
       );
-      const bare = describePreflight(
-        parsePreflightScan({ ...plain, findings_by_kind: without }),
-        null,
-      );
+      const bare = describeV1(parseV1({ ...plain, findings_by_kind: without }), null);
       expect(bare.lines.some(isDateWarningLine)).toBe(false);
     }
   });
 
   test("a dates-only record whose counts were lost still warns, without a count", () => {
-    const lost = parsePreflightScan({ ...scanFor("dates-only"), findings_by_kind: {} });
-    const lines = describePreflight(lost, null).lines;
+    const lost = parseV1({ ...scanFor("dates-only"), findings_by_kind: {} });
+    const lines = describeV1(lost, null).lines;
     expect(lines.filter(isDateWarningLine)).toEqual(dateWarningLines({ status: "dates-only" }));
     expect(lines.find(isDateWarningLine)).toBe(
       "Warning: acquisition dates finer than year and month were found in recording headers or scans tables.",
@@ -396,7 +407,7 @@ describe("describePreflight", () => {
   });
 
   test("a direct finding is described by kind and count", () => {
-    const d = describePreflight(parsePreflightScan(scanFor("direct-identifiers")), null);
+    const d = describeV1(parseV1(scanFor("direct-identifiers")), null);
     expect(d.headline).toBe("Identifier preflight: FOUND IDENTIFIERS");
     expect(d.tone).toBe("stop");
     expect(d.lines).toContain("Findings by kind: edf-patient-name x4.");
