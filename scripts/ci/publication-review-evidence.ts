@@ -42,6 +42,11 @@ import { formatCoverage, readerMatch } from "../../shared/identifier-readers";
 import type { FindingKind } from "../../shared/identifier-scan";
 import type { LicenseFileFact, MatcherWord } from "../../shared/license-file";
 import { type NormalizedLicense, normalizeLicense } from "../../shared/license-lineage";
+import {
+  type NameUpstreamResult,
+  type UpstreamTitleSource,
+  nameFollowsUpstream,
+} from "../../shared/name-follows-upstream";
 import { SEMVER } from "../../shared/pr-review";
 import {
   type BidsState,
@@ -612,6 +617,8 @@ export interface EvidenceParts {
   v3?: {
     license_file: LicenseFileFact;
     description_keys_not_shown_names: DescriptionKeyNotShownWord[];
+    /** Whether the Name follows an upstream dataset's title; absent when no sources were served. */
+    name_upstream?: NameUpstreamResult;
   };
 }
 
@@ -619,6 +626,18 @@ export interface EvidenceParts {
 export interface EvidenceInputs {
   presend: InputPreSendResult;
   lineage: ReviewLineage | null;
+  /**
+   * The lineage's sources as the Worker served them, which the name rule compares the Name with
+   * (`shared/name-follows-upstream.ts`). Absent where none were served (the calibration), and then
+   * the block carries no `name_upstream`.
+   */
+  sources?: readonly UpstreamTitleSource[];
+}
+
+/** The `Name` of `dataset_description.json` as text, or null when there is none to read. */
+function nameOf(descriptionText: string | null): string | null {
+  const desc = parseObject(descriptionText);
+  return desc !== null && typeof desc.Name === "string" ? desc.Name : null;
 }
 
 /**
@@ -867,6 +886,16 @@ export function evidenceFromDocuments(
         docs.dataset_description.text,
         checked.states.dataset_description,
       ),
+      // The name rule (the owner's of 2026-11-27): the whole raw Name, never the cut the model sees,
+      // against the sources the Worker served. Only beside a lineage, which the sources belong to.
+      ...(inputs.inputs?.sources !== undefined && inputs.inputs.lineage !== null
+        ? {
+            name_upstream: nameFollowsUpstream(
+              nameOf(docs.dataset_description.text),
+              inputs.inputs.sources,
+            ),
+          }
+        : {}),
     },
   });
   return {
