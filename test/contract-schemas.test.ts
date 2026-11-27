@@ -655,6 +655,19 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     // Their responses are in `compute-partner.ts`, open.
     "compute-partner-request.ts",
     "compute-runner.ts",
+    // The live progress object (ADR 0134, epic #2324 phase 2): validated by the Worker as it arrives
+    // in a heartbeat or on the job-token route; a mistyped key must be refused, not stripped. Its one
+    // response, ProgressReportResponseSchema, is open.
+    "compute-progress.ts",
+    // The quality plugin manifest (ADR 0134, epic #2324 phase 2): it describes software NEMAR reviews,
+    // and an unknown key is a bug to refuse. It has no response.
+    "plugin-manifest.ts",
+    // The standalone launcher's documents (ADR 0134 decision 8, epic #2324 phase 6): the local launch
+    // specification, the recipe's progress file and the results report are read by the launcher as they
+    // come in; a mistyped key must be refused, not stripped. They have no response.
+    "compute-local-launch.ts",
+    "compute-recipe-progress.ts",
+    "compute-results-report.ts",
   ]);
 
   const HEX = "a".repeat(64);
@@ -762,6 +775,10 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     BundleResponseSchema: {
       side: "lenient",
       valid: () => ({ url: "https://r2.example.test/b", expires_at: "2026-11-03T12:00:00Z" }),
+    },
+    ServingIndexResponseSchema: {
+      side: "lenient",
+      valid: () => ({ url: "https://r2.example.test/s", expires_at: "2026-11-03T12:00:00Z" }),
     },
     OutputsResponseSchema: {
       side: "lenient",
@@ -1100,12 +1117,44 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     "RunnerCompleteRequestSchema",
   ];
 
+  /** The strict schemas of `compute-progress.ts` and `plugin-manifest.ts` (ADR 0134), not in CLASSIFIED. */
+  const PROGRESS_REQUEST_NAMES = [
+    "ProgressSchema",
+    "ProgressCheckpointCountsSchema",
+    "ProgressFailureSchema",
+    "PluginManifestSchema",
+    "PluginMetricSchema",
+    "PluginViewSchema",
+    "PluginViewRoleSchema",
+    "PluginViewProducedRoleSchema",
+    "PluginViewRecipeRoleSchema",
+    "PluginViewColumnSchema",
+    "LocalLaunchSpecSchema",
+    "LocalLaunchDatasetSchema",
+    "RecipeProgressSchema",
+    "RecipeCheckpointMapItemSchema",
+    "RecipeCheckpointMapSchema",
+    "RecipeProgressRunningSchema",
+    "ResultsReportSchema",
+    "ResultsReportVerificationSchema",
+    "ResultsReportTableSchema",
+    "ResultsReportCheckpointsSchema",
+  ];
+
+  test("every listed strict request name is a schema exported by shared/contract/index", async () => {
+    const index = (await import("../shared/contract/index")) as Record<string, unknown>;
+    for (const name of [...RUNNER_REQUEST_NAMES, ...PROGRESS_REQUEST_NAMES]) {
+      expect(index[name], name).toBeInstanceOf(z.ZodType);
+    }
+  });
+
   /** The names a response schema must never be built from. */
   const STRICT_NAMES = [
     ...Object.entries(CLASSIFIED)
       .filter(([, c]) => c.side === "strict")
       .map(([name]) => name),
     ...RUNNER_REQUEST_NAMES,
+    ...PROGRESS_REQUEST_NAMES,
   ];
 
   /**
@@ -1447,7 +1496,7 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
   ];
 
   test("the import guard flags every shape of taking a strict compute schema, and only those", () => {
-    expect(STRICT_NAMES).toHaveLength(15);
+    expect(STRICT_NAMES).toHaveLength(35);
     expect(IMPORT_PROBES.length).toBeGreaterThan(55);
     for (const [label, file, text, offends] of IMPORT_PROBES) {
       const found = strictComputeTakes(CONTRACT_DIR, file, text, STRICT_NAMES);
@@ -1535,10 +1584,10 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
 });
 
 describe("neuroschema dataset schema", () => {
-  test("pins the v0.4.1 envelope + required identity fields", () => {
-    expect(NEUROSCHEMA_VERSION).toBe("0.4.1");
+  test("pins the v0.6.0 envelope + required identity fields", () => {
+    expect(NEUROSCHEMA_VERSION).toBe("0.6.0");
     const ds = {
-      schema_version: "0.4.1",
+      schema_version: "0.6.0",
       doc_type: "dataset",
       dataset_id: "nm000108",
       name: "Test",
@@ -1550,7 +1599,7 @@ describe("neuroschema dataset schema", () => {
 
   test("rejects a wrong schema_version or empty modality", () => {
     const base = {
-      schema_version: "0.4.1",
+      schema_version: "0.6.0",
       doc_type: "dataset",
       dataset_id: "nm000108",
       name: "T",
@@ -1558,8 +1607,9 @@ describe("neuroschema dataset schema", () => {
       recording_modality: ["EEG"],
     };
     expect(() => neuroschemaDatasetSchema.parse({ ...base, schema_version: "0.2.0" })).toThrow();
-    // The previous release: the literal moved with the vendored bundle.
+    // The previous releases: the literal moved with the vendored bundle.
     expect(() => neuroschemaDatasetSchema.parse({ ...base, schema_version: "0.4.0" })).toThrow();
+    expect(() => neuroschemaDatasetSchema.parse({ ...base, schema_version: "0.5.0" })).toThrow();
     expect(() => neuroschemaDatasetSchema.parse({ ...base, recording_modality: [] })).toThrow();
   });
 });

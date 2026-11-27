@@ -60,6 +60,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { migrationPrefixProblems } from "./migration-prefixes";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const BACKEND = join(REPO_ROOT, "backend");
@@ -164,6 +165,13 @@ async function wrangler(args: string[]): Promise<{ ok: boolean; output: string }
 async function main(): Promise<void> {
   if (!existsSync(WRANGLER)) {
     console.error(`wrangler not found at ${WRANGLER}. Run 'bun install' in backend/ first.`);
+    process.exit(1);
+  }
+
+  const prefixProblems = migrationPrefixProblems(MIGRATIONS_DIR);
+  if (prefixProblems.length > 0) {
+    for (const problem of prefixProblems) console.error(problem);
+    console.error("wrangler tracks migrations by file name (scripts/migration-prefixes.ts).");
     process.exit(1);
   }
 

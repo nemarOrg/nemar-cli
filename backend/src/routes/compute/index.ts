@@ -2,8 +2,12 @@
  * The compute gateway's routes, mounted at `/compute` (epic #2005 phase A5, #2010; ADR 0118).
  *
  *   POST /compute/jobs/:id/bundle             the launcher, with its job token (no session)
+ *   POST /compute/jobs/:id/serving-index      the launcher, with its job token (no session): the staged
+ *                                             serving index (ADR 0141)
  *   POST /compute/jobs/:id/outputs            the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/outputs/complete   the launcher, with its job token (no session)
+ *   POST /compute/jobs/:id/progress           a NEMAR pipeline job on Tapis, with its job token: live
+ *                                             progress (ADR 0134, epic #2324 phase 2)
  *   POST /compute/jobs/:id/cancel             the job's owner, signed in: cancel it (a job that had already
  *                                             ended answers 200 with its state and `cancelled: false`)
  *   POST /compute/jobs/:id/links              the job's owner, signed in: 7-day links to the results,

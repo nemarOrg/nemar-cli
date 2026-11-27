@@ -1,0 +1,31 @@
+{
+  "categories": [
+    "Brain",
+    "Muscle",
+    "Eye",
+    "Heart",
+    "Line Noise",
+    "Channel Noise",
+    "Other"
+  ],
+  "classifier": "ICLabel",
+  "counts": [
+    8,
+    0,
+    5,
+    0,
+    4,
+    0,
+    1
+  ],
+  "n_components": 18,
+  "summed_variance_pct": [
+    27.7573,
+    0.0,
+    53.4874,
+    0.0,
+    16.7357,
+    0.0,
+    2.6655
+  ]
+}

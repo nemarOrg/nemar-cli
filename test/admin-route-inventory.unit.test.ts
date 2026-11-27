@@ -89,6 +89,15 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /compute/observer-runs": 1,
   "POST /compute/pipeline/run": 1,
   "GET /compute/pipeline/status": 1,
+  // Epic #2324 phase 4a (ADR 0134 decision 5): the grid, the coverage card and a run's drill-down; read only.
+  "GET /compute/pipeline/grid": 1,
+  "GET /compute/pipeline/coverage": 1,
+  "GET /compute/pipeline/runs/:stamp": 1,
+  // Epic #2324 phase B3: a run's quality (its derivative's word and its succeeded recordings).
+  "GET /compute/pipeline/runs/:stamp/quality": 1,
+  // Epic #2324 phase B3b: a run's quality record and files by stamp, canaries included. One handler: the
+  // router's middleware is the whole gate, and it must stay after the run's quality page.
+  "GET /compute/pipeline/runs/:stamp/quality/*": 1,
   // Portable compute, card DM-05: the owner's runner registry. `requireOwner` then the handler, each.
   "POST /compute/runners": 2,
   "GET /compute/runners": 2,
@@ -414,8 +423,15 @@ describe("admin route inventory", () => {
     expect(dispatches).toBeLessThan(byId);
   });
 
+  test("a run's quality views sit behind the router middleware, after the run's quality page", () => {
+    const paths = adminRoutes.routes.map((r) => `${r.method} ${r.path}`);
+    const views = paths.indexOf("GET /compute/pipeline/runs/:stamp/quality/*");
+    expect(views).toBeGreaterThan(paths.indexOf("GET /compute/pipeline/runs/:stamp/quality"));
+    expect(views).toBeGreaterThan(paths.lastIndexOf("ALL /*"));
+  });
+
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(279);
+    expect(adminRoutes.routes.length).toBe(284);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

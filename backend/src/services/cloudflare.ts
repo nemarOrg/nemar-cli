@@ -17,11 +17,15 @@
  * with the `Zone.Cache Purge` permission on the SCCN zone (`CLOUDFLARE_ZONE_ID`).
  */
 
+import { qualityCacheTag } from "../../../shared/contract/quality-route.js";
 import type { Bindings } from "../types/bindings.js";
 
 /** Cloudflare's single-file purge cap is 30 URLs per request on
  *  Free/Pro/Business plans; chunk larger lists to stay within it. */
 const PURGE_URLS_PER_REQUEST = 30;
+
+/** How long one purge request may take before it is abandoned and reported as failed. */
+export const PURGE_TIMEOUT_MS = 5000;
 
 export interface PurgeResult {
   /** True when every batch was accepted (or there was nothing to purge). */
@@ -57,7 +61,24 @@ export function normalizePurgeUrls(urls: string[]): string[] {
  * than erroring. Never throws.
  */
 export async function purgeCacheUrls(env: Bindings, urls: string[]): Promise<PurgeResult> {
-  const unique = normalizePurgeUrls(urls);
+  return postPurge(env, "files", normalizePurgeUrls(urls));
+}
+
+/**
+ * The Cloudflare API's origin: `https://api.cloudflare.com`, or a test's stand-in named by the global
+ * `NEMAR_CLOUDFLARE_API_URL` (the seam the other outbound services have). Never read from a request.
+ */
+function cloudflareApiBase(): string {
+  const override = (globalThis as { NEMAR_CLOUDFLARE_API_URL?: string }).NEMAR_CLOUDFLARE_API_URL;
+  return typeof override === "string" && override !== "" ? override : "https://api.cloudflare.com";
+}
+
+/** One purge request per batch of `files` (URLs) or `tags`; best effort, never throws. */
+async function postPurge(
+  env: Bindings,
+  kind: "files" | "tags",
+  unique: string[],
+): Promise<PurgeResult> {
   if (unique.length === 0) return { ok: true, submitted: 0 };
 
   if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ZONE_ID) {
@@ -68,7 +89,7 @@ export async function purgeCacheUrls(env: Bindings, urls: string[]): Promise<Pur
     };
   }
 
-  const endpoint = `https://api.cloudflare.com/client/v4/zones/${env.CLOUDFLARE_ZONE_ID}/purge_cache`;
+  const endpoint = `${cloudflareApiBase()}/client/v4/zones/${env.CLOUDFLARE_ZONE_ID}/purge_cache`;
   let allOk = true;
   let lastError: string | undefined;
 
@@ -80,7 +101,9 @@ export async function purgeCacheUrls(env: Bindings, urls: string[]): Promise<Pur
           Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ files: batch }),
+        body: JSON.stringify({ [kind]: batch }),
+        // A purge never holds its caller: an API that does not answer is abandoned and reported.
+        signal: AbortSignal.timeout(PURGE_TIMEOUT_MS),
       });
       if (!res.ok) {
         allOk = false;
@@ -95,6 +118,36 @@ export async function purgeCacheUrls(env: Bindings, urls: string[]): Promise<Pur
   }
 
   return { ok: allOk, submitted: unique.length, ...(lastError ? { detail: lastError } : {}) };
+}
+
+/**
+ * Purge everything cached under the given `Cache-Tag` values, in batches of 30. Same rules as
+ * {@link purgeCacheUrls}: skipped without the token and zone, never throws.
+ */
+export async function purgeCacheTags(env: Bindings, tags: string[]): Promise<PurgeResult> {
+  return postPurge(env, "tags", [...new Set(tags.filter((t) => t !== ""))]);
+}
+
+/**
+ * Purge a dataset's quality views (`Cache-Tag: nemar-dq-<id>`, ADR 0137 decision 7) after an unpublish, a
+ * withdrawal or a concealment, so Cloudflare's cache drops them at once rather than at their TTL. Called
+ * AFTER the D1 write that changed the dataset, never before it and never instead of it: best effort, it
+ * never throws and a failure is logged with a fixed word and the dataset id. The route's own D1 gate and
+ * epoch already refuse the dataset at the next request; this reaches entries the route would not read.
+ */
+export async function purgeQualityCache(
+  env: Bindings,
+  datasetId: string,
+  cause: "unpublish" | "withdraw" | "conceal" | "private",
+): Promise<void> {
+  try {
+    const result = await purgeCacheTags(env, [qualityCacheTag(datasetId)]);
+    if (!result.ok) {
+      console.error(`[quality] cache_purge_failed dataset=${datasetId} cause=${cause}`);
+    }
+  } catch {
+    console.error(`[quality] cache_purge_failed dataset=${datasetId} cause=${cause}`);
+  }
 }
 
 /**

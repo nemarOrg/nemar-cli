@@ -35,8 +35,7 @@ function indexedFiles(readme: string): string[] {
  * branch, and delete it in the first change that brings the file.
  */
 // 0127: reserved for PR #2210 (pull request review regardless of owner role); delete this entry when that ADR lands
-// 0137: reserved for the pipeline progress epic (branch feature/issue-2324-epic-pipeline-progress); delete this entry when that ADR lands
-const TOLERATED_GAPS: ReadonlySet<number> = new Set([127, 137]);
+const TOLERATED_GAPS: ReadonlySet<number> = new Set([127]);
 
 /** The numbers missing between 1 and the highest one present, ascending. */
 function findGaps(nums: number[]): number[] {

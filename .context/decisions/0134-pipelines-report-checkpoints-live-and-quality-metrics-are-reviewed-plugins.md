@@ -4,6 +4,15 @@
 **Date:** 2026-11-21
 **Owner:** Seyed Yahya Shirazi
 
+This record moves to accepted when the nemar-process and website epics that build the rest of it reach their integration branches; the nemar-cli epic (#2324) alone does not complete it.
+
+Partially superseded by [ADR 0137](0137-quality-views-are-declared-data-drawn-in-the-browser-and-no-figure-image-is-stored.md) (proposed) where this record names figures or a floor value:
+decisions 2, 6, 7 and 9 (the `figures` checkpoint, figure formats and caps, the first figure plugins, a plugin that re-reports a floor value, and the homes of figure rules), and the rejected alternative of array outputs.
+NEMAR stores no figure image: a quality view is declared data that a browser draws, and the word "figures" in decision 1 now reads "views".
+Every other part of this record stands, and its text below is unchanged.
+
+Amended 2026-11-26 (below, after decision 9): what a public page shows of `processing` and `signalJourney`, at both levels, is the promoted run, built on read.
+
 ## Context
 
 nemar-process runs NEMAR's own processing in containers, on workstation runners (ADR 0121) and on the supercomputer through Tapis (ADR 0118).
@@ -53,6 +62,7 @@ A new table holds, per pipeline stamp and checkpoint, the four counts, the cappe
 A running job with no report for three cadences (or no heartbeat, which already ends a runner lease) shows as `stalled`, distinct from `failed`.
 At completion the row is reconciled from the uploaded recordings table, and a disagreement between the live counts and the table is itself recorded, so a broken reporter is visible.
 The reconciled counts are what the backend writes to neuroschema (decision 9); `stalled` and the failure list stay operator views.
+`stalled` is derived when a row is read, never stored, so no schedule is added; reconciliation rides the stamp sync.
 
 **5. Admins get one dashboard, built like the Zarr one.**
 The admin overview gains a coverage card per recipe (datasets whose current version passed, out of those eligible) with a failure trend, as the Zarr conversion card has.
@@ -98,12 +108,39 @@ Nothing here enters neuroschema's core; it uses extension namespaces, which neur
 | Link to the signalJourney records (per recipe: location, SHA-256, signalJourney version; `processing_status` `in_progress` while reports arrive, then `completed` or `failed`) | neuroschema `signalJourney` |
 | Plugin manifest | nemar-cli `shared/contract/`, pinned by nemar-process; it declares software before a run and has no dataset or record to attach to |
 | Live progress object | nemar-cli `shared/contract/`, closed, pinned by nemar-process |
+| Local launch specification (`nemar.local-launch.v1`, the standalone launcher's job file) | nemar-cli `shared/contract/compute-local-launch.*`, closed, pinned by nemar-process; it shares the launch specification's members for what runs |
+| Recipe progress file (`nemar.recipe-progress.v1`, what a job writes for the launcher to read) | nemar-cli `shared/contract/compute-recipe-progress.*`, closed, pinned by nemar-process |
+| Results report (`nemar.results-report.v1`, the standalone launcher's local report) | nemar-cli `shared/contract/compute-results-report.*`, closed, pinned by nemar-process; its counts and failure items are the live progress object's shapes, arranged per checkpoint and held together by the same rules |
 | Step-to-checkpoint map | recipe code in nemar-process, printed by `nemar-recipe version`, held in nemar-cli's registry |
 | NEMAR's rules for signalJourney records (figure formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` extension namespace |
 
 nemar-cli already vendors neuroschema as one bundle in `shared/contract/neuroschema/`, rooted at the dataset document; the vendor script gains a record root (or validates extension objects by their `$id`), and nemar-process will validate against that bundle through its existing nemar-cli pin, so no third pin is added.
 neuroschema's extension-manager table is corrected so the NEMAR backend is the writer of `dataQuality`, `processing` and `signalJourney`.
 Proposed upstream to signalJourney, in order: checksum and size on output targets (signalJourney#7), the `nemar` namespace (signalJourney#8), a typed metric entry, and optionally a step `stage` label; none of these blocks the work here.
+
+## Amendment 2026-11-26: what a public page shows of a run
+
+Decision 9 places checkpoint outcomes and signalJourney links at two levels and does not say which run a public page shows.
+This amendment settles it; where it and the decisions above differ, it holds, and decision 4's "what the backend writes to neuroschema" reads "what the backend builds into neuroschema".
+
+1. **Both levels describe the promoted run.**
+   A public page's `processing` and `signalJourney` entries, at the dataset level and at the record level, describe each recipe's current public derivative: the run whose `dataQuality` the page shows (ADR 0137 decision 7), a `catalog` or `published` derivative, the newest by `stored_at`.
+   A run in progress, a `canary` run and a failed run show nothing on a public page, and no `in_progress` link is served; administrators see those runs on the grid and in the admin quality views.
+   The three namespaces of one public answer therefore describe one run: a recording's outcomes summed over the run equal the dataset counts, and a recording's link names the record its `dataQuality` entry came from.
+2. **Built on read from what is kept per run, never stored per recording.**
+   The dataset entry is built from the run's reconciled counts and the order it declared, with `stored` worked out from its stored derivative, and the dataset link from the link reconciliation keeps on the run's row.
+   A recording's entry and link are built on request from the derivative's recordings table and the recording's record, under the quality route's gate, edge cache and purge (`GET /<id>/quality/v1/<recipe>/processing/<recording>`); a recording that failed or was skipped has no record, so its link is `failed`.
+   D1 gains no row per recording (ADR 0137 decision 8).
+   Migration 0160 drops the latest-run documents of migration 0156, keeps each run's link on its run row, and keeps each derivative's checkpoint map, so a derivative made by a recipe version the registry has moved past is still read with its own map.
+3. **`stored` follows the last declared checkpoint.**
+   A recording is `stored` when it passed the recipe's last declared checkpoint (`quality` for both recipes) and its run's derivative was kept; otherwise `stored` is `skipped` with that checkpoint's code and step.
+   So a recording whose quality plugin was skipped shows `stored: skipped` with the plugin's code even though its other files were copied with the derivative: `stored` says the recording completed the recipe and was kept, not that some file of it exists.
+   The dataset counts follow the same rule (`passed` is the last checkpoint's `passed`), so the two levels agree.
+   It holds only while every plugin step sits in the last declared checkpoint, which the registry's tests require; a plugin at an earlier checkpoint would break the cascade rule of the record-level entry.
+4. **One row per recording.**
+   A recordings table that names one path twice is refused, by reconciliation (the run's outcome is `table_unreadable` and it has no counts, so no dataset `processing` entry is shown for it) and by the record-level read alike.
+5. **neuroschema's wording.**
+   neuroschema's `signalJourney` extension says a link describes "the latest run"; on NEMAR's public pages that is the latest run NEMAR shows, the promoted one, and each record-level answer names the derivative it came from.
 
 ## Consequences
 
@@ -112,7 +149,7 @@ Proposed upstream to signalJourney, in order: checksum and size on output target
 - The Tapis route is a new job-token surface; it accepts only the closed object and only for a job that is running, and it is revoked with the job token.
 - One more table, reconciled at completion, and one more admin page and card in the website.
 - Recipes gain a step-to-checkpoint map and the shared recipe layer a local progress file; a recipe version that changes the map changes its registry entry.
-- neuroschema gains a namespace (a minor version) and fills two placeholders (patch versions); `qc-summary.v1` is retired in favor of the `dataQuality` dataset document.
+- neuroschema 0.5.0, one minor release, adds the `processing` namespace and fills the `dataQuality` and `signalJourney` placeholders; nemar-cli re-vendors it with a record root and moves `NEUROSCHEMA_VERSION` to 0.5.0, a minor bump the live checks see; `qc-summary.v1` is retired in favor of the `dataQuality` dataset document.
 - Adding a metric is writing a plugin against one manifest, for NEMAR's team and for outside experts alike.
 - A plugin reaches NEMAR's pages only through review and the upstream-first rule, which is slower than dropping in a script, and deliberately so: the numbers NEMAR shows for a dataset are NEMAR's claim.
 - Job submission and reporting become one path across a person's machine, NEMAR's runners and the supercomputer, for NEMAR and for third parties; the cost is that the launch specification, the manifest, the progress object and the neuroschema extensions are public interfaces that must stay versioned and backward compatible, and the launcher needs a standalone mode.

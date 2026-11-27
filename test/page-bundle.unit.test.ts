@@ -144,6 +144,31 @@ describe("isBundleComplete", () => {
     ).toBe(false);
   });
 
+  test("all ok but the pipeline's namespaces could not be read -> false (#2375 review)", () => {
+    // The metadata stands without processing, signalJourney and dataQuality; caching it would pin a page
+    // without its quality for the whole SWR window.
+    expect(
+      isBundleComplete({
+        landing: ok({}),
+        metadata: ok({}),
+        summary: ok(null),
+        catalogRow: ok({}),
+        resolvedVersion: null,
+        pipelineDegraded: true,
+      }),
+    ).toBe(false);
+    expect(
+      isBundleComplete({
+        landing: ok({}),
+        metadata: ok({}),
+        summary: ok(null),
+        catalogRow: ok({}),
+        resolvedVersion: null,
+        pipelineDegraded: false,
+      }),
+    ).toBe(true);
+  });
+
   test("landing failed -> false", () => {
     // Today landing can only fail by exception (which throws past the
     // bundle assembler entirely), but pin the contract anyway in case a

@@ -11,7 +11,7 @@
  * existing nemar-cli + git-annex flow.
  */
 
-import { type Context, Hono } from "hono";
+import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { PUBLISHED_FILE_MISSING_ERROR } from "../../../shared/contract/data-plane";
 import { checkDataMissBudget } from "../middleware/rateLimit";
 import { recordAccess } from "../services/access-metrics";
@@ -23,6 +23,7 @@ import {
   MAX_SERVABLE_CHUNKS,
   resolveAnnexDelivery,
 } from "../services/chunked-delivery";
+import { readPipelineExtensions } from "../services/compute-pipeline-progress";
 import {
   type CatalogIndexBuildResult,
   type CatalogIndexRow,
@@ -98,6 +99,7 @@ import {
   resolveArchiveKey,
 } from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
+import { qualityHandler } from "./quality";
 
 export const dataRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -1717,7 +1719,7 @@ dataRoutes.get("/:datasetId/:version/summary.json", (c) => {
  *
  * Sibling to summary.json. Emitted by the central generate-records workflow
  * on `nemarDatasets/.github` at S3 key `<id>/version/v<X.Y.Z>-records.json`
- * (an array of neuroschema v0.4.1 `record` docs, one per primary signal
+ * (an array of neuroschema `record` docs, one per primary signal
  * file). The emitter owns the shape contract; this handler serves the bytes
  * verbatim. Same cache policy as summary.json: immutable per (id, version),
  * so a long s-maxage; a missing artifact is `no-store` 404 (no negative
@@ -1779,7 +1781,7 @@ dataRoutes.get("/:datasetId/:version/records.json", (c) => {
 });
 
 /**
- * GET /<id>/metadata.json -> dataset-level neuroschema v0.4.1 document.
+ * GET /<id>/metadata.json -> dataset-level neuroschema v0.6.0 document.
  *
  * Combines the D1 catalog row, the parsed nemar_metadata.json enrichment
  * payload, and (when at least one version exists) a derived BIDS index from
@@ -1894,6 +1896,22 @@ async function metadataJsonHandler(
     manifestDigest,
     githubOrg: ORG_NAME,
   });
+
+  // The dataset-level neuroschema `processing`, `signalJourney` and `dataQuality` entries of NEMAR's
+  // pipeline (ADR 0134 decision 9 as amended 2026-11-26, ADR 0137 decision 8, epic #2324), behind the same
+  // public gate as the rest of this document; never for a concealed deposit. All three describe each
+  // recipe's PROMOTED run (its current public derivative), built on read: a run in progress, a canary run
+  // and a failed run show nothing here. A read that fails leaves them out and the document stands. The page
+  // bundle serves the same read (`readPipelineExtensions`).
+  if (row.anonymous !== 1) {
+    try {
+      Object.assign(payload.extensions, await readPipelineExtensions(env.DB, datasetId));
+    } catch (err) {
+      console.warn(
+        `[data] metadata.json: pipeline documents unavailable dataset=${datasetId} class=${err instanceof Error ? err.name : typeof err}`,
+      );
+    }
+  }
 
   return new Response(JSON.stringify(payload), {
     headers: {
@@ -2118,6 +2136,48 @@ dataRoutes.get("/:datasetId/qa/*", (c) => {
   const rawPath = bidsPathAfterMount(new URL(c.req.url).pathname, [datasetId, "qa"]);
   if (rawPath === null) return notFound("Not found");
   return qaHandler(c.env, c.req.raw, datasetId, rawPath);
+});
+
+// ===========================================================================
+// Quality view route: /<id>/quality/v1/...  (ADR 0137 decision 7, epic #2324 B2)
+//
+// A recording's quality views and the files they declare, from a recipe's
+// current public derivative; `routes/quality.ts` holds the order of checks.
+// Registered BEFORE `/:datasetId/:version` so `quality` is never read as a
+// version, and `/<id>/quality` itself answers the route's own 404.
+// ===========================================================================
+// The website reads a quality answer from a nemar.org page, so cross-origin, and checks the body against
+// its `ETag` (the SHA-256 of the bytes) before it parses it (nemarOrg/website#596). The api's global cors()
+// sets `Access-Control-Expose-Headers` before the handler runs and that preset value overwrites any the
+// handler sets, so `ETag` is added here, after the handler, on this route only: the shared list (and so
+// every other api route, the admin quality views included) stays as it was (#2324).
+const QUALITY_EXPOSED = "ETag";
+export const exposeQualityEtag: MiddlewareHandler<{
+  Bindings: Bindings;
+  Variables: Variables;
+}> = async (c, next) => {
+  await next();
+  // A refusal carries no ETag, so it exposes nothing more than the shared list.
+  if (!c.res.ok) return;
+  const listed = c.res.headers.get("Access-Control-Expose-Headers");
+  const names = (listed ?? "").split(",").map((n) => n.trim().toLowerCase());
+  if (names.includes(QUALITY_EXPOSED.toLowerCase())) return;
+  c.res.headers.set(
+    "Access-Control-Expose-Headers",
+    listed ? `${listed},${QUALITY_EXPOSED}` : QUALITY_EXPOSED,
+  );
+};
+dataRoutes.use("/:datasetId/quality/*", exposeQualityEtag);
+
+dataRoutes.get("/:datasetId/quality", (c) =>
+  qualityHandler(c.env, c.req.raw, c.req.param("datasetId"), [], deferOf(c)),
+);
+
+dataRoutes.get("/:datasetId/quality/*", (c) => {
+  const datasetId = c.req.param("datasetId");
+  const segments = new URL(c.req.url).pathname.split("/");
+  const at = segments.findIndex((s, i) => s === datasetId && segments[i + 1] === "quality");
+  return qualityHandler(c.env, c.req.raw, datasetId, segments.slice(at + 2), deferOf(c));
 });
 
 // Redirect /<id>/<version> -> /<id>/<version>/ so the relative `../` link in

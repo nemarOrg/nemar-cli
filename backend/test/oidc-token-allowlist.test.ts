@@ -100,6 +100,8 @@ const PARAM_VALUES: Record<string, string> = {
   sourceId: "ds999999",
   tag: "x",
   file: "x",
+  // ADR 0134 phase 4a: the admin pipeline drill-down, `/admin/compute/pipeline/runs/:stamp`.
+  stamp: "1",
 };
 
 /** An API key nobody holds: `nm_` and 43 base64url characters, the shape `generateApiKey` makes. */

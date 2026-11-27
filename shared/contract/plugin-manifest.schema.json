@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://api.nemar.org/schemas/plugin-manifest-v1.json",
+  "title": "NEMAR quality plugin manifest, nemar.plugin-manifest.v1",
+  "description": "What a NEMAR quality plugin declares before it runs (ADR 0134 decision 6, refined by ADR 0137 decision 4): its name, version, the Python module to load, the checkpoint it belongs to (quality), what it reads, its fixed parameters, and the metrics and views it writes. Copied byte for byte from nemarOrg/nemar-cli (shared/contract/plugin-manifest.schema.json) by nemarOrg/nemar-process. Closed. A declared metric without headline, with a run's value (a number or null) and the plugin's name and version, is a valid neuroschema qualityMetric; its bounds are the valid range the plugin declares. headline lives in the manifest only: the metric is also written to the record's summaryMetrics. A view is declared data a browser draws, never an image: a neuroschema view kind and kind_version, a caption, and 1 to 8 roles, each produced by the plugin (a format, at most 4194304 bytes, at most two dimension names in row-then-column order, an optional value unit, optional columns, at most 64: a NEMAR cap, not neuroschema's, a column's own unit overriding the role's) or provided by the host recipe ({\"from\": \"recipe\"}); whether the kind, format and recipe role exist is the loader's check. Rules a schema cannot state are the reader's, in this order: a metric's bounds have min <= max when both are set (bounds_reversed); a plugin declares at least one metric or view (plugin_without_output); every metric is named <plugin>:<name> with the plugin's own name as the prefix (metric_not_prefixed). A manifest is at most 65536 bytes.",
+  "$defs": {
+    "Range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max"],
+      "properties": {
+        "min": { "type": ["number", "null"] },
+        "max": { "type": ["number", "null"] }
+      }
+    },
+    "Metric": {
+      "description": "One metric a plugin writes: neuroschema qualityMetric without the run's value and the plugin.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "description"],
+      "properties": {
+        "unit": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "bounds": { "$ref": "#/$defs/Range" },
+        "headline": { "type": "boolean" }
+      }
+    },
+    "ViewColumn": {
+      "description": "One column a produced role reads: neuroschema view column.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\t\\r\\n]+(?![\\s\\S])"
+        },
+        "type": { "enum": ["number", "integer", "string"] },
+        "unit": { "type": "string", "minLength": 1, "maxLength": 32 }
+      }
+    },
+    "ViewProducedRole": {
+      "description": "A role the plugin produces: the runner checks the plugin's array or mapping against it and writes it. unit is the role's value unit, with the grammar and cap of a neuroschema column unit; a column's own unit overrides it for that column. Whether a generic kind's role must carry a unit (a role unit or columns with units) is the loader's check per kind, not this schema's.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "max_bytes", "dims"],
+      "properties": {
+        "format": { "type": "string", "pattern": "^[a-z][a-z0-9]{0,15}(?![\\s\\S])" },
+        "max_bytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "dims": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])" }
+        },
+        "unit": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/ViewColumn" }
+        }
+      }
+    },
+    "ViewRecipeRole": {
+      "description": "A role the host recipe provides: the runner attaches the recipe's file for it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from"],
+      "properties": { "from": { "const": "recipe" } }
+    },
+    "View": {
+      "description": "One view a plugin writes: declared data a browser draws.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "kind_version", "caption", "roles"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9-]*)+(?![\\s\\S])"
+        },
+        "kind_version": { "type": "integer", "minimum": 1, "maximum": 999 },
+        "caption": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "roles": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 8,
+          "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])" },
+          "additionalProperties": {
+            "anyOf": [{ "$ref": "#/$defs/ViewProducedRole" }, { "$ref": "#/$defs/ViewRecipeRole" }]
+          }
+        }
+      }
+    },
+    "ParameterValue": {
+      "anyOf": [
+        { "type": "number" },
+        { "type": "string", "maxLength": 256 },
+        { "type": "boolean" },
+        { "type": "null" },
+        { "type": "array", "maxItems": 64, "items": { "type": "number" } }
+      ]
+    },
+    "PluginManifest": {
+      "description": "The manifest. Closed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "name", "version", "entry", "checkpoint", "reads", "parameters", "outputs"],
+      "properties": {
+        "format": { "const": "nemar.plugin-manifest.v1" },
+        "name": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}(?![\\s\\S])" },
+        "version": { "type": "string", "pattern": "^[0-9A-Za-z._+-]{1,64}(?![\\s\\S])" },
+        "entry": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*(?![\\s\\S])"
+        },
+        "checkpoint": { "enum": ["quality"] },
+        "reads": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dataset", "recipes"],
+          "properties": {
+            "dataset": { "type": "boolean" },
+            "recipes": {
+              "type": "array",
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[a-z0-9-]{1,64}(?![\\s\\S])" }
+            }
+          },
+          "anyOf": [
+            { "type": "object", "properties": { "dataset": { "const": true } } },
+            { "type": "object", "properties": { "recipes": { "type": "array", "minItems": 1 } } }
+          ]
+        },
+        "parameters": {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])" },
+          "additionalProperties": { "$ref": "#/$defs/ParameterValue" }
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["metrics", "views"],
+          "properties": {
+            "metrics": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*(?::[A-Za-z][A-Za-z0-9_-]*)?(?![\\s\\S])"
+              },
+              "additionalProperties": { "$ref": "#/$defs/Metric" }
+            },
+            "views": {
+              "type": "object",
+              "maxProperties": 16,
+              "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])" },
+              "additionalProperties": { "$ref": "#/$defs/View" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

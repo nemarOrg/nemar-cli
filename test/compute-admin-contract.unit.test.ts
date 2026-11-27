@@ -15,7 +15,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { PIPELINE_STAMP_STATES } from "../shared/compute-recipes";
+import { PIPELINE_CELL_MARKS, PIPELINE_RUN_STATUSES } from "../shared/compute-checkpoints";
+import { COMPUTE_RECIPES, PIPELINE_STAMP_STATES } from "../shared/compute-recipes";
 import { COMPUTE_REFUSAL_CODES, COMPUTE_REFUSAL_STATUS } from "../shared/compute-state";
 import * as admin from "../shared/contract/compute-admin";
 
@@ -113,6 +114,71 @@ const hold = {
 };
 
 /** A valid document for each exported schema. */
+const pipelineRun = {
+  stamp_id: 12,
+  dataset_id: "nm000104",
+  recipe: "nemar-floor",
+  version: "v1.0.0",
+  current_version: true,
+  recipe_version: "1.0.0-b1",
+  engine: "eegprep@0.5.0",
+  input: "zarr",
+  attempt: 1,
+  stamp_state: "succeeded",
+  code: null,
+  job_id: "job_0123456789abcdef01234567",
+  job_state: "finished",
+  executor: "runner",
+  runner_id: "rnr_0123456789abcdef01234567",
+  runner_name: "ws_b",
+  checkpoint: "quality",
+  reported_at: "2026-11-23 09:00:00",
+  reports: 7,
+  reconciled: true,
+  outcome: "reconciled",
+  disagreement: false,
+  created_at: "2026-11-23 08:00:00",
+  updated_at: "2026-11-23 09:05:00",
+};
+
+const pipelineCell = {
+  mark: "failed",
+  counts: { passed: 3, failed: 1, skipped: 0, total: 4 },
+  reconciled: true,
+  disagreement: false,
+  listed: 1,
+};
+
+const pipelineGridRow = {
+  dataset_id: "nm000104",
+  newest_version: "1.0.0",
+  status: "finished",
+  run: pipelineRun,
+  cells: { import: pipelineCell, stored: { ...pipelineCell, mark: "pending", counts: null } },
+};
+
+const pipelineByStatus = {
+  not_started: 0,
+  waiting: 0,
+  running: 0,
+  stalled: 0,
+  finished: 1,
+  failed: 0,
+};
+
+const pipelineSummary = {
+  recipe: "nemar-floor",
+  recipe_version: "1.0.0-b1",
+  placeholder: false,
+  auto_dispatch: true,
+  columns: ["import", "preprocess", "quality", "stored"],
+  eligible: 3,
+  covered: 1,
+  complete: 0,
+  covered_any_version: 1,
+  by_status: pipelineByStatus,
+};
+
 const VALID: Record<string, unknown> = {
   ComputeJobsListResponseSchema: { jobs: [job, job], next_after: 41 },
   ComputeUnmatchedResponseSchema: {
@@ -238,6 +304,82 @@ const VALID: Record<string, unknown> = {
     run_id: "11111111-2222-3333-4444-555555555555",
     token: "x.y",
     expires_in_minutes: 60,
+  },
+  ComputePipelineCountsSchema: { passed: 3, failed: 1, skipped: 0, total: 4 },
+  ComputePipelineRunViewSchema: pipelineRun,
+  ComputePipelineCellSchema: pipelineCell,
+  ComputePipelineGridRowSchema: pipelineGridRow,
+  ComputePipelineRecipeSummarySchema: pipelineSummary,
+  ComputePipelineGridResponseSchema: {
+    as_of: "2026-11-23 10:00:00",
+    stalled_after_seconds: 180,
+    recipe: "nemar-floor",
+    columns: ["import", "preprocess", "quality", "stored"],
+    summary: pipelineSummary,
+    matched: { total: 1, by_status: pipelineByStatus },
+    facets: {
+      recipe_versions: ["1.0.0-b1"],
+      runners: [{ id: "rnr_0123456789abcdef01234567", name: "ws_b" }],
+    },
+    rows: [pipelineGridRow, { ...pipelineGridRow, status: "not_started", run: null }],
+    next_after: "nm000104",
+  },
+  ComputePipelineTrendPointSchema: { at: "2026-11-22", value: 1, total: 4 },
+  ComputePipelineCoverageResponseSchema: {
+    as_of: "2026-11-23 10:00:00",
+    days: 30,
+    recipes: [{ ...pipelineSummary, trend: [{ at: "2026-11-22", value: 1, total: 4 }] }],
+  },
+  ComputePipelineRunDetailResponseSchema: {
+    status: "finished",
+    newest_version: "1.0.0",
+    run: pipelineRun,
+    checkpoints: [
+      {
+        checkpoint: "import",
+        mark: "failed",
+        counts: { passed: 3, failed: 1, skipped: 0, total: 4 },
+        live: null,
+        reconciled: true,
+        disagreement: false,
+        reported_at: "2026-11-23 09:00:00",
+        failures: [{ path: "sub-02/eeg/b.edf", code: "load_failed", step: "load" }],
+        listed: 1,
+        unlisted: 0,
+        failures_unreadable: false,
+      },
+    ],
+    listed_codes: [{ checkpoint: "import", code: "load_failed", count: 1 }],
+  },
+  ComputeRunQualityResponseSchema: {
+    stamp_id: 7,
+    dataset_id: "nm000104",
+    version: "v1.0.0",
+    recipe: "nemar-ica",
+    recipe_version: "1.0.0",
+    input: "bids",
+    stamp_state: "succeeded",
+    dataset_public: true,
+    quality: "canary",
+    skip: null,
+    derivative: {
+      key: "a".repeat(64),
+      state: "stored",
+      retention: "canary",
+      failure: null,
+      created_at: "2026-11-20 09:00:00",
+      stored_at: "2026-11-20 10:00:00",
+      expires_at: "2026-12-20 10:00:00",
+      superseded_at: null,
+      serving_index: "none",
+    },
+    recordings: {
+      state: "listed",
+      succeeded: 1,
+      unlisted: 0,
+      items: [{ path: "sub-01/eeg/sub-01_task-rest_eeg.edf" }],
+      next_after: null,
+    },
   },
   ComputePipelineResultSchema: pipelineResult,
   ComputePipelineRoomSchema: { daily_left: 4, live_left: 0, limited_by: "live_cap" },
@@ -527,5 +669,78 @@ describe("compute-admin: the words and constants", () => {
     const no = ["abcdefg", "k".repeat(101), "has space", "a:b:c:d:e", "a/b/c/d/e", "ünïcode-key"];
     for (const k of ok) expect([k, admin.COMPUTE_IDEMPOTENCY_KEY_RE.test(k)]).toEqual([k, true]);
     for (const k of no) expect([k, admin.COMPUTE_IDEMPOTENCY_KEY_RE.test(k)]).toEqual([k, false]);
+  });
+});
+
+describe("the pipeline grid's words and bounds", () => {
+  const source = readFileSync(join(import.meta.dir, "../shared/contract/compute-admin.ts"), "utf8");
+
+  test("the grid statuses are `not_started` and then what a run shows", () => {
+    expect([...admin.COMPUTE_PIPELINE_GRID_STATUSES]).toEqual([
+      "not_started",
+      ...PIPELINE_RUN_STATUSES,
+    ]);
+  });
+
+  test("the cell marks are the marks pipelineCellMark gives", () => {
+    expect([...admin.COMPUTE_PIPELINE_CELL_MARKS]).toEqual([...PIPELINE_CELL_MARKS]);
+  });
+
+  test("the recipe version pattern takes the registry's versions and refuses others", () => {
+    for (const r of COMPUTE_RECIPES) {
+      expect(admin.COMPUTE_PIPELINE_RECIPE_VERSION_RE.test(r.version)).toBe(true);
+    }
+    for (const bad of ["", "1.0 0", "a/b", "x".repeat(65)]) {
+      expect(admin.COMPUTE_PIPELINE_RECIPE_VERSION_RE.test(bad)).toBe(false);
+    }
+  });
+
+  test("the bounds are ordered", () => {
+    expect(admin.COMPUTE_PIPELINE_GRID_PAGE_DEFAULT).toBeLessThanOrEqual(
+      admin.COMPUTE_PIPELINE_GRID_PAGE_MAX,
+    );
+    expect(admin.COMPUTE_PIPELINE_TREND_DAYS_DEFAULT).toBeLessThanOrEqual(
+      admin.COMPUTE_PIPELINE_TREND_DAYS_MAX,
+    );
+  });
+
+  test("every word list and bound is a literal the website's drift tests can read from the text", () => {
+    for (const name of [
+      "COMPUTE_PIPELINE_GRID_STATUSES",
+      "COMPUTE_PIPELINE_CELL_MARKS",
+      "COMPUTE_PIPELINE_RUN_OUTCOMES",
+      "COMPUTE_RUN_QUALITY_STATES",
+      "COMPUTE_RUN_QUALITY_RECORDINGS_STATES",
+    ]) {
+      const m = source.match(new RegExp(`export const ${name} = \\[([^\\]]*)\\] as const;`));
+      expect([name, m !== null]).toEqual([name, true]);
+      const words = [...(m?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((w) => w[1]);
+      expect(words).toEqual([...(admin as unknown as Record<string, readonly string[]>)[name]]);
+    }
+    for (const name of [
+      "COMPUTE_PIPELINE_GRID_PAGE_DEFAULT",
+      "COMPUTE_PIPELINE_GRID_PAGE_MAX",
+      "COMPUTE_PIPELINE_TREND_DAYS_DEFAULT",
+      "COMPUTE_PIPELINE_TREND_DAYS_MAX",
+      "COMPUTE_RUN_QUALITY_PAGE_SIZE",
+    ]) {
+      const m = source.match(new RegExp(`export const ${name} = ([0-9]+);`));
+      expect([name, Number(m?.[1])]).toEqual([
+        name,
+        (admin as unknown as Record<string, number>)[name],
+      ]);
+    }
+  });
+
+  test("a run's quality: a page is 100 recordings, and the stored words are the ones a table is read for", () => {
+    expect(admin.COMPUTE_RUN_QUALITY_PAGE_SIZE).toBe(100);
+    expect(new Set(admin.COMPUTE_RUN_QUALITY_STATES).size).toBe(
+      admin.COMPUTE_RUN_QUALITY_STATES.length,
+    );
+    expect(admin.COMPUTE_RUN_QUALITY_RECORDINGS_STATES[0]).toBe("listed");
+  });
+
+  test("a drill-down of a stamp that does not exist is 404 stamp_not_found", () => {
+    expect(admin.COMPUTE_ADMIN_ERROR_STATUS.stamp_not_found).toBe(404);
   });
 });

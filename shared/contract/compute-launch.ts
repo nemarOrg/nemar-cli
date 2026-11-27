@@ -1,11 +1,11 @@
 /**
- * The launch specification `nemar.launch-spec.v1` and the launcher's routes (epic #2005 phase A1,
- * #2006; ADR 0118): the one document NEMAR's Worker hands the launcher on the node, in the
+ * The launch specification `nemar.launch-spec.v2` and the launcher's routes (epic #2005 phase A1,
+ * #2006; ADR 0118; version 2, ADR 0141): the one document NEMAR's Worker hands the launcher on the node, in the
  * environment variable `NEMAR_LAUNCH_SPEC` (as base64url text, see below), and the three shapes the
  * launcher exchanges with the Worker, distinct from the user-facing job specification in `./compute.ts`.
  *
  * THE JSON SCHEMA NEXT TO THIS FILE IS SHARED BYTE FOR BYTE with `nemarOrg/nemar-process`
- * (`launcher/schema/launch-spec.v1.json`), where the launcher is written. The launcher cannot
+ * (`launcher/schema/launch-spec.v2.json`), where the launcher is written. The launcher cannot
  * import this file, so `compute-launch.schema.json` is the contract both sides check against, and
  * `test/compute-contract.unit.test.ts` holds the two to each other: the schema's keys and
  * enumerations are read back against these constants, and a differential corpus is judged by both.
@@ -66,6 +66,7 @@ import {
   COMPUTE_JOB_ID_RE,
   COMPUTE_MAX_OUTPUT_FILES,
   COMPUTE_PATH_SEGMENT,
+  COMPUTE_SERVING_INDEX_MAX_BYTES,
   COMPUTE_SHA256_RE,
   JOB_ENV_ALLOWLIST,
   type JobSpec,
@@ -79,11 +80,36 @@ import {
   isSafeComputePath,
 } from "./compute.js";
 
-/** The name of the schema, and of the document's contract. */
-export const LAUNCH_SPEC_VERSION = "nemar.launch-spec.v1";
+/**
+ * The name of the schema, and of the document's contract. Version 2 (ADR 0141) adds one optional member,
+ * `serving_index`, and nothing else: every version 1 document is a version 2 document with the same bytes.
+ * Version 1's root is closed, so a launcher that reads version 1 refuses a document that carries the member
+ * (`invalid_spec`); the Worker writes it only for a job of a recipe that keys the serving index on the
+ * archive input, which runs on Tapis only, where no launcher that reads version 1 was ever registered.
+ */
+export const LAUNCH_SPEC_VERSION = "nemar.launch-spec.v2";
+
+/**
+ * The most bytes of a serving index the Worker stages and the launcher fetches: the recipe's own bound
+ * (nemar-process `zarr_input.MAX_INDEX_BYTES`, 64 MiB). The converter's index is well under 1 MiB.
+ */
+export const SERVING_INDEX_MAX_BYTES = COMPUTE_SERVING_INDEX_MAX_BYTES;
+
+/**
+ * Where the launcher places a staged serving index inside the container (ADR 0141): the directory it binds
+ * read-only, beside the datasets under `/data` (a dataset id is two letters and six digits, so the name
+ * cannot be one), and the file in it the recipe is handed with `--serving-index`. A WIRE CONTRACT with the
+ * launcher in nemar-process: the Worker writes the path into the job's arguments, and the launcher puts the
+ * file there.
+ */
+export const SERVING_INDEX_CONTAINER_DIR = "/data/serving-index";
+export const SERVING_INDEX_CONTAINER_PATH = `${SERVING_INDEX_CONTAINER_DIR}/index.json`;
 
 /** The launcher reads at most this many bytes of the specification (the JSON text, decoded). */
 export const LAUNCH_SPEC_MAX_BYTES = 64 * 1024;
+
+/** The most datasets one launch specification names; the local launch specification's bound too. */
+export const LAUNCH_SPEC_MAX_DATASETS = 20;
 
 /**
  * The longest `NEMAR_LAUNCH_SPEC` value: base64url without padding spends `ceil(n * 4 / 3)`
@@ -137,7 +163,7 @@ const URL_RE = /^https?:\/\/[^\s]+$/;
 const JOB_TOKEN_RE = /^[A-Za-z0-9_-]{16,256}$/;
 
 /**
- * The header the launcher sends its per-job token in, to the bundle, outputs and complete routes (never a
+ * The header the launcher sends its per-job token in, to the bundle, outputs, complete and progress routes (never a
  * URL). A WIRE CONTRACT with the launcher in nemar-process: changing the word breaks every launcher, so
  * it is declared once, here, and `compute-contract.unit.test.ts` pins its spelling.
  */
@@ -198,6 +224,18 @@ export const LaunchSpecSchema = z
       .object({ sha256: z.string().regex(COMPUTE_SHA256_RE), size: safeInt(1) })
       .strict()
       .optional(),
+    /**
+     * The serving copy's index the Worker staged for this job (ADR 0141): the SHA-256 and size of its bytes.
+     * The launcher asks `POST <api_base>/compute/jobs/<id>/serving-index` for a presigned GET, checks both,
+     * and places the file read-only at {@link SERVING_INDEX_CONTAINER_PATH}. Absent for every other job.
+     */
+    serving_index: z
+      .object({
+        sha256: z.string().regex(COMPUTE_SHA256_RE),
+        size: safeInt(1, SERVING_INDEX_MAX_BYTES),
+      })
+      .strict()
+      .optional(),
     datasets: z
       .array(
         z
@@ -218,7 +256,7 @@ export const LaunchSpecSchema = z
           })
           .strict(),
       )
-      .max(20),
+      .max(LAUNCH_SPEC_MAX_DATASETS),
     /** The NEMAR API the launcher calls with `job_token`: no query, no fragment. */
     api_base: z.string().max(512).regex(API_BASE_RE),
     image: z
@@ -246,42 +284,50 @@ export const LaunchSpecSchema = z
     env: launchEnvSchema,
     resources: z.object({ gpus: safeInt(0, 8) }).strict(),
     limits: z.object({ max_files: safeInt(1, 1_000_000), max_total_bytes: safeInt(1) }).strict(),
-    /** The per-job token, sent in `X-Compute-Job-Token` to the bundle, outputs and complete routes. */
+    /** The per-job token, sent in `X-Compute-Job-Token` to the bundle, serving index, outputs, complete and progress routes. */
     job_token: z.string().regex(JOB_TOKEN_RE),
   })
   .strict()
-  .superRefine((spec, ctx) => {
-    const refuse = (path: string, message: string) =>
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
-    if ((spec.entry === undefined) === (spec.command === undefined)) {
-      refuse("entry", "exactly one of entry and command");
-    }
-    if (spec.entry !== undefined && spec.bundle === undefined) {
-      refuse("bundle", "an entry needs the bundle that holds it");
-    }
-    // Each cross rule only when both its fields are well formed, so the field issues are not doubled.
-    const named = sifFileNameForDigest(spec.image.digest);
-    if (named !== null && SIF_FILE_RE.test(spec.image.sif) && spec.image.sif !== named) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["image", "sif"],
-        message: SIF_NAMED_MESSAGE,
-      });
-    }
-    if (
-      named !== null &&
-      COMPUTE_IMAGE_REF_RE.test(spec.image.uri) &&
-      !spec.image.uri.endsWith(spec.image.digest)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["image", "uri"],
-        message: IMAGE_REF_NAMED_MESSAGE,
-      });
-    }
-  });
+  .superRefine(refineRunnable);
 
 export type LaunchSpec = z.infer<typeof LaunchSpecSchema>;
+
+/** What {@link refineRunnable} reads: the members a launch and a local launch specification share. */
+export interface RunnableSpec {
+  entry?: string;
+  command?: string[];
+  bundle?: unknown;
+  image: { uri: string; digest: string; sif: string };
+}
+
+/**
+ * The rules of a runnable document no JSON Schema can state, declared once for the launch
+ * specification and the local one (`./compute-local-launch.ts`): exactly one of `entry` and `command`;
+ * an `entry` comes with the `bundle` that holds it; `image.sif` is the file named for `image.digest`;
+ * and `image.uri` is pinned to `image.digest`. Each image rule runs only when both its fields are well
+ * formed, so the field issues are not doubled.
+ */
+export function refineRunnable(spec: RunnableSpec, ctx: z.RefinementCtx): void {
+  const refuse = (path: string[], message: string) =>
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+  if ((spec.entry === undefined) === (spec.command === undefined)) {
+    refuse(["entry"], "exactly one of entry and command");
+  }
+  if (spec.entry !== undefined && spec.bundle === undefined) {
+    refuse(["bundle"], "an entry needs the bundle that holds it");
+  }
+  const named = sifFileNameForDigest(spec.image.digest);
+  if (named !== null && SIF_FILE_RE.test(spec.image.sif) && spec.image.sif !== named) {
+    refuse(["image", "sif"], SIF_NAMED_MESSAGE);
+  }
+  if (
+    named !== null &&
+    COMPUTE_IMAGE_REF_RE.test(spec.image.uri) &&
+    !spec.image.uri.endsWith(spec.image.digest)
+  ) {
+    refuse(["image", "uri"], IMAGE_REF_NAMED_MESSAGE);
+  }
+}
 
 /**
  * The file name of the SIF built from an image digest: `<the 64 hex of "sha256:<hex>">.sif`, or null
@@ -482,6 +528,9 @@ export function launchSpecFits(job: JobSpec): boolean {
   };
   if (job.entry !== undefined) worst.entry = job.entry;
   else worst.command = job.command ?? ["x"];
+  if (job.serving_index !== undefined && "sha256" in job.serving_index) {
+    worst.serving_index = { sha256: hex, size: SERVING_INDEX_MAX_BYTES };
+  }
   try {
     encodeLaunchSpec(worst);
     return true;
@@ -500,6 +549,14 @@ const timestampSchema = z.string().regex(TIMESTAMP_RE);
  * A response, so open: a reader ignores keys it does not know.
  */
 export const BundleResponseSchema = z
+  .object({ url: urlSchema, expires_at: timestampSchema })
+  .passthrough();
+
+/**
+ * `POST <api_base>/compute/jobs/<id>/serving-index`: a short-lived presigned GET of the serving index the
+ * Worker staged for the job (ADR 0141), the same shape as the bundle's answer. A response, so open.
+ */
+export const ServingIndexResponseSchema = z
   .object({ url: urlSchema, expires_at: timestampSchema })
   .passthrough();
 

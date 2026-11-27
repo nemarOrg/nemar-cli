@@ -1,0 +1,1037 @@
+{
+  "description": "nemar-ica 1.0.0-b2: dataset-level record of the decompositions (aggregates and per-recording summary table).",
+  "extensions": {
+    "nemar": {
+      "counts": {
+        "discovered": 1,
+        "failed": 0,
+        "skipped": 0,
+        "succeeded": 1
+      },
+      "dataset": {
+        "id": "on007823",
+        "source_commit": "5555555555555555555555555555555555555555",
+        "version": "v1.0.0"
+      },
+      "devices": {
+        "cpu": 1
+      },
+      "engine": {
+        "commonLayer": "1.0.0-b2",
+        "environment": {
+          "MKL_NUM_THREADS": "1",
+          "NUMEXPR_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "OPENBLAS_NUM_THREADS": "1",
+          "PYTHONHASHSEED": null
+        },
+        "ica_engine": "pamica-torch",
+        "numpy": "2.5.4",
+        "package": "eegprep",
+        "pamica": "0.4.0",
+        "python": "3.12.13",
+        "scipy": "1.18.1",
+        "threadpools": [
+          {
+            "api": "openmp",
+            "num_threads": 1,
+            "version": null
+          }
+        ],
+        "threads": 1,
+        "torch": "2.12.1",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "fallbacks": [],
+      "gpu_contention_mib": 256,
+      "ica_run": {
+        "device_requested": "cpu",
+        "engine": "pamica-torch",
+        "max_iter": 5,
+        "threads": 1
+      },
+      "ignored_datatypes": {},
+      "image": {
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "tag": null
+      },
+      "plan_hashes": {
+        "sha256:7af7faa04477a7380170abc9f9b76eb7d41b30b5b46fd5203adab013f8ffe271": 1
+      },
+      "process": {
+        "build": "source",
+        "commit": null,
+        "version": "0.1.2-dev2"
+      },
+      "profile": "dataset",
+      "recipe": {
+        "id": "nemar-ica",
+        "version": "1.0.0-b2"
+      },
+      "recordings": [
+        [
+          "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf",
+          "eeg",
+          "succeeded",
+          "n/a",
+          "n/a",
+          "n/a",
+          22,
+          19,
+          282.0,
+          200.0,
+          "sha256:7af7faa04477a7380170abc9f9b76eb7d41b30b5b46fd5203adab013f8ffe271",
+          "pamica-torch",
+          18,
+          5,
+          "max_iter",
+          "false",
+          -2.74499,
+          "cpu",
+          "requested",
+          "false",
+          0.294025,
+          90.4762,
+          40.7872,
+          7.48,
+          44.4444,
+          "line_noise_50:below_threshold,line_noise_60:below_threshold",
+          "aec5068d2f14deb49892488f6605245bf2286fdd40d83699ab960c547056d259"
+        ]
+      ],
+      "recordings_table": {
+        "columns": [
+          "path",
+          "datatype",
+          "status",
+          "code",
+          "step",
+          "detail",
+          "n_channels",
+          "n_good_channels",
+          "duration_s",
+          "srate_hz",
+          "plan_hash",
+          "engine",
+          "rank",
+          "iterations",
+          "stop_reason",
+          "did_converge",
+          "final_ll",
+          "device",
+          "device_reason",
+          "fallback",
+          "asr_burst_fraction",
+          "pct_good_channels",
+          "pct_good_samples",
+          "line_db_before",
+          "pct_brain_components",
+          "skipped_steps",
+          "record_content_sha256"
+        ],
+        "location": "desc-nemarica_recordings.tsv",
+        "rows_in_record": 1,
+        "rows_truncated": 0,
+        "sha256": "d300c348163f3ef3bf96e3a358a77e046570ffabd4c93a6731ef55952e3621d9",
+        "size": 710
+      },
+      "report": {
+        "discovered_count": 1,
+        "engine_version": "nemar-ica@1.0.0-b2/eegprep==0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8/sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "failed_count": 0,
+        "finished_utc": "2026-11-25T19:41:00Z",
+        "pending_count": 0,
+        "process": "nemar-ica",
+        "records": [],
+        "records_truncated": 0,
+        "source_commit": "5555555555555555555555555555555555555555",
+        "started_utc": "2026-11-25T19:40:56Z",
+        "succeeded_count": 1
+      },
+      "run_id": "ica-views-e2e",
+      "seeds": {
+        "clean_channels.ransac": 5489
+      }
+    }
+  },
+  "pipelineInfo": {
+    "description": "NEMAR decomposition, dataset level.",
+    "executionDate": "2026-11-25T19:41:00Z",
+    "name": "nemar-ica",
+    "pipelineType": "ica",
+    "version": "1.0.0-b2"
+  },
+  "processingSteps": [
+    {
+      "description": "Load recording",
+      "inputSources": [
+        {
+          "description": "Dataset version as staged for the job",
+          "location": "nemar:dataset/on007823@v1.0.0",
+          "sourceType": "resource"
+        }
+      ],
+      "name": "eegprep.pop_load_frombids",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "bidschanloc": true,
+        "bidsevent": false,
+        "bidsmetadata": true,
+        "dtype": "float64",
+        "eventtype": null,
+        "infer_locations": false,
+        "numeric_null": [],
+        "return_report": true,
+        "verbose": false
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.pop_load_frombids",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "load"
+    },
+    {
+      "dependsOn": [
+        "load"
+      ],
+      "description": "Select the channels typed EEG",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "load"
+        }
+      ],
+      "name": "eegprep.pop_select",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "channel_types": [
+          "EEG",
+          "untyped"
+        ]
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.pop_select",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "signal_channels"
+    },
+    {
+      "dependsOn": [
+        "signal_channels"
+      ],
+      "description": "Detect flat-line channels",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "signal_channels"
+        }
+      ],
+      "name": "eegprep.clean_flatlines",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "max_allowed_jitter": 20.0,
+        "max_flatline_duration": 5.0
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.clean_flatlines",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "flatline"
+    },
+    {
+      "dependsOn": [
+        "flatline"
+      ],
+      "description": "Remove slow drifts",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "flatline"
+        }
+      ],
+      "name": "eegprep.pop_eegfiltnew",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "channels": null,
+        "chantype": null,
+        "filtorder": null,
+        "gui": false,
+        "hicutoff": null,
+        "locutoff": 0.5,
+        "minphase": false,
+        "plotfreqz": false,
+        "revfilt": false,
+        "usefftfilt": false
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.pop_eegfiltnew",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "drift"
+    },
+    {
+      "dependsOn": [
+        "drift"
+      ],
+      "description": "Measure line noise",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "drift"
+        }
+      ],
+      "name": "eegprep.functions.sigprocfunc.spectopo.compute_spectra",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "frequencies_hz": [
+          50,
+          60
+        ],
+        "neighbor_bin_offsets": [
+          -6,
+          -5,
+          -4,
+          -3,
+          -2,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "nfft": null,
+        "overlap": 0,
+        "peak": "nearest_bin",
+        "percent": 100,
+        "statistic": "mean_over_channels_of_db",
+        "threshold_db": 10.0,
+        "winsize": null,
+        "wintype": "hamming"
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.functions.sigprocfunc.spectopo.compute_spectra",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "line_noise_measure"
+    },
+    {
+      "dependsOn": [
+        "line_noise_measure"
+      ],
+      "description": "Remove 50 Hz line noise with a notch filter about 1 Hz wide at -6 dB",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "line_noise_measure"
+        }
+      ],
+      "name": "eegprep.pop_eegfiltnew",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "channels": null,
+        "chantype": null,
+        "filtorder": null,
+        "gui": false,
+        "hicutoff": 51.0,
+        "locutoff": 49.0,
+        "minphase": false,
+        "plotfreqz": false,
+        "revfilt": true,
+        "usefftfilt": false
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {
+          "below_threshold": 1
+        }
+      },
+      "software": {
+        "functionCall": "eegprep.pop_eegfiltnew",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "line_noise_50"
+    },
+    {
+      "dependsOn": [
+        "line_noise_50"
+      ],
+      "description": "Remove 60 Hz line noise with a notch filter about 1 Hz wide at -6 dB",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "line_noise_50"
+        }
+      ],
+      "name": "eegprep.pop_eegfiltnew",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "channels": null,
+        "chantype": null,
+        "filtorder": null,
+        "gui": false,
+        "hicutoff": 61.0,
+        "locutoff": 59.0,
+        "minphase": false,
+        "plotfreqz": false,
+        "revfilt": true,
+        "usefftfilt": false
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {
+          "below_threshold": 1
+        }
+      },
+      "software": {
+        "functionCall": "eegprep.pop_eegfiltnew",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "line_noise_60"
+    },
+    {
+      "dependsOn": [
+        "line_noise_60"
+      ],
+      "description": "Detect bad channels",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "line_noise_60"
+        }
+      ],
+      "name": "eegprep.clean_channels",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "corr_threshold": 0.85,
+        "max_broken_time": 0.5,
+        "noise_threshold": 4.0,
+        "num_samples": 50,
+        "rng_seed": 5489,
+        "rules": {
+          "few_channels": 4,
+          "min_located_channels": 4,
+          "min_nolocs_srate_hz": 110.0,
+          "short_recording_s": 60.0
+        },
+        "subset_size": 0.25,
+        "window_len": 5.0
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.clean_channels",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "bad_channels"
+    },
+    {
+      "dependsOn": [
+        "bad_channels"
+      ],
+      "description": "Detect bad windows",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "bad_channels"
+        }
+      ],
+      "name": "eegprep.clean_windows",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "max_bad_channels": 0.2,
+        "max_dropout_fraction": 0.1,
+        "min_clean_fraction": 0.25,
+        "rules": {
+          "short_recording_s": 60.0
+        },
+        "shape_range": [
+          1.7,
+          1.8499999999999999,
+          1.9999999999999998,
+          2.1499999999999995,
+          2.3,
+          2.4499999999999993,
+          2.5999999999999996,
+          2.749999999999999,
+          2.8999999999999995,
+          3.049999999999999,
+          3.1999999999999993,
+          3.3499999999999988,
+          3.499999999999999
+        ],
+        "step_sizes": [
+          0.01,
+          0.01
+        ],
+        "truncate_quant": [
+          0.022,
+          0.6
+        ],
+        "window_len": 1.0,
+        "window_overlap": 0.66,
+        "zthresholds": [
+          -3.5,
+          5.0
+        ]
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.clean_windows",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "bad_windows"
+    },
+    {
+      "dependsOn": [
+        "bad_windows"
+      ],
+      "description": "Quality metrics",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "bad_windows"
+        }
+      ],
+      "name": "nemar_process.qc.floor_metrics",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "robust_amplitude": "1.4826*MAD",
+        "spectrum_hz": [
+          1,
+          70
+        ]
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "nemar_process.qc.floor_metrics",
+        "name": "nemar_process",
+        "version": "1.0.0-b2"
+      },
+      "stepId": "qc"
+    },
+    {
+      "dependsOn": [
+        "qc"
+      ],
+      "description": "Repair bursts with artifact subspace reconstruction, keeping its calibration state, and measure the share of samples it repairs",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "qc"
+        }
+      ],
+      "name": "eegprep.clean_asr",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "cutoff": 30.0,
+        "max_dims": 0.66,
+        "maxmem": 1024,
+        "ref_maxbadchannels": 0.075,
+        "ref_tolerances": [
+          -3.5,
+          5.5
+        ],
+        "ref_wndlen": 1.0,
+        "return_state": true,
+        "step_size": null,
+        "use_gpu": false,
+        "useriemannian": null,
+        "window_len": null
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.clean_asr",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "asr"
+    },
+    {
+      "dependsOn": [
+        "asr"
+      ],
+      "description": "Re-reference to the average of the good channels",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "asr"
+        }
+      ],
+      "name": "eegprep.pop_reref",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "ref": []
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.pop_reref",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "reref"
+    },
+    {
+      "dependsOn": [
+        "reref"
+      ],
+      "description": "Decompose the repaired, re-referenced data into independent components",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "reref"
+        }
+      ],
+      "name": "eegprep.pop_runica",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "reorder": "on"
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.pop_runica",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "ica"
+    },
+    {
+      "dependsOn": [
+        "ica"
+      ],
+      "description": "Classify the components with ICLabel",
+      "inputSources": [
+        {
+          "outputId": "Annotations of every recording (see the recordings table)",
+          "sourceType": "previousStepOutput",
+          "stepId": "ica"
+        }
+      ],
+      "name": "eegprep.pop_iclabel",
+      "outputTargets": [
+        {
+          "description": "Annotations of every recording (see the recordings table)",
+          "format": "per-recording state",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "icversion": "default"
+      },
+      "qualityMetrics": {
+        "recordingsSucceeded": 1,
+        "recordingsWithStepSkipped": {}
+      },
+      "software": {
+        "functionCall": "eegprep.pop_iclabel",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "iclabel"
+    }
+  ],
+  "schema_version": "0.1.0",
+  "sj_version": "0.1.0",
+  "summaryMetrics": {
+    "asrBurstFraction": {
+      "description": "Share of the samples artifact subspace reconstruction repaired.",
+      "histogram": {
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0
+        ],
+        "edges": [
+          0.0,
+          0.01,
+          0.02,
+          0.05,
+          0.1,
+          0.2,
+          0.3,
+          0.5,
+          1.0
+        ],
+        "missing": 0,
+        "overflow": 0,
+        "underflow": 0
+      },
+      "max": 0.294025,
+      "median": 0.294025,
+      "min": 0.294025,
+      "n": 1,
+      "unit": "fraction"
+    },
+    "icaIterations": {
+      "description": "Iterations the decomposition ran.",
+      "histogram": {
+        "counts": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "edges": [
+          0,
+          50,
+          100,
+          250,
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "missing": 0,
+        "overflow": 0,
+        "underflow": 0
+      },
+      "max": 5,
+      "median": 5.0,
+      "min": 5,
+      "n": 1,
+      "unit": "count"
+    },
+    "icaRank": {
+      "description": "Rank of the decomposition: one less than the good channels, for the average reference.",
+      "histogram": {
+        "counts": [
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "edges": [
+          0,
+          8,
+          16,
+          24,
+          32,
+          40,
+          48,
+          56,
+          64
+        ],
+        "missing": 0,
+        "overflow": 0,
+        "underflow": 0
+      },
+      "max": 18,
+      "median": 18.0,
+      "min": 18,
+      "n": 1,
+      "unit": "count"
+    },
+    "lineNoiseBeforeDb": {
+      "description": "Line-noise excess before the band-stop filters, at whichever of 50 and 60 Hz had the larger excess before them.",
+      "histogram": {
+        "counts": [
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "edges": [
+          -10,
+          -5,
+          0,
+          5,
+          10,
+          15,
+          20,
+          30,
+          40
+        ],
+        "missing": 0,
+        "overflow": 0,
+        "underflow": 0
+      },
+      "max": 7.48,
+      "median": 7.48,
+      "min": 7.48,
+      "n": 1,
+      "unit": "dB"
+    },
+    "nemar-quality:percentBrainComponents": {
+      "description": "Share of components whose most probable ICLabel class is Brain.",
+      "histogram": {
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "edges": [
+          0,
+          10,
+          20,
+          30,
+          40,
+          50,
+          60,
+          70,
+          80,
+          90,
+          100
+        ],
+        "missing": 0,
+        "overflow": 0,
+        "underflow": 0
+      },
+      "max": 44.4444,
+      "median": 44.4444,
+      "min": 44.4444,
+      "n": 1,
+      "unit": "%"
+    },
+    "percentGoodChannels": {
+      "description": "Share of the EEG channels the floor judged good.",
+      "histogram": {
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "edges": [
+          0,
+          10,
+          20,
+          30,
+          40,
+          50,
+          60,
+          70,
+          80,
+          90,
+          100
+        ],
+        "missing": 0,
+        "overflow": 0,
+        "underflow": 0
+      },
+      "max": 90.4762,
+      "median": 90.4762,
+      "min": 90.4762,
+      "n": 1,
+      "unit": "%"
+    },
+    "percentGoodSamples": {
+      "description": "Share of the samples outside the bad windows the floor found.",
+      "histogram": {
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "edges": [
+          0,
+          10,
+          20,
+          30,
+          40,
+          50,
+          60,
+          70,
+          80,
+          90,
+          100
+        ],
+        "missing": 0,
+        "overflow": 0,
+        "underflow": 0
+      },
+      "max": 40.7872,
+      "median": 40.7872,
+      "min": 40.7872,
+      "n": 1,
+      "unit": "%"
+    },
+    "recordingsDiscovered": 1,
+    "recordingsFailed": 0,
+    "recordingsSkipped": 0,
+    "recordingsSucceeded": 1
+  }
+}

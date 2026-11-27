@@ -1993,8 +1993,37 @@ const LAUNCH_CASES: readonly Case[] = [
   ["a hex job token", set(LAUNCH, "job_token", "ab".repeat(32)), true],
   ["a nested entry", set(LAUNCH, "entry", "src/analysis/run.py"), true],
   ["an entry of 240 characters", set(LAUNCH, "entry", `${"a".repeat(237)}.py`), true],
+  // Version 2 (ADR 0141): the staged serving index, its digest and size, at both ends of the size.
+  ["a staged serving index", { ...LAUNCH, serving_index: { sha256: HEX_A, size: 1 } }, true],
+  [
+    "a serving index of 64 MiB",
+    { ...LAUNCH, serving_index: { sha256: HEX_A, size: 64 * 1024 * 1024 } },
+    true,
+  ],
 
   ["an unknown top-level key", { ...LAUNCH, upload: {} }, false],
+  [
+    "a serving index over 64 MiB",
+    { ...LAUNCH, serving_index: { sha256: HEX_A, size: 64 * 1024 * 1024 + 1 } },
+    false,
+  ],
+  ["an empty serving index", { ...LAUNCH, serving_index: { sha256: HEX_A, size: 0 } }, false],
+  ["a serving index with no size", { ...LAUNCH, serving_index: { sha256: HEX_A } }, false],
+  [
+    "a serving index digest in capitals",
+    { ...LAUNCH, serving_index: { sha256: "A".repeat(64), size: 1 } },
+    false,
+  ],
+  [
+    "a serving index with a url",
+    { ...LAUNCH, serving_index: { sha256: HEX_A, size: 1, url: "https://x.test/i.json" } },
+    false,
+  ],
+  [
+    "a serving index that records a word",
+    { ...LAUNCH, serving_index: { reason: "no_index" } },
+    false,
+  ],
   // A trailing newline is the one input `$` lets Python's `re` accept and JavaScript's refuse; the
   // schema ends its patterns with `(?![\s\S])` so every engine agrees.
   ["an entry with a trailing newline", set(LAUNCH, "entry", "run.py\n"), false],
@@ -2438,8 +2467,9 @@ describe("the launcher's job-token header is a wire contract", () => {
 });
 
 describe("the launch specification", () => {
-  test("the version is nemar.launch-spec.v1 and the runtimes are python and image", () => {
-    expect(LAUNCH_SPEC_VERSION).toBe("nemar.launch-spec.v1");
+  test("the version is nemar.launch-spec.v2 and the runtimes are python and image", () => {
+    // Version 2 adds the optional serving_index and nothing else (ADR 0141).
+    expect(LAUNCH_SPEC_VERSION).toBe("nemar.launch-spec.v2");
     expect([...LAUNCH_RUNTIMES]).toEqual(["python", "image"]);
     expect(LAUNCH_SPEC_MAX_BYTES).toBe(64 * 1024);
     // The value on the wire is the text in base64url: 87,382 characters for 65,536 bytes (A1c).
@@ -3902,6 +3932,7 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
       // Everything but the text annotations, hashed. The SHA-256 is of the file as it stood before the
       // wire form was added, so a change to a key, a type, a pattern or a bound shows here, and a change
       // to a sentence does not. A structural change is nemar-process's to copy too: update this with it.
+      // Moved with version 2 (ADR 0141): the optional serving_index and the serving_index_response.
       const strip = (node: unknown): unknown =>
         Array.isArray(node)
           ? node.map(strip)
@@ -3916,7 +3947,7 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
         createHash("sha256")
           .update(JSON.stringify(strip(launchSchema)))
           .digest("hex"),
-      ).toBe("684334303372be174ae9b2fd60f36ad57dde5d7fa6f870979e093136c54947af");
+      ).toBe("9739f5d8863058aa52c3620f9111c5e5fe83f2a2731a7ae7e2251dad66022dab");
     });
   });
 });
@@ -5387,6 +5418,7 @@ describe("the JSON Schema file read back against the constants it mirrors", () =
       "command",
       "args",
       "bundle",
+      "serving_index",
       "datasets",
       "api_base",
       "image",
@@ -5398,7 +5430,7 @@ describe("the JSON Schema file read back against the constants it mirrors", () =
     expect(Object.keys(schema.properties).sort()).toEqual([...keys].sort());
     expect(schema.additionalProperties).toBe(false);
     expect([...schema.required].sort()).toEqual(
-      keys.filter((k) => !["entry", "command", "bundle"].includes(k)).sort(),
+      keys.filter((k) => !["entry", "command", "bundle", "serving_index"].includes(k)).sort(),
     );
     expect(Object.keys(LaunchSpecSchema.innerType().shape).sort()).toEqual([...keys].sort());
   });
@@ -5416,6 +5448,7 @@ describe("the JSON Schema file read back against the constants it mirrors", () =
     expect(Object.keys(schema.$defs).sort()).toEqual(
       [
         "bundle_response",
+        "serving_index_response",
         "manifest",
         "outputs_request",
         "outputs_response",
@@ -5446,14 +5479,15 @@ describe("the JSON Schema file read back against the constants it mirrors", () =
     expect(JSON.stringify(schema).split('"pattern"').length).toBeGreaterThan(30);
   });
 
-  // The three objects a launcher only ever READS: the two responses and each upload in the second.
+  // The four objects a launcher only ever READS: the three responses and each upload in the outputs one.
   const OPEN_BY_DESIGN = [
     "$.$defs.bundle_response",
+    "$.$defs.serving_index_response",
     "$.$defs.outputs_response",
     "$.$defs.outputs_response.properties.uploads.items",
   ];
 
-  test("every object in it is closed, except the three a launcher only reads", () => {
+  test("every object in it is closed, except the four a launcher only reads", () => {
     const open: string[] = [];
     const walk = (node: unknown, where: string) => {
       if (Array.isArray(node)) return node.forEach((n, i) => walk(n, `${where}[${i}]`));

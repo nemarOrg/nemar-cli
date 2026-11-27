@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/nemarOrg/nemar-cli/shared/contract/compute-launch.schema.json",
-  "title": "nemar.launch-spec.v1",
-  "description": "The launch specification NEMAR's Worker hands the launcher, and the shapes the launcher exchanges with the Worker and leaves on the node. The launch specification is a document of printable-ASCII JSON text, at most 65536 bytes: every byte is 0x20 to 0x7e, a character at or above U+007F is written as a lowercase \\uXXXX escape, a character outside the Basic Multilingual Plane as two, and JSON escapes the control characters. This schema describes that text. The document travels as the value of the environment variable NEMAR_LAUNCH_SPEC, as the base64url encoding (Request for Comments (RFC) 4648 section 5, alphabet A-Za-z0-9-_, no padding, no line breaks) of the bytes of that text, at most 87382 characters, and the encoding is canonical: encoding the decoded text again gives the value back. Its digests are over the text, never over the encoded value. Shared byte for byte between nemarOrg/nemar-cli (shared/contract/compute-launch.schema.json) and nemarOrg/nemar-process (launcher/schema/launch-spec.v1.json): whichever merges first writes it, the other copies it. The root validates the launch specification; $defs hold the bundle response, the outputs request and response, and the launcher's result, manifest and provenance documents. Requests and documents are closed (no unknown keys); the two responses (bundle_response, outputs_response) are open, and a reader ignores unknown keys. Exit numbers: 0, and 10 to 16 for the seven launcher failure codes in order. On the node, outputs are at work/outputs/<path> and the launcher directory holds result.json, provenance.json, manifest.json and launcher.log; in the results bucket the same files are jobs/<job_id>/outputs/<path> and jobs/<job_id>/launcher/<file>.",
+  "title": "nemar.launch-spec.v2",
+  "description": "The launch specification NEMAR's Worker hands the launcher, and the shapes the launcher exchanges with the Worker and leaves on the node. The launch specification is a document of printable-ASCII JSON text, at most 65536 bytes: every byte is 0x20 to 0x7e, a character at or above U+007F is written as a lowercase \\uXXXX escape, a character outside the Basic Multilingual Plane as two, and JSON escapes the control characters. This schema describes that text. The document travels as the value of the environment variable NEMAR_LAUNCH_SPEC, as the base64url encoding (Request for Comments (RFC) 4648 section 5, alphabet A-Za-z0-9-_, no padding, no line breaks) of the bytes of that text, at most 87382 characters, and the encoding is canonical: encoding the decoded text again gives the value back. Its digests are over the text, never over the encoded value. Shared byte for byte between nemarOrg/nemar-cli (shared/contract/compute-launch.schema.json) and nemarOrg/nemar-process (launcher/schema/launch-spec.v2.json): whichever merges first writes it, the other copies it. Version 2 adds the optional member serving_index and nothing else, so every version 1 document is a version 2 document; a version 1 reader refuses a document that carries it, because the root is closed. The root validates the launch specification; $defs hold the bundle response, the serving index response, the outputs request and response, and the launcher's result, manifest and provenance documents. Requests and documents are closed (no unknown keys); the two responses (bundle_response, outputs_response) are open, and a reader ignores unknown keys. Exit numbers: 0, and 10 to 16 for the seven launcher failure codes in order. On the node, outputs are at work/outputs/<path> and the launcher directory holds result.json, provenance.json, manifest.json and launcher.log; in the results bucket the same files are jobs/<job_id>/outputs/<path> and jobs/<job_id>/launcher/<file>.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -68,6 +68,23 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
+        }
+      }
+    },
+    "serving_index": {
+      "description": "The serving copy's index.json that the Worker staged for this job: the SHA-256 and size of its bytes. There is no URL: the launcher asks POST <api_base>/compute/jobs/<job_id>/serving-index with job_token for a presigned address (serving_index_response), downloads the file before the job's network is fenced, checks its size and SHA-256, and binds the directory that holds it read-only at /data/serving-index, the file at /data/serving-index/index.json, the path the Worker names in args after --serving-index. A failure of the route or of the download, or a size or SHA-256 that differs, ends the job dataset_fetch_failed before the container runs (the detail serving_index_mismatch for a size or SHA-256 that differs). Absent for every job the Worker staged no index for.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "size"],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
         }
       }
     },
@@ -176,7 +193,7 @@
       }
     },
     "job_token": {
-      "description": "The per-job token, sent in the X-Compute-Job-Token header to the bundle, outputs and complete routes, never in a URL.",
+      "description": "The per-job token, sent in the X-Compute-Job-Token header to the bundle, serving index, outputs and complete routes, never in a URL.",
       "type": "string",
       "pattern": "^[A-Za-z0-9_-]{16,256}(?![\\s\\S])"
     }
@@ -191,6 +208,22 @@
   "$defs": {
     "bundle_response": {
       "description": "POST <api_base>/compute/jobs/<job_id>/bundle: a short-lived presigned GET of the job's own archive. A response, so open: a reader ignores unknown keys (a running launcher must survive the Worker adding one).",
+      "type": "object",
+      "required": ["url", "expires_at"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^https?://[^\\s]+(?![\\s\\S])"
+        },
+        "expires_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z(?![\\s\\S])"
+        }
+      }
+    },
+    "serving_index_response": {
+      "description": "POST <api_base>/compute/jobs/<job_id>/serving-index: a short-lived presigned GET of the serving index the Worker staged for the job, as the bundle response. A response, so open: a reader ignores unknown keys.",
       "type": "object",
       "required": ["url", "expires_at"],
       "properties": {

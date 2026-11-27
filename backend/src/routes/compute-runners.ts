@@ -69,8 +69,14 @@ export const RUNNER_TOKEN_BODY_MAX_BYTES = 1024;
 /** The most bytes a claim reads: a protocol word, a count, up to three runtimes, an architecture and a version. */
 export const RUNNER_CLAIM_BODY_MAX_BYTES = 4096;
 
-/** The most bytes a heartbeat or a completion reads: a few ids, words and numbers. */
+/** The most bytes a completion reads: a few ids, words and numbers. */
 export const RUNNER_REPORT_BODY_MAX_BYTES = 8192;
+
+/**
+ * The most bytes a heartbeat reads: a few ids and words, and the live progress object of ADR 0134, which
+ * serializes to at most `PROGRESS_MAX_BYTES` (8192).
+ */
+export const RUNNER_HEARTBEAT_BODY_MAX_BYTES = 16_384;
 
 export const computeRunnerRoutes = new Hono<Env>();
 
@@ -190,7 +196,7 @@ computeRunnerRoutes.post("/heartbeat", runnerAccess, async (c) => {
   const runner = c.get("runner");
   if (!runner) return refuse(c, "runner_unknown");
   c.header("Cache-Control", "no-store");
-  const read = await readRunnerBody(c, RUNNER_REPORT_BODY_MAX_BYTES);
+  const read = await readRunnerBody(c, RUNNER_HEARTBEAT_BODY_MAX_BYTES);
   if (!read.ok) return read.response;
   const parsed = RunnerHeartbeatRequestSchema.safeParse(read.body);
   if (!parsed.success) return refuse(c, "invalid_body");

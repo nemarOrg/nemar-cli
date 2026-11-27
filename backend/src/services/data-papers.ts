@@ -58,13 +58,16 @@ export const DATA_PAPER_STRING_CAPS = {
   judge_model: 100,
 } as const;
 
-// A DOI is `10.<registrant>/<suffix>`; the suffix has no whitespace. Anything
-// else (a URL, a `doi:` prefix, a trailing period) is refused, not repaired:
+// A DOI is `10.<registrant>/<suffix>`: four to nine ASCII digits, and a suffix
+// of printable ASCII with no space, neuroschema 0.6.0 `dataPaper.doi` exactly
+// (explicit classes, because `\d` and `\S` read differently in Python). Anything
+// else (a URL, a `doi:` prefix, a non-ASCII character) is refused, not repaired:
 // the dashboard publishes normalized DOIs, so a malformed one is a producer bug
 // to surface, and guessing the intended DOI is how a wrong paper gets served.
-// `\S+` also accepts characters such as `<` and `>`, so a consumer that renders
-// a DOI into HTML must escape it.
-const DOI_PATTERN = /^10\.\d{4,9}\/\S+$/;
+// `[!-~]` also accepts characters such as `<` and `>`, so a consumer that renders
+// a DOI into HTML must escape it. test/contract-neuroschema.test.ts holds this
+// to the vendored schema.
+const DOI_PATTERN = /^10\.[0-9]{4,9}\/[!-~]+$/;
 
 export const MIN_DATA_PAPER_YEAR = 1000;
 export const MAX_DATA_PAPER_YEAR = 2999;

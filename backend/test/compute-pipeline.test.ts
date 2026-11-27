@@ -1185,6 +1185,57 @@ describe("a deleted dataset", () => {
     expect(await ledgerKinds(env, a.jobId)).toEqual(["hold"]);
     expect(await jobCount(env)).toBe(2);
   });
+
+  test("loses its live progress, run rows (with their links) and quality summaries, and another dataset keeps its own (MUTATION: drop any of the three deletes)", async () => {
+    const { env } = await world();
+    const owner = await seedUser(env.DB, {});
+    await env.DB.prepare("UPDATE datasets SET owner_user_id = ?1 WHERE dataset_id = 'nm000104'")
+      .bind(owner)
+      .run();
+    await seedEegDataset(env, "nm000105", { owner });
+    const a = await run(env);
+    const b = await run(env, { datasetId: "nm000105" });
+    if (!a.ok || !b.ok) throw new Error("not dispatched");
+    for (const [stampId, jobId, datasetId] of [
+      [a.stampId, a.jobId, "nm000104"],
+      [b.stampId, b.jobId, "nm000105"],
+    ] as const) {
+      await env.DB.prepare(
+        "INSERT INTO compute_pipeline_progress_runs (stamp_id, job_id, reports) VALUES (?1, ?2, 1)",
+      )
+        .bind(stampId, jobId)
+        .run();
+      await env.DB.prepare(
+        "INSERT INTO compute_pipeline_progress (stamp_id, checkpoint, passed, failed, skipped, total, reported_at) VALUES (?1, 'import', 1, 0, 0, 2, datetime('now'))",
+      )
+        .bind(stampId)
+        .run();
+      await env.DB.prepare(
+        "INSERT INTO compute_quality_documents (stamp_id, dataset_id, recipe, entry, record_sha256) VALUES (?1, ?2, 'nemar-floor', '{}', ?3)",
+      )
+        .bind(stampId, datasetId, "a".repeat(64))
+        .run();
+    }
+    const count = async (table: string, where: string, bind: string | number) =>
+      (
+        await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`)
+          .bind(bind)
+          .first<{ n: number }>()
+      )?.n ?? 0;
+    const result = await deleteDatasetCascade(
+      env.DB,
+      { ...env, ENVIRONMENT: "production" },
+      "nm000104",
+      { skipS3: true },
+    );
+    expect(result.steps.d1.success).toBe(true);
+    expect(await count("compute_pipeline_progress", "stamp_id = ?1", a.stampId)).toBe(0);
+    expect(await count("compute_pipeline_progress_runs", "stamp_id = ?1", a.stampId)).toBe(0);
+    expect(await count("compute_quality_documents", "dataset_id = ?1", "nm000104")).toBe(0);
+    expect(await count("compute_pipeline_progress", "stamp_id = ?1", b.stampId)).toBe(1);
+    expect(await count("compute_pipeline_progress_runs", "stamp_id = ?1", b.stampId)).toBe(1);
+    expect(await count("compute_quality_documents", "dataset_id = ?1", "nm000105")).toBe(1);
+  });
 });
 
 describe("the launcher's files", () => {

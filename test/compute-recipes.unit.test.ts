@@ -20,15 +20,23 @@ import {
   RECIPE_IMAGE_DIGEST_FLAG,
   RECIPE_INPUTS,
   RECIPE_INPUT_EXECUTOR,
+  RECIPE_PLUGIN_STEPS,
+  RECIPE_PRE_CHECKS,
   RECIPE_PRODUCT_DIR,
+  RECORD_STEP,
   type RecipeExecutor,
   type RecipeInput,
   STAMP_INPUT_FIELDS,
   STAMP_REFUSAL_REASONS,
+  STANDARD_CHECKPOINTS,
+  STORED_CHECKPOINT,
+  checkpointOfStep,
+  declaredCheckpoints,
   defaultInput,
   findRecipe,
   readRecipeRecord,
   recipeArguments,
+  recipeCheckpointMap,
   recipeCommand,
   recipeImageDigestArg,
   recipeLabel,
@@ -38,6 +46,7 @@ import {
   stampInputFields,
 } from "../shared/compute-recipes";
 import {
+  COMPUTE_MAX_OUTPUT_FILES,
   JobSpecSchema,
   LAUNCHER_OUTPUTS_DIR,
   PARTITIONS,
@@ -45,6 +54,8 @@ import {
   estimateSuMilli,
 } from "../shared/contract/compute";
 import { launchSpecFits } from "../shared/contract/compute-launch";
+import { PROGRESS_STEP_RE } from "../shared/contract/compute-progress";
+import { PLUGIN_CHECKPOINTS, PLUGIN_NAME_RE } from "../shared/contract/plugin-manifest";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
 const IMAGE = `ghcr.io/example/nemar-python@${DIGEST}`;
@@ -155,6 +166,17 @@ describe("the registry", () => {
       test("its version and engine are plain words the stamp's columns take", () => {
         expect(recipe.version).toMatch(/^[0-9A-Za-z._+-]{1,64}$/);
         expect(recipe.engine).toMatch(/^[0-9A-Za-z._+@-]{1,64}$/);
+      });
+
+      test("every plugin step sits in its last declared checkpoint, where a skipped plugin cannot break the cascade (ADR 0134 amendment of 2026-11-26)", () => {
+        const plugins: readonly string[] = RECIPE_PLUGIN_STEPS;
+        const last = recipe.checkpoints[recipe.checkpoints.length - 1];
+        for (const c of recipe.checkpoints) {
+          for (const step of c.steps) {
+            if (plugins.includes(step))
+              expect([step, c.checkpoint]).toEqual([step, last.checkpoint]);
+          }
+        }
       });
 
       test("its required outputs are under the product directory and named by its label", () => {
@@ -643,5 +665,192 @@ describe("the module", () => {
       .replace(/\/\/.*$/gm, "");
     expect(src).not.toMatch(/^\s*import\b/m);
     expect(src).not.toMatch(/\bfetch\s*\(|Date\.now|Math\.random|process\./);
+  });
+});
+
+// ADR 0134 decision 2 (epic #2324 phase 2): each recipe version declares its checkpoints and the steps
+// that map to each. The step lists below are nemar-process's `STEP_ORDER` plus its `PRE_CHECKS` and, for
+// nemar-ica, its `PLUGINS`, in map order (nemar_floor/steps.py and, for nemar-ica, the floor's steps it re-runs
+// then nemar_ica/steps.py), written out a second time so a change on either side is a change here.
+describe("checkpoint maps (ADR 0134)", () => {
+  const FLOOR_STEP_ORDER = [
+    "load",
+    "signal_channels",
+    "flatline",
+    "drift",
+    "line_noise_measure",
+    "line_noise_50",
+    "line_noise_60",
+    "qc_amplitude",
+    "bad_channels",
+    "bad_windows",
+    "qc",
+  ];
+  const ICA_STEP_ORDER = [
+    ...FLOOR_STEP_ORDER,
+    "ica_eligibility",
+    "iclabel_locations",
+    "asr",
+    "reref",
+    "ica",
+    "iclabel",
+    "nemar-quality",
+    "nemar-spectrum",
+  ];
+
+  test("the standard checkpoints and stored are the ADR's, in order, with no figures (ADR 0137)", () => {
+    expect([...STANDARD_CHECKPOINTS]).toEqual([
+      "import",
+      "preprocess",
+      "ica",
+      "iclabel",
+      "quality",
+      "stored",
+    ]);
+    expect(STANDARD_CHECKPOINTS as readonly string[]).not.toContain("figures");
+    expect(STORED_CHECKPOINT).toBe("stored");
+  });
+
+  test("the plugin steps are nemar-quality then nemar-spectrum, and every plugin checkpoint is a standard one", () => {
+    expect([...RECIPE_PLUGIN_STEPS]).toEqual(["nemar-quality", "nemar-spectrum"]);
+    for (const c of PLUGIN_CHECKPOINTS) {
+      expect(STANDARD_CHECKPOINTS as readonly string[], c).toContain(c);
+    }
+  });
+
+  test("nemar-floor maps exactly as the ADR says", () => {
+    const floor = findRecipe("nemar-floor");
+    expect(floor?.checkpoints.map((c) => [c.checkpoint, [...c.steps]])).toEqual([
+      ["import", ["load", "signal_channels"]],
+      [
+        "preprocess",
+        [
+          "flatline",
+          "drift",
+          "line_noise_measure",
+          "line_noise_50",
+          "line_noise_60",
+          "qc_amplitude",
+          "bad_channels",
+          "bad_windows",
+        ],
+      ],
+      ["quality", ["qc"]],
+    ]);
+  });
+
+  test("nemar-ica maps its re-run qc to preprocess, then ica, iclabel, and its quality plugins at quality", () => {
+    const ica = findRecipe("nemar-ica");
+    expect(ica?.checkpoints.map((c) => c.checkpoint)).toEqual([
+      "import",
+      "preprocess",
+      "ica",
+      "iclabel",
+      "quality",
+    ]);
+    expect(ica && checkpointOfStep(ica, "qc")).toBe("preprocess");
+    expect(ica && checkpointOfStep(ica, "asr")).toBe("preprocess");
+    expect(ica && checkpointOfStep(ica, "iclabel")).toBe("iclabel");
+    expect(ica && checkpointOfStep(ica, "nemar-quality")).toBe("quality");
+    expect(ica && checkpointOfStep(ica, "nemar-spectrum")).toBe("quality");
+    expect(ica?.checkpoints.find((c) => c.checkpoint === "quality")?.steps).toEqual([
+      "nemar-quality",
+      "nemar-spectrum",
+    ]);
+    // the record is written after the plugins: its step counts at quality
+    expect(ica && checkpointOfStep(ica, RECORD_STEP)).toBe("quality");
+  });
+
+  test("every recipe's own result limit is a whole number from 1 to the outputs ceiling (owner, 2026-11-23)", () => {
+    for (const recipe of COMPUTE_RECIPES) {
+      const max = recipe.resultLimits?.maxFiles;
+      if (max === undefined) continue;
+      expect(Number.isSafeInteger(max), recipe.name).toBe(true);
+      expect(max, recipe.name).toBeGreaterThanOrEqual(1);
+      expect(max, recipe.name).toBeLessThanOrEqual(COMPUTE_MAX_OUTPUT_FILES);
+    }
+    expect(findRecipe("nemar-ica")?.resultLimits?.maxFiles).toBe(25_000);
+    expect(findRecipe("nemar-floor")?.resultLimits?.maxFiles).toBe(25_000);
+  });
+
+  test("every plugin step is a step word and a plugin name, mapped only in nemar-ica, at quality", () => {
+    for (const step of RECIPE_PLUGIN_STEPS) {
+      expect(PROGRESS_STEP_RE.test(step), step).toBe(true);
+      expect(PLUGIN_NAME_RE.test(step), step).toBe(true);
+    }
+    const ica = findRecipe("nemar-ica");
+    const floor = findRecipe("nemar-floor");
+    const plugins: readonly string[] = RECIPE_PLUGIN_STEPS;
+    expect(ica?.checkpoints.flatMap((c) => c.steps).filter((s) => plugins.includes(s))).toEqual([
+      ...RECIPE_PLUGIN_STEPS,
+    ]);
+    expect(floor?.checkpoints.flatMap((c) => c.steps).filter((s) => plugins.includes(s))).toEqual(
+      [],
+    );
+    for (const step of RECIPE_PLUGIN_STEPS) {
+      expect(ica ? checkpointOfStep(ica, step) : null).toBe("quality");
+    }
+  });
+
+  test("every pre-check counts at preprocess, so a recording it refuses never passed a later checkpoint", () => {
+    for (const recipe of COMPUTE_RECIPES) {
+      for (const step of recipe.checkpoints.flatMap((c) => c.steps)) {
+        if ((RECIPE_PRE_CHECKS as readonly string[]).includes(step)) {
+          expect(checkpointOfStep(recipe, step), `${recipe.name} ${step}`).toBe("preprocess");
+        }
+      }
+    }
+    const ica = findRecipe("nemar-ica");
+    expect(ica && checkpointOfStep(ica, "ica_eligibility")).toBe("preprocess");
+    expect(ica && checkpointOfStep(ica, "iclabel_locations")).toBe("preprocess");
+    const floor = findRecipe("nemar-floor");
+    expect(floor && checkpointOfStep(floor, "qc_amplitude")).toBe("preprocess");
+  });
+
+  test.each([
+    ["nemar-floor", FLOOR_STEP_ORDER],
+    ["nemar-ica", ICA_STEP_ORDER],
+  ])("every step of %s maps to exactly one checkpoint, in step order", (name, order) => {
+    const recipe = findRecipe(name);
+    if (!recipe) throw new Error(name);
+    const mapped = recipe.checkpoints.flatMap((c) => c.steps);
+    expect(mapped).toEqual(order);
+    expect(new Set(mapped).size).toBe(mapped.length);
+    for (const step of order) expect(checkpointOfStep(recipe, step)).not.toBeNull();
+    expect(checkpointOfStep(recipe, "no_such_step")).toBeNull();
+    // `record`, the recipe writing its own record, is a trailing pseudo-step: the last checkpoint.
+    expect(mapped).not.toContain(RECORD_STEP);
+    expect(checkpointOfStep(recipe, RECORD_STEP)).toBe(
+      recipe.checkpoints[recipe.checkpoints.length - 1]?.checkpoint,
+    );
+  });
+
+  test("checkpoints follow the standard order, never name stored, and each has a step", () => {
+    for (const recipe of COMPUTE_RECIPES) {
+      const names = recipe.checkpoints.map((c) => c.checkpoint);
+      expect(names).not.toContain(STORED_CHECKPOINT);
+      const positions = names.map((n) => (STANDARD_CHECKPOINTS as readonly string[]).indexOf(n));
+      expect(positions.every((p) => p >= 0)).toBe(true);
+      expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+      for (const c of recipe.checkpoints) expect(c.steps.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("declaredCheckpoints ends with stored", () => {
+    const floor = findRecipe("nemar-floor");
+    expect(floor && declaredCheckpoints(floor)).toEqual([
+      "import",
+      "preprocess",
+      "quality",
+      "stored",
+    ]);
+  });
+
+  test("the map belongs to the registry's version only", () => {
+    const floor = findRecipe("nemar-floor");
+    expect(recipeCheckpointMap("nemar-floor", floor?.version)).toBe(floor?.checkpoints ?? null);
+    expect(recipeCheckpointMap("nemar-floor", `${floor?.version}-other`)).toBeNull();
+    expect(recipeCheckpointMap("no-such-recipe", "1.0.0")).toBeNull();
+    expect(recipeCheckpointMap(undefined, undefined)).toBeNull();
   });
 });

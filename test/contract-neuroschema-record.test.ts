@@ -1,13 +1,15 @@
 /**
- * neuroschema `record` conformance: the vendored record bundle compiles and
- * accepts the record documents NEMAR actually publishes. The Zarr engine
+ * neuroschema `record` conformance: the record root of the vendored bundle
+ * compiles and accepts the record documents NEMAR actually publishes. The Zarr engine
  * protocol's `opened.record` passes one of these through unchanged, so the
  * protocol tests reuse these fixtures.
  *
  * The fixtures are three records copied verbatim from the public
  * https://data.nemar.org/nm000103/latest/records.json (read on 2026-11-06).
- * They are stamped schema_version "0.3.0" yet conform to the vendored 0.4.1
- * record schema: the stamp is the emitter's, and only conformance is asserted.
+ * They are stamped schema_version "0.3.0" yet conform to the vendored record
+ * schema: the stamp is the emitter's, and only conformance is asserted.
+ * build-vendor.mjs walks the dataset and record roots into the one bundle
+ * (`dataset.bundle.json`, `roots.record`), so both come from the same release.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -29,16 +31,18 @@ const records = readJson("fixtures/neuroschema-records/nm000103-sample.json") as
 >;
 const first = records[0] as Record<string, unknown>;
 
-interface Provenance {
-  _provenance: { neuroschema_version: string; source_commit: string };
+interface Bundle {
+  _provenance: { neuroschema_version: string };
+  roots: { record: string };
+  schemas: Array<{ $id: string }>;
 }
 
-describe("vendored neuroschema record bundle", () => {
-  test("is cut from the same neuroschema release and commit as the dataset bundle", () => {
-    const record = readJson("../shared/contract/neuroschema/record.bundle.json") as Provenance;
-    const dataset = readJson("../shared/contract/neuroschema/dataset.bundle.json") as Provenance;
-    expect(record._provenance.neuroschema_version).toBe(NEUROSCHEMA_VERSION);
-    expect(record._provenance.source_commit).toBe(dataset._provenance.source_commit);
+describe("vendored neuroschema record root", () => {
+  test("is declared by the bundle cut from the release NEMAR pins", () => {
+    const bundle = readJson("../shared/contract/neuroschema/dataset.bundle.json") as Bundle;
+    expect(bundle._provenance.neuroschema_version).toBe(NEUROSCHEMA_VERSION);
+    expect(bundle.roots.record).toBe("nsc:/core/record.schema.json");
+    expect(bundle.schemas.some((s) => s.$id === bundle.roots.record)).toBe(true);
   });
 
   test("accepts every published record fixture", () => {

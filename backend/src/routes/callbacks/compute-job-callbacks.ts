@@ -3,8 +3,11 @@
  * launcher on Expanse" and "The launch specification"):
  *
  *   POST /compute/jobs/:id/bundle             a 10-minute presigned GET of THIS job's own code bundle
+ *   POST /compute/jobs/:id/serving-index      a 10-minute presigned GET of the serving index the Worker
+ *                                             staged for THIS job (ADR 0141)
  *   POST /compute/jobs/:id/outputs            what the job produced, and an upload address for each file
  *   POST /compute/jobs/:id/outputs/complete   the uploads are done
+ *   POST /compute/jobs/:id/progress           live progress of a NEMAR pipeline job on Tapis (ADR 0134)
  *
  * They are registered on the compute router with no session: the launcher runs on a node, holds no
  * account and no storage credential, and authenticates with ONE per-job token.
@@ -21,6 +24,10 @@
  * that does not exist (and, for `bundle`, a job that has no bundle). The door says nothing about which
  * jobs exist or why it refused. Only then, for a verified token, are the other answers given.
  *
+ * The serving index address is made by `presignServingIndexRead`, from the digest the job's RECORDED
+ * specification names (read back and accepted only if its bytes are the ones whose digest the row holds), and
+ * a job whose specification names no staged index is refused like a job with no bundle.
+ *
  * The bundle address is made by `presignBundleRead`, from the job id the token was verified for and
  * nothing the request carries: no path, no key and no query is read, so there is nothing to steer it to
  * another record. Bodies are bounded (1 MiB for `bundle` and `complete`, which need none; the outputs
@@ -32,10 +39,20 @@
  * cleared (a revoke does that) is the same single refusal, never compared as equal. A Tapis job's path is
  * untouched.
  *
+ * THE PROGRESS ROUTE (ADR 0134 decision 3, epic #2324 phase 2) is for a NEMAR pipeline job on Tapis only:
+ * after the same door, the body (at most `PROGRESS_BODY_MAX_BYTES`) must be the closed `nemar.progress.v1`
+ * object, the job must be a Tapis job in `submitted`, `queued` or `running` (D1 lags Tapis) with a dispatched
+ * pipeline stamp whose recipe version has a checkpoint map, and the object must fit that map
+ * (`progressProblem`). It is stored by `recordProgress`, whose one guarded batch also holds the rate floor:
+ * a report sooner than `PROGRESS_MIN_INTERVAL_SECONDS` after the last accepted one is `report_too_soon` (429)
+ * and writes nothing. No switch beyond `COMPUTE_ENABLED` is read, and nothing new is needed to revoke it: a
+ * terminal job, a cleared nonce or a rotated secret ends the token as for the other routes.
+ *
  * Nothing here logs a token, an address or a path: a line carries the job id and a fixed word.
  */
 
 import type { Context, Hono } from "hono";
+import { progressProblem } from "../../../../shared/compute-checkpoints.js";
 import {
   COMPUTE_REFUSAL_STATUS,
   COMPUTE_ROUTE_SENTENCES,
@@ -43,12 +60,24 @@ import {
   isTerminalComputeState,
 } from "../../../../shared/compute-state.js";
 import { COMPUTE_JOB_TOKEN_HEADER } from "../../../../shared/contract/compute-launch.js";
+import {
+  PROGRESS_BODY_MAX_BYTES,
+  PROGRESS_REPORT_SECONDS,
+  ProgressSchema,
+} from "../../../../shared/contract/compute-progress.js";
 import { LEASE_ID_RE, RUNNER_LEASE_HEADER } from "../../../../shared/contract/compute-runner.js";
 import { COMPUTE_JOB_ID_RE } from "../../../../shared/contract/compute.js";
 import { type ComputeJobRow, getJob } from "../../services/compute-jobs.js";
 import { handleComplete, handleOutputs, outputsBodyCap } from "../../services/compute-outputs.js";
-import { presignBundleRead } from "../../services/compute-records.js";
+import {
+  PROGRESS_TAPIS_STATES,
+  recordProgress,
+  stampForJob,
+} from "../../services/compute-pipeline-progress.js";
+import { presignBundleRead, presignServingIndexRead } from "../../services/compute-records.js";
+import { computeEnabled } from "../../services/compute-switches.js";
 import { NO_NONCE, verifyComputeToken } from "../../services/compute-tokens.js";
+import { readRecordedSpec } from "../../services/compute-verify.js";
 import type { Bindings, Variables } from "../../types/bindings.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
 
@@ -122,12 +151,31 @@ export function registerComputeJobCallbackRoutes(router: Router): void {
     return c.json({ url: signed.url, expires_at: signed.expires_at });
   });
 
+  router.post("/jobs/:id/serving-index", async (c) => {
+    const job = await authorize(c);
+    if (!job) return refused(c);
+    if (declaredTooLarge(c, SMALL_BODY_BYTES)) return answer(c, 413, "invalid_spec");
+    const records = c.env.COMPUTE_RECORDS;
+    if (!records) return answer(c, COMPUTE_REFUSAL_STATUS.compute_disabled, "compute_disabled");
+    // The digest is the RECORDED specification's, never anything the request carries (ADR 0141).
+    const spec = await readRecordedSpec(records, job);
+    const staged = spec?.serving_index;
+    if (staged === undefined || !("sha256" in staged)) return refused(c);
+    const signed = await presignServingIndexRead(c.env, staged);
+    if (!signed.ok) {
+      return signed.code === "compute_disabled"
+        ? answer(c, COMPUTE_REFUSAL_STATUS.compute_disabled, "compute_disabled")
+        : refused(c);
+    }
+    return c.json({ url: signed.url, expires_at: signed.expires_at });
+  });
+
   router.post("/jobs/:id/outputs", async (c) => {
     const job = await authorize(c);
     if (!job) return refused(c);
     let cap: number;
     try {
-      cap = await outputsBodyCap(c.env);
+      cap = await outputsBodyCap(c.env, job);
     } catch {
       // The cap comes from the owner's policy, read from the database: a failure here is a transient fault
       // of the Worker's own, not the platform being off. 503 as before, with its own word, so the launcher
@@ -155,5 +203,49 @@ export function registerComputeJobCallbackRoutes(router: Router): void {
     const result = await handleComplete(c.env, job);
     if (result.ok) return c.json({ ok: true });
     return answer(c, result.status, result.code);
+  });
+
+  router.post("/jobs/:id/progress", async (c) => {
+    const job = await authorize(c);
+    if (!job) return refused(c);
+    if (!computeEnabled(c.env)) {
+      return answer(c, COMPUTE_REFUSAL_STATUS.compute_disabled, "compute_disabled");
+    }
+    const read = await readBoundedJsonObject(c, PROGRESS_BODY_MAX_BYTES);
+    if (!read.ok) return answer(c, read.status === 413 ? 413 : 400, "invalid_spec");
+    const parsed = ProgressSchema.safeParse(read.body);
+    if (!parsed.success) return answer(c, 400, "invalid_spec");
+    if (job.executor !== "tapis") return answer(c, COMPUTE_REFUSAL_STATUS.bad_state, "bad_state");
+    if (!(PROGRESS_TAPIS_STATES as readonly string[]).includes(job.state)) {
+      return answer(c, COMPUTE_REFUSAL_STATUS.bad_state, "bad_state");
+    }
+    let lookup: Awaited<ReturnType<typeof stampForJob>>;
+    try {
+      lookup = await stampForJob(c.env.DB, job.id);
+    } catch (err) {
+      console.error(
+        `[compute-job-callbacks] progress_stamp_read_failed job=${job.id} class=${err instanceof Error ? err.name : typeof err}`,
+      );
+      return answer(c, COMPUTE_REFUSAL_STATUS.storage_unavailable, "storage_unavailable");
+    }
+    if (!lookup.ok) return answer(c, COMPUTE_REFUSAL_STATUS.bad_state, "bad_state");
+    if (progressProblem(parsed.data, lookup.stamp.checkpoints) !== null) {
+      return answer(c, 400, "invalid_spec");
+    }
+    const result = await recordProgress(c.env.DB, {
+      jobId: job.id,
+      stamp: lookup.stamp,
+      reporter: { executor: "tapis" },
+      progress: parsed.data,
+    });
+    if (result === "accepted") return c.json({ ok: true });
+    if (result === "too_soon") {
+      c.header("Retry-After", String(PROGRESS_REPORT_SECONDS));
+      return answer(c, COMPUTE_REFUSAL_STATUS.report_too_soon, "report_too_soon");
+    }
+    if (result === "storage_unavailable") {
+      return answer(c, COMPUTE_REFUSAL_STATUS.storage_unavailable, "storage_unavailable");
+    }
+    return answer(c, COMPUTE_REFUSAL_STATUS.bad_state, "bad_state");
   });
 }

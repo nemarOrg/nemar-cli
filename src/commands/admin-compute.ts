@@ -12,7 +12,7 @@
  *   nemar admin compute jobs list|record|report|access-report|hold|release-hold|holds|access-reports|requeue-access-report
  *                                                         reporting, legal holds and ACCESS reports (phase A7, #2012; the same file)
  *   nemar admin compute observer mint [--json]            mint the observer's one-hour token (admin)
- *   nemar admin compute pipeline run|status ...           run NEMAR's own recipes, or read their stamps (admin; src/commands/admin-compute-pipeline.ts)
+ *   nemar admin compute pipeline run|status|failures|stamps ...  run NEMAR's recipes; show their progress grid, failures and stamps (admin; src/commands/admin-compute-pipeline.ts)
  *   nemar admin compute access list|grant|deny|suspend|revoke ...  decide on a person's compute access (admin; src/commands/admin-compute-access.ts)
  *   nemar admin compute runners register|list|revoke ...  the machines that run jobs for NEMAR (owner; src/commands/admin-compute-runners.ts)
  *   nemar admin compute derivatives list|show|promote|sync ...  the derivative store of pipeline products (admin; published: owner; src/commands/admin-compute-derivatives.ts)

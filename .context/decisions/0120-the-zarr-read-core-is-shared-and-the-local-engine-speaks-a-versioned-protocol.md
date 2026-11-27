@@ -165,7 +165,10 @@ A Zarr store is not the file, though: one recording can have several groups, and
 
 - `shared/zarr-engine-protocol.schema.json`, `shared/contract/zarr-engine-protocol.ts`, `shared/zarr/protocol-frame.ts`; the engine, `src/lib/zarr-engine/`, and `test/zarr-engine-runtime.test.ts` (a real child process).
 - `test/zarr-engine-protocol-contract.test.ts`, `test/zarr-engine-frame.test.ts`, `test/fixtures/engine-frames/`, `scripts/zarr/engine_frame_fixtures.py`.
-- `shared/contract/neuroschema/record.bundle.json`, `test/contract-neuroschema-record.test.ts`, `test/fixtures/neuroschema-records/` (three records from nm000103's public `records.json`); `shared/zarr/window-samples.ts` and `backend/test/zarr-window-samples.test.ts`.
+- The record root of `shared/contract/neuroschema/dataset.bundle.json` (`roots.record`; see the note below), `test/contract-neuroschema-record.test.ts`, `test/fixtures/neuroschema-records/` (three records from nm000103's public `records.json`); `shared/zarr/window-samples.ts` and `backend/test/zarr-window-samples.test.ts`.
 - `backend/src/routes/schemas.ts` serves the v0 schema; `backend/test/zarr-index-v3.test.ts` tests it.
 - `src/lib/zarr-engine/disk-cache.ts`, `test/zarr-engine-disk-cache.test.ts`, the restart tests in `test/zarr-engine-runtime.test.ts`; `src/lib/zarr-engine/client.ts`, `src/commands/zarr.ts`, `src/commands/engine.ts` and their `test/zarr-*cli.test.ts` files.
 - ADR 0005, ADR 0029, ADR 0037, ADR 0057, ADR 0077 (precedent only), ADR 0114.
+
+Note: the record schema now comes from the single vendored neuroschema 0.6.0 bundle, `shared/contract/neuroschema/dataset.bundle.json`, through its `roots.record`.
+The separate `record.bundle.json` (cut at 0.4.1) was folded into that bundle when the pipeline progress epic (ADR 0134 and ADR 0137) merged this work, so one bundle holds both roots from the same release.

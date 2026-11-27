@@ -1,0 +1,2865 @@
+{
+  "description": "nemar-ica 1.0.0-b2: the independent-component decomposition of one EEG recording, computed by pAMICA through eegprep (or by the AMICA binary, recorded as such), with ASR's state and ICLabel's probabilities; no samples are written.",
+  "extensions": {
+    "nemar": {
+      "dataset": {
+        "id": "on007823",
+        "source_commit": "5555555555555555555555555555555555555555",
+        "version": "v1.0.0"
+      },
+      "engine": {
+        "commonLayer": "1.0.0-b2",
+        "environment": {
+          "MKL_NUM_THREADS": "1",
+          "NUMEXPR_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "OPENBLAS_NUM_THREADS": "1",
+          "PYTHONHASHSEED": null
+        },
+        "ica_engine": "pamica-torch",
+        "numpy": "2.5.4",
+        "package": "eegprep",
+        "pamica": "0.4.0",
+        "python": "3.12.13",
+        "scipy": "1.18.1",
+        "threadpools": [
+          {
+            "api": "openmp",
+            "num_threads": 1,
+            "version": null
+          }
+        ],
+        "threads": 1,
+        "torch": "2.12.1",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "floor_plan_hash": "sha256:8b822db646d8a547e8f7d34bf42e140ac6ffe021975c918ff82717a00a5052a3",
+      "ica": {
+        "asr": {
+          "channels": [
+            "Fp1",
+            "Fp2",
+            "F3",
+            "F4",
+            "C3",
+            "C4",
+            "P3",
+            "P4",
+            "O2",
+            "F7",
+            "F8",
+            "T3",
+            "T4",
+            "T5",
+            "FZ",
+            "CZ",
+            "PZ",
+            "Pg1",
+            "Pg2"
+          ],
+          "cutoff": 30.0,
+          "max_dims": 0.66,
+          "maxmem_mb": 1024,
+          "state_sha256": "b283f72d043fc071c48d8d39bddb3d29b58745a892c75a1807831f0ad551f46f",
+          "step_size": 50,
+          "window_len_s": 0.5
+        },
+        "asr_burst_fraction": 0.294025,
+        "asr_bursts": {
+          "fraction": 0.294025,
+          "n_repaired": 16583,
+          "n_samples": 56400,
+          "spans": [
+            [
+              0,
+              199
+            ],
+            [
+              250,
+              399
+            ],
+            [
+              650,
+              749
+            ],
+            [
+              850,
+              999
+            ],
+            [
+              1150,
+              2149
+            ],
+            [
+              2300,
+              2449
+            ],
+            [
+              2450,
+              2799
+            ],
+            [
+              2900,
+              3349
+            ],
+            [
+              3500,
+              3699
+            ],
+            [
+              3750,
+              3899
+            ],
+            [
+              3950,
+              4049
+            ],
+            [
+              4450,
+              5249
+            ],
+            [
+              5350,
+              5449
+            ],
+            [
+              5650,
+              5799
+            ],
+            [
+              6450,
+              6749
+            ],
+            [
+              7000,
+              7199
+            ],
+            [
+              9350,
+              9499
+            ],
+            [
+              10050,
+              10149
+            ],
+            [
+              10300,
+              10549
+            ],
+            [
+              10650,
+              10799
+            ],
+            [
+              10850,
+              11349
+            ],
+            [
+              11950,
+              12149
+            ],
+            [
+              12450,
+              12599
+            ],
+            [
+              12700,
+              12799
+            ],
+            [
+              12800,
+              13049
+            ],
+            [
+              13050,
+              13199
+            ],
+            [
+              13200,
+              13649
+            ],
+            [
+              14150,
+              14249
+            ],
+            [
+              14300,
+              14499
+            ],
+            [
+              17100,
+              17199
+            ],
+            [
+              18400,
+              18649
+            ],
+            [
+              18650,
+              18799
+            ],
+            [
+              18900,
+              19249
+            ],
+            [
+              19400,
+              19549
+            ],
+            [
+              19850,
+              20499
+            ],
+            [
+              20500,
+              20799
+            ],
+            [
+              21200,
+              21599
+            ],
+            [
+              21850,
+              22049
+            ],
+            [
+              22050,
+              22399
+            ],
+            [
+              22550,
+              22849
+            ],
+            [
+              22950,
+              23749
+            ],
+            [
+              24500,
+              24749
+            ],
+            [
+              24950,
+              25199
+            ],
+            [
+              25400,
+              25799
+            ],
+            [
+              25800,
+              26249
+            ],
+            [
+              26500,
+              26699
+            ],
+            [
+              27050,
+              27249
+            ],
+            [
+              27450,
+              27549
+            ],
+            [
+              33925,
+              34074
+            ],
+            [
+              38675,
+              38824
+            ],
+            [
+              39525,
+              39674
+            ],
+            [
+              45125,
+              45274
+            ],
+            [
+              45625,
+              45774
+            ],
+            [
+              45875,
+              46024
+            ],
+            [
+              46075,
+              46224
+            ],
+            [
+              46525,
+              47074
+            ],
+            [
+              47075,
+              47224
+            ],
+            [
+              47275,
+              47524
+            ],
+            [
+              47575,
+              47724
+            ],
+            [
+              47825,
+              47924
+            ],
+            [
+              47975,
+              48124
+            ],
+            [
+              49975,
+              50074
+            ],
+            [
+              52175,
+              52324
+            ],
+            [
+              52325,
+              52424
+            ],
+            [
+              52475,
+              52674
+            ],
+            [
+              53825,
+              53974
+            ],
+            [
+              53975,
+              54374
+            ]
+          ],
+          "threshold_uv": 1e-08
+        },
+        "best_iter": 4,
+        "best_ll": -2.7449900144324153,
+        "bit_reproducible": true,
+        "block_size": 131072,
+        "browser_transform": {
+          "applies_to": "serving_copy channels matched by label, in microvolts: the view converts by the store's unit field and refuses an unknown unit or any channel it cannot match",
+          "caption": "not checked against the decomposition input",
+          "columns": [
+            "Fp1",
+            "Fp2",
+            "F3",
+            "F4",
+            "C3",
+            "C4",
+            "P3",
+            "P4",
+            "O2",
+            "F7",
+            "F8",
+            "T3",
+            "T4",
+            "T5",
+            "FZ",
+            "CZ",
+            "PZ",
+            "Pg1",
+            "Pg2"
+          ],
+          "match": "label",
+          "matrix": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_servingunmixing.tsv",
+          "note": "no preprocessing; activations approximate the decomposition input",
+          "rows": null,
+          "shaded": {
+            "files": [
+              "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_badsegments.tsv"
+            ],
+            "label": "burst"
+          },
+          "unit": "uV"
+        },
+        "browser_transform_reason": null,
+        "decomposition_input": {
+          "channel_types": [
+            [
+              "Fp1",
+              "EEG"
+            ],
+            [
+              "Fp2",
+              "EEG"
+            ],
+            [
+              "F3",
+              "EEG"
+            ],
+            [
+              "F4",
+              "EEG"
+            ],
+            [
+              "C3",
+              "EEG"
+            ],
+            [
+              "C4",
+              "EEG"
+            ],
+            [
+              "P3",
+              "EEG"
+            ],
+            [
+              "P4",
+              "EEG"
+            ],
+            [
+              "O1",
+              "EEG"
+            ],
+            [
+              "O2",
+              "EEG"
+            ],
+            [
+              "F7",
+              "EEG"
+            ],
+            [
+              "F8",
+              "EEG"
+            ],
+            [
+              "T3",
+              "EEG"
+            ],
+            [
+              "T4",
+              "EEG"
+            ],
+            [
+              "T5",
+              "EEG"
+            ],
+            [
+              "T6",
+              "EEG"
+            ],
+            [
+              "FZ",
+              "EEG"
+            ],
+            [
+              "CZ",
+              "EEG"
+            ],
+            [
+              "PZ",
+              "EEG"
+            ],
+            [
+              "Pg1",
+              "EEG"
+            ],
+            [
+              "Pg2",
+              "EEG"
+            ],
+            [
+              "ECG",
+              "ECG"
+            ]
+          ],
+          "channel_types_sha256": "3c5002233aa36a975b1de9586e438e98ccff404371159626ae56335d244280d2",
+          "channels": [
+            "Fp1",
+            "Fp2",
+            "F3",
+            "F4",
+            "C3",
+            "C4",
+            "P3",
+            "P4",
+            "O2",
+            "F7",
+            "F8",
+            "T3",
+            "T4",
+            "T5",
+            "FZ",
+            "CZ",
+            "PZ",
+            "Pg1",
+            "Pg2"
+          ],
+          "preprocessing": [
+            {
+              "function": "eegprep.pop_select",
+              "step": "signal_channels"
+            },
+            {
+              "function": "eegprep.clean_flatlines",
+              "step": "flatline"
+            },
+            {
+              "function": "eegprep.pop_eegfiltnew",
+              "step": "drift"
+            },
+            {
+              "function": "eegprep.clean_channels",
+              "step": "bad_channels"
+            },
+            {
+              "function": "eegprep.clean_asr",
+              "step": "asr"
+            },
+            {
+              "function": "eegprep.pop_reref",
+              "step": "reref"
+            }
+          ],
+          "reference": "average",
+          "source": "archive",
+          "unit": "uV"
+        },
+        "device": "cpu",
+        "device_reason": "requested",
+        "device_requested": "cpu",
+        "did_converge": false,
+        "dtype": "float64",
+        "engine": "pamica-torch",
+        "engine_input_dtype": "float64",
+        "fallback": false,
+        "final_ll": -2.7449900144324153,
+        "good_channels": [
+          "Fp1",
+          "Fp2",
+          "F3",
+          "F4",
+          "C3",
+          "C4",
+          "P3",
+          "P4",
+          "O2",
+          "F7",
+          "F8",
+          "T3",
+          "T4",
+          "T5",
+          "FZ",
+          "CZ",
+          "PZ",
+          "Pg1",
+          "Pg2"
+        ],
+        "gpu_allocator_limit_mb": null,
+        "gpu_memory_cap_mb": null,
+        "gpu_name": null,
+        "iclabel": {
+          "version": "default",
+          "weights_sha256": "8949a3e1faf61fee997034eca50a94475b78d58b35beb38ba48f0b208444d929"
+        },
+        "image_flavor": null,
+        "input_profile": "archive",
+        "iterations": 5,
+        "max_iter": 5,
+        "n_good_channels": 19,
+        "n_mix": 3,
+        "n_models": 1,
+        "pamica": {
+          "backend": "AMICATorchNG",
+          "best_iter": 4,
+          "best_ll": -2.7449900144324153,
+          "block_size": 131072,
+          "device": "cpu",
+          "did_converge": false,
+          "do_mean": true,
+          "do_newton": true,
+          "do_reject": false,
+          "do_sphere": true,
+          "dtype": "float64",
+          "final_ll": -2.7449900144324153,
+          "invsigmax": 100.0,
+          "invsigmin": 1e-05,
+          "iterations": 5,
+          "lrate": 0.05,
+          "max_iter": 5,
+          "maxdecs": 3,
+          "maxincs": 5,
+          "maxrej": 3,
+          "min_dll": 1e-09,
+          "min_nd": 1e-07,
+          "minlrate": 1e-08,
+          "n_mix": 3,
+          "n_models": 1,
+          "newt_start": 50,
+          "newtrate": 1.0,
+          "pcakeep": 18,
+          "pipeline": "pamica.AMICA(backend='torch').fit",
+          "rank": 18,
+          "rejint": 3,
+          "rejsig": 3.0,
+          "rejstart": 2,
+          "rho0": 1.5,
+          "rholratefact": 0.5,
+          "seed": 5489,
+          "stop_reason": "max_iter",
+          "threads": 1,
+          "torch": "2.12.1",
+          "use_grad_norm": true,
+          "use_min_dll": true,
+          "version": "0.4.0"
+        },
+        "pcakeep": 18,
+        "positions": {
+          "coordinate_system": "MNI305",
+          "coordinate_units": "mm",
+          "source": "electrodes.tsv",
+          "withheld": null
+        },
+        "rank": 18,
+        "reference": "average",
+        "reorder": "on",
+        "seed": 5489,
+        "serving_index": {
+          "dataset_id": "on007823",
+          "reason": null,
+          "row": {
+            "group": "eeg_200hz",
+            "n_samples": 56400,
+            "path": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf",
+            "rate": 200.0
+          },
+          "sha256": "fb030cb42dbf97a3e76f3bd890991c95e703fd5a42198b9d0d7adda0e6efcf0c",
+          "source_commit": "5555555555555555555555555555555555555555"
+        },
+        "start": "pamica_seed",
+        "stop_reason": "max_iter",
+        "threads": 1,
+        "torch_cuda": null,
+        "torch_version": "2.12.1",
+        "versions": {
+          "eegprep": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
+          "pamica": "0.4.0",
+          "torch": "2.12.1"
+        }
+      },
+      "image": {
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "tag": null
+      },
+      "inputs": [
+        {
+          "path": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf",
+          "role": "recording",
+          "sha256": "b2029c3f30ee2d84839ee97be5abe39ee4b1960bcb6881ca2ac600ae7dc603d3",
+          "size": 2487488
+        },
+        {
+          "path": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_channels.tsv",
+          "role": "channels.tsv",
+          "sha256": "35a01cd8bf4ed24f94edeceefd9c86a39d00a5acdcbd0a1fb4e65f24ae77570e",
+          "size": 968
+        },
+        {
+          "path": "sub-CUCOV076/eeg/sub-CUCOV076_electrodes.tsv",
+          "role": "electrodes.tsv",
+          "sha256": "a491426c8cbccf06469664fe883d0e851426f52e489b6732b7cb32efe185dde2",
+          "size": 573
+        },
+        {
+          "path": "sub-CUCOV076/eeg/sub-CUCOV076_coordsystem.json",
+          "role": "coordsystem.json",
+          "sha256": "9abbc0c34c91dfad0fc18d29dee942bbfad46fe2b43d9a1993384f88af32fbec",
+          "size": 68
+        }
+      ],
+      "mask_grid": {
+        "n_samples": 56400,
+        "profile": "archive",
+        "rate": 200.0
+      },
+      "metrics": {
+        "asrBurstFraction": {
+          "bounds": {
+            "max": 1,
+            "min": 0
+          },
+          "description": "Share of the samples artifact subspace reconstruction repaired.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "fraction",
+          "value": 0.294025
+        },
+        "durationS": {
+          "bounds": {
+            "max": null,
+            "min": 0
+          },
+          "description": "Duration of the samples the floor read.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "s",
+          "value": 282.0
+        },
+        "icaIterations": {
+          "bounds": {
+            "max": null,
+            "min": 0
+          },
+          "description": "Iterations the decomposition ran.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "count",
+          "value": 5
+        },
+        "icaRank": {
+          "bounds": {
+            "max": null,
+            "min": 0
+          },
+          "description": "Rank of the decomposition: one less than the good channels, for the average reference.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "count",
+          "value": 18
+        },
+        "lineNoiseAfterDb": {
+          "description": "Line-noise excess after the band-stop filters, at whichever of 50 and 60 Hz had the larger excess before them.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "dB",
+          "value": 7.48
+        },
+        "lineNoiseBeforeDb": {
+          "description": "Line-noise excess before the band-stop filters, at whichever of 50 and 60 Hz had the larger excess before them.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "dB",
+          "value": 7.48
+        },
+        "nChannelsInput": {
+          "bounds": {
+            "max": null,
+            "min": 0
+          },
+          "description": "Channels in the recording, of every type.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "count",
+          "value": 22
+        },
+        "nGoodChannels": {
+          "bounds": {
+            "max": null,
+            "min": 0
+          },
+          "description": "EEG channels the floor judged good.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "count",
+          "value": 19
+        },
+        "nNoiseOnlyChannels": {
+          "bounds": {
+            "max": null,
+            "min": 0
+          },
+          "description": "EEG channels without coordinates, judged on the noise criterion only.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "count",
+          "value": 2
+        },
+        "nNotAssessedChannels": {
+          "bounds": {
+            "max": null,
+            "min": 0
+          },
+          "description": "EEG channels no criterion could judge.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "count",
+          "value": 0
+        },
+        "nSignalChannels": {
+          "bounds": {
+            "max": null,
+            "min": 0
+          },
+          "description": "Channels typed EEG, the ones the floor assesses.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "count",
+          "value": 21
+        },
+        "percentGoodChannels": {
+          "bounds": {
+            "max": 100,
+            "min": 0
+          },
+          "description": "Share of the EEG channels the floor judged good.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "%",
+          "value": 90.4762
+        },
+        "percentGoodSamples": {
+          "bounds": {
+            "max": 100,
+            "min": 0
+          },
+          "description": "Share of the samples outside the bad windows the floor found.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "%",
+          "value": 40.7872
+        },
+        "samplingRateHz": {
+          "bounds": {
+            "max": null,
+            "min": 0
+          },
+          "description": "Sampling rate of the samples the floor read.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b2"
+          },
+          "unit": "Hz",
+          "value": 200.0
+        }
+      },
+      "outputs": [
+        {
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_channels.tsv",
+          "role": "channels.tsv",
+          "sha256": "b3ab512ffefeb98851ab2c8daada8b06c66052a7dc657ebe7dacabe77078dc2e",
+          "size": 750
+        },
+        {
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_badsegments.tsv",
+          "role": "badsegments.tsv",
+          "sha256": "90cefa3eeb9413c3eb8aaae05e05a70444093cfcd8eca3b4a89ab5d1ec54dcb4",
+          "size": 4039
+        },
+        {
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_samplemask.tsv",
+          "role": "samplemask.tsv",
+          "sha256": "e4e86a51cf887bfb579930b8d9136da5bc755da2c84e5f80ea1d3204fe157c06",
+          "size": 3251
+        },
+        {
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_filters.json",
+          "role": "filters.json",
+          "sha256": "2137dbc93050cca4949ef9d04204b84a9eeaf29dc3bbe8a108ab264c80bd9ffd",
+          "size": 648
+        },
+        {
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_qc.json",
+          "role": "qc.json",
+          "sha256": "090a506aaded8d4c9bca564de261c8a9fb888e4436a23b5d17f081631984266d",
+          "size": 3080
+        },
+        {
+          "encoding": "application/json;canonical",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_asr.json",
+          "role": "asr.json",
+          "sha256": "b283f72d043fc071c48d8d39bddb3d29b58745a892c75a1807831f0ad551f46f",
+          "size": 18304
+        },
+        {
+          "columnLabels": [
+            "Fp1",
+            "Fp2",
+            "F3",
+            "F4",
+            "C3",
+            "C4",
+            "P3",
+            "P4",
+            "O2",
+            "F7",
+            "F8",
+            "T3",
+            "T4",
+            "T5",
+            "FZ",
+            "CZ",
+            "PZ",
+            "Pg1",
+            "Pg2"
+          ],
+          "dtype": "float64",
+          "encoding": "text/%.17g",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_unmixing.tsv",
+          "role": "unmixing.tsv",
+          "rowLabels": [
+            "IC001",
+            "IC002",
+            "IC003",
+            "IC004",
+            "IC005",
+            "IC006",
+            "IC007",
+            "IC008",
+            "IC009",
+            "IC010",
+            "IC011",
+            "IC012",
+            "IC013",
+            "IC014",
+            "IC015",
+            "IC016",
+            "IC017",
+            "IC018"
+          ],
+          "sha256": "ae1185598b20b2e7776996bda8640cb3db956aa28e1d797014217ed5912b081a",
+          "shape": [
+            18,
+            19
+          ],
+          "size": 7539
+        },
+        {
+          "columnLabels": [
+            "PC001",
+            "PC002",
+            "PC003",
+            "PC004",
+            "PC005",
+            "PC006",
+            "PC007",
+            "PC008",
+            "PC009",
+            "PC010",
+            "PC011",
+            "PC012",
+            "PC013",
+            "PC014",
+            "PC015",
+            "PC016",
+            "PC017",
+            "PC018"
+          ],
+          "dtype": "float64",
+          "encoding": "text/%.17g",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_weights.tsv",
+          "role": "weights.tsv",
+          "rowLabels": [
+            "IC001",
+            "IC002",
+            "IC003",
+            "IC004",
+            "IC005",
+            "IC006",
+            "IC007",
+            "IC008",
+            "IC009",
+            "IC010",
+            "IC011",
+            "IC012",
+            "IC013",
+            "IC014",
+            "IC015",
+            "IC016",
+            "IC017",
+            "IC018"
+          ],
+          "sha256": "88a92b3af42e63817fc8e839273df68cdd50374aa398a90dfc9baf81b85fc303",
+          "shape": [
+            18,
+            18
+          ],
+          "size": 7377
+        },
+        {
+          "columnLabels": [
+            "Fp1",
+            "Fp2",
+            "F3",
+            "F4",
+            "C3",
+            "C4",
+            "P3",
+            "P4",
+            "O2",
+            "F7",
+            "F8",
+            "T3",
+            "T4",
+            "T5",
+            "FZ",
+            "CZ",
+            "PZ",
+            "Pg1",
+            "Pg2"
+          ],
+          "dtype": "float64",
+          "encoding": "text/%.17g",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_sphere.tsv",
+          "role": "sphere.tsv",
+          "rowLabels": [
+            "PC001",
+            "PC002",
+            "PC003",
+            "PC004",
+            "PC005",
+            "PC006",
+            "PC007",
+            "PC008",
+            "PC009",
+            "PC010",
+            "PC011",
+            "PC012",
+            "PC013",
+            "PC014",
+            "PC015",
+            "PC016",
+            "PC017",
+            "PC018"
+          ],
+          "sha256": "2099bf2afd191499205ec5b0f2ad325a6f5bd15fa70b0ebbb61a64a9cc53655c",
+          "shape": [
+            18,
+            19
+          ],
+          "size": 7524
+        },
+        {
+          "columnLabels": [
+            "IC001",
+            "IC002",
+            "IC003",
+            "IC004",
+            "IC005",
+            "IC006",
+            "IC007",
+            "IC008",
+            "IC009",
+            "IC010",
+            "IC011",
+            "IC012",
+            "IC013",
+            "IC014",
+            "IC015",
+            "IC016",
+            "IC017",
+            "IC018"
+          ],
+          "dtype": "float64",
+          "encoding": "text/%.17g",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_mixing.tsv",
+          "role": "mixing.tsv",
+          "rowLabels": [
+            "Fp1",
+            "Fp2",
+            "F3",
+            "F4",
+            "C3",
+            "C4",
+            "P3",
+            "P4",
+            "O2",
+            "F7",
+            "F8",
+            "T3",
+            "T4",
+            "T5",
+            "FZ",
+            "CZ",
+            "PZ",
+            "Pg1",
+            "Pg2"
+          ],
+          "sha256": "346942799b8897e62236dbda8d4c702fc3628c2e99a006391c0a888dd25d5293",
+          "shape": [
+            19,
+            18
+          ],
+          "size": 6991
+        },
+        {
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_components.tsv",
+          "role": "components.tsv",
+          "sha256": "471642ab64dce5ab6b81d5cbab65d1ba78ad773b7582c0de1618ad7712d8ba07",
+          "size": 1448
+        },
+        {
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_ica.json",
+          "role": "ica.json",
+          "sha256": "003099ed2ff3671bc1e39fce464581f60cde33f517951e9a5ff3a748dbdb8a51",
+          "size": 9511
+        },
+        {
+          "columnLabels": [
+            "Fp1",
+            "Fp2",
+            "F3",
+            "F4",
+            "C3",
+            "C4",
+            "P3",
+            "P4",
+            "O2",
+            "F7",
+            "F8",
+            "T3",
+            "T4",
+            "T5",
+            "FZ",
+            "CZ",
+            "PZ",
+            "Pg1",
+            "Pg2"
+          ],
+          "dtype": "float64",
+          "encoding": "text/%.17g",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_servingunmixing.tsv",
+          "role": "servingunmixing.tsv",
+          "rowLabels": [
+            "IC001",
+            "IC002",
+            "IC003",
+            "IC004",
+            "IC005",
+            "IC006",
+            "IC007",
+            "IC008",
+            "IC009",
+            "IC010",
+            "IC011",
+            "IC012",
+            "IC013",
+            "IC014",
+            "IC015",
+            "IC016",
+            "IC017",
+            "IC018"
+          ],
+          "sha256": "be8f5dc22f6cd3384547c6994905bae27a6705e2a4ba5a40054fcf01f6c45713",
+          "shape": [
+            18,
+            19
+          ],
+          "size": 7539
+        },
+        {
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_chanlocs.tsv",
+          "role": "chanlocs.tsv",
+          "sha256": "80b91f4cb77048e7834c2442a551d88805869b73210840862ac47785978a5b6c",
+          "size": 1008
+        },
+        {
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_icclasses.json",
+          "role": "icclasses.json",
+          "sha256": "9c8faaa4efcfaada74273f11dade28a08135b94de3c3d38ec6bb50f97c4b841f",
+          "size": 353
+        },
+        {
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_spectrum.tsv",
+          "role": "spectrum.tsv",
+          "sha256": "452b2488efaafbd59af03a3baae54fb2b7f4fa2404894898dbbbc0f3529a2301",
+          "size": 76266
+        }
+      ],
+      "plan_hash": "sha256:7af7faa04477a7380170abc9f9b76eb7d41b30b5b46fd5203adab013f8ffe271",
+      "plugins": [
+        {
+          "checkpoint": "quality",
+          "manifest_sha256": "d31f643626a1f6051446ecf0e675ebc2f95922161b2fe6c15cf60770d0231463",
+          "name": "nemar-quality",
+          "status": "ran",
+          "tree_sha256": "9a028266108e0975ea1cfa67087b28f8fb1b41cf8c88ebb3a3f434f4c7d188ad",
+          "version": "0.1.0"
+        },
+        {
+          "checkpoint": "quality",
+          "manifest_sha256": "427b9d7090439fcfc23a9f5cc3a68bfcb42fabec6b62763c9c40e5f35baabdee",
+          "name": "nemar-spectrum",
+          "status": "ran",
+          "tree_sha256": "0cb3a8b8c2e661d6621413980d9a00dae83531012247b94d75b19a26e7aed0ae",
+          "version": "0.1.0"
+        }
+      ],
+      "process": {
+        "build": "source",
+        "commit": null,
+        "version": "0.1.2-dev2"
+      },
+      "profile": "recording",
+      "recipe": {
+        "id": "nemar-ica",
+        "version": "1.0.0-b2"
+      },
+      "recording": {
+        "datatype": "eeg",
+        "format": "edf",
+        "path": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf"
+      },
+      "rules": [
+        "signal-channels-typed",
+        "locations-usable"
+      ],
+      "run_id": "ica-views-e2e",
+      "seeds": {
+        "clean_channels.ransac": 5489
+      },
+      "skipped_steps": [
+        {
+          "function": "eegprep.pop_eegfiltnew",
+          "reason": "below_threshold",
+          "step_id": "line_noise_50"
+        },
+        {
+          "function": "eegprep.pop_eegfiltnew",
+          "reason": "below_threshold",
+          "step_id": "line_noise_60"
+        }
+      ],
+      "views": [
+        {
+          "base": "nemar.sensor-field",
+          "base_version": 1,
+          "caption": "Scalp maps of the independent components, each with its share of the variance and its ICLabel probabilities.",
+          "data": [
+            {
+              "columns": [
+                {
+                  "name": "IC001",
+                  "type": "number"
+                },
+                {
+                  "name": "IC002",
+                  "type": "number"
+                },
+                {
+                  "name": "IC003",
+                  "type": "number"
+                },
+                {
+                  "name": "IC004",
+                  "type": "number"
+                },
+                {
+                  "name": "IC005",
+                  "type": "number"
+                },
+                {
+                  "name": "IC006",
+                  "type": "number"
+                },
+                {
+                  "name": "IC007",
+                  "type": "number"
+                },
+                {
+                  "name": "IC008",
+                  "type": "number"
+                },
+                {
+                  "name": "IC009",
+                  "type": "number"
+                },
+                {
+                  "name": "IC010",
+                  "type": "number"
+                },
+                {
+                  "name": "IC011",
+                  "type": "number"
+                },
+                {
+                  "name": "IC012",
+                  "type": "number"
+                },
+                {
+                  "name": "IC013",
+                  "type": "number"
+                },
+                {
+                  "name": "IC014",
+                  "type": "number"
+                },
+                {
+                  "name": "IC015",
+                  "type": "number"
+                },
+                {
+                  "name": "IC016",
+                  "type": "number"
+                },
+                {
+                  "name": "IC017",
+                  "type": "number"
+                },
+                {
+                  "name": "IC018",
+                  "type": "number"
+                }
+              ],
+              "dims": [
+                {
+                  "axis": "rows",
+                  "coords": {
+                    "column": "name",
+                    "role": "layout"
+                  },
+                  "name": "sensor",
+                  "type": "string"
+                },
+                {
+                  "axis": "columns",
+                  "coords": {
+                    "header": true
+                  },
+                  "name": "component",
+                  "type": "string"
+                }
+              ],
+              "format": "tsv",
+              "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_mixing.tsv",
+              "role": "values",
+              "sha256": "346942799b8897e62236dbda8d4c702fc3628c2e99a006391c0a888dd25d5293",
+              "size": 6991
+            },
+            {
+              "columns": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "sensor_type",
+                  "type": "string"
+                },
+                {
+                  "name": "theta_deg",
+                  "type": "number",
+                  "unit": "deg"
+                },
+                {
+                  "name": "radius",
+                  "type": "number"
+                }
+              ],
+              "coordinate_system": "MNI305",
+              "dims": [
+                {
+                  "axis": "rows",
+                  "coords": {
+                    "column": "name"
+                  },
+                  "name": "sensor",
+                  "type": "string"
+                }
+              ],
+              "format": "tsv",
+              "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_chanlocs.tsv",
+              "position_source": "measured",
+              "role": "layout",
+              "sha256": "80b91f4cb77048e7834c2442a551d88805869b73210840862ac47785978a5b6c",
+              "size": 1008
+            },
+            {
+              "columns": [
+                {
+                  "name": "component",
+                  "type": "string"
+                },
+                {
+                  "name": "variance_pct",
+                  "type": "number",
+                  "unit": "%"
+                },
+                {
+                  "name": "brain",
+                  "type": "number"
+                },
+                {
+                  "name": "muscle",
+                  "type": "number"
+                },
+                {
+                  "name": "eye",
+                  "type": "number"
+                },
+                {
+                  "name": "heart",
+                  "type": "number"
+                },
+                {
+                  "name": "line_noise",
+                  "type": "number"
+                },
+                {
+                  "name": "channel_noise",
+                  "type": "number"
+                },
+                {
+                  "name": "other",
+                  "type": "number"
+                }
+              ],
+              "dims": [
+                {
+                  "axis": "rows",
+                  "coords": {
+                    "column": "component"
+                  },
+                  "name": "component",
+                  "type": "string"
+                }
+              ],
+              "format": "tsv",
+              "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_components.tsv",
+              "role": "components",
+              "sha256": "471642ab64dce5ab6b81d5cbab65d1ba78ad773b7582c0de1618ad7712d8ba07",
+              "size": 1448
+            }
+          ],
+          "key": "icmaps",
+          "kind": "nemar.ic-maps",
+          "kind_version": 1,
+          "source": {
+            "recipe": {
+              "name": "nemar-ica",
+              "version": "1.0.0-b2"
+            }
+          }
+        },
+        {
+          "base": "nemar.lines",
+          "base_version": 1,
+          "caption": "Component activations computed in your browser from the serving copy, with no preprocessing; they approximate the decomposition's input, the dataset's own recording filtered and repaired with artifact subspace reconstruction.",
+          "inputs": [
+            {
+              "file": {
+                "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_servingunmixing.tsv",
+                "sha256": "be8f5dc22f6cd3384547c6994905bae27a6705e2a4ba5a40054fcf01f6c45713",
+                "size": 7539
+              },
+              "role": "unmixing"
+            },
+            {
+              "role": "signal",
+              "store": {
+                "content_sha256": null,
+                "group": "eeg_200hz",
+                "profile": "archive",
+                "recording": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf"
+              }
+            },
+            {
+              "file": {
+                "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_components.tsv",
+                "sha256": "471642ab64dce5ab6b81d5cbab65d1ba78ad773b7582c0de1618ad7712d8ba07",
+                "size": 1448
+              },
+              "role": "components"
+            },
+            {
+              "file": {
+                "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_badsegments.tsv",
+                "sha256": "90cefa3eeb9413c3eb8aaae05e05a70444093cfcd8eca3b4a89ab5d1ec54dcb4",
+                "size": 4039
+              },
+              "role": "badsegments"
+            }
+          ],
+          "key": "icactivity",
+          "kind": "nemar.ic-activity",
+          "kind_version": 1,
+          "parameters": {
+            "decomposition_input": {
+              "channel_types": [
+                [
+                  "Fp1",
+                  "EEG"
+                ],
+                [
+                  "Fp2",
+                  "EEG"
+                ],
+                [
+                  "F3",
+                  "EEG"
+                ],
+                [
+                  "F4",
+                  "EEG"
+                ],
+                [
+                  "C3",
+                  "EEG"
+                ],
+                [
+                  "C4",
+                  "EEG"
+                ],
+                [
+                  "P3",
+                  "EEG"
+                ],
+                [
+                  "P4",
+                  "EEG"
+                ],
+                [
+                  "O1",
+                  "EEG"
+                ],
+                [
+                  "O2",
+                  "EEG"
+                ],
+                [
+                  "F7",
+                  "EEG"
+                ],
+                [
+                  "F8",
+                  "EEG"
+                ],
+                [
+                  "T3",
+                  "EEG"
+                ],
+                [
+                  "T4",
+                  "EEG"
+                ],
+                [
+                  "T5",
+                  "EEG"
+                ],
+                [
+                  "T6",
+                  "EEG"
+                ],
+                [
+                  "FZ",
+                  "EEG"
+                ],
+                [
+                  "CZ",
+                  "EEG"
+                ],
+                [
+                  "PZ",
+                  "EEG"
+                ],
+                [
+                  "Pg1",
+                  "EEG"
+                ],
+                [
+                  "Pg2",
+                  "EEG"
+                ],
+                [
+                  "ECG",
+                  "ECG"
+                ]
+              ],
+              "channel_types_sha256": "3c5002233aa36a975b1de9586e438e98ccff404371159626ae56335d244280d2",
+              "channels": [
+                "Fp1",
+                "Fp2",
+                "F3",
+                "F4",
+                "C3",
+                "C4",
+                "P3",
+                "P4",
+                "O2",
+                "F7",
+                "F8",
+                "T3",
+                "T4",
+                "T5",
+                "FZ",
+                "CZ",
+                "PZ",
+                "Pg1",
+                "Pg2"
+              ],
+              "preprocessing": [
+                {
+                  "function": "eegprep.pop_select",
+                  "step": "signal_channels"
+                },
+                {
+                  "function": "eegprep.clean_flatlines",
+                  "step": "flatline"
+                },
+                {
+                  "function": "eegprep.pop_eegfiltnew",
+                  "step": "drift"
+                },
+                {
+                  "function": "eegprep.clean_channels",
+                  "step": "bad_channels"
+                },
+                {
+                  "function": "eegprep.clean_asr",
+                  "step": "asr"
+                },
+                {
+                  "function": "eegprep.pop_reref",
+                  "step": "reref"
+                }
+              ],
+              "reference": "average",
+              "source": "archive",
+              "unit": "uV"
+            },
+            "display_filter": {
+              "highpass_hz": 1,
+              "order": 2
+            },
+            "max_window_s": 30
+          },
+          "source": {
+            "recipe": {
+              "name": "nemar-ica",
+              "version": "1.0.0-b2"
+            }
+          },
+          "transform": {
+            "name": "nemar.ic-activity.v1",
+            "parameters": {
+              "applies_to": "serving_copy channels matched by label, in microvolts: the view converts by the store's unit field and refuses an unknown unit or any channel it cannot match",
+              "caption": "not checked against the decomposition input",
+              "columns": [
+                "Fp1",
+                "Fp2",
+                "F3",
+                "F4",
+                "C3",
+                "C4",
+                "P3",
+                "P4",
+                "O2",
+                "F7",
+                "F8",
+                "T3",
+                "T4",
+                "T5",
+                "FZ",
+                "CZ",
+                "PZ",
+                "Pg1",
+                "Pg2"
+              ],
+              "match": "label",
+              "matrix": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_servingunmixing.tsv",
+              "note": "no preprocessing; activations approximate the decomposition input",
+              "rows": null,
+              "shaded": {
+                "files": [
+                  "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_badsegments.tsv"
+                ],
+                "label": "burst"
+              },
+              "unit": "uV"
+            }
+          }
+        },
+        {
+          "base": "nemar.lines",
+          "base_version": 1,
+          "caption": "Two seconds of the recording inside the floor's good samples nearest its middle, as the serving copy holds it, with the floor's bad channels and segments marked.",
+          "inputs": [
+            {
+              "role": "signal",
+              "store": {
+                "content_sha256": null,
+                "group": "eeg_200hz",
+                "profile": "archive",
+                "recording": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf"
+              }
+            },
+            {
+              "file": {
+                "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_channels.tsv",
+                "sha256": "b3ab512ffefeb98851ab2c8daada8b06c66052a7dc657ebe7dacabe77078dc2e",
+                "size": 750
+              },
+              "role": "channels"
+            },
+            {
+              "file": {
+                "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_badsegments.tsv",
+                "sha256": "90cefa3eeb9413c3eb8aaae05e05a70444093cfcd8eca3b4a89ab5d1ec54dcb4",
+                "size": 4039
+              },
+              "role": "badsegments"
+            }
+          ],
+          "key": "midsegment",
+          "kind": "nemar.signal-window",
+          "kind_version": 1,
+          "parameters": {
+            "bad_segment_table": true,
+            "duration_s": 2,
+            "start_s": 140.0
+          },
+          "source": {
+            "recipe": {
+              "name": "nemar-ica",
+              "version": "1.0.0-b2"
+            }
+          }
+        },
+        {
+          "base": "nemar.histogram",
+          "base_version": 1,
+          "caption": "Independent components counted by their most probable ICLabel class. Beside each class X is the summed variance of components classed X: the sum of each component's own share of the data's variance, not the variance the class explains, since the components are not orthogonal.",
+          "data": [
+            {
+              "format": "json",
+              "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_icclasses.json",
+              "role": "histogram",
+              "sha256": "9c8faaa4efcfaada74273f11dade28a08135b94de3c3d38ec6bb50f97c4b841f",
+              "size": 353
+            }
+          ],
+          "key": "icclasses",
+          "kind": "nemar.ic-classes",
+          "kind_version": 1,
+          "source": {
+            "plugin": {
+              "name": "nemar-quality",
+              "version": "0.1.0"
+            }
+          }
+        },
+        {
+          "base": "nemar.lines",
+          "base_version": 1,
+          "caption": "Power spectral density of each good channel of the decomposition's input (Welch's method, in dB re 1 µV²/Hz), with scalp maps at chosen frequencies.",
+          "data": [
+            {
+              "columns": [
+                {
+                  "name": "freq_hz",
+                  "type": "number",
+                  "unit": "Hz"
+                },
+                {
+                  "name": "Fp1",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "Fp2",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "F3",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "F4",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "C3",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "C4",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "P3",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "P4",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "O2",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "F7",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "F8",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "T3",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "T4",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "T5",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "FZ",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "CZ",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "PZ",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "Pg1",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "Pg2",
+                  "type": "number",
+                  "unit": "dB"
+                }
+              ],
+              "dims": [
+                {
+                  "axis": "rows",
+                  "coords": {
+                    "column": "freq_hz"
+                  },
+                  "name": "freq",
+                  "type": "number",
+                  "unit": "Hz"
+                },
+                {
+                  "axis": "columns",
+                  "coords": {
+                    "column": "name",
+                    "role": "layout"
+                  },
+                  "name": "sensor",
+                  "type": "string"
+                }
+              ],
+              "format": "tsv",
+              "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_spectrum.tsv",
+              "role": "values",
+              "sha256": "452b2488efaafbd59af03a3baae54fb2b7f4fa2404894898dbbbc0f3529a2301",
+              "size": 76266
+            },
+            {
+              "columns": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "sensor_type",
+                  "type": "string"
+                },
+                {
+                  "name": "theta_deg",
+                  "type": "number",
+                  "unit": "deg"
+                },
+                {
+                  "name": "radius",
+                  "type": "number"
+                }
+              ],
+              "coordinate_system": "MNI305",
+              "dims": [
+                {
+                  "axis": "rows",
+                  "coords": {
+                    "column": "name"
+                  },
+                  "name": "sensor",
+                  "type": "string"
+                }
+              ],
+              "format": "tsv",
+              "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_chanlocs.tsv",
+              "position_source": "measured",
+              "role": "layout",
+              "sha256": "80b91f4cb77048e7834c2442a551d88805869b73210840862ac47785978a5b6c",
+              "size": 1008
+            }
+          ],
+          "key": "spectrum",
+          "kind": "nemar.spectrum",
+          "kind_version": 1,
+          "parameters": {
+            "initial_maps_hz": [
+              6,
+              10,
+              22,
+              60
+            ],
+            "method": "welch",
+            "overlap": 0.5,
+            "unit": "dB",
+            "upper_hz": 100.0,
+            "window": "hamming",
+            "window_s": 2.0
+          },
+          "source": {
+            "plugin": {
+              "name": "nemar-spectrum",
+              "version": "0.1.0"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "pipelineInfo": {
+    "description": "NEMAR decomposition: the quality floor, ASR with its state, the average reference, pAMICA's independent components and ICLabel (eegprep).",
+    "executionDate": "2026-11-25T19:41:00Z",
+    "name": "nemar-ica",
+    "pipelineType": "ica",
+    "version": "1.0.0-b2"
+  },
+  "processingSteps": [
+    {
+      "description": "Load recording",
+      "executionDateTime": "2026-11-25T19:40:56Z",
+      "inputSources": [
+        {
+          "entityLabels": {
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "EDF",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf",
+          "sourceType": "file"
+        }
+      ],
+      "name": "eegprep.pop_load_frombids",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after load",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "bidschanloc": true,
+        "bidsevent": false,
+        "bidsmetadata": true,
+        "dtype": "float64",
+        "eventtype": null,
+        "infer_locations": false,
+        "numeric_null": [],
+        "return_report": true,
+        "verbose": false
+      },
+      "qualityMetrics": {
+        "dtype": "float64",
+        "durationS": 282.0,
+        "etcKeysDropped": [],
+        "etcNormalized": false,
+        "locationSource": "electrodes.tsv",
+        "nChannels": 22,
+        "nChannelsWithLocations": 19,
+        "nSamples": 56400,
+        "powerLineHzDeclared": 60,
+        "samplingRateHz": 200.0
+      },
+      "software": {
+        "functionCall": "eegprep.pop_load_frombids",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "load"
+    },
+    {
+      "dependsOn": [
+        "load"
+      ],
+      "description": "Select the channels typed EEG",
+      "executionDateTime": "2026-11-25T19:40:56Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after load",
+          "sourceType": "previousStepOutput",
+          "stepId": "load"
+        }
+      ],
+      "name": "eegprep.pop_select",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after signal_channels",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "channel_types": [
+          "EEG",
+          "untyped"
+        ]
+      },
+      "qualityMetrics": {
+        "excludedChannels": [
+          "ECG"
+        ],
+        "nInputChannels": 22,
+        "nSignalChannels": 21
+      },
+      "software": {
+        "functionCall": "eegprep.pop_select",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "signal_channels"
+    },
+    {
+      "dependsOn": [
+        "signal_channels"
+      ],
+      "description": "Detect flat-line channels",
+      "executionDateTime": "2026-11-25T19:40:56Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after signal_channels",
+          "sourceType": "previousStepOutput",
+          "stepId": "signal_channels"
+        }
+      ],
+      "name": "eegprep.clean_flatlines",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after flatline",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "max_allowed_jitter": 20.0,
+        "max_flatline_duration": 5.0
+      },
+      "qualityMetrics": {
+        "nRemoved": 0,
+        "removedChannels": []
+      },
+      "software": {
+        "functionCall": "eegprep.clean_flatlines",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "flatline"
+    },
+    {
+      "dependsOn": [
+        "flatline"
+      ],
+      "description": "Remove slow drifts",
+      "executionDateTime": "2026-11-25T19:40:56Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after flatline",
+          "sourceType": "previousStepOutput",
+          "stepId": "flatline"
+        }
+      ],
+      "name": "eegprep.pop_eegfiltnew",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after drift",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "channels": null,
+        "chantype": null,
+        "filtorder": null,
+        "gui": false,
+        "hicutoff": null,
+        "locutoff": 0.5,
+        "minphase": false,
+        "plotfreqz": false,
+        "revfilt": false,
+        "usefftfilt": false
+      },
+      "qualityMetrics": {
+        "cutoffHz": [
+          0.25
+        ],
+        "kernelLength": 1321,
+        "kernelSha256": "f0e2b3b4440ddc73fd67d7c05d227fbaf413221d0ac7f33de464fe859e66e2c4",
+        "order": 1320,
+        "transitionHz": 0.5
+      },
+      "software": {
+        "functionCall": "eegprep.pop_eegfiltnew",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "drift"
+    },
+    {
+      "dependsOn": [
+        "drift"
+      ],
+      "description": "Measure line noise",
+      "executionDateTime": "2026-11-25T19:40:56Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after drift",
+          "sourceType": "previousStepOutput",
+          "stepId": "drift"
+        }
+      ],
+      "name": "eegprep.functions.sigprocfunc.spectopo.compute_spectra",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after line_noise_measure",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        },
+        {
+          "description": "Drift and line-noise filter record",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "JSON",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_filters.json",
+          "targetType": "file"
+        }
+      ],
+      "parameters": {
+        "frequencies_hz": [
+          50,
+          60
+        ],
+        "neighbor_bin_offsets": [
+          -6,
+          -5,
+          -4,
+          -3,
+          -2,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "nfft": null,
+        "overlap": 0,
+        "peak": "nearest_bin",
+        "percent": 100,
+        "statistic": "mean_over_channels_of_db",
+        "threshold_db": 10.0,
+        "winsize": null,
+        "wintype": "hamming"
+      },
+      "qualityMetrics": {
+        "afterDb": {
+          "50": 0.073,
+          "60": 7.48
+        },
+        "beforeDb": {
+          "50": 0.073,
+          "60": 7.48
+        },
+        "remeasured": false,
+        "removedHz": []
+      },
+      "software": {
+        "functionCall": "eegprep.functions.sigprocfunc.spectopo.compute_spectra",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "line_noise_measure"
+    },
+    {
+      "dependsOn": [
+        "line_noise_measure"
+      ],
+      "description": "Detect bad channels",
+      "executionDateTime": "2026-11-25T19:40:57Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after line_noise_measure",
+          "sourceType": "previousStepOutput",
+          "stepId": "line_noise_measure"
+        }
+      ],
+      "name": "eegprep.clean_channels",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after bad_channels",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        },
+        {
+          "description": "BIDS channels table with status of every channel",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_channels.tsv",
+          "targetType": "file"
+        }
+      ],
+      "parameters": {
+        "corr_threshold": 0.85,
+        "max_broken_time": 0.5,
+        "noise_threshold": 4.0,
+        "num_samples": 50,
+        "rng_seed": 5489,
+        "rules": {
+          "few_channels": 4,
+          "min_located_channels": 4,
+          "min_nolocs_srate_hz": 110.0,
+          "short_recording_s": 60.0
+        },
+        "subset_size": 0.25,
+        "window_len": 5.0
+      },
+      "qualityMetrics": {
+        "branch": "ransac",
+        "nRemoved": 2,
+        "nUsableLocations": 19,
+        "noiseCriterionApplied": true,
+        "noiseOnlyChannels": [
+          "Pg1",
+          "Pg2"
+        ],
+        "notAssessedChannels": [],
+        "removedChannels": [
+          "O1",
+          "T6"
+        ]
+      },
+      "software": {
+        "functionCall": "eegprep.clean_channels",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "bad_channels"
+    },
+    {
+      "dependsOn": [
+        "bad_channels"
+      ],
+      "description": "Detect bad windows",
+      "executionDateTime": "2026-11-25T19:40:58Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after bad_channels",
+          "sourceType": "previousStepOutput",
+          "stepId": "bad_channels"
+        }
+      ],
+      "name": "eegprep.clean_windows",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after bad_windows",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        },
+        {
+          "description": "Bad segments found by clean_windows and the spans the recipe flagged",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_badsegments.tsv",
+          "targetType": "file"
+        },
+        {
+          "description": "Bad windows as sample indices of the samples read, stop exclusive, and the spans the recipe flagged",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_samplemask.tsv",
+          "targetType": "file"
+        }
+      ],
+      "parameters": {
+        "max_bad_channels": 0.2,
+        "max_dropout_fraction": 0.1,
+        "min_clean_fraction": 0.25,
+        "rules": {
+          "short_recording_s": 60.0
+        },
+        "shape_range": [
+          1.7,
+          1.8499999999999999,
+          1.9999999999999998,
+          2.1499999999999995,
+          2.3,
+          2.4499999999999993,
+          2.5999999999999996,
+          2.749999999999999,
+          2.8999999999999995,
+          3.049999999999999,
+          3.1999999999999993,
+          3.3499999999999988,
+          3.499999999999999
+        ],
+        "step_sizes": [
+          0.01,
+          0.01
+        ],
+        "truncate_quant": [
+          0.022,
+          0.6
+        ],
+        "window_len": 1.0,
+        "window_overlap": 0.66,
+        "zthresholds": [
+          -3.5,
+          5.0
+        ]
+      },
+      "qualityMetrics": {
+        "nSamplesRemoved": 33396,
+        "nSegments": 32,
+        "percentGoodSamples": 40.7872
+      },
+      "software": {
+        "functionCall": "eegprep.clean_windows",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "bad_windows"
+    },
+    {
+      "dependsOn": [
+        "bad_windows"
+      ],
+      "description": "Quality metrics",
+      "executionDateTime": "2026-11-25T19:40:58Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after bad_windows",
+          "sourceType": "previousStepOutput",
+          "stepId": "bad_windows"
+        }
+      ],
+      "name": "nemar_process.qc.floor_metrics",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after qc",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        },
+        {
+          "description": "Quality control metrics",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "JSON",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_qc.json",
+          "targetType": "file"
+        }
+      ],
+      "parameters": {
+        "robust_amplitude": "1.4826*MAD",
+        "spectrum_hz": [
+          1,
+          70
+        ]
+      },
+      "qualityMetrics": {
+        "percentGoodChannels": 90.4762,
+        "percentGoodSamples": 40.7872
+      },
+      "software": {
+        "functionCall": "nemar_process.qc.floor_metrics",
+        "name": "nemar_process",
+        "version": "1.0.0-b2"
+      },
+      "stepId": "qc"
+    },
+    {
+      "dependsOn": [
+        "qc"
+      ],
+      "description": "Repair bursts with artifact subspace reconstruction, keeping its calibration state, and measure the share of samples it repairs",
+      "executionDateTime": "2026-11-25T19:40:58Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after qc",
+          "sourceType": "previousStepOutput",
+          "stepId": "qc"
+        }
+      ],
+      "name": "eegprep.clean_asr",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after asr",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        },
+        {
+          "description": "ASR calibration state (canonical JSON)",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "JSON",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_asr.json",
+          "targetType": "file"
+        }
+      ],
+      "parameters": {
+        "cutoff": 30.0,
+        "max_dims": 0.66,
+        "maxmem": 1024,
+        "ref_maxbadchannels": 0.075,
+        "ref_tolerances": [
+          -3.5,
+          5.5
+        ],
+        "ref_wndlen": 1.0,
+        "return_state": true,
+        "step_size": null,
+        "use_gpu": false,
+        "useriemannian": null,
+        "window_len": null
+      },
+      "qualityMetrics": {
+        "burstFraction": 0.294025,
+        "channelsNamed": true,
+        "nBurstSpans": 67,
+        "stateSha256": "b283f72d043fc071c48d8d39bddb3d29b58745a892c75a1807831f0ad551f46f",
+        "stepSize": 50,
+        "windowLenS": 0.5
+      },
+      "software": {
+        "functionCall": "eegprep.clean_asr",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "asr"
+    },
+    {
+      "dependsOn": [
+        "asr"
+      ],
+      "description": "Re-reference to the average of the good channels",
+      "executionDateTime": "2026-11-25T19:40:58Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after asr",
+          "sourceType": "previousStepOutput",
+          "stepId": "asr"
+        }
+      ],
+      "name": "eegprep.pop_reref",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after reref",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        }
+      ],
+      "parameters": {
+        "ref": []
+      },
+      "qualityMetrics": {
+        "nChannels": 19,
+        "reference": "average"
+      },
+      "software": {
+        "functionCall": "eegprep.pop_reref",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "reref"
+    },
+    {
+      "dependsOn": [
+        "reref"
+      ],
+      "description": "Decompose the repaired, re-referenced data into independent components",
+      "executionDateTime": "2026-11-25T19:40:59Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after reref",
+          "sourceType": "previousStepOutput",
+          "stepId": "reref"
+        }
+      ],
+      "name": "eegprep.pop_runica",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after ica",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        },
+        {
+          "description": "Unmixing matrix (weights times sphere), components by channels",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_unmixing.tsv",
+          "targetType": "file"
+        },
+        {
+          "description": "Component weights over the sphered (principal) components",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_weights.tsv",
+          "targetType": "file"
+        },
+        {
+          "description": "Sphering matrix, principal components by channels",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_sphere.tsv",
+          "targetType": "file"
+        },
+        {
+          "description": "Mixing matrix (the inverse of the unmixing), channels by components",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_mixing.tsv",
+          "targetType": "file"
+        },
+        {
+          "description": "What the run says of its decomposition: engine, settings, start, device",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "JSON",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_ica.json",
+          "targetType": "file"
+        },
+        {
+          "description": "Unmixing for the serving copy: components by the kept channels, with the average reference folded in, from the store's physical unit (or microvolts, matched by label)",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_servingunmixing.tsv",
+          "targetType": "file"
+        }
+      ],
+      "parameters": {
+        "block_size": 131072,
+        "device": "cpu",
+        "do_reject": false,
+        "icatype": "pamica",
+        "max_iter": 5,
+        "maxincs": 5,
+        "maxrej": 3,
+        "min_dll": 1e-09,
+        "min_nd": 1e-07,
+        "n_mix": 3,
+        "n_models": 1,
+        "pcakeep": 18,
+        "rejint": 3,
+        "rejsig": 3.0,
+        "rejstart": 2,
+        "reorder": "on",
+        "rules": {
+          "channel_types_sha256": "3c5002233aa36a975b1de9586e438e98ccff404371159626ae56335d244280d2"
+        },
+        "seed": 5489,
+        "threads": 1,
+        "use_grad_norm": true,
+        "use_min_dll": true
+      },
+      "qualityMetrics": {
+        "didConverge": false,
+        "engine": "pamica-torch",
+        "finalLogLikelihood": -2.7449900144324153,
+        "iterations": 5,
+        "rank": 18,
+        "stopReason": "max_iter"
+      },
+      "software": {
+        "functionCall": "eegprep.pop_runica",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "ica"
+    },
+    {
+      "dependsOn": [
+        "ica"
+      ],
+      "description": "Classify the components with ICLabel",
+      "executionDateTime": "2026-11-25T19:41:00Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after ica",
+          "sourceType": "previousStepOutput",
+          "stepId": "ica"
+        }
+      ],
+      "name": "eegprep.pop_iclabel",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after iclabel",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        },
+        {
+          "description": "Variance accounted for and ICLabel probabilities of each component",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_components.tsv",
+          "targetType": "file"
+        },
+        {
+          "description": "Positions of the decomposition's channels, in the unmixing's column order: name, type, EEGLAB's theta (degrees) and radius, and x, y, z in millimeters in the frame eegprep takes for EEGLAB's (+x nose, +y left, +z up), as it holds them after loading; every place n/a when they are known to be misread (extensions.nemar.ica.positions.withheld)",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_chanlocs.tsv",
+          "targetType": "file"
+        }
+      ],
+      "parameters": {
+        "icversion": "default"
+      },
+      "qualityMetrics": {
+        "classes": [
+          "Brain",
+          "Muscle",
+          "Eye",
+          "Heart",
+          "Line Noise",
+          "Channel Noise",
+          "Other"
+        ],
+        "weightsSha256": "8949a3e1faf61fee997034eca50a94475b78d58b35beb38ba48f0b208444d929"
+      },
+      "software": {
+        "functionCall": "eegprep.pop_iclabel",
+        "name": "eegprep",
+        "url": "https://github.com/sccn/eegprep",
+        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+      },
+      "stepId": "iclabel"
+    },
+    {
+      "dependsOn": [
+        "iclabel"
+      ],
+      "description": "Quality plugin nemar-quality 0.1.0 (quality)",
+      "executionDateTime": "2026-11-25T19:41:00Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after iclabel",
+          "sourceType": "previousStepOutput",
+          "stepId": "iclabel"
+        }
+      ],
+      "name": "nemar_process.plugins.nemar_quality.run",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after nemar-quality",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        },
+        {
+          "description": "Independent components counted by their most probable ICLabel class. Beside each class X is the summed variance of components classed X: the sum of each component's own share of the data's variance, not the variance the class explains, since the components are not orthogonal. (nemar.ic-classes, histogram)",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "JSON",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_icclasses.json",
+          "targetType": "file"
+        }
+      ],
+      "parameters": {},
+      "qualityMetrics": {
+        "nemar-quality:percentBrainComponents": {
+          "bounds": {
+            "max": 100,
+            "min": 0
+          },
+          "description": "Share of components whose most probable ICLabel class is Brain.",
+          "plugin": {
+            "name": "nemar-quality",
+            "version": "0.1.0"
+          },
+          "unit": "%",
+          "value": 44.4444
+        }
+      },
+      "software": {
+        "functionCall": "nemar_process.plugins.nemar_quality.run",
+        "name": "nemar-quality",
+        "version": "0.1.0"
+      },
+      "stepId": "nemar-quality"
+    },
+    {
+      "dependsOn": [
+        "nemar-quality"
+      ],
+      "description": "Quality plugin nemar-spectrum 0.1.0 (quality)",
+      "executionDateTime": "2026-11-25T19:41:00Z",
+      "inputSources": [
+        {
+          "outputId": "EEG working copy after nemar-quality",
+          "sourceType": "previousStepOutput",
+          "stepId": "nemar-quality"
+        }
+      ],
+      "name": "nemar_process.plugins.nemar_spectrum.run",
+      "outputTargets": [
+        {
+          "description": "EEG working copy after nemar-spectrum",
+          "format": "EEGLAB EEG dict (float64)",
+          "targetType": "in-memory"
+        },
+        {
+          "description": "Power spectral density of each good channel of the decomposition's input (Welch's method, in dB re 1 µV²/Hz), with scalp maps at chosen frequencies. (nemar.spectrum, values)",
+          "entityLabels": {
+            "desc": "nemarica",
+            "sub": "CUCOV076",
+            "task": "COVID"
+          },
+          "format": "TSV",
+          "location": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_spectrum.tsv",
+          "targetType": "file"
+        }
+      ],
+      "parameters": {},
+      "qualityMetrics": {},
+      "software": {
+        "functionCall": "nemar_process.plugins.nemar_spectrum.run",
+        "name": "nemar-spectrum",
+        "version": "0.1.0"
+      },
+      "stepId": "nemar-spectrum"
+    }
+  ],
+  "schema_version": "0.1.0",
+  "sj_version": "0.1.0",
+  "summaryMetrics": {
+    "asrBurstFraction": 0.294025,
+    "durationS": 282.0,
+    "icaDidConverge": false,
+    "icaFinalLogLikelihood": -2.7449900144324153,
+    "icaIterations": 5,
+    "icaRank": 18,
+    "lineNoiseAfterDb": {
+      "50": 0.073,
+      "60": 7.48
+    },
+    "lineNoiseBeforeDb": {
+      "50": 0.073,
+      "60": 7.48
+    },
+    "nChannelsInput": 22,
+    "nGoodChannels": 19,
+    "nNoiseOnlyChannels": 2,
+    "nNotAssessedChannels": 0,
+    "nSignalChannels": 21,
+    "nemar-quality:percentBrainComponents": 44.4444,
+    "percentGoodChannels": 90.4762,
+    "percentGoodSamples": 40.7872,
+    "samplingRateHz": 200.0
+  }
+}

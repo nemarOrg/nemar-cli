@@ -4,6 +4,21 @@
  *   POST /admin/compute/pipeline/run      run a recipe over one dataset version, or over the next datasets
  *                                         it has not been run over; `dry_run` says what it would do
  *   GET  /admin/compute/pipeline/status   the stamps, filtered, newest first, after they were synced
+ *   GET  /admin/compute/pipeline/grid     datasets by checkpoints for one recipe (ADR 0134 decision 5)
+ *   GET  /admin/compute/pipeline/coverage each recipe's coverage and its daily failure trend
+ *   GET  /admin/compute/pipeline/runs/:stamp  one run's checkpoints and the failures each lists
+ *   GET  /admin/compute/pipeline/runs/:stamp/quality  where the run's derivative stands, and a page of its
+ *                                         succeeded recordings (epic #2324 phase B3, services/quality-admin.ts)
+ *
+ * A run's quality record and files (`.../runs/:stamp/quality/record/...` and `.../quality/file/...`, epic
+ * #2324 phase B3b) are `routes/admin/quality-views.ts`'s, registered after these.
+ *
+ * The grid, coverage, run and run-quality routes READ ONLY (epic #2324 phase 4a): they never sync, never reconcile and
+ * never write, so a page the website renders costs a few statements. `grid?sync=1` brings the open stamps
+ * up to date first, as the status route always does; the CLI asks for it, the website never does. A run's
+ * status is still right without a sync (it reads the job's own end); its reconciled counts wait, and the
+ * coverage counts a finished run only once a sync has recorded its end, so a read-only view can lag. Like
+ * the status route, they work while the Worker is in read-only maintenance mode.
  *
  * A run over the eligible datasets is bounded, for every actor, by its `limit`, the per-invocation bound
  * (`COMPUTE_PIPELINE_RUN_PER_INVOCATION`), what is left of `pipelines.dailyJobCap` and what is left of the
@@ -42,24 +57,37 @@ import {
   recipeRunsInput,
   recipeRunsOn,
 } from "../../../../shared/compute-recipes.js";
-import { COMPUTE_ROUTE_SENTENCES } from "../../../../shared/compute-state.js";
+import { COMPUTE_EXECUTORS, COMPUTE_ROUTE_SENTENCES } from "../../../../shared/compute-state.js";
 import {
   COMPUTE_ADMIN_ERROR_STATUS,
+  COMPUTE_PIPELINE_GRID_PAGE_DEFAULT,
+  COMPUTE_PIPELINE_GRID_PAGE_MAX,
+  COMPUTE_PIPELINE_GRID_STATUSES,
+  COMPUTE_PIPELINE_RECIPE_VERSION_RE,
   COMPUTE_PIPELINE_REFUSAL_STATUS,
   COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT,
   COMPUTE_PIPELINE_RUN_LIMIT_MAX,
+  COMPUTE_PIPELINE_STAMP_ID_RE,
   COMPUTE_PIPELINE_STAMP_STATES,
   COMPUTE_PIPELINE_STATUS_PAGE_MAX,
+  COMPUTE_PIPELINE_TREND_DAYS_DEFAULT,
+  COMPUTE_PIPELINE_TREND_DAYS_MAX,
   type ComputePipelineRefusal,
   type ComputePipelineResult,
   type ComputePipelineStampView,
 } from "../../../../shared/contract/compute-admin.js";
+import { RUNNER_ID_RE } from "../../../../shared/contract/compute-runner.js";
 import {
   COMPUTE_DATASET_ID_RE,
   COMPUTE_DATASET_VERSION_RE,
 } from "../../../../shared/contract/compute.js";
 import { AUDIT_LOG_INSERT_SQL } from "../../db/audit-log.js";
 import { tapisSubmitConfigured } from "../../services/compute-lifecycle.js";
+import {
+  pipelineCoverage,
+  pipelineGrid,
+  pipelineRunDetail,
+} from "../../services/compute-pipeline-grid.js";
 import {
   type DispatchResult,
   type PipelineRefusal,
@@ -72,7 +100,9 @@ import {
 } from "../../services/compute-pipeline.js";
 import { fieldPath } from "../../services/compute-policy.js";
 import { computeEnabled } from "../../services/compute-switches.js";
+import { isRecordingPath, runQuality } from "../../services/quality-admin.js";
 import type { Bindings, Variables } from "../../types/bindings.js";
+import { refuse as refuseAdmin } from "./compute.js";
 import type { AdminRouter } from "./shared.js";
 
 type Ctx = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -101,6 +131,8 @@ const SENTENCES = {
     "That dataset's Zarr copy could not be shown to be the tagged version's data; the reason says what was not shown.",
   zarr_source_unverifiable:
     "The Zarr copy or the tagged version could not be read, so nothing was checked; try again shortly.",
+  serving_index_deferred:
+    "The serving index could not be staged because of a temporary fault, so the run is deferred, not failed: its stamp records the deferral, a later dispatch tries again, and 24 hours after the first deferral the run goes ahead without the index (runs_without_index_after says when).",
   runtime_unavailable: "NEMAR's runtime image is not configured.",
   pipelines_account_missing: "The pipelines account is not set up.",
   compute_disabled: COMPUTE_ROUTE_SENTENCES.compute_disabled,
@@ -221,6 +253,42 @@ const statusQuery = z.object({
   limit: z.coerce.number().int().min(1).max(COMPUTE_PIPELINE_STATUS_PAGE_MAX).default(50),
 });
 
+const gridQuery = z
+  .object({
+    recipe: RECIPE_NAME,
+    recipe_version: z.string().regex(COMPUTE_PIPELINE_RECIPE_VERSION_RE).optional(),
+    executor: z.enum(COMPUTE_EXECUTORS).optional(),
+    runner: z.string().regex(RUNNER_ID_RE).optional(),
+    status: z.enum(COMPUTE_PIPELINE_GRID_STATUSES).optional(),
+    dataset: z.string().regex(COMPUTE_DATASET_ID_RE).optional(),
+    after: z.string().regex(COMPUTE_DATASET_ID_RE).optional(),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(COMPUTE_PIPELINE_GRID_PAGE_MAX)
+      .default(COMPUTE_PIPELINE_GRID_PAGE_DEFAULT),
+    sync: z.enum(["0", "1"]).optional(),
+  })
+  .superRefine((q, ctx) => {
+    if (q.runner !== undefined && q.executor === "tapis") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runner"],
+        message: "a runner's jobs are not Tapis jobs",
+      });
+    }
+  });
+
+const coverageQuery = z.object({
+  days: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(COMPUTE_PIPELINE_TREND_DAYS_MAX)
+    .default(COMPUTE_PIPELINE_TREND_DAYS_DEFAULT),
+});
+
 async function readJson(c: Ctx): Promise<unknown | null> {
   try {
     return await c.req.json();
@@ -250,6 +318,9 @@ function resultView(r: DispatchResult): ComputePipelineResult {
     ...(r.version === undefined ? {} : { version: r.version }),
     ...(r.blockedBy === undefined ? {} : { blocked_by: r.blockedBy }),
     ...(r.reason === undefined ? {} : { reason: r.reason }),
+    ...(r.runsWithoutIndexAfter === undefined
+      ? {}
+      : { runs_without_index_after: r.runsWithoutIndexAfter }),
     ...(r.stampId === undefined ? {} : { stamp_id: r.stampId }),
   };
 }
@@ -315,6 +386,38 @@ function fail(c: Ctx, err: unknown) {
     { error: "The pipeline routes failed unexpectedly.", code: "internal" },
     COMPUTE_ADMIN_ERROR_STATUS.internal,
   );
+}
+
+/** A stamp id from the path: a whole number of up to 16 digits that is a safe integer, or null. */
+function stampParam(raw: string): number | null {
+  if (!COMPUTE_PIPELINE_STAMP_ID_RE.test(raw)) return null;
+  const stampId = Number(raw);
+  return Number.isSafeInteger(stampId) ? stampId : null;
+}
+
+const stampIssue = () =>
+  new z.ZodError([
+    { code: z.ZodIssueCode.custom, path: ["stamp"], message: "a stamp id is a whole number" },
+  ]);
+
+/** A run's quality page: `after` is a recording path the quality route takes, and nothing else is asked. */
+const runQualityQuery = z
+  .object({
+    after: z
+      .string()
+      .refine(isRecordingPath, { message: "a cursor is a recording path a page answered with" })
+      .optional(),
+  })
+  .strict();
+
+/** `waitUntil` where the request has an execution context (none in some test harnesses). */
+function deferOf(c: Ctx): ((work: Promise<unknown>) => void) | undefined {
+  try {
+    const ctx = c.executionCtx;
+    return (work) => ctx.waitUntil(work);
+  } catch {
+    return undefined;
+  }
 }
 
 export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
@@ -438,6 +541,91 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
         },
         run.dispatched > 0 ? 201 : 200,
       );
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  admin.get("/compute/pipeline/grid", async (c) => {
+    const query = gridQuery.safeParse(c.req.query());
+    if (!query.success) return invalid(c, "invalid_query", query.error);
+    const q = query.data;
+    const recipe = findRecipe(q.recipe);
+    if (recipe === null) return refuse(c, "recipe_unknown");
+    try {
+      if (q.sync === "1") await syncPipelineStamps(c.env);
+      return c.json(
+        await pipelineGrid(c.env, {
+          recipe,
+          recipeVersion: q.recipe_version,
+          executor: q.executor,
+          runner: q.runner,
+          status: q.status,
+          dataset: q.dataset,
+          after: q.after,
+          limit: q.limit,
+        }),
+      );
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  admin.get("/compute/pipeline/coverage", async (c) => {
+    const query = coverageQuery.safeParse(c.req.query());
+    if (!query.success) return invalid(c, "invalid_query", query.error);
+    try {
+      return c.json(await pipelineCoverage(c.env, query.data.days));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  admin.get("/compute/pipeline/runs/:stamp", async (c) => {
+    const stampId = stampParam(c.req.param("stamp"));
+    if (stampId === null) return invalid(c, "invalid_query", stampIssue());
+    try {
+      const detail = await pipelineRunDetail(c.env.DB, stampId);
+      if (detail === null) return refuseAdmin(c, "stamp_not_found");
+      return c.json(detail);
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  // A run's quality (epic #2324 phase B3): where its derivative stands and a page of its succeeded
+  // recordings. Read only, and every answer, a refusal included, is `no-store` (ADR 0137 decision 7).
+  admin.get("/compute/pipeline/runs/:stamp/quality", async (c) => {
+    c.header("Cache-Control", "no-store");
+    const stampId = stampParam(c.req.param("stamp"));
+    if (stampId === null) return invalid(c, "invalid_query", stampIssue());
+    // A key named twice is refused, not read as its first value: a cursor is one path.
+    const named = Object.entries(c.req.queries()).find(([, values]) => values.length > 1);
+    if (named !== undefined) {
+      return invalid(
+        c,
+        "invalid_query",
+        new z.ZodError([
+          {
+            code: z.ZodIssueCode.custom,
+            // A key the route does not take is never echoed.
+            path: named[0] === "after" ? ["after"] : [],
+            message: "named twice",
+          },
+        ]),
+      );
+    }
+    const query = runQualityQuery.safeParse(c.req.query());
+    if (!query.success) return invalid(c, "invalid_query", query.error);
+    try {
+      const answer = await runQuality(c.env, {
+        stampId,
+        after: query.data.after ?? null,
+        origin: new URL(c.req.url).origin,
+        defer: deferOf(c),
+      });
+      if (answer === null) return refuseAdmin(c, "stamp_not_found");
+      return c.json(answer);
     } catch (err) {
       return fail(c, err);
     }

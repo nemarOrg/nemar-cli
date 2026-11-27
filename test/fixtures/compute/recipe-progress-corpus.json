@@ -1,0 +1,2828 @@
+{
+ "source": "nemarOrg/nemar-process at 77922f378a4a02eddfd2e95c6fc2108f01298a80: the first eight documents were written by recipes/nemar_process/common/progress.py (Tracker), the rest are mutations of one of them; every verdict is launcher/nemar_launch/progress.py check_recipe_progress at that commit.",
+ "cases": [
+  {
+   "name": "written by the recipe layer: nemar-floor.discovered",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": []
+   }
+  },
+  {
+   "name": "written by the recipe layer: nemar-floor.started",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": null
+     }
+    ]
+   }
+  },
+  {
+   "name": "written by the recipe layer: nemar-floor.step",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "written by the recipe layer: nemar-floor.ended",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": []
+   }
+  },
+  {
+   "name": "written by the recipe layer: nemar-ica.discovered",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-ica",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows",
+       "qc",
+       "ica_eligibility",
+       "iclabel_locations",
+       "asr",
+       "reref"
+      ]
+     },
+     {
+      "checkpoint": "ica",
+      "steps": [
+       "ica"
+      ]
+     },
+     {
+      "checkpoint": "iclabel",
+      "steps": [
+       "iclabel"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarica_recordings.tsv",
+    "discovered": 3,
+    "running": []
+   }
+  },
+  {
+   "name": "written by the recipe layer: nemar-ica.started",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-ica",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows",
+       "qc",
+       "ica_eligibility",
+       "iclabel_locations",
+       "asr",
+       "reref"
+      ]
+     },
+     {
+      "checkpoint": "ica",
+      "steps": [
+       "ica"
+      ]
+     },
+     {
+      "checkpoint": "iclabel",
+      "steps": [
+       "iclabel"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarica_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": null
+     }
+    ]
+   }
+  },
+  {
+   "name": "written by the recipe layer: nemar-ica.step",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-ica",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows",
+       "qc",
+       "ica_eligibility",
+       "iclabel_locations",
+       "asr",
+       "reref"
+      ]
+     },
+     {
+      "checkpoint": "ica",
+      "steps": [
+       "ica"
+      ]
+     },
+     {
+      "checkpoint": "iclabel",
+      "steps": [
+       "iclabel"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarica_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "written by the recipe layer: nemar-ica.ended",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-ica",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows",
+       "qc",
+       "ica_eligibility",
+       "iclabel_locations",
+       "asr",
+       "reref"
+      ]
+     },
+     {
+      "checkpoint": "ica",
+      "steps": [
+       "ica"
+      ]
+     },
+     {
+      "checkpoint": "iclabel",
+      "steps": [
+       "iclabel"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarica_recordings.tsv",
+    "discovered": 3,
+    "running": []
+   }
+  },
+  {
+   "name": "another format",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v2",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "format missing",
+   "valid": false,
+   "document": {
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "an unknown top-level key",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ],
+    "extra": 1
+   }
+  },
+  {
+   "name": "recipe has an unknown key",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1",
+     "name": "x"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "recipe id uppercase",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "Nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "recipe id starting with a hyphen",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "recipe id of 64 characters",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "recipe id of 65 characters",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "recipe version with a space",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0 b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "recipe version of 64 characters",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "recipe version of 65 characters",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "11111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "recipe version empty",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": ""
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "no checkpoints",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "nine checkpoints",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "c0",
+      "steps": [
+       "s0"
+      ]
+     },
+     {
+      "checkpoint": "c1",
+      "steps": [
+       "s1"
+      ]
+     },
+     {
+      "checkpoint": "c2",
+      "steps": [
+       "s2"
+      ]
+     },
+     {
+      "checkpoint": "c3",
+      "steps": [
+       "s3"
+      ]
+     },
+     {
+      "checkpoint": "c4",
+      "steps": [
+       "s4"
+      ]
+     },
+     {
+      "checkpoint": "c5",
+      "steps": [
+       "s5"
+      ]
+     },
+     {
+      "checkpoint": "c6",
+      "steps": [
+       "s6"
+      ]
+     },
+     {
+      "checkpoint": "c7",
+      "steps": [
+       "s7"
+      ]
+     },
+     {
+      "checkpoint": "c8",
+      "steps": [
+       "s8"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "eight checkpoints",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "c0",
+      "steps": [
+       "s0"
+      ]
+     },
+     {
+      "checkpoint": "c1",
+      "steps": [
+       "s1"
+      ]
+     },
+     {
+      "checkpoint": "c2",
+      "steps": [
+       "s2"
+      ]
+     },
+     {
+      "checkpoint": "c3",
+      "steps": [
+       "s3"
+      ]
+     },
+     {
+      "checkpoint": "c4",
+      "steps": [
+       "s4"
+      ]
+     },
+     {
+      "checkpoint": "c5",
+      "steps": [
+       "s5"
+      ]
+     },
+     {
+      "checkpoint": "c6",
+      "steps": [
+       "s6"
+      ]
+     },
+     {
+      "checkpoint": "c7",
+      "steps": [
+       "s7"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "the stored checkpoint",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "stored",
+      "steps": [
+       "load"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a checkpoint named twice",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "a"
+      ]
+     },
+     {
+      "checkpoint": "import",
+      "steps": [
+       "b"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a step in two checkpoints",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "a"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "a"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a checkpoint with no steps",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": []
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a checkpoint with 64 steps",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "s0",
+       "s1",
+       "s2",
+       "s3",
+       "s4",
+       "s5",
+       "s6",
+       "s7",
+       "s8",
+       "s9",
+       "s10",
+       "s11",
+       "s12",
+       "s13",
+       "s14",
+       "s15",
+       "s16",
+       "s17",
+       "s18",
+       "s19",
+       "s20",
+       "s21",
+       "s22",
+       "s23",
+       "s24",
+       "s25",
+       "s26",
+       "s27",
+       "s28",
+       "s29",
+       "s30",
+       "s31",
+       "s32",
+       "s33",
+       "s34",
+       "s35",
+       "s36",
+       "s37",
+       "s38",
+       "s39",
+       "s40",
+       "s41",
+       "s42",
+       "s43",
+       "s44",
+       "s45",
+       "s46",
+       "s47",
+       "s48",
+       "s49",
+       "s50",
+       "s51",
+       "s52",
+       "s53",
+       "s54",
+       "s55",
+       "s56",
+       "s57",
+       "s58",
+       "s59",
+       "s60",
+       "s61",
+       "s62",
+       "s63"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a checkpoint with 65 steps",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "s0",
+       "s1",
+       "s2",
+       "s3",
+       "s4",
+       "s5",
+       "s6",
+       "s7",
+       "s8",
+       "s9",
+       "s10",
+       "s11",
+       "s12",
+       "s13",
+       "s14",
+       "s15",
+       "s16",
+       "s17",
+       "s18",
+       "s19",
+       "s20",
+       "s21",
+       "s22",
+       "s23",
+       "s24",
+       "s25",
+       "s26",
+       "s27",
+       "s28",
+       "s29",
+       "s30",
+       "s31",
+       "s32",
+       "s33",
+       "s34",
+       "s35",
+       "s36",
+       "s37",
+       "s38",
+       "s39",
+       "s40",
+       "s41",
+       "s42",
+       "s43",
+       "s44",
+       "s45",
+       "s46",
+       "s47",
+       "s48",
+       "s49",
+       "s50",
+       "s51",
+       "s52",
+       "s53",
+       "s54",
+       "s55",
+       "s56",
+       "s57",
+       "s58",
+       "s59",
+       "s60",
+       "s61",
+       "s62",
+       "s63",
+       "s64"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a checkpoint item with an unknown key",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "a"
+      ],
+      "x": 1
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "an uppercase checkpoint",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "Import",
+      "steps": [
+       "a"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a step with a space",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "a b"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a table outside a directory",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a table not ending in _recordings.tsv",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a table with a .. segment",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "../product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a table with a leading slash",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "/product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a table with an empty segment",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product//desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a table eight segments deep",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "a/b/c/d/e/f/g/desc-x_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a table nine segments deep",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "a/b/c/d/e/f/g/h/desc-x_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a table part of 128 characters",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "p/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a table part of 129 characters",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "p/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a table named only _recordings.tsv",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "p/_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "discovered missing",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "discovered null",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": null,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "discovered negative",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": -1,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "discovered a million",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 1000000,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "discovered past a million",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 1000001,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "discovered a boolean",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": true,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "discovered a fraction",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 1.5,
+    "running": [
+     {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.set",
+      "step": "load"
+     }
+    ]
+   }
+  },
+  {
+   "name": "nothing running",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": []
+   }
+  },
+  {
+   "name": "two running",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "a",
+      "step": null
+     },
+     {
+      "path": "b",
+      "step": null
+     }
+    ]
+   }
+  },
+  {
+   "name": "running with a null step",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "a",
+      "step": null
+     }
+    ]
+   }
+  },
+  {
+   "name": "running with an unknown key",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "a",
+      "step": null,
+      "x": 1
+     }
+    ]
+   }
+  },
+  {
+   "name": "running with a bad step",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "a",
+      "step": "a b"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a running path of 4096 characters",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "step": null
+     }
+    ]
+   }
+  },
+  {
+   "name": "a running path of 4097 characters",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "step": null
+     }
+    ]
+   }
+  },
+  {
+   "name": "a running path of 4096 astral characters",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+      "step": null
+     }
+    ]
+   }
+  },
+  {
+   "name": "a running path of non-ASCII text",
+   "valid": true,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": "sub-\u00e9/eeg/x.set",
+      "step": null
+     }
+    ]
+   }
+  },
+  {
+   "name": "running path not a string",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": [
+     {
+      "path": 1,
+      "step": null
+     }
+    ]
+   }
+  },
+  {
+   "name": "running not a list",
+   "valid": false,
+   "document": {
+    "format": "nemar.recipe-progress.v1",
+    "recipe": {
+     "id": "nemar-floor",
+     "version": "1.0.0-b1"
+    },
+    "checkpoints": [
+     {
+      "checkpoint": "import",
+      "steps": [
+       "load",
+       "signal_channels"
+      ]
+     },
+     {
+      "checkpoint": "preprocess",
+      "steps": [
+       "flatline",
+       "drift",
+       "line_noise_measure",
+       "line_noise_50",
+       "line_noise_60",
+       "qc_amplitude",
+       "bad_channels",
+       "bad_windows"
+      ]
+     },
+     {
+      "checkpoint": "quality",
+      "steps": [
+       "qc"
+      ]
+     }
+    ],
+    "table": "product/desc-nemarfloor_recordings.tsv",
+    "discovered": 3,
+    "running": {
+     "path": "a",
+     "step": null
+    }
+   }
+  }
+ ]
+}

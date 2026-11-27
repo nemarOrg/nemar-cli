@@ -34,6 +34,7 @@ import {
   RUNNER_BACKENDS,
 } from "../compute-state.js";
 import { LAUNCH_SPEC_ENV_MAX_CHARS } from "./compute-launch.js";
+import { ProgressSchema } from "./compute-progress.js";
 import {
   COMPUTE_IMAGE_DIGEST_RE,
   COMPUTE_IMAGE_REF_RE,
@@ -183,9 +184,20 @@ export const RunnerClaimRequestSchema = z
   })
   .strict();
 
-/** A heartbeat renews the lease of one job and reports the phase it is in. */
+/**
+ * A heartbeat renews the lease of one job and reports the phase it is in, and, for a pipeline job that
+ * follows ADR 0134, its live progress (`nemar.progress.v1`, `./compute-progress.ts`). A heartbeat whose
+ * `progress` breaks that schema is `invalid_body` and renews nothing: a runner validates progress before
+ * it attaches it, and retries without it on `invalid_body`. A progress object that is too soon or does
+ * not fit the recipe is ignored by the Worker, and the lease is still renewed.
+ */
 export const RunnerHeartbeatRequestSchema = z
-  .object({ job_id: jobIdSchema, lease_id: leaseIdSchema, phase: z.enum(RUNNER_PHASES) })
+  .object({
+    job_id: jobIdSchema,
+    lease_id: leaseIdSchema,
+    phase: z.enum(RUNNER_PHASES),
+    progress: ProgressSchema.optional(),
+  })
   .strict();
 
 /** What a runner measured, in whole numbers. */
