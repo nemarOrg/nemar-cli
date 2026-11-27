@@ -431,8 +431,8 @@ describe("what it is allowed to hold", () => {
       "${{ vars.ANTHROPIC_PUBLICATION_REVIEW_SERVICE_ACCOUNT_ID }}",
     );
     // The organization and the workspace are shared with the other reviews.
-    expect(env.ANTHROPIC_ORGANIZATION_ID).toBe("${{ vars.ANTHROPIC_ORGANIZATION_ID }}");
-    expect(env.ANTHROPIC_WORKSPACE_ID).toBe("${{ vars.ANTHROPIC_WORKSPACE_ID }}");
+    expect(env.ANTHROPIC_ORGANIZATION_ID).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_ORGANIZATION_ID }}");
+    expect(env.ANTHROPIC_WORKSPACE_ID).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_WORKSPACE_ID }}");
     expect(env.ANTHROPIC_IDENTITY_TOKEN_FILE).toContain("anthropic-oidc.jwt");
     expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
     expect(env.PUBLICATION_REVIEW_CALLBACK_TOKEN).toBe(
@@ -444,8 +444,8 @@ describe("what it is allowed to hold", () => {
     const env = step("Check the federation configuration").env ?? {};
     expect(env.RULE).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_FEDERATION_RULE_ID }}");
     expect(env.ACCOUNT).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_SERVICE_ACCOUNT_ID }}");
-    expect(env.ORG).toBe("${{ vars.ANTHROPIC_ORGANIZATION_ID }}");
-    expect(env.WORKSPACE).toBe("${{ vars.ANTHROPIC_WORKSPACE_ID }}");
+    expect(env.ORG).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_ORGANIZATION_ID }}");
+    expect(env.WORKSPACE).toBe("${{ vars.ANTHROPIC_PUBLICATION_REVIEW_WORKSPACE_ID }}");
     // The pull-request review's identity is read only by this check, and only to refuse it; the
     // model step never signs in with it.
     expect(env.OTHER_RULE).toBe("${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}");

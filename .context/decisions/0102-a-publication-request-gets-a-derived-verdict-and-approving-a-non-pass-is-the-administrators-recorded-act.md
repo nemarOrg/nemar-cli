@@ -1139,3 +1139,11 @@ The per-depositor allowance stays at 5, and an administrator's start still skips
 In the same change, `PUBLICATION_REVIEW_ENABLED = "1"` joins production `[vars]`.
 The items of "Before it is switched on" that remained open are listed in that pull request, and it merged only after the owner confirmed each one.
 ADR 0139 builds on this review.
+
+## Amendment 2026-11-27 (owner, #2441): the review signs in to an Anthropic organization of its own
+
+"Before it is switched on", item 2, shared the organization and workspace variables between the reviews.
+The owner created the publication review's federation rule and service account in a separate Anthropic organization, with its own issuer configuration, so nothing about its sign-in is shared with the pull-request review.
+The workflow reads four variables of its own: `ANTHROPIC_PUBLICATION_REVIEW_FEDERATION_RULE_ID`, `ANTHROPIC_PUBLICATION_REVIEW_SERVICE_ACCOUNT_ID`, `ANTHROPIC_PUBLICATION_REVIEW_ORGANIZATION_ID` and `ANTHROPIC_PUBLICATION_REVIEW_WORKSPACE_ID`.
+Each review's federation check also reads the other review's rule and service account variables, only to refuse a rule or an account that is the same as its own.
+Where this and item 2 differ, this is the later text.
