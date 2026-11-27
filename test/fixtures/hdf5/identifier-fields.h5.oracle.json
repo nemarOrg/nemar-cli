@@ -1,0 +1,14 @@
+[
+{"dtype":null,"kind":"group","name":"","path":"/","shape":null,"value":null},
+{"dtype":"string","kind":"attribute","name":"AppName","path":"/meta","shape":[],"value":"Marlow Recorder"},
+{"dtype":"string","kind":"attribute","name":"ExperimenterName","path":"/meta","shape":[],"value":"Quillfeather Marlow"},
+{"dtype":"string","kind":"attribute","name":"ManufacturerName","path":"/meta","shape":[],"value":"Quillfeather Instruments GmbH"},
+{"dtype":"string","kind":"attribute","name":"Notes","path":"/meta","shape":[],"value":"Quillfeather Marlow recorded this"},
+{"dtype":"string","kind":"attribute","name":"SourcePath","path":"/meta","shape":[],"value":"/home/qmarlow/data/run1"},
+{"dtype":null,"kind":"group","name":"meta","path":"/meta","shape":null,"value":null},
+{"dtype":"string","kind":"dataset","name":"BirthDate","path":"/meta/BirthDate","shape":[],"storage":{"address":2449,"layout":"contiguous","size":7},"value":"unknown"},
+{"dtype":"string","kind":"dataset","name":"DateOfBirth","path":"/meta/DateOfBirth","shape":[],"storage":{"address":2432,"layout":"contiguous","size":10},"value":"1971-04-23"},
+{"dtype":"string","kind":"dataset","name":"Email","path":"/meta/Email","shape":[],"storage":{"address":2456,"layout":"contiguous","size":19},"value":"someone@example.org"},
+{"dtype":"string","kind":"dataset","name":"dob","path":"/meta/dob","shape":[],"storage":{"address":2442,"layout":"contiguous","size":7},"value":"1971-04"},
+{"dtype":"float64","kind":"dataset","name":"signal","path":"/signal","shape":[1000],"skipped":"size","storage":{"address":10624,"layout":"contiguous","size":8000},"value":null}
+]

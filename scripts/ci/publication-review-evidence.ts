@@ -38,7 +38,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { type FindingKind, formatCoverage } from "../../shared/identifier-scan";
+import { formatCoverage, readerMatch } from "../../shared/identifier-readers";
+import type { FindingKind } from "../../shared/identifier-scan";
 import { SEMVER } from "../../shared/pr-review";
 import {
   type BidsState,
@@ -498,8 +499,9 @@ function sidecarNumbers(sidecar: Record<string, unknown>): {
  * Subjects, sessions, recordings, datatypes, formats, the three `has_*` flags, and the sampling
  * rates and channel counts of a bounded sample of data sidecars, from the tree's paths and
  * {@link SIDECAR_SAMPLE} sidecars. Recordings are counted in the raw tree only (outside
- * `derivatives/`, `sourcedata/` and `code/`), by the screen's own rule (`formatCoverage`), with EDF
- * and BDF as their own formats and every format the Worker's closed list does not name folded into
+ * `derivatives/`, `sourcedata/` and `code/`), by the screen's own rule (`formatCoverage` and the
+ * reader registry), a file a registered reader parses counted under the extension it matched (EDF
+ * and BDF as their own formats) and every format the Worker's closed list does not name folded into
  * `.other`, so no file name rides in a key. No path, label or sidecar value is in the result.
  */
 export function structuralSummary(dir: string, tree: Tree): StructuralSummary {
@@ -527,9 +529,12 @@ export function structuralSummary(dir: string, tree: Tree): StructuralSummary {
   const add = (key: string, n: number) => {
     if (n > 0) formats[key] = (formats[key] ?? 0) + n;
   };
-  const lower = rawPaths.map((p) => p.toLowerCase());
-  add(".edf", lower.filter((p) => p.endsWith(".edf")).length);
-  add(".bdf", lower.filter((p) => p.endsWith(".bdf")).length);
+  // A file a registered reader parses counts under the extension it matched on (`.edf`, `.bdf`);
+  // the rest by the screen's own coverage rule. Unknown names fold into `.other`.
+  for (const path of rawPaths) {
+    const match = readerMatch(path);
+    if (match) add(REVIEW_FORMATS.has(match.extension) ? match.extension : ".other", 1);
+  }
   for (const [format, n] of Object.entries(formatCoverage(rawPaths).unscreened)) {
     add(REVIEW_FORMATS.has(format) ? format : ".other", n);
   }

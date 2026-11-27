@@ -247,8 +247,8 @@ export async function readDatasetFact(
  * The identifier screen of N.0.0's `sha`, bound to the record. An `xx` dataset is `exempt`; no
  * screen of that head is `absent`. A verdict is read as `upstream-repull-screen.ts` reads it (a
  * run past its report deadline is `unreported`), and one whose stored report does not name `sha`
- * is `unreadable`, never `clear`. `review`, `not-screened` and `clean-edf-only-others-unscreened`
- * are `acknowledge`, acknowledged or not.
+ * is `unreadable`, never `clear`. `review`, `not-screened`, `partially-screened` and
+ * `clean-edf-only-others-unscreened` are `acknowledge`, acknowledged or not.
  */
 export async function readScreenFact(
   db: D1Database,

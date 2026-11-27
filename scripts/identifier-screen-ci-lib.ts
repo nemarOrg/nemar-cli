@@ -51,6 +51,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { S3Client, type Subprocess } from "bun";
+import { type FormatReader, READERS, readerFor } from "../shared/identifier-readers";
 import {
   type DatasetRecord,
   INTERNAL_FAILURE,
@@ -835,7 +836,19 @@ export class GitBlobReader {
 
 /** `SHA256E-s1234--<hex>.edf`: backend, size, digest, extension. No path separator can occur. */
 const ANNEX_KEY = /^([A-Z][A-Z0-9]*)-s(\d{1,15})--([0-9a-f]{8,128})((?:\.[A-Za-z0-9]{1,16}){0,3})$/;
-const EDF_KEY_EXTENSION = /\.(edf|bdf)$/i;
+
+/**
+ * What an annex key's extension says the file is: a registered reader, and whether it is EDF/BDF.
+ * The key keeps the extension the file had when it was added, whatever it is called now.
+ */
+function keyReader(
+  key: string,
+  readers: readonly FormatReader[] = READERS,
+): Pick<ManifestEntry, "edf" | "reader"> {
+  const reader = readerFor(key, readers);
+  if (!reader) return {};
+  return reader.id === "edf" ? { edf: true } : { reader: reader.id };
+}
 
 export interface AnnexKey {
   key: string;
@@ -871,6 +884,8 @@ export interface ResolvedTree {
   unresolved: number;
   /** EDF/BDF files whose bytes are in S3. */
   annexedEdf: number;
+  /** Recordings a registered reader parses whose bytes are in S3 (EDF/BDF among them). */
+  annexedRecordings: number;
 }
 
 const decoder = new TextDecoder();
@@ -905,6 +920,7 @@ export async function resolveEntries(
   let inline = 0;
   let unresolved = 0;
   let annexedEdf = 0;
+  let annexedRecordings = 0;
   const keys = new Map<string, AnnexKey | null>();
   for (const t of tree) {
     const symlink = isSymlink(t);
@@ -918,14 +934,15 @@ export async function resolveEntries(
       pointed = keys.get(cacheKey) ?? null;
     }
     if (pointed) {
-      const edf = EDF_KEY_EXTENSION.test(pointed.key);
+      const byKey = keyReader(pointed.key);
       annexed++;
-      if (edf || /\.(edf|bdf)$/i.test(t.path)) annexedEdf++;
+      if (byKey.edf || /\.(edf|bdf)$/i.test(t.path)) annexedEdf++;
+      if (byKey.edf || byKey.reader || readerFor(t.path)) annexedRecordings++;
       entries.push({
         path: t.path,
         size: declaredSize(pointed),
         url: `annex:${pointed.key}`,
-        ...(edf ? { edf: true } : {}),
+        ...byKey,
       });
     } else if (symlink) {
       unresolved++;
@@ -935,7 +952,7 @@ export async function resolveEntries(
       entries.push({ path: t.path, size: sizes.get(t.oid) ?? null, url: `git:${t.oid}` });
     }
   }
-  return { entries, annexed, inline, unresolved, annexedEdf };
+  return { entries, annexed, inline, unresolved, annexedEdf, annexedRecordings };
 }
 
 export interface Superseded {
@@ -947,10 +964,9 @@ export interface Superseded {
   sizes: Map<string, number | null>;
 }
 
-const EDF_PATH = /\.(edf|bdf)$/i;
-
 /**
- * The recordings that are in git history but not in the tree. A header that was fixed in a later
+ * The recordings, in any format a registered reader parses, that are in git history but not in
+ * the tree. A header that was fixed in a later
  * commit is still in the earlier commit's annex key (and in S3), and both become public with the
  * repository, so a screen of the tree alone would call a dataset clean while the old header is one
  * `git log` away. A recording is superseded when its annex key is in no file of the tree (a file
@@ -958,12 +974,17 @@ const EDF_PATH = /\.(edf|bdf)$/i;
  * when its blob is in no file of the tree. Only pointers and recordings are read; the content of
  * other old files stays unread.
  */
+/** The entry fields for a recording whose path names its reader. */
+const pathReader = (reader: FormatReader | null): Pick<ManifestEntry, "edf" | "reader"> =>
+  !reader ? {} : reader.id === "edf" ? { edf: true } : { reader: reader.id };
+
 export async function findSuperseded(
   dir: string,
   walk: HistoryWalk,
   tree: ResolvedTree,
   treeOids: ReadonlySet<string>,
   blobs: GitBlobReader,
+  readers: readonly FormatReader[] = READERS,
 ): Promise<Superseded> {
   const treeKeys = new Set(
     tree.entries.filter((e) => e.url.startsWith("annex:")).map((e) => e.url.slice(6)),
@@ -988,15 +1009,14 @@ export async function findSuperseded(
       }
       const pointed = parseAnnexPointer(decoder.decode(read.bytes), symlink);
       if (pointed) {
-        if (
-          !treeKeys.has(pointed.key) &&
-          (EDF_KEY_EXTENSION.test(pointed.key) || EDF_PATH.test(path))
-        ) {
+        const byKey = keyReader(pointed.key, readers);
+        const byPath = readerFor(path, readers);
+        if (!treeKeys.has(pointed.key) && (byKey.edf || byKey.reader || byPath)) {
           found.set(`annex:${pointed.key}`, {
             path,
             size: declaredSize(pointed),
             url: `annex:${pointed.key}`,
-            edf: true,
+            ...(byKey.edf || byKey.reader ? byKey : pathReader(byPath)),
           });
         }
         return;
@@ -1004,7 +1024,8 @@ export async function findSuperseded(
       if (symlink) return;
     }
     // Not a pointer: a recording committed to git directly is read from its blob.
-    if (EDF_PATH.test(path)) found.set(`git:${oid}`, { path, size, url: `git:${oid}`, edf: true });
+    const byPath = readerFor(path, readers);
+    if (byPath) found.set(`git:${oid}`, { path, size, url: `git:${oid}`, ...pathReader(byPath) });
   };
   for (let i = 0; i < candidates.length; i += 20_000) {
     await Promise.all(candidates.slice(i, i + 20_000).map(examine));
@@ -1038,7 +1059,7 @@ export function blobsToFetch(
       ...candidates.text,
       ...(candidates.participants ? [candidates.participants] : []),
     ]),
-    recordings: collect([...candidates.edf, ...superseded]),
+    recordings: collect([...candidates.recordings, ...superseded]),
   };
 }
 
@@ -1083,11 +1104,14 @@ export function createEntryReader(deps: EntryReaderDeps) {
     options: EntryReadOptions,
   ): Promise<Uint8Array> => {
     if (Date.now() >= deps.deadlineAt) throw new ReadFailure("deadline");
+    const offset = options.offset ?? 0;
     if (entry.url.startsWith("git:")) {
-      const read = await deps.blobs.read(entry.url.slice(4), n);
+      // A blob streams from its start: keep up to the end of the range, then drop the head.
+      const read = await deps.blobs.read(entry.url.slice(4), offset + n);
       if (!read.ok) throw new ReadFailure(`blob-${read.reason}`);
-      if (read.bytes.length < options.minBytes) throw new ReadFailure("short-body");
-      return read.bytes;
+      const bytes = read.bytes.subarray(Math.min(offset, read.bytes.length));
+      if (bytes.length < options.minBytes) throw new ReadFailure("short-body");
+      return bytes;
     }
     if (entry.url.startsWith("annex:")) {
       if (!deps.presign) throw new ReadFailure("credentials-missing");
@@ -1234,7 +1258,7 @@ export async function screenDataset(
         ...(walk && superseded.unreadable === 0 ? [] : ["history-unread"]),
         ...(tree.gitlinks > 0 ? ["submodule-unread"] : []),
       ],
-      supersededEdf: superseded.entries,
+      supersededRecordings: superseded.entries,
     };
     log(
       `screen: history ${walk ? `paths=${walk.paths.size} superseded=${superseded.entries.length}` : "unread"}`,
@@ -1243,7 +1267,8 @@ export async function screenDataset(
     // Annexed recordings are read in S3. Without credentials that is every one of them
     // unread, so say so with its own word instead of a record full of failures.
     const needsStorage =
-      resolved.annexedEdf + superseded.entries.filter((e) => e.url.startsWith("annex:")).length;
+      resolved.annexedRecordings +
+      superseded.entries.filter((e) => e.url.startsWith("annex:")).length;
     if (!config.aws && needsStorage > 0) {
       log("screen: error=credentials-missing");
       return errorReport("credentials-missing", scannerId, head);

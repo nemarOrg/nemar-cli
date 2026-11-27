@@ -463,7 +463,7 @@ describe("every way of not getting a report still mails the admins, and says so"
       const r = row();
       expect(r.identifier_screen_status).toBe("error");
       expect(JSON.parse(r.identifier_screen_report ?? "{}")).toEqual({
-        version: 1,
+        version: 2,
         scanner: null,
         head: null,
         error: "workflow-failed",

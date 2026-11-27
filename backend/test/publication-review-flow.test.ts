@@ -62,6 +62,7 @@ const REVIEWABLE = [
   "review",
   "unchecked",
   "not-screened",
+  "partially-screened",
   "clean-edf-only-others-unscreened",
 ];
 const NOT_REVIEWABLE = ["direct-identifiers", "error", "unreported"];

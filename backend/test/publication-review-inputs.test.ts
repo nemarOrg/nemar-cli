@@ -11,9 +11,24 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Miniflare } from "miniflare";
+import {
+  type ManifestEntry,
+  ReadFailure,
+  createContext,
+  scanDatasetFromManifest,
+} from "../../scripts/identifier-fleet-lib";
+import {
+  finalizeScanReport,
+  foldOddFailures,
+  foldOddFormats,
+} from "../../scripts/identifier-screen-ci-lib";
+import { parseScreenReport } from "../../shared/identifier-screen-report";
 import { RESOLVER_VERSION } from "../../shared/license-lineage";
 import {
+  type CoverageTally,
   PUBLICATION_PROMPT_VERSION,
   REVIEW_INPUTS,
   parseReviewInputs,
@@ -369,6 +384,113 @@ describe("the coverage counts, read from either screen report version", () => {
     // The version-2 tallies are refused whole; the version-1 counts still stand.
     expect(coverageOf(readNarrowScreenReport(bad), SCREENED_HEAD).source).toBe("screen_v1");
     expect(readNarrowScreenReport("not json")).toBeNull();
+  });
+});
+
+describe("the narrow reader agrees with A1's report (drift)", () => {
+  // The narrow shape above is deliberate: it is pinned to the report A1's builder writes by
+  // building one with the real readers over real fixtures, through the screen's own door.
+  const FIXTURES = join(import.meta.dir, "..", "..", "test", "fixtures");
+  const fixture = (...parts: string[]) => new Uint8Array(readFileSync(join(FIXTURES, ...parts)));
+  const files: Record<string, Uint8Array> = {
+    "sub-01/eeg/sub-01_task-a_eeg.edf": fixture("identifier-scan", "clean.edf"),
+    "sub-02/eeg/sub-02_task-a_eeg.edf": fixture("identifier-scan", "flagged.edf"),
+    // A `.vhdr` whose `.eeg` is absent: partial, companion missing.
+    "sub-01/eeg/sub-01_task-b_eeg.vhdr": fixture("text-headers", "brainvision", "test.vhdr"),
+    "sub-01/eeg/sub-01_task-b_eeg.vmrk": fixture("text-headers", "brainvision", "test.vmrk"),
+    "sub-01/nirs/sub-01_task-c_nirs.snirf": fixture("hdf5", "snirf-samples-simple-probe.snirf"),
+    "sub-01/eeg/sub-01_task-d_eeg.set": fixture("mat", "eeglab-data.set"),
+    "sub-01/nirs/sub-01_task-e_nirs.nirs": fixture("mat", "homer2-simple-probe.nirs"),
+    "sub-01/beh/sub-01_task-f_beh.mat": fixture("mat", "oddball-onoff.mat"),
+    "sub-01/eeg/sub-01_task-g_eeg.zip": fixture("zip", "edf-and-xdf.zip"),
+    // Bytes no reader can parse: a failed read.
+    "sub-02/eeg/sub-02_task-d_eeg.set": new Uint8Array(300).fill(0x41),
+    // Formats no reader parses: unscreened.
+    "sub-02/meg/sub-02_task-a_meg.fif": new Uint8Array(300).fill(0x41),
+    "sub-02/eeg/sub-02_task-a_eeg.cnt": new Uint8Array(300).fill(0x41),
+  };
+
+  async function a1Report() {
+    const entries: ManifestEntry[] = Object.entries(files).map(([path, bytes]) => ({
+      path,
+      size: bytes.length,
+      url: `mem:${path}`,
+    }));
+    const ctx = createContext({
+      fileConcurrency: 4,
+      workerConcurrency: 1,
+      githubToken: async () => null,
+      sleep: async () => undefined,
+      readVersionManifest: async () => {
+        throw new ReadFailure("unreadable-entry");
+      },
+      readEntryHead: async (entry, n, options) => {
+        const bytes = files[entry.path];
+        if (!bytes) throw new ReadFailure("unreadable-entry", { status: 404 });
+        const offset = options.offset ?? 0;
+        const out = bytes.slice(offset, offset + n);
+        if (out.length < options.minBytes) throw new ReadFailure("short-body");
+        return out;
+      },
+    });
+    const record = await scanDatasetFromManifest(ctx, "nm000186", null, entries, "clone", {});
+    const built = finalizeScanReport(
+      foldOddFailures(foldOddFormats(record)),
+      "identifier-scan@abcdef1",
+      SCREENED_HEAD,
+    );
+    // As the Worker stores it: through the door, then a JSON column.
+    return parseScreenReport(JSON.parse(JSON.stringify(built)));
+  }
+
+  test("tallies, readers and unscreened counts read the same as A1's report", async () => {
+    const report = await a1Report();
+    const scan = report.scan;
+    const byFormat = scan?.read_by_format ?? {};
+    const unscreened = scan?.unscreened_formats ?? {};
+    // Not vacuous: several readers, a read that is not complete, and formats nobody reads.
+    expect(Object.keys(byFormat).length).toBeGreaterThanOrEqual(5);
+    expect(
+      Object.values(byFormat).some((t) => t !== undefined && (t.partial > 0 || t.failed > 0)),
+    ).toBe(true);
+    expect(Object.keys(unscreened).length).toBeGreaterThanOrEqual(2);
+
+    const narrow = readNarrowScreenReport(JSON.stringify(report));
+    expect(narrow?.version).toBe(2);
+    expect(narrow?.head).toBe(SCREENED_HEAD);
+    expect(narrow?.scanner).toBe("identifier-scan@abcdef1");
+    expect(narrow?.readers).toEqual(scan?.readers as Record<string, string>);
+    expect(narrow?.readByFormat).toEqual(byFormat as Record<string, CoverageTally>);
+    expect(narrow?.unscreened).toEqual(unscreened);
+    expect(narrow?.files).toEqual({
+      edf_bdf: scan?.files?.edf_bdf ?? -1,
+      header_read: scan?.files?.header_read ?? -1,
+      header_read_failed: scan?.files?.header_read_failed ?? -1,
+    });
+
+    const coverage = coverageOf(narrow, SCREENED_HEAD);
+    expect(coverage.source).toBe("screen_v2");
+    const expected: Record<string, CoverageTally> = {};
+    for (const [k, t] of Object.entries(byFormat)) if (t) expected[k] = t;
+    for (const [k, n] of Object.entries(unscreened)) {
+      if (!(k in expected)) expected[k] = { files: n, read: 0, partial: 0, failed: 0 };
+    }
+    expect(coverage.formats).toEqual(expected);
+  });
+
+  test("the inputs route serves A1's report as the job's parser reads it", async () => {
+    const report = await a1Report();
+    const { requestId, reviewId } = review();
+    h.db.run("UPDATE publication_requests SET identifier_screen_report = ? WHERE id = ?", [
+      JSON.stringify(report),
+      requestId,
+    ]);
+    const res = await inputs(reviewId);
+    expect(res.status).toBe(200);
+    expect(parseReviewInputs(res.body).coverage).toEqual(
+      coverageOf(readNarrowScreenReport(JSON.stringify(report)), SCREENED_HEAD),
+    );
+    expect(Object.keys(parseReviewInputs(res.body).coverage.formats)).toContain("zip:.xdf");
   });
 });
 

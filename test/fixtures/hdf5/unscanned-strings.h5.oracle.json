@@ -1,0 +1,6 @@
+[
+{"dtype":"string","kind":"attribute","name":"notes","path":"/","shape":[],"skipped":"size","value":null},
+{"dtype":null,"kind":"group","name":"","path":"/","shape":null,"value":null},
+{"dtype":"string","kind":"dataset","name":"labels","path":"/labels","shape":[5000],"skipped":"size","storage":{"address":72080,"layout":"contiguous","size":5000},"value":null},
+{"dtype":"float64","kind":"dataset","name":"signal","path":"/signal","shape":[1000],"skipped":"size","storage":{"address":77080,"layout":"contiguous","size":8000},"value":null}
+]

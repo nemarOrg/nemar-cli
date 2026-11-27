@@ -15,6 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { formatCoverage } from "../shared/identifier-readers";
 import {
   DATE_KINDS,
   DIRECT_KINDS,
@@ -22,7 +23,6 @@ import {
   type Shape,
   countByKind,
   detectEdfFamily,
-  formatCoverage,
   scanAcqTime,
   scanEdfHeader,
   scanJsonKeys,
@@ -297,8 +297,9 @@ describe("coverage and summaries", () => {
       "sub-03/anat/t1.nii.gz",
       "participants.tsv",
     ]);
-    expect(cov.screened).toBe(2);
-    expect(cov.unscreened).toEqual({ ".set": 1, ".fdt": 1, ".fif.gz": 1, ".nii.gz": 1 });
+    // The EEGLAB reader reads the .set and claims the .fdt beside it (card A5).
+    expect(cov.byReader).toEqual({ edf: 2, eeglab: 1 });
+    expect(cov.unscreened).toEqual({ ".fif.gz": 1, ".nii.gz": 1 });
   });
 
   test("summaries carry counts, and shapes carry no letters or digits", () => {
@@ -742,19 +743,19 @@ describe("second review: delimiters, record numbers, slots, coverage, canonical 
         ["sub-01/meg/sub-01_task-x_meg.ds/a.meg4", "sub-01/meg/sub-01_task-x_meg.ds/a.res4"],
         { ".ds/": 1 },
       ],
-      [["sub-01/emg/sub-01_task-x_emg.hdf5"], { ".hdf5": 1 }],
+      [["sub-01/ieeg/sub-01_task-x_ieeg.nwb"], { ".nwb": 1 }],
       [["sub-01/eeg/sub-01_task-x_eeg.edf.gz"], { ".edf.gz": 1 }],
       [["sub-01/eeg/sub-01_task-x_eeg.eeg", "sub-01/eeg/sub-01_task-x_eeg.json"], { ".eeg": 1 }],
       [["sub-01/eeg/a.mff/info.xml", "sub-01/eeg/a.mff/signal1.bin"], { ".mff/": 1 }],
       [["sub-01/ieeg/a.mefd/x/y.timd"], { ".mefd/": 1 }],
       [["sub-01/eeg/a.zarr/.zarray", "sub-01/eeg/b.zarr/.zarray"], { ".zarr/": 2 }],
-      [["sourcedata/a.mat", "sourcedata/b.mat"], { ".mat": 2 }],
+      [["sourcedata/a.xdf", "sourcedata/b.xdf"], { ".xdf": 2 }],
     ];
     for (const [paths, expected] of cases) {
       expect(formatCoverage(paths).unscreened, paths[0]).toEqual(expected);
     }
     expect(formatCoverage(["sub-01/eeg/a.edf", "sub-01/eeg/a.json", "sub-01/eeg/a.tsv"])).toEqual({
-      screened: 1,
+      byReader: { edf: 1 },
       unscreened: {},
     });
     expect(
@@ -863,12 +864,14 @@ describe("third review: birth dates in the recording field, slots, vocabulary, a
 
   test("coverage counts archives, vendor-native files and unrecognized raw files under sourcedata", () => {
     const counted = (paths: string[]) => formatCoverage(paths).unscreened;
-    expect(counted(["sourcedata/raw.zip"])).toEqual({ ".zip": 1 });
+    // A .zip has a reader (card A6): its entries are counted by format, as `zip:<ext>`.
+    expect(counted(["sourcedata/raw.zip"])).toEqual({});
+    expect(formatCoverage(["sourcedata/raw.zip"]).byReader).toEqual({ zip: 1 });
     expect(counted(["sourcedata/raw.tar.gz"])).toEqual({ ".tar.gz": 1 });
     for (const ext of ["ns5", "lay", "rec", "smr", "dat", "npy", "parquet"]) {
       expect(counted([`data/recording.${ext}`]), ext).toEqual({ [`.${ext}`]: 1 });
     }
-    expect(counted(["data/raw.hdf5"])).toEqual({ ".hdf5": 1 });
+    expect(counted(["data/raw.nwb"])).toEqual({ ".nwb": 1 });
     expect(counted(["sourcedata/sub-01/rec.xyz"])).toEqual({ ".xyz": 1 });
     expect(counted(["sourcedata/sub-01/rec"])).toEqual({ "(no extension)": 1 });
     expect(
@@ -977,7 +980,7 @@ describe("fourth review: birth words, strict slots, ages, month names, harmless 
         "sourcedata/a.log",
       ]),
     ).toEqual({});
-    expect(counted(["data/archive.zip"])).toEqual({ ".zip": 1 });
+    expect(counted(["data/archive.tar"])).toEqual({ ".tar": 1 });
   });
 });
 

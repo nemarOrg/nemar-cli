@@ -18,15 +18,31 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  DATE_KINDS,
-  DIRECT_KINDS,
-  EDF_HEADER_BYTES,
-  type Finding,
-  type FindingKind,
-  countByKind,
-  edfIdentificationText,
+  DEFAULT_DATASET_TIME_MS,
+  type FormatReader,
+  READERS,
+  type RangeSource,
+  ReadFailure,
+  type ReaderId,
   formatCoverage,
-  scanEdfHeader,
+} from "../shared/identifier-readers";
+import {
+  type ClassifyInput,
+  type ReaderClassLimit,
+  type RecordingEntry,
+  classifyDataset,
+  coverageFields,
+  isComplete,
+  isDateFinding,
+  isDirectFinding,
+  readRecordings,
+  readerForEntry,
+  recordingCounts,
+  subjectOf,
+} from "../shared/identifier-report-builder";
+import {
+  type Finding,
+  countByKind,
   scanJsonKeys,
   scanParticipantIds,
   scanPaths,
@@ -41,7 +57,10 @@ import type {
   SamplingStat,
 } from "../shared/identifier-screen-report";
 
-export type { DatasetRecord, DatasetStatus, ManifestSource, SamplingStat };
+export type { ClassifyInput, DatasetRecord, DatasetStatus, ManifestSource, SamplingStat };
+// The verdict and the failure class are the shared report builder's; the fleet scan's callers and
+// tests keep reaching them here.
+export { ReadFailure, classifyDataset, isComplete, isDateFinding, isDirectFinding, subjectOf };
 
 export const USER_AGENT = "nemar-identifier-scan/1.0 (+https://docs.nemar.org/policies/takedown/)";
 export const DEFAULT_API = "https://api.nemar.org";
@@ -194,26 +213,6 @@ export function createLimiter(max: number): Limiter {
   };
 }
 
-/** A failed read, classed by a fixed word or an HTTP status. Never carries a value. */
-export class ReadFailure extends Error {
-  readonly cls: string;
-  readonly status: number | undefined;
-  readonly retryable: boolean;
-  /** How long the server asked us to wait (Retry-After), when it said. */
-  readonly retryAfterMs: number | undefined;
-  constructor(
-    cls: string,
-    options: { status?: number; retryable?: boolean; retryAfterMs?: number } = {},
-  ) {
-    super(cls);
-    this.name = "ReadFailure";
-    this.cls = cls;
-    this.status = options.status;
-    this.retryable = options.retryable ?? false;
-    this.retryAfterMs = options.retryAfterMs;
-  }
-}
-
 /** `Retry-After` as milliseconds: delta-seconds or an HTTP date; undefined when absent or unusable. */
 export function parseRetryAfter(
   value: string | null | undefined,
@@ -325,6 +324,13 @@ export function networkFailure(error: unknown): ReadFailure {
   return new ReadFailure(timedOut ? "timeout" : "network", { retryable: true });
 }
 
+/** The class of a read from a non-zero offset that a server answered with the whole file. */
+export const RANGE_IGNORED = "range-ignored";
+
+/**
+ * The fixed class of a failed read: a {@link ReadFailure}'s own (an HTTP status, `timeout`,
+ * `short-body`, {@link RANGE_IGNORED} and the rest), or the thrown error's class name.
+ */
 export function failureClass(error: unknown): string {
   if (error instanceof ReadFailure) return error.cls;
   return `error-${error instanceof Error ? error.name : "unknown"}`;
@@ -373,15 +379,19 @@ async function cancelBody(res: Response): Promise<void> {
 export interface ReadHeadOptions {
   /** Fewer bytes than this is a failed read (`short-body`), not a short file. */
   minBytes?: number;
+  /** The first byte to read (default 0). */
+  offset?: number;
   userAgent?: string;
   timeoutMs?: number;
 }
 
 /**
- * Read at most `n` bytes from the start of a URL.
+ * Read at most `n` bytes of a URL, from `options.offset` (default the start).
  *
  * Only 200 and 206 are reads. A server that ignores `Range` answers 200 with the whole file:
- * this takes the first `n` bytes and cancels the body, so a recording is never downloaded.
+ * from offset 0 this takes the first `n` bytes and cancels the body, so a recording is never
+ * downloaded; from any other offset those bytes are not the range asked for, so the read fails
+ * with the fixed class `range-ignored` and nothing is taken.
  * 404, 416 (an empty object), a short body and a dropped connection are failures to read,
  * thrown as {@link ReadFailure} so the caller counts them; they are never an empty header.
  */
@@ -394,7 +404,7 @@ export async function readHead(
   try {
     res = await fetch(url, {
       headers: {
-        Range: `bytes=0-${n - 1}`,
+        Range: `bytes=${options.offset ?? 0}-${(options.offset ?? 0) + n - 1}`,
         "Accept-Encoding": "identity",
         "User-Agent": options.userAgent ?? USER_AGENT,
       },
@@ -406,6 +416,10 @@ export async function readHead(
   if (res.status !== 200 && res.status !== 206) {
     await cancelBody(res);
     throw httpFailure(res.status, res.headers.get("retry-after"));
+  }
+  if (res.status === 200 && (options.offset ?? 0) > 0) {
+    await cancelBody(res);
+    throw new ReadFailure(RANGE_IGNORED);
   }
   const reader = res.body?.getReader();
   if (!reader) throw new ReadFailure("no-body");
@@ -445,6 +459,8 @@ export interface FleetLimits {
   sideFileBytes: number;
   /** Bytes read of participants.tsv (the header row and the participant labels). */
   participantsBytes: number;
+  /** Time the recordings of one dataset may take; past it the rest are `partial` (`time`). */
+  datasetTimeMs: number;
 }
 
 /**
@@ -468,6 +484,12 @@ export interface FleetContext {
   userAgent: string;
   /** Concurrent file reads within one dataset. */
   fileConcurrency: number;
+  /**
+   * Tighter bounds for classes of readers within `fileConcurrency` (the local scans pass
+   * `LOCAL_READER_CLASS_LIMITS`). Absent, as for the CI screen and the fleet scan, every recording
+   * shares `fileConcurrency` alone.
+   */
+  readerClassLimits?: readonly ReaderClassLimit[];
   /** Bounds every request to the Worker across all datasets. */
   workerLimit: Limiter;
   timeoutMs: number;
@@ -498,6 +520,8 @@ export interface FleetContext {
 /** What {@link FleetContext.readEntryHead} receives besides the entry and the byte count. */
 export interface EntryReadOptions {
   minBytes: number;
+  /** The first byte to read; absent means 0. A reader that cannot seek reads from 0 and skips. */
+  offset?: number;
   userAgent: string;
   timeoutMs: number;
 }
@@ -625,6 +649,7 @@ export function createContext(options: ContextOptions = {}): FleetContext {
       textFiles: 300,
       sideFileBytes: 65_536,
       participantsBytes: 1_048_576,
+      datasetTimeMs: DEFAULT_DATASET_TIME_MS,
       ...options.limits,
     },
     readVersionManifest:
@@ -633,6 +658,7 @@ export function createContext(options: ContextOptions = {}): FleetContext {
         readVersionManifestViaAws(id, version, { timeoutMs: awsTimeoutMs, env: options.awsEnv })),
     githubToken: options.githubToken ?? createGithubTokenReader(),
     ...(options.readEntryHead ? { readEntryHead: options.readEntryHead } : {}),
+    ...(options.readerClassLimits ? { readerClassLimits: options.readerClassLimits } : {}),
   };
 }
 
@@ -779,6 +805,11 @@ export interface ManifestEntry {
    * A path that ends `.edf` or `.bdf` is one without this flag.
    */
   edf?: boolean;
+  /**
+   * The registered reader the storage key names (an annex key's extension), when it names one,
+   * whatever the path is called now. Absent: the path decides.
+   */
+  reader?: ReaderId;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -924,9 +955,6 @@ export async function loadManifest(
 // Sampling
 // ---------------------------------------------------------------------------------------
 
-/** The first `sub-<label>` in a path, or "?". The label is only ever a grouping key. */
-export const subjectOf = (path: string): string => /sub-([^/_]+)/.exec(path)?.[1] ?? "?";
-
 /**
  * At most `max` items spread evenly over the groups (subjects), and evenly within each
  * group; every group is represented when there are at most `max` of them, and `max` groups
@@ -975,63 +1003,17 @@ export function sampleEvenly<T>(
 // Status
 // ---------------------------------------------------------------------------------------
 
-/** An identifier-severity finding of a kind that names a person or a clinical record. */
-export const isDirectFinding = (f: Finding): boolean =>
-  f.severity === "identifier" && DIRECT_KINDS.has(f.kind);
-
-/**
- * A calendar date finer than year in a header. Acceptable when nothing links the recording to a
- * person (policy 2026-10-04), so it is reported but never changes whether a dataset is clean.
- */
-export const isDateFinding = (f: Finding): boolean => DATE_KINDS.has(f.kind);
-
-export interface ClassifyInput {
-  findings: readonly Finding[];
-  /** EDF/BDF files in the manifest, whether or not they were all read. */
-  edfCount: number;
-  /** EDF/BDF headers read AND scanned. */
-  headerRead: number;
-  /** Recording files in formats the scanner cannot parse. */
-  unscreenedCount: number;
-  /** Reasons the scan did not cover everything it could have. */
-  incompleteReasons: readonly string[];
-}
-
-/**
- * Complete means every EDF/BDF header was read and scanned, every side read succeeded and no
- * sampling cap was hit. It is computed from counts, never inferred from the absence of a
- * recorded failure.
- */
-export function isComplete(input: ClassifyInput): boolean {
-  return input.headerRead === input.edfCount && input.incompleteReasons.length === 0;
-}
-
-/**
- * The dataset's verdict. A finding already made is never hidden by incompleteness; only a
- * dataset with no finding can be `unchecked`, and `clean` needs a complete scan of EDF/BDF
- * headers and NO recording in a format the scanner cannot parse.
- */
-export function classifyDataset(input: ClassifyInput): DatasetStatus {
-  if (input.findings.some(isDirectFinding)) return "direct-identifiers";
-  // Any finding that is not just an acceptable date needs a person to look.
-  if (input.findings.some((f) => !isDateFinding(f))) return "review";
-  if (!isComplete(input)) return "unchecked";
-  if (input.edfCount > 0 && input.unscreenedCount > 0) return "clean-edf-only-others-unscreened";
-  if (input.edfCount === 0) return input.unscreenedCount > 0 ? "not-screened" : "no-recordings";
-  // Complete, EDF/BDF only: clean, noting acceptable dates when there are any.
-  return input.findings.length > 0 ? "dates-only" : "clean";
-}
+// `isDirectFinding`, `isDateFinding`, `classifyDataset` and `isComplete` are the shared report
+// builder's (`shared/identifier-report-builder.ts`), re-exported above.
 
 // ---------------------------------------------------------------------------------------
 // One dataset
 // ---------------------------------------------------------------------------------------
 
-const EDF_FILE = /\.(edf|bdf)$/i;
-const isEdfEntry = (e: ManifestEntry): boolean => e.edf === true || EDF_FILE.test(e.path);
-
 /** The entries a scan may read, by kind. The byte limit on side files is applied by the scan. */
 export interface ReadCandidates {
-  edf: ManifestEntry[];
+  /** Recordings a registered reader parses. */
+  recordings: ManifestEntry[];
   participants: ManifestEntry | undefined;
   scans: ManifestEntry[];
   json: ManifestEntry[];
@@ -1043,9 +1025,12 @@ export interface ReadCandidates {
  * caller that must fetch content before the scan (the publication screen prefetches the git
  * blobs a partial clone left behind) asks for exactly what the scan will ask for.
  */
-export function readCandidates(manifest: readonly ManifestEntry[]): ReadCandidates {
+export function readCandidates(
+  manifest: readonly ManifestEntry[],
+  readers: readonly FormatReader[] = READERS,
+): ReadCandidates {
   return {
-    edf: manifest.filter(isEdfEntry),
+    recordings: manifest.filter((e) => readerForEntry(e, readers) !== null),
     participants: manifest.find((e) => e.path === "participants.tsv"),
     scans: manifest.filter((e) => e.path.endsWith("_scans.tsv")),
     json: manifest
@@ -1068,10 +1053,16 @@ function readEntry(
   entry: ManifestEntry,
   n: number,
   minBytes = 0,
+  offset = 0,
 ): Promise<Uint8Array> {
   const attempt = () =>
     guarded(ctx, entry.url, () => {
-      const options = { minBytes, userAgent: ctx.userAgent, timeoutMs: ctx.timeoutMs };
+      const options = {
+        minBytes,
+        userAgent: ctx.userAgent,
+        timeoutMs: ctx.timeoutMs,
+        ...(offset > 0 ? { offset } : {}),
+      };
       return ctx.readEntryHead
         ? ctx.readEntryHead(entry, n, options)
         : readHead(entry.url, n, options);
@@ -1080,6 +1071,26 @@ function readEntry(
     () => (isWorkerUrl(ctx, entry.url) ? ctx.workerLimit(attempt) : attempt()),
     retryOptions(ctx),
   );
+}
+
+/**
+ * An entry as a {@link RangeSource}: every read goes through {@link readEntry}, so it is retried,
+ * bounded and breaker-guarded like any other. A read inside a known size must return every byte
+ * it asked for; with no known size, a short read is the end of the file.
+ */
+export function entrySource(ctx: FleetContext, entry: ManifestEntry): RangeSource {
+  const size = entry.size ?? Number.POSITIVE_INFINITY;
+  return {
+    size,
+    read: (offset, length) =>
+      readEntry(
+        ctx,
+        entry,
+        length,
+        Number.isFinite(size) ? Math.max(0, Math.min(length, size - offset)) : 0,
+        offset,
+      ),
+  };
 }
 
 async function readText(
@@ -1122,22 +1133,29 @@ export interface ScanExtras {
   /** Reasons the caller already knows the scan fell short, for example `history-unread`. */
   extraIncompleteReasons?: readonly string[];
   /**
-   * Recordings that were in an earlier commit but are not in the scanned tree. Their bytes are
-   * as public as the tree's (git history and the bucket), so each header is read and counted with
-   * the tree's recordings: an unreadable one makes the record `unchecked`. The exception is an
-   * object the store answers 404 for, which is gone and leaks nothing: it is counted under the
-   * fixed read-failure class `edf/superseded-absent`, left out of the recording counts, and does
-   * not make the record incomplete. Any other failure (403, a timeout) is a failure like any other.
+   * Recordings, in any format a registered reader parses, that were in an earlier commit but are
+   * not in the scanned tree. Their bytes are as public as the tree's (git history and the bucket),
+   * so each is read and counted with the tree's recordings: an unreadable one makes the record
+   * `unchecked`. The exception is an object the store answers 404 for, which is gone and leaks
+   * nothing: it is counted under the fixed read-failure class `<reader>/superseded-absent`, left
+   * out of the recording counts, and does not make the record incomplete. Any other failure (403,
+   * a timeout) is a failure like any other.
    */
-  supersededEdf?: readonly ManifestEntry[];
+  supersededRecordings?: readonly ManifestEntry[];
+  /** The reader registry to read with; the default is `READERS`. A test registers a stub here. */
+  readers?: readonly FormatReader[];
 }
 
-/** The read-failure class of a superseded recording whose object no longer exists. */
+/**
+ * The read-failure class of a superseded EDF/BDF recording whose object no longer exists; another
+ * reader's is `<reader>/superseded-absent`.
+ */
 export const SUPERSEDED_ABSENT = "edf/superseded-absent";
 
 /**
- * Scan one dataset from its manifest: EDF/BDF headers, the participants table, scans tables,
- * non-BIDS JSON and small code and text files. Reads only the first bytes of each file.
+ * Scan one dataset from its manifest: every recording a registered reader parses, through that
+ * reader and under its limits (`shared/identifier-report-builder.ts`; EDF/BDF: the 256-byte
+ * header), the participants table, scans tables, non-BIDS JSON and small code and text files.
  *
  * `source: "clone"` is a local read of a metadata-only clone, so it is uncapped: every EDF/BDF
  * header, every scans table and every candidate JSON and text file is read. Any cap would make
@@ -1153,12 +1171,12 @@ export async function scanDatasetFromManifest(
   extras: ScanExtras = {},
 ): Promise<DatasetRecord> {
   const paths = manifest.map((e) => e.path);
+  const readers = extras.readers ?? READERS;
   const uncapped = source === "clone";
   const pick = <T>(items: readonly T[], max: number, groupOf: (item: T) => string): T[] =>
     uncapped ? [...items] : sampleEvenly(items, max, groupOf);
   const findings: Finding[] = [...scanPaths([...paths, ...(extras.extraPaths ?? [])])];
-  const coverage = formatCoverage(paths);
-  const unscreenedCount = Object.values(coverage.unscreened).reduce((a, b) => a + b, 0);
+  const coverage = formatCoverage(paths, readers);
   const failures: Record<string, number> = {};
   const fail = (what: string, error: unknown) => {
     // A stopped run is not a failed read: let it end the scan, record nothing.
@@ -1168,64 +1186,43 @@ export async function scanDatasetFromManifest(
   };
   const subjectKey = (e: ManifestEntry) => subjectOf(e.path);
 
-  // EDF/BDF headers: 256 bytes each. A tree-sourced manifest reads everything through the
-  // Worker, so it is sampled; every other source reads every header.
-  const candidates = readCandidates(manifest);
-  const superseded = new Set(extras.supersededEdf ?? []);
-  const edfAll = [...candidates.edf, ...superseded];
+  // Recordings, each through its registered reader (EDF/BDF: the 256-byte header). A tree-sourced
+  // manifest reads everything through the Worker, so its EDF/BDF headers are sampled; every
+  // other source reads every recording.
+  const candidates = readCandidates(manifest, readers);
   const { participants, scans: scansAll, json: jsonCandidates, text: textCandidates } = candidates;
-  const edfSelected =
-    source === "git-tree"
-      ? sampleEvenly(edfAll, ctx.limits.treeHeaderSample, subjectKey)
-      : [...edfAll];
-  let headerRead = 0;
-  let headerFailed = 0;
-  let supersededAbsent = 0;
-  let flaggedFileCount = 0;
-  const flaggedKinds: Partial<Record<FindingKind, number>> = {};
-  const patientValues = new Set<string>();
-  const flaggedPatientValues = new Set<string>();
-  const codeValues = new Set<string>();
-  const nameValues = new Set<string>();
-  const birthValues = new Set<string>();
-  const subjects = new Set<string>();
-  await pool(edfSelected, ctx.fileConcurrency, async (entry) => {
-    try {
-      const head = await readEntry(ctx, entry, EDF_HEADER_BYTES, EDF_HEADER_BYTES);
-      const found = scanEdfHeader(head);
-      const { patient } = edfIdentificationText(head);
-      // Everything below only commits; nothing that can throw runs after `headerRead++`.
-      if (!found.some((f) => f.kind === "edf-unreadable")) {
-        patientValues.add(patient);
-        const parts = patient.split(/\s+/);
-        if (parts.length >= 4) {
-          codeValues.add(parts[0] as string);
-          birthValues.add(parts[2] as string);
-          nameValues.add(parts[3] as string);
-        }
-      }
-      subjects.add(subjectOf(entry.path));
-      if (found.some((f) => f.severity === "identifier")) {
-        flaggedFileCount++;
-        flaggedPatientValues.add(patient);
-      }
-      addFindings(findings, found);
-      for (const kind of new Set(found.map((f) => f.kind))) {
-        flaggedKinds[kind] = (flaggedKinds[kind] ?? 0) + 1;
-      }
-      headerRead++;
-    } catch (error) {
-      if (superseded.has(entry) && error instanceof ReadFailure && error.status === 404) {
-        supersededAbsent++;
-        failures[SUPERSEDED_ABSENT] = (failures[SUPERSEDED_ABSENT] ?? 0) + 1;
-        return;
-      }
-      headerFailed++;
-      fail("edf", error);
-    }
+  const recordings = await readRecordings<ManifestEntry>({
+    entries: candidates.recordings,
+    superseded: extras.supersededRecordings ?? [],
+    paths,
+    readers,
+    open: (entry) => entrySource(ctx, entry),
+    concurrency: ctx.fileConcurrency,
+    ...(ctx.readerClassLimits ? { readerClassLimits: ctx.readerClassLimits } : {}),
+    now: ctx.now,
+    datasetTimeMs: ctx.limits.datasetTimeMs,
+    failureClass,
+    isFatal: (error) => error instanceof RunAborted,
+    isAbsent: (error) => error instanceof ReadFailure && error.status === 404,
+    select: (reader, entries) =>
+      source === "git-tree" && reader.id === "edf"
+        ? sampleEvenly(entries, ctx.limits.treeHeaderSample, subjectKey)
+        : [...entries],
   });
-  // A recording that no longer exists is not a recording that was not read.
-  const edfCount = edfAll.length - supersededAbsent;
+  for (const f of recordings.findings) findings.push(f);
+  for (const [key, n] of Object.entries(recordings.failures)) failures[key] = n;
+  // A file a reader found not to be its format (an Analyze `.hdr`) is unscreened, by extension.
+  for (const [extension, n] of Object.entries(recordings.notApplicable)) {
+    coverage.unscreened[extension] = (coverage.unscreened[extension] ?? 0) + n;
+  }
+  const unscreenedCount = Object.values(coverage.unscreened).reduce((a, b) => a + b, 0);
+  const edfTally = recordings.tallies.edf;
+  const edfAbsent = recordings.failures[SUPERSEDED_ABSENT] ?? 0;
+  const edfCount = edfTally.files;
+  const headerRead = edfTally.read;
+  const headerFailed = edfTally.failed;
+  const edfSelected = recordings.selected.edf - edfAbsent;
+  const edfStats = recordings.edf;
 
   // participants.tsv: identifier columns in the header row, name-like participant labels below.
   let participantsUnread = false;
@@ -1315,7 +1312,7 @@ export async function scanDatasetFromManifest(
     edf_headers: {
       candidates: edfCount,
       oversize: 0,
-      selected: edfSelected.length - supersededAbsent,
+      selected: edfSelected,
       scanned: headerRead,
     },
     scans_tables: {
@@ -1355,19 +1352,22 @@ export async function scanDatasetFromManifest(
   if (sampling.scans_tables.scanned < sampling.scans_tables.selected) reasons.add("scans-unread");
   if (participantsUnread) reasons.add("participants-unread");
   if (participantsTruncated) reasons.add("participants-truncated");
+  // Why a recording was read only partly, or not at all, in a format other than EDF/BDF.
+  for (const reason of recordings.reasons) reasons.add(reason);
   for (const reason of extras.extraIncompleteReasons ?? []) reasons.add(reason);
   const incompleteReasons = [...reasons].sort();
 
+  const counted = recordingCounts(recordings);
   const classify: ClassifyInput = {
     findings,
-    edfCount,
-    headerRead,
+    recordings: counted.recordings,
+    recordingsRead: counted.read,
     unscreenedCount,
     incompleteReasons,
   };
   const identifier = findings.filter((f) => f.severity === "identifier");
   const sideFailed = Object.entries(failures)
-    .filter(([key]) => !key.startsWith("edf/"))
+    .filter(([key]) => !(key.slice(0, key.indexOf("/")) in recordings.tallies))
     .reduce((sum, [, n]) => sum + n, 0);
   return {
     id,
@@ -1385,17 +1385,18 @@ export async function scanDatasetFromManifest(
     },
     sampling,
     read_failures: failures,
-    edf_bdf_files_flagged: flaggedFileCount,
-    distinct_patient_field_values: patientValues.size,
-    distinct_subjects_with_edf_bdf: subjects.size,
-    distinct_patient_code_subfield: codeValues.size,
-    distinct_patient_name_subfield: nameValues.size,
-    distinct_patient_birth_subfield: birthValues.size,
-    distinct_patient_field_values_in_flagged_files: flaggedPatientValues.size,
+    edf_bdf_files_flagged: edfStats.flaggedFiles,
+    distinct_patient_field_values: edfStats.patientValues.size,
+    distinct_subjects_with_edf_bdf: edfStats.subjects.size,
+    distinct_patient_code_subfield: edfStats.codeValues.size,
+    distinct_patient_name_subfield: edfStats.nameValues.size,
+    distinct_patient_birth_subfield: edfStats.birthValues.size,
+    distinct_patient_field_values_in_flagged_files: edfStats.flaggedPatientValues.size,
     findings_by_kind: countByKind(findings),
-    edf_bdf_files_by_kind: flaggedKinds,
+    edf_bdf_files_by_kind: edfStats.flaggedKinds,
     unscreened_formats: coverage.unscreened,
     side_reads_failed: sideFailed,
+    ...coverageFields(recordings, readers),
     finding_fields: [...new Set(identifier.map((f) => `${f.kind}:${f.field}`))].sort(),
   };
 }

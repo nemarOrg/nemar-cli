@@ -14,6 +14,13 @@
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import type { Miniflare } from "miniflare";
+
+/**
+ * The D1 binding Miniflare hands out. Named from Miniflare rather than the Workers global, so a
+ * test is type-checked under the root configuration (Bun types) as well as the backend's.
+ */
+type MiniflareD1 = Awaited<ReturnType<Miniflare["getD1Database"]>>;
 
 export const MIGRATIONS_DIR = join(import.meta.dir, "../../src/db/migrations");
 
@@ -34,7 +41,7 @@ export function migrationCall(sql: string): string {
 }
 
 /** Apply the named files, in order, failing loudly on the first that D1 refuses. */
-export async function applyMigrations(d1: D1Database, files: string[]): Promise<void> {
+export async function applyMigrations(d1: MiniflareD1, files: string[]): Promise<void> {
   for (const file of files) {
     try {
       await d1.prepare(migrationCall(readFileSync(join(MIGRATIONS_DIR, file), "utf-8"))).run();

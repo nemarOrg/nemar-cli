@@ -43,9 +43,9 @@ const POLICY_URL = `${UPSTREAM_ACK_DOCS_URL}#${UPSTREAM_ACK_ANCHOR}`;
 export const ACK_BATCH_MAX = 20;
 
 /**
- * The screen states a batch acknowledgment may cover. `partially-screened` is the coverage state
- * card A1 adds; it is listed by name so the rule covers it when A1 lands, and matches nothing
- * before. `review` is eligible only with {@link ACK_ELIGIBLE_KINDS} findings and nothing else.
+ * The screen states a batch acknowledgment may cover. `partially-screened` is what a version-2
+ * report says where a version-1 report said `clean-edf-only-others-unscreened` (card A1), so both
+ * are listed. `review` is eligible only with {@link ACK_ELIGIBLE_KINDS} findings and nothing else.
  */
 export const ACK_ELIGIBLE_STATES: ReadonlySet<string> = new Set([
   "not-screened",
