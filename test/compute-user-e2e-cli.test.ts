@@ -187,6 +187,22 @@ async function finish(proc: Subprocess<"ignore", "pipe", "pipe">): Promise<Ran> 
 
 const cli = async (who: Person | null, ...args: string[]): Promise<Ran> => finish(start(who, args));
 
+/**
+ * Wait for a CLI run and for the test's own part of the world (`driver`) together. A driver that fails
+ * fails THIS test at once and stops the CLI: left floating, its rejection was reported between tests
+ * and failed whichever test ran next (#2402), while the CLI it was meant to drive waited on.
+ */
+async function finishWith<T>(
+  proc: Subprocess<"ignore", "pipe", "pipe">,
+  driver: Promise<T>,
+): Promise<[Ran, T]> {
+  const owned = driver.catch((err) => {
+    proc.kill();
+    throw err;
+  });
+  return Promise.all([finish(proc), owned]);
+}
+
 function jsonOf(r: Ran): Record<string, any> {
   expect(r.stdout.trim().startsWith("{")).toBe(true);
   return JSON.parse(r.stdout);
@@ -251,12 +267,18 @@ async function waitFor<T>(what: string, read: () => T | undefined | null, ms = 6
   }
 }
 
-/** The one job of an account (other than the ones to ignore) that Tapis has, once it does. */
+/**
+ * The one job of an account (other than the ones to ignore) that Tapis has, once the Worker has also
+ * subscribed its webhook. The Worker binds the Tapis uuid to the row and THEN subscribes, in the same
+ * submit request (`bindTapisJob`), so a row that shows the uuid can still have its subscription on the
+ * wire; a webhook fired in that window has nowhere to go (#2402). Waiting for the subscription the
+ * stand-in recorded is waiting for what a real tenant needs before it can deliver.
+ */
 async function submittedJob(
   accountId: number,
   ignore: readonly string[] = [],
 ): Promise<{ id: string; uuid: string }> {
-  return waitFor("a job at Tapis", () => {
+  const bound = await waitFor("a job at Tapis", () => {
     const rows = w.fx.harness.db
       .query(
         "SELECT id, tapis_uuid FROM compute_jobs WHERE account_id = ? AND tapis_uuid IS NOT NULL",
@@ -266,6 +288,10 @@ async function submittedJob(
     const only = fresh[0];
     return fresh.length === 1 && only ? { id: only.id, uuid: only.tapis_uuid } : null;
   });
+  await waitFor("the Worker's webhook subscription", () =>
+    w.fx.tapis.subscriptions.some((s) => s.jobUuid === bound.uuid) ? true : null,
+  );
+  return bound;
 }
 
 async function specOf(id: string): Promise<{ bundle?: { sha256: string } }> {
@@ -340,13 +366,13 @@ describe("the whole story", () => {
     script("analysis.py", HEADER);
 
     const proc = start(p, ["submit", "analysis.py", "--wait"]);
-    const driver = (async () =>
+    const [done, firstId] = await finishWith(
+      proc,
       runToFinished(p.id, [
         { path: "report.txt", content: "the report\n" },
         { path: "deep/table.csv", content: "a,b\n1,2\n" },
-      ]))();
-    const done = await finish(proc);
-    const firstId = await driver;
+      ]),
+    );
     expect(done.exitCode).toBe(0);
     expect(done.stdout).toContain("Submitted job_");
     expect(done.stdout).toContain("(header-job)");
@@ -552,14 +578,34 @@ describe("Ctrl-C while waiting", () => {
   }, 90_000);
 });
 
+describe("a webhook subscription still on the wire when the job is bound (#2402)", () => {
+  test("the cluster fires no webhook until the Worker has subscribed, and the wait still ends finished", async () => {
+    const p = await grantedPerson();
+    script("analysis.py", HEADER);
+    // The Worker binds the uuid first and subscribes second; a slow subscribe widens that window from
+    // milliseconds (where CI hit it now and then) to one that every run is in.
+    w.fx.tapis.delay("POST /v3/jobs/subscribe/:uuid", 1_500);
+    const proc = start(p, ["submit", "analysis.py", "--wait"]);
+    const [done, id] = await finishWith(
+      proc,
+      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }]),
+    );
+    expect(done.exitCode).toBe(0);
+    expect(done.stdout).toContain(`Job ${id} finished.`);
+    expect(jobRow(w, id).state).toBe("finished");
+    expect(w.fx.tapis.subscriptions.map((s) => s.jobUuid)).toEqual([jobRow(w, id).tapis_uuid]);
+  }, 120_000);
+});
+
 describe("a download whose bytes changed", () => {
   test("is deleted and reported, and the command exits 1", async () => {
     const p = await grantedPerson();
     script("analysis.py", HEADER);
     const proc = start(p, ["submit", "analysis.py", "--wait"]);
-    const driver = runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }]);
-    await finish(proc);
-    const id = await driver;
+    const [, id] = await finishWith(
+      proc,
+      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }]),
+    );
     await w.fx.harness.results.put(
       resultsOutputKey(id, "report.txt"),
       new TextEncoder().encode("thE report\n"),
@@ -604,9 +650,7 @@ describe("logs and cancel of a job that ended", () => {
     const p = await grantedPerson();
     script("analysis.py", HEADER);
     const proc = start(p, ["submit", "analysis.py", "--wait"]);
-    const driver = runToFinished(p.id, [{ path: "r.txt", content: "r" }]);
-    await finish(proc);
-    const id = await driver;
+    const [, id] = await finishWith(proc, runToFinished(p.id, [{ path: "r.txt", content: "r" }]));
     const r = await cli(p, "cancel", id, "--yes");
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("had already ended");
@@ -659,13 +703,10 @@ describe("--json is only the Worker's answer", () => {
 
     // a finished job: results --json carries the Worker's document, links included
     const second = start(p, ["submit", "analysis.py", "--wait", "--json"]);
-    const driver = runToFinished(
-      p.id,
-      [{ path: "report.txt", content: "the report\n" }],
-      [doc.job_id],
+    const [waited, id] = await finishWith(
+      second,
+      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }], [doc.job_id]),
     );
-    const waited = await finish(second);
-    const id = await driver;
     expect(waited.exitCode).toBe(0);
     expect(jsonOf(waited)).toMatchObject({ job: { id, state: "finished" } });
     const results = jsonOf(await cli(p, "results", id, "--json"));
@@ -686,9 +727,10 @@ describe("a bearer link never reaches the debug log", () => {
     const p = await grantedPerson();
     script("analysis.py", HEADER);
     const proc = start(p, ["submit", "analysis.py", "--wait"]);
-    const driver = runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }]);
-    await finish(proc);
-    const id = await driver;
+    const [, id] = await finishWith(
+      proc,
+      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }]),
+    );
     const r = await finish(start(p, ["results", id], {}, ["--debug"]));
     expect(r.exitCode).toBe(0);
     const logs = readAllText(join(configDir, "logs"));
