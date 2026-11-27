@@ -119,6 +119,8 @@ describe("0098 publication_reviews: columns", () => {
     superseded_by: { type: "INTEGER", notnull: 0, dflt: null },
     // Migration 0162: the license matcher of a version-3 report (ADR 0142).
     license_matcher: { type: "TEXT", notnull: 0, dflt: null },
+    // Migration 0163: what the review was served, for the decision card (ADR 0142, decision 4).
+    served_metadata: { type: "TEXT", notnull: 0, dflt: null },
   };
 
   test("exactly the declared columns, types, NOT NULLs and defaults", () => {

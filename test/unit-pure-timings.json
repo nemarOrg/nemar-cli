@@ -208,6 +208,7 @@
     "backend/test/dataset-id-partition.test.ts": 4375,
     "backend/test/dataset-versions-source-version.test.ts": 216,
     "backend/test/datasets-column-budget.test.ts": 172,
+    "backend/test/decision-card-migration.test.ts": 515,
     "backend/test/device-auth-routes.test.ts": 509,
     "backend/test/device-codes-migration.test.ts": 468,
     "backend/test/docs-auth-routes.test.ts": 552,
