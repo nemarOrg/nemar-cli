@@ -63,6 +63,25 @@ export function isActionRequiredOutcome(o: unknown): o is ActionRequiredOutcome 
   return (ACTION_REQUIRED_OUTCOMES as readonly unknown[]).includes(o);
 }
 
+/**
+ * The outcomes that mail the depositor a notice (ADR 0139 decision 7, amendment of 2026-11-27):
+ * every outcome that needs action except `unresolved`, which means NEMAR could not read an
+ * upstream record. That is NEMAR's failure to fix, not the depositor's; it still shows to the
+ * administrators and keeps the review reason.
+ */
+export const DEPOSITOR_NOTICE_OUTCOMES = [
+  "needs_permission",
+  "share_alike_mismatch",
+  "redistribution_prohibited",
+  "source_is_publication",
+] as const satisfies readonly ActionRequiredOutcome[];
+
+export function isDepositorNoticeOutcome(
+  o: unknown,
+): o is (typeof DEPOSITOR_NOTICE_OUTCOMES)[number] {
+  return (DEPOSITOR_NOTICE_OUTCOMES as readonly unknown[]).includes(o);
+}
+
 /** One source behind a lineage outcome, as a review's basis keeps it. */
 export interface BasisSource {
   id: string;

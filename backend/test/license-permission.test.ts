@@ -20,7 +20,7 @@ import {
 } from "../../shared/license-permission";
 import { READY_TO_APPROVE_HEADLINE } from "../../shared/publication-auto-deny";
 import { PUBLICATION_PROMPT_VERSION, REVIEW_INPUTS } from "../../shared/publication-review";
-import { afterPermissionRecorded } from "../src/services/license-notice";
+import { afterPermissionRecorded, licenseNoticeAfterStore } from "../src/services/license-notice";
 import {
   derivePublicationReview,
   publicationReviewEmailSection,
@@ -336,6 +336,38 @@ describe("the depositor's notice", () => {
         n: 0,
       });
     });
+  });
+
+  test("an unresolved lineage mails nobody: NEMAR could not read a registry, and administrators still see it", async () => {
+    await accounts();
+    await withFakeResend(async (calls) => {
+      const logged: string[] = [];
+      const log = console.log;
+      console.log = (...args: unknown[]) => {
+        logged.push(args.map(String).join(" "));
+      };
+      let again: string;
+      let reviewId: number;
+      try {
+        ({ reviewId } = await reviewed(basisOf([SOURCE], "unresolved")));
+        // The after-store step, run again on the same review, says why it sent nothing.
+        again = await licenseNoticeAfterStore(h.env(), reviewId);
+      } finally {
+        console.log = log;
+      }
+      expect(again).toBe("unresolved_not_mailed");
+      expect(noticesTo(calls)).toHaveLength(0);
+      expect(h.db.query("SELECT COUNT(*) AS n FROM license_permission_notices").get()).toEqual({
+        n: 0,
+      });
+      expect(logged).toContain(
+        `[license-notice] review ${reviewId}: lineage unresolved, no depositor mail (NEMAR could not read an upstream record)`,
+      );
+    });
+    // The outcome still holds the request for the administrators, on the card and in show.
+    const d = await detail();
+    expect(reasonCodes(d.body)).toContain("license_lineage_unconfirmed");
+    expect(d.body.outcome).toBe("action_required");
   });
 
   test("a publication named as the source gets its own message, naming the declared license", async () => {
