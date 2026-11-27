@@ -1,0 +1,364 @@
+# dataset_id	status	block_reason	min_requirements_reasons
+nm000288	requested		
+nm000331	requested		
+nm000332	requested		
+nm000333	requested		
+nm000337	requested		
+nm000366	requested		
+nm000378	requested		
+nm000391	requested		
+nm000393	requested		
+nm000407	requested		
+nm000416	requested		
+nm000423	requested		
+nm000425	requested		
+nm000427	requested		
+nm000428	requested		
+nm000431	requested		
+nm000438	requested		
+nm000440	requested		
+nm000441	requested		
+nm000442	requested		
+nm000444	requested		
+nm000445	requested		
+nm000447	requested		
+nm000448	requested		
+nm000449	requested		
+nm000450	requested		
+nm000451	requested		
+nm000457	requested		
+nm000458	requested		
+nm000459	requested		
+nm000466	requested		
+nm000467	requested		
+nm000470	requested		
+nm000474	requested		
+nm000478	requested		
+nm000479	requested		
+nm000488	requested		
+nm000494	requested		
+nm000497	requested		
+nm000499	requested		
+nm000511	requested		
+nm000512	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000514	requested		
+nm000515	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000516	requested		
+nm000517	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000518	requested		
+nm000524	requested		
+nm000529	requested		
+nm000531	requested		
+nm000532	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000533	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000534	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000535	requested		
+nm000536	requested		
+nm000538	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000539	requested		
+nm000540	requested		
+nm000541	requested		
+nm000542	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000554	requested		
+nm000562	requested		
+nm000563	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000565	requested		
+nm000566	requested		
+nm000567	requested		
+nm000568	requested		
+nm000569	requested		
+nm000577	requested		
+nm000578	requested		
+nm000579	requested		
+nm000589	blocked	bids_validation_pending	
+nm000591	requested		
+nm000592	requested		
+nm000593	requested		
+nm000594	requested		
+nm000595	requested		
+nm000596	requested		
+nm000597	requested		
+nm000598	requested		
+nm000599	requested		
+nm000601	requested		
+nm000602	requested		
+nm000603	requested		
+nm000604	requested		
+nm000605	requested		
+nm000606	requested		
+nm000608	requested		
+nm000609	requested		
+nm000610	requested		
+nm000612	requested		
+nm000614	requested		
+nm000616	requested		
+nm000622	requested		
+nm000623	requested		
+nm000624	requested		
+nm000628	requested		
+nm000630	requested		
+nm000631	blocked	min_requirements_failed	Dataset Name must be a descriptive title of at least 25 characters (currently 20). If the study is known by a short acronym, expand it with a subtitle, e.g. "ACRO: auditory cortex recordings during natural speech".,An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000633	requested		
+nm000634	requested		
+nm000636	requested		
+nm000637	requested		
+nm000638	requested		
+nm000639	requested		
+nm000641	requested		
+nm000642	requested		
+nm000643	requested		
+nm000644	requested		
+nm000645	requested		
+nm000646	requested		
+nm000647	requested		
+nm000649	requested		
+nm000655	requested		
+nm000657	requested		
+nm000660	requested		
+nm000661	requested		
+nm000662	requested		
+nm000663	requested		
+nm000667	requested		
+nm000668	requested		
+nm000669	requested		
+nm000670	requested		
+nm000671	requested		
+nm000672	requested		
+nm000673	requested		
+nm000674	requested		
+nm000675	requested		
+nm000676	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000677	requested		
+nm000678	requested		
+nm000679	requested		
+nm000681	requested		
+nm000683	requested		
+nm000684	requested		
+nm000687	requested		
+nm000688	requested		
+nm000690	requested		
+nm000691	requested		
+nm000692	requested		
+nm000693	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000694	requested		
+nm000696	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000697	requested		
+nm000698	requested		
+nm000699	requested		
+nm000700	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000701	requested		
+nm000703	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000704	requested		
+nm000705	requested		
+nm000709	requested		
+nm000710	requested		
+nm000711	requested		
+nm000712	requested		
+nm000713	requested		
+nm000714	requested		
+nm000715	requested		
+nm000716	requested		
+nm000717	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000718	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000719	requested		
+nm000720	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000721	requested		
+nm000722	requested		
+nm000723	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000728	requested		
+nm000730	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000733	requested		
+nm000735	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000736	requested		
+nm000737	requested		
+nm000738	requested		
+nm000740	requested		
+nm000743	requested		
+nm000746	requested		
+nm000748	requested		
+nm000749	requested		
+nm000750	requested		
+nm000753	requested		
+nm000754	requested		
+nm000755	requested		
+nm000759	requested		
+nm000762	requested		
+nm000763	requested		
+nm000764	requested		
+nm000765	requested		
+nm000766	requested		
+nm000767	requested		
+nm000768	requested		
+nm000769	requested		
+nm000770	requested		
+nm000771	requested		
+nm000772	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000773	requested		
+nm000774	requested		
+nm000775	requested		
+nm000776	requested		
+nm000777	requested		
+nm000778	requested		
+nm000779	requested		
+nm000780	requested		
+nm000781	requested		
+nm000782	requested		
+nm000783	requested		
+nm000784	requested		
+nm000785	requested		
+nm000786	requested		
+nm000787	requested		
+nm000788	requested		
+nm000789	requested		
+nm000790	requested		
+nm000791	requested		
+nm000792	requested		
+nm000794	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000795	requested		
+nm000797	requested		
+nm000799	requested		
+nm000800	requested		
+nm000801	requested		
+nm000802	requested		
+nm000804	requested		
+nm000805	requested		
+nm000806	requested		
+nm000807	requested		
+nm000808	requested		
+nm000809	requested		
+nm000810	requested		
+nm000811	requested		
+nm000812	requested		
+nm000813	requested		
+nm000814	requested		
+nm000815	requested		
+nm000816	requested		
+nm000818	requested		
+nm000819	requested		
+nm000820	requested		
+nm000821	requested		
+nm000822	requested		
+nm000823	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000824	requested		
+nm000825	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000826	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000828	requested		
+nm000829	requested		
+nm000830	requested		
+nm000831	requested		
+nm000832	requested		
+nm000833	requested		
+nm000834	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000835	requested		
+nm000836	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000837	requested		
+nm000838	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000839	requested		
+nm000840	requested		
+nm000841	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000842	requested		
+nm000843	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000845	requested		
+nm000846	requested		
+nm000848	requested		
+nm000849	requested		
+nm000850	requested		
+nm000853	requested		
+nm000854	requested		
+nm000855	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000856	requested		
+nm000859	requested		
+nm000860	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000862	requested		
+nm000863	requested		
+nm000864	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000865	requested		
+nm000866	requested		
+nm000867	requested		
+nm000868	requested		
+nm000869	requested		
+nm000871	requested		
+nm000872	requested		
+nm000874	requested		
+nm000875	requested		
+nm000876	requested		
+nm000877	requested		
+nm000878	requested		
+nm000879	requested		
+nm000880	requested		
+nm000881	requested		
+nm000882	requested		
+nm000883	requested		
+nm000884	requested		
+nm000885	requested		
+nm000886	requested		
+nm000887	requested		
+nm000888	requested		
+nm000889	requested		
+nm000890	requested		
+nm000891	requested		
+nm000892	requested		
+nm000893	requested		
+nm000895	requested		
+nm000896	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000897	requested		
+nm000898	requested		
+nm000900	requested		
+nm000901	requested		
+nm000902	requested		
+nm000903	requested		
+nm000904	requested		
+nm000905	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000906	requested		
+nm000907	requested		
+nm000909	requested		
+nm000910	requested		
+nm000911	requested		
+nm000912	requested		
+nm000913	requested		
+nm000914	requested		
+nm000915	requested		
+nm000916	requested		
+nm000917	requested		
+nm000918	requested		
+nm000920	requested		
+nm000922	requested		
+nm000923	requested		
+nm000924	requested		
+nm000925	requested		
+nm000926	requested		
+nm000927	requested		
+nm000930	requested		
+nm000931	requested		
+nm000932	requested		
+nm000935	requested		
+nm000936	requested		
+nm000937	requested		
+nm000938	requested		
+nm000939	requested		
+nm000940	requested		
+nm000942	requested		
+nm000944	requested		
+nm000946	requested		
+nm000957	requested		
+nm000965	requested		
+nm000966	blocked	min_requirements_failed	An ethics approval statement is required: fill the EthicsApprovals field of dataset_description.json, or add an ethics/IRB statement to the README.
+nm000967	requested		
+nm000968	requested		
+nm000969	requested		
+nm000970	requested		
+nm000976	requested		
+nm000978	blocked	bids_validation_pending	
+nm000979	requested		
+nm000980	requested		
+nm000981	requested		
+nm000982	requested		
+on008081	requested		
+on008198	requested		
+on008322	requested		
+on008763	requested		
+on008809	requested		
+on008895	requested		
+on009033	requested		
+on009126	requested		
+on009134	blocked	bids_validation_in_progress	

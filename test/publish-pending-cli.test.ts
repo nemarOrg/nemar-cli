@@ -138,7 +138,11 @@ describe("an anonymous request that is pending", () => {
       "Once it has passed, request again: nemar dataset publish request nm099999 --anonymous",
     );
     expect(all(r)).not.toContain("WARNING");
-    expect(standIn.bodies[0]).toContain('"anonymous":true');
+    // The command reads the dataset's status first (ADR 0139, decision 5: a note is asked for
+    // after a denial), so the request's body is the one of the POST, not the first.
+    expect(
+      standIn.bodies[standIn.hits.indexOf(`POST /datasets/${DATASET_ID}/publish/request`)],
+    ).toContain('"anonymous":true');
   });
 
   test("not echoed at all: warned about, exits 1, and the flag still comes from what was typed", async () => {

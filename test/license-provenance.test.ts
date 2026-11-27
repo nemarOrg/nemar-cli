@@ -214,7 +214,11 @@ describe("validateLicenseCompatibility", () => {
 
     const other = validateLicenseCompatibility("CC-BY-SA-4.0", "CC-BY-4.0");
     expect(other.compatible).toBe(false);
-    expect(other.reason).toContain("CC-BY-SA-4.0");
+    expect(other.outcome).toBe("share_alike_mismatch");
+    // An earlier share-alike version is a mismatch too.
+    expect(validateLicenseCompatibility("CC-BY-SA-4.0", "CC-BY-SA-3.0").outcome).toBe(
+      "share_alike_mismatch",
+    );
   });
 
   test("CC-BY-NC-4.0 source disallows fully-open target", () => {
@@ -235,9 +239,40 @@ describe("validateLicenseCompatibility", () => {
     expect(other.compatible).toBe(false);
   });
 
-  test("unknown source license passes with warning", () => {
+  // The shared rule (epic #2182 card D1): an unrecognized source license needs permission. The
+  // old matrix passed it as compatible "with a warning", the permissive direction.
+  test("unknown source license needs permission", () => {
     const result = validateLicenseCompatibility("CUSTOM-1.0", "CC-BY-4.0");
-    expect(result.compatible).toBe(true);
-    expect(result.reason).toContain("not in the compatibility table");
+    expect(result.compatible).toBe(false);
+    expect(result.outcome).toBe("needs_permission");
+    expect(result.recognized).toBe(false);
+    expect(validateLicenseCompatibility("CC-BY-ND-4.0", "CC0-1.0").recognized).toBe(true);
+  });
+
+  // Software licenses applied to data require attribution (lead ruling 2026-11-25).
+  test("MIT, BSD-2/3-Clause and Apache-2.0 sources are compatible with attribution", () => {
+    for (const source of ["MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0"]) {
+      const result = validateLicenseCompatibility(source, "CC0-1.0");
+      expect(result.outcome).toBe("compatible_attribution");
+      expect(result.compatible).toBe(true);
+    }
+  });
+
+  test("NoDerivatives sources need permission whatever the target", () => {
+    expect(validateLicenseCompatibility("CC-BY-ND-4.0", "CC-BY-ND-4.0").outcome).toBe(
+      "needs_permission",
+    );
+    expect(validateLicenseCompatibility("CC-BY-NC-ND-4.0", "CC-BY-NC-4.0").outcome).toBe(
+      "needs_permission",
+    );
+  });
+
+  test("NC source keeping NC is compatible_nc, dropping it needs permission", () => {
+    expect(validateLicenseCompatibility("CC-BY-NC-4.0", "CC-BY-NC-ND-4.0").outcome).toBe(
+      "compatible_nc",
+    );
+    expect(validateLicenseCompatibility("CC-BY-NC-4.0", "CC0-1.0").outcome).toBe(
+      "needs_permission",
+    );
   });
 });

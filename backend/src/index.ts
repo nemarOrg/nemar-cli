@@ -121,6 +121,7 @@ import {
 import { getActiveNotices } from "./services/notices";
 import { logoutTickLogLine, runOidcLogoutRetryTick } from "./services/oidc-logout";
 import { sweepStalePrReviews } from "./services/pr-review";
+import { sendAutoDenyDigest } from "./services/publication-auto-deny";
 import { sweepPublicationReviews } from "./services/publication-review";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import { runRecordingStatsSweepCron } from "./services/recording-stats-sweep";
@@ -1063,9 +1064,9 @@ export default {
         ctx.waitUntil(
           sweepIdentifierScreens(env)
             .then((r) => {
-              if (r.timedOut + r.emailed + r.undelivered + r.errors > 0) {
+              if (r.timedOut + r.emailed + r.undelivered + r.errors + r.digests > 0) {
                 console.log(
-                  `[identifier-screen-sweep] timedOut=${r.timedOut} emailed=${r.emailed} undelivered=${r.undelivered} errors=${r.errors}`,
+                  `[identifier-screen-sweep] timedOut=${r.timedOut} emailed=${r.emailed} digests=${r.digests} undelivered=${r.undelivered} errors=${r.errors}`,
                 );
               }
             })
@@ -1476,6 +1477,25 @@ export default {
       // from ENVIRONMENT, so a real 10.82901 DOI on a mirror row resolves to
       // production EZID credentials regardless of which worker is running.
       ctx.waitUntil(reconcileReservedVersionDois(env));
+      // Epic #2182 card B5 (ADR 0139, decisions 3 and 4): the administrators' daily digest of the
+      // automatic denial (denied, would deny, capped, disagreed), claimed once a UTC day.
+      // PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it mails administrators, and
+      // the dev database shares real users. It also refuses outside production on its own, and its
+      // recipients come from getAdminEmailsForCategory, which is fenced too.
+      ctx.waitUntil(
+        sendAutoDenyDigest(env)
+          .then((r) => {
+            if (r.claimed) {
+              console.log(`[auto-deny-digest] rows=${r.rows} delivered=${r.delivered}`);
+            }
+          })
+          .catch((err) =>
+            console.error(
+              "[auto-deny-digest] failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
       // #1913 (epic #1046 phase 7b, ADR 0111): end the automatic re-pull's live dispatches that
       // said nothing within eight hours as `unreported`, so a dead run does not hold its dataset's
       // one live slot. PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it writes the

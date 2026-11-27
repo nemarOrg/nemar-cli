@@ -7,9 +7,16 @@
  *                                     changed since the dispatch, a review switched off, or an
  *                                     unsettled claim is refused with 409 before the workflow reads
  *                                     anything or calls a model.
+ *   POST /publication-review-inputs   after the claim, before the job examines anything: the
+ *                                     widened inputs of ADR 0139 (decision 6) for this one review,
+ *                                     the enrichment, the lineage, the resubmission note and the
+ *                                     screen's coverage counts. Read-only. Only a claimed review
+ *                                     that has not reported is answered (409 otherwise); a read the
+ *                                     inputs need that fails answers 502, and the job then reports
+ *                                     `inputs_unavailable` rather than review on part of them.
  *   POST /publication-review-result   the report (or the word for why there is none).
  *
- * Both are authed like the pull-request review's callbacks: a per-review HMAC token in
+ * All three are authed like the pull-request review's callbacks: a per-review HMAC token in
  * X-Webhook-Token, signed over {dataset_id, review_id, nonce} with PRESCREEN_CALLBACK_SECRET under
  * the `publication-review` domain tag, whose nonce is recovered from the row the token was issued
  * for. The token is spent by the RESULT: the row is found only while it waits for its report
@@ -31,15 +38,21 @@
  * the global handler would print the whole error, whose text can carry SQL.
  */
 
+import { CONFIRMING_MODELS } from "../../../../shared/publication-auto-deny.js";
 import { parsePublicationCallbackOutcome } from "../../../../shared/publication-review.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyPublicationReviewCallbackToken } from "../../services/github/callback-tokens.js";
+import { licenseNoticeAfterStore } from "../../services/license-notice.js";
+import { afterPublicationReviewStored } from "../../services/publication-auto-deny.js";
+import { publicationReviewInputs } from "../../services/publication-review-inputs.js";
 import { errorWords } from "../../services/publication-review-log.js";
+import { readReview } from "../../services/publication-review-rows.js";
 import {
   claimPublicationReview,
   pendingPublicationReviewNonce,
   storePublicationReviewResult,
 } from "../../services/publication-review.js";
+import type { Bindings } from "../../types/bindings.js";
 import type { WebhookContext, WebhookRouter } from "../webhooks/shared.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
 import { deferAfterAnswer } from "./defer.js";
@@ -104,6 +117,19 @@ async function verify(c: WebhookContext, route: string): Promise<Verified | Resp
   return { reviewId, datasetId, nonce: pending.nonce, body: b };
 }
 
+/**
+ * After a result is stored: the automatic denial's step (ADR 0139), then the depositor's license
+ * notice (card B6), which reads the request's status after that step, so a request the step denied
+ * is not told that its review will continue. The notice never throws.
+ */
+async function afterReviewStored(env: Bindings, reviewId: number): Promise<void> {
+  try {
+    await afterPublicationReviewStored(env, reviewId);
+  } finally {
+    await licenseNoticeAfterStore(env, reviewId);
+  }
+}
+
 export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/publication-review-claim", async (c) => {
     const v = await verify(c, "publication-review-claim");
@@ -131,10 +157,47 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
     return c.json({ ok: false, claimed: false, reason: claim }, 409);
   });
 
+  webhooks.post("/publication-review-inputs", async (c) => {
+    const v = await verify(c, "publication-review-inputs");
+    if (v instanceof Response) return v;
+    let answer: Awaited<ReturnType<typeof publicationReviewInputs>>;
+    try {
+      answer = await publicationReviewInputs(c.env, v.reviewId, v.datasetId);
+    } catch (err) {
+      // Nothing was written, so the job may try again. The words of the error, never the error.
+      console.error(
+        `[publication-review-inputs] review ${v.reviewId} (${v.datasetId}): read failed (${errorWords(err)})`,
+      );
+      return c.json({ error: "The review's inputs could not be read; try again" }, 500);
+    }
+    // Fixed words only: the body is the dataset's metadata and is never logged.
+    console.log(
+      `[publication-review-inputs] review ${v.reviewId} (${v.datasetId}): ${answer.kind}`,
+    );
+    if (answer.kind === "not_claimed") {
+      return c.json({ ok: false, reason: "not_claimed" }, 409);
+    }
+    if (answer.kind === "unavailable") {
+      return c.json({ error: "The review's inputs could not be read" }, 502);
+    }
+    return c.json(answer.body);
+  });
+
   webhooks.post("/publication-review-result", async (c) => {
     const v = await verify(c, "publication-review-result");
     if (v instanceof Response) return v;
 
+    // A confirming row (ADR 0139, decision 1) is answered on the confirming model, which no other
+    // row may name; the store then checks the model and effort against the row once more.
+    let confirming = false;
+    try {
+      confirming = (await readReview(c.env.DB, v.reviewId))?.confirmOf != null;
+    } catch (err) {
+      console.error(
+        `[publication-review-result] review ${v.reviewId} (${v.datasetId}): read failed (${errorWords(err)})`,
+      );
+      return c.json({ error: "The result could not be stored; try again" }, 500);
+    }
     const outcome = parsePublicationCallbackOutcome(
       { outcome: v.body.outcome, report: v.body.report, error: v.body.error },
       // The parser's reason is a fixed word, so it is safe to log, and without it a contract that
@@ -144,6 +207,7 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
         console.warn(
           `[publication-review-result] review ${v.reviewId} (${v.datasetId}): report refused (${code})`,
         ),
+      confirming ? { models: CONFIRMING_MODELS } : {},
     );
     let stored: Awaited<ReturnType<typeof storePublicationReviewResult>>;
     try {
@@ -154,6 +218,7 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
         v.nonce,
         outcome,
         deferAfterAnswer(c),
+        afterReviewStored,
       );
     } catch (err) {
       // Nothing was stored and the token is not spent (the store is one transaction), so the job

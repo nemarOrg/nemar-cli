@@ -15,10 +15,22 @@ import {
   isCiPendingReason,
 } from "../../../../shared/contract/publication.js";
 import { publicationRequestNotice } from "../../../../shared/identifier-screen-report.js";
+import { licensePermissionRecordedForDepositor } from "../../../../shared/license-permission.js";
+import {
+  type PublicationReviewReproducibility,
+  reproducibilityLines,
+  reproducibilityOf,
+} from "../../../../shared/publication-review.js";
 import {
   PRE_PUBLICATION_STEPS,
   publishingHasStarted,
 } from "../../../../shared/publication-steps.js";
+import {
+  AUTO_DENY_AUDIT_ACTION,
+  type PreviousDenialBy,
+  RESUBMISSION_NOTE_REFUSAL_SENTENCES,
+  readResubmissionNote,
+} from "../../../../shared/resubmission-note.js";
 import { applyEditWithAudit } from "../../db/audit-log";
 import { authMiddleware } from "../../middleware/auth";
 import {
@@ -53,8 +65,11 @@ import {
   screenView,
   startScreenAndNotify,
 } from "../../services/identifier-screen";
+import { licenseNoticeLines, permissionFactOf } from "../../services/license-permission";
 import { readReviewIntent } from "../../services/pr-review-eligibility";
 import { ownedHere } from "../../services/pr-review-queue";
+import { errorWords } from "../../services/publication-review-log";
+import { ROW_COLUMNS, rowViewOf, toRow } from "../../services/publication-review-rows";
 import {
   publicationReviewApplies,
   publicationReviewEmailSection,
@@ -199,6 +214,11 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // that is present and not a JSON boolean is refused instead.
     let anonymousRequested = false;
     let anonymousMalformed = false;
+    // The resubmission note (ADR 0139, decision 5) rides in the same optional body. ABSENT is no
+    // note; PRESENT is read by the one rule (`readResubmissionNote`) and refused, not trimmed down,
+    // when it breaks it: a depositor whose explanation was cut to fit would never know what the
+    // reviewer read.
+    let rawNote: unknown;
     try {
       const raw: unknown = await c.req.json();
       if (typeof raw === "object" && raw !== null && "anonymous" in raw) {
@@ -208,6 +228,9 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         } else {
           anonymousMalformed = true;
         }
+      }
+      if (typeof raw === "object" && raw !== null && "resubmission_note" in raw) {
+        rawNote = (raw as { resubmission_note?: unknown }).resubmission_note;
       }
     } catch {
       // No body, or not JSON. Both mean a normal publication request.
@@ -222,6 +245,19 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         400,
       );
     }
+
+    const note = readResubmissionNote(rawNote);
+    if (!note.ok) {
+      return c.json(
+        {
+          error: RESUBMISSION_NOTE_REFUSAL_SENTENCES[note.refusal],
+          code: "invalid_resubmission_note",
+          reason: note.refusal,
+        },
+        400,
+      );
+    }
+    const resubmissionNote = note.note;
 
     // The owner's name columns ride along on the dataset lookup: publication
     // mints a DOI that cites the uploader by real name (#1255), so "does this
@@ -485,12 +521,16 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         // is unblocked by anything other than a re-request.
         await db
           .prepare(
-            `UPDATE publication_requests SET status = 'blocked', block_reason = ?, min_requirements_reasons = ?, anonymous = ?, ${RESET_SCREEN_COLUMNS_SQL}, updated_at = datetime('now') WHERE id = ?`,
+            // `resubmission_note` is re-stated only when this request carries one: a re-request
+            // that sends none keeps the words the depositor already gave, and a new one replaces
+            // them.
+            `UPDATE publication_requests SET status = 'blocked', block_reason = ?, min_requirements_reasons = ?, anonymous = ?, resubmission_note = COALESCE(?, resubmission_note), ${RESET_SCREEN_COLUMNS_SQL}, updated_at = datetime('now') WHERE id = ?`,
           )
           .bind(
             blockReason,
             minReasons ? JSON.stringify(minReasons) : null,
             anonymousRequested ? 1 : 0,
+            resubmissionNote,
             requestId,
           )
           .run();
@@ -509,16 +549,27 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
             // re-requests WITHOUT the flag is asking for a normal publication,
             // and a stale 1 here would silently give them an anonymous release
             // instead -- the one mistake this flow must not make quietly.
-            `UPDATE publication_requests SET status = 'requested', block_reason = NULL, min_requirements_reasons = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, prescreen_reasons = NULL, ${RESET_SCREEN_COLUMNS_SQL}, anonymous = ?, updated_at = datetime('now') WHERE id = ?`,
+            `UPDATE publication_requests SET status = 'requested', block_reason = NULL, min_requirements_reasons = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, prescreen_reasons = NULL, ${RESET_SCREEN_COLUMNS_SQL}, anonymous = ?, resubmission_note = COALESCE(?, resubmission_note), updated_at = datetime('now') WHERE id = ?`,
           )
-          .bind(anonymousRequested ? 1 : 0, requestId)
+          .bind(anonymousRequested ? 1 : 0, resubmissionNote, requestId)
           .run();
       }
     } else {
-      // Create new publication request
+      // Create new publication request. It answers the dataset's most recent earlier request
+      // when that one was DENIED (ADR 0139, decision 5), and `previous_request_id` says which, so
+      // a reader can walk from a resubmission to the denial. A withdrawal is stored as a denial
+      // too (ADR 0104) and is not one: it is never linked, as it never prompts for a note.
+      const last = await db
+        .prepare(
+          "SELECT id, status, withdrawn_at FROM publication_requests WHERE dataset_id = ? ORDER BY requested_at DESC, id DESC LIMIT 1",
+        )
+        .bind(datasetId)
+        .first<{ id: number; status: string; withdrawn_at: string | null }>();
+      const previousRequestId =
+        last && last.status === "denied" && last.withdrawn_at === null ? last.id : null;
       const inserted = await db
         .prepare(
-          "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason, min_requirements_reasons, anonymous) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+          "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason, min_requirements_reasons, anonymous, resubmission_note, previous_request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(
           datasetId,
@@ -527,6 +578,8 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           blockReason,
           minReasons ? JSON.stringify(minReasons) : null,
           anonymousRequested ? 1 : 0,
+          resubmissionNote,
+          previousRequestId,
         )
         .first<{ id: number }>();
       prId = inserted?.id ?? null;
@@ -562,6 +615,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     }
 
     if (blocked) {
+      // The note sent with this request is KEPT on the held row (the UPDATE or INSERT above, with
+      // COALESCE so a retry without one keeps the earlier words) and is deliberately NOT echoed
+      // here: the keys of this body are pinned field for field by the CLI's stand-in bodies, and
+      // the depositor is told the note was recorded when the request is released and accepted.
       return c.json(
         {
           status: "blocked",
@@ -672,6 +729,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       // for an exempt dataset, "NOT RUN" otherwise).
       try {
         await mailPublicationRequest(c.env, {
+          requestId: prId,
           datasetId,
           username: currentUser.username,
           anonymous: anonymousRequested,
@@ -717,6 +775,9 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       dataset_id: datasetId,
       status: "requested",
       anonymous: anonymousRequested,
+      // ECHOED like `anonymous`: a depositor whose note was dropped on the way would otherwise see
+      // a success that reads the same as a request the reviewer will read it with.
+      resubmission_note_recorded: resubmissionNote !== null,
       identifier_screen: screen,
       request_notice: publicationRequestNotice(datasetId),
     });
@@ -807,6 +868,31 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
 
     const repoName = request.github_repo?.split("/")[1];
 
+    // Who ended a denied request, for the question `publish request` asks before a resubmission
+    // (ADR 0139, decision 5): an automated agent when an `auto_deny` audit row names this request,
+    // an administrator otherwise. `json_valid` guards `json_extract`, which throws on a payload
+    // that is not JSON (an audit payload can be truncated), and a read that fails is no answer
+    // rather than a failed status: the question is then asked without the date's author.
+    let deniedByKind: PreviousDenialBy | null = null;
+    if (request.status === "denied" && request.withdrawn_at === null) {
+      deniedByKind = "administrator";
+      try {
+        const agent = await db
+          .prepare(
+            `SELECT 1 AS hit FROM audit_log
+              WHERE action = ? AND resource_type = 'dataset' AND resource_id = ?
+                AND CASE WHEN json_valid(details) THEN json_extract(details, '$.request_id') END = ?
+              LIMIT 1`,
+          )
+          .bind(AUTO_DENY_AUDIT_ACTION, datasetId, request.id)
+          .first<{ hit: number }>();
+        if (agent) deniedByKind = "agent";
+      } catch (err) {
+        console.error(`[publish-status] could not read who denied request ${request.id}:`, err);
+        deniedByKind = null;
+      }
+    }
+
     // Pre-screen is advisory (#756): when it flagged a concern, surface it as a
     // non-blocking advisory (the request is NOT blocked by it). Real blockers keep
     // status='blocked' with a BLOCK_MESSAGE below.
@@ -843,6 +929,48 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       }
     }
 
+    // The reproducibility record of the request's newest reported review (ADR 0139, decision 9):
+    // what a depositor needs to see what the review was given and to recompute the evidence.
+    // Checked values and fixed words only; a read that fails is no record, never a failed status.
+    let reviewRecord: PublicationReviewReproducibility | null = null;
+    // What the depositor is asked to send when that review's license lineage needs action (ADR
+    // 0139, decision 7, amendment of 2026-11-25), the lines of the notice mail; or, once an
+    // administrator recorded the evidence, that it was. Never the evidence text itself.
+    let licenseLines: string[] = [];
+    try {
+      const row = await db
+        .prepare(
+          `SELECT ${ROW_COLUMNS} FROM publication_reviews
+            WHERE request_id = ? AND dataset_id = ? AND state = 'reported'
+              AND confirm_of IS NULL
+            ORDER BY id DESC LIMIT 1`,
+        )
+        .bind(request.id, datasetId)
+        .first<Record<string, unknown>>();
+      const reviewRow = row ? toRow(row) : null;
+      reviewRecord = reviewRow ? reproducibilityOf(reviewRow) : null;
+      if (reviewRow) {
+        const view = rowViewOf(reviewRow, Date.now());
+        const report = view.kind === "reported" ? view.report : null;
+        // Its own catch: a permission that cannot be read shows no lines, and never costs the record.
+        try {
+          const permission = await permissionFactOf(db, request, reviewRow, report);
+          licenseLines =
+            permission !== null
+              ? [licensePermissionRecordedForDepositor(permission)]
+              : licenseNoticeLines(datasetId, reviewRow, report);
+        } catch (err) {
+          console.error(
+            `[publish-status] could not read the license permission of request ${request.id}: ${errorWords(err)}`,
+          );
+        }
+      }
+    } catch (err) {
+      console.error(
+        `[publish-status] could not read the review record of request ${request.id}: ${errorWords(err)}`,
+      );
+    }
+
     return c.json({
       dataset_id: datasetId,
       status: request.status,
@@ -851,6 +979,8 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       approved_at: request.approved_at,
       denied_at: request.denied_at,
       denied_reason: request.denied_reason,
+      // "agent" or "administrator" for a denial that was not a withdrawal, else null.
+      denied_by_kind: deniedByKind,
       // The requester ended this one themselves (migration 0097). `status`
       // stays 'denied' so older clients still read a finished request.
       withdrawn: request.status === "denied" && request.withdrawn_at !== null,
@@ -887,6 +1017,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       current_step: request.current_step,
       last_error: request.last_error,
       updated_at: request.updated_at,
+      // The record of the newest reported review, with the lines every surface prints for it.
+      review_record: reviewRecord,
+      review_record_lines: reviewRecord === null ? [] : reproducibilityLines(reviewRecord),
+      license_permission_lines: licenseLines,
     });
   });
 
@@ -1096,6 +1230,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     const reviewAtMs = Math.floor(Date.now() / 1000) * 1000;
     try {
       const outcome = await mailPublicationRequest(c.env, {
+        requestId: request.id,
         datasetId,
         username: currentUser.username,
         anonymous: request.anonymous === 1,

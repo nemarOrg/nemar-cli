@@ -536,13 +536,14 @@ jobs:
   #
   # TO REFRESH test/scrub/timings.json (after files are added, removed or split, or when the
   # shards drift apart): every shard uploads the durations it measured as the artifact
-  # `scrub-shard-<n>`. From a green run on the branch:
-  #   gh run download <run-id> --pattern 'scrub-shard-*' --dir /tmp/scrub-shards
-  #   jq -S -s '{version: 1, files: (map(.files) | add)}' /tmp/scrub-shards/*/timings.json \
-  #     > test/scrub/timings.json
-  # A file missing from the timings file still runs; it is only balanced less well. A file's
-  # duration varies by up to a third between runs on the same code, so average two runs'
-  # artifacts rather than trusting one.
+  # `scrub-shard-<n>`. A file's duration varies by up to a third between runs on the same code,
+  # so average two green runs, with the recipe in the TO REFRESH note above `unit-pure-shard`
+  # (pattern 'scrub-shard-*', output test/scrub/timings.json).
+  # bun weighs a file the table does not name as almost nothing and cuts the sorted list into
+  # runs of equal summed time, so unnamed files pile into one shard (#2351 measured 262 of
+  # them in unit-pure shard 1). test/ci-tier-routing.unit.test.ts fails when a scrub suite is
+  # missing from this table or the table names a file that is gone; a new file can go in with
+  # an estimate in milliseconds.
   scrub-tools-shard:
     name: scrub-tools shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-latest
@@ -802,8 +803,8 @@ jobs:
   # deploy-backend.yml's `test-gate` also runs, so the PR gate and the deploy gate
   # assert the same set.
   #
-  # The suite is about 650 files and 17,000 tests. In one process it took about 31
-  # minutes and grew toward its limit, so it runs as a matrix of shards.
+  # The suite is 1,012 files and about 28,500 tests (run 45907601198). In one process it
+  # took about 31 minutes and grew toward its limit, so it runs as a matrix of shards.
   #
   # THE CHECK NAME. `unit-pure-shard` is the matrix; `unit-pure` is a gate that needs it
   # and keeps the name this REQUIRED check always had. The gate is skipped exactly when
@@ -817,12 +818,21 @@ jobs:
   #
   # TO REFRESH test/unit-pure-timings.json (after files are added, removed or split, or
   # when the shards drift apart): every shard uploads the durations it measured as the
-  # artifact `unit-pure-shard-<n>`. From a green run on the branch:
-  #   gh run download <run-id> --pattern 'unit-pure-shard-*' --dir /tmp/up-shards
-  #   jq -S -s '{version: 1, files: (map(.files) | add)}' /tmp/up-shards/*/timings.json \
-  #     > test/unit-pure-timings.json
-  # A file missing from the timings file still runs; it is only balanced less well. A
-  # file's duration varies between runs, so average two runs' artifacts.
+  # artifact `unit-pure-shard-<n>`. A file's duration varies between runs, so take two green
+  # runs on the branch and average them:
+  #   for r in <run-a> <run-b>; do
+  #     gh run download "$r" --pattern 'unit-pure-shard-*' --dir "/tmp/up-$r"
+  #     jq -s '{files: (map(.files) | add)}' /tmp/up-"$r"/*/timings.json > "/tmp/up-$r.json"
+  #   done
+  #   jq -S -n --slurpfile a /tmp/up-<run-a>.json --slurpfile b /tmp/up-<run-b>.json \
+  #     '$a[0].files as $x | $b[0].files as $y | {version: 1, files: ($x + $y | with_entries(
+  #       .value = ([$x[.key], $y[.key]] | map(select(. != null)) | add / length | round
+  #                 | if . < 1 then 1 else . end)))}' > test/unit-pure-timings.json
+  # bun cuts the sorted file list into runs of equal summed time and weighs a file the table
+  # does not name as almost nothing, so unnamed files all land in one shard: 262 of them made
+  # shard 1 run 466 of 992 files and about twice the time of the lightest shard (#2351).
+  # test/ci-tier-routing.unit.test.ts therefore fails when a pure file is missing from the
+  # table or the table names a file that is gone; a new file can go in with an estimate.
   unit-pure-shard:
     name: unit-pure shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-latest
@@ -1129,54 +1139,107 @@ jobs:
           out="$RUNNER_TEMP/unit-pure-shard-out"
           mkdir -p "$out"
           timings="$out/timings.json"
-          cp test/unit-pure-timings.json "$timings"
           log="$RUNNER_TEMP/unit-pure-shard.log"
 
-          # pipefail keeps bun's own exit status: a failing test fails this step.
+          # #2351: a shard whose runner runs out of memory does not fail, it goes silent (the log stops
+          # mid-test, or ends "The runner has received a shutdown signal") until the job's time limit.
+          # So the runner's memory is printed to the log every 15 s, where it survives the runner, and
+          # kept beside the timings. Not to the bun logs: the checks below read only bun's own output.
+          # The subshell inherits `set -euo pipefail`, which would end the sampler at its first failed
+          # command, so it turns both off; awk reads all of ps's output, so ps cannot get SIGPIPE.
+          ( set +e +o pipefail
+            while sleep 15; do
+              line="[memory] $(free -m | awk '/^Mem:/ {printf "used %d of %d MiB, available %d", $3, $2, $7} /^Swap:/ {printf ", swap used %d MiB", $3}'); largest: $(ps -eo rss=,comm= --sort=-rss | awk 'NR <= 3 {printf "%s %d MiB; ", $2, $1 / 1024}')"
+              echo "$line"
+              echo "$line" >> "$out/memory.txt"
+            done ) &
+          sampler=$!
+          # The sampler and the sleep it is waiting on.
+          trap 'pkill -P "$sampler" 2>/dev/null; kill "$sampler" 2>/dev/null || true' EXIT
+
+          # TWO bun processes per shard, one after the other, each running half of this shard's
+          # files (#2351). A bun worker does not give back what a finished file used: on the 16 GB
+          # runner the two workers of shard 1 climbed from 2.9 to 8.6 GB while its last ~250 short
+          # files ran, and the old shard 1 (466 files in one process) ran the runner out of memory,
+          # which hangs the job rather than failing it. Each half is bun's own shard of a
+          # 2 * SHARD_TOTAL split, so the halves balance on the same timings table (on bun 1.4.4
+          # the 12 parts nest inside the old six slices; that is an observation, not something the
+          # checks rely on: they hold the parts to partitioning the list, and the gate checks the
+          # union across shards). Every half runs even when an earlier one fails, so one
+          # red half does not hide the other.
+          #
           # --parallel=2: worker processes, each file in a fresh global (the default isolation).
           # One shard measured locally: 167 s serial, 92 s at 2 workers, 47 s at 4. Two, not one
           # per core: at 4 workers on the 4-vCPU runner, tests that boot a Miniflare D1 or wait on
           # a short timeout failed under load, three different ones in three runs (the broker byte
           # bound, the markLoaded scan, and the upstream-backfill Miniflare boot).
-          bun test --timings "$timings" --update-timings --shard="$shard/$SHARD_TOTAL" --parallel=2 \
-            --reporter=junit --reporter-outfile="$out/junit.xml" "${files[@]}" 2>&1 | tee "$log"
-
-          # The files this shard actually ran, from the junit report: every test file appears as
-          # a testsuite carrying its path in `file`. The gate compares these lists across shards.
-          grep -o '<testsuite [^>]*' "$out/junit.xml" | sed -nE 's/.* file="([^"]*)".*/\1/p' | sort -u > "$out/ran-files.txt"
-
-          # An empty shard is not an error to bun ("Ran 0 tests across 0 files", exit 0), so
-          # read the run's own summary, refuse an empty shard, and record what it ran.
+          halves=2
           esc=$(printf '\033')
-          plain=$(sed -E "s/${esc}\[[0-9;]*m//g" "$log")
-          header=$(grep -E -m1 '^--shard=[0-9]+/[0-9]+: running [0-9]+/[0-9]+ test files' <<<"$plain" || true)
-          summary=$(grep -E '^Ran [0-9]+ tests? across [0-9]+ files?' <<<"$plain" | tail -1 || true)
-          passline=$(grep -E '^ *[0-9]+ pass$' <<<"$plain" | tail -1 || true)
-          if [ -z "$header" ] || [ -z "$summary" ] || [ -z "$passline" ]; then
-            echo "::error::bun printed no shard header, run summary or pass count, so what this shard ran is unknown"
+          ran=0; tests=0; passed=0; failed=0
+          for half in $(seq 1 "$halves"); do
+            part=$(( (shard - 1) * halves + half ))
+            parts=$(( SHARD_TOTAL * halves ))
+            cp test/unit-pure-timings.json "$out/timings-$half.json"
+            # pipefail keeps bun's own exit status, so a failing test marks the step failed.
+            bun test --timings "$out/timings-$half.json" --update-timings --shard="$part/$parts" --parallel=2 \
+              --reporter=junit --reporter-outfile="$out/junit-$half.xml" "${files[@]}" 2>&1 | tee "$log-$half" \
+              || failed=1
+
+            # An empty run is not an error to bun ("Ran 0 tests across 0 files", exit 0), so read
+            # the run's own summary and refuse an empty half.
+            plain=$(sed -E "s/${esc}\[[0-9;]*m//g" "$log-$half")
+            header=$(grep -E -m1 '^--shard=[0-9]+/[0-9]+: running [0-9]+/[0-9]+ test files' <<<"$plain" || true)
+            summary=$(grep -E '^Ran [0-9]+ tests? across [0-9]+ files?' <<<"$plain" | tail -1 || true)
+            passline=$(grep -E '^ *[0-9]+ pass$' <<<"$plain" | tail -1 || true)
+            if [ -z "$header" ] || [ -z "$summary" ] || [ -z "$passline" ]; then
+              # Recorded, not fatal here, so the next part still runs; the step fails below.
+              echo "::error::bun printed no shard header, run summary or pass count for part $part/$parts, so what this shard ran is unknown"
+              failed=1
+              continue
+            fi
+            read -r h_planned h_discovered < <(sed -E 's#^--shard=[0-9]+/[0-9]+: running ([0-9]+)/([0-9]+) test files.*#\1 \2#' <<<"$header")
+            read -r h_tests h_ran < <(sed -E 's#^Ran ([0-9]+) tests? across ([0-9]+) files?.*#\1 \2#' <<<"$summary")
+            h_passed=$(sed -E 's#^ *([0-9]+) pass$#\1#' <<<"$passline")
+            if [ "$h_ran" -lt 1 ] || [ "$h_tests" -lt 1 ] || [ "$h_passed" -lt 1 ]; then
+              echo "::error::part $part/$parts ran $h_tests tests across $h_ran files and $h_passed passed; an empty or all-skipped part passes bun and asserts nothing"
+              exit 1
+            fi
+            if [ "$h_ran" != "$h_planned" ]; then
+              echo "::error::part $part/$parts was assigned $h_planned files and ran $h_ran"
+              exit 1
+            fi
+            if [ "$h_discovered" != "${#files[@]}" ]; then
+              echo "::error::the classifier listed ${#files[@]} files and bun matched $h_discovered, so a listed file does not exist as a test file"
+              exit 1
+            fi
+            discovered=$h_discovered
+            ran=$((ran + h_ran))
+            tests=$((tests + h_tests)); passed=$((passed + h_passed))
+          done
+          if [ "$failed" != 0 ]; then
+            echo "::error::shard $shard/$SHARD_TOTAL failed: a test failed or a part left no summary (see above)"
             exit 1
           fi
-          read -r planned discovered < <(sed -E 's#^--shard=[0-9]+/[0-9]+: running ([0-9]+)/([0-9]+) test files.*#\1 \2#' <<<"$header")
-          read -r tests ran < <(sed -E 's#^Ran ([0-9]+) tests? across ([0-9]+) files?.*#\1 \2#' <<<"$summary")
-          passed=$(sed -E 's#^ *([0-9]+) pass$#\1#' <<<"$passline")
-          if [ "$ran" -lt 1 ] || [ "$tests" -lt 1 ] || [ "$passed" -lt 1 ]; then
-            echo "::error::shard $shard/$SHARD_TOTAL ran $tests tests across $ran files and $passed passed; an empty or all-skipped shard passes bun and asserts nothing"
+          # Every part was read, so the totals are this shard's: refuse an empty sum as well.
+          if [ "$ran" -lt 1 ] || [ "$tests" -lt 1 ] || [ "$passed" -lt 1 ] || [ "$discovered" != "${#files[@]}" ]; then
+            echo "::error::shard $shard/$SHARD_TOTAL ran $tests tests across $ran files and $passed passed, of $discovered files bun matched; the classifier listed ${#files[@]}"
             exit 1
           fi
-          if [ "$ran" != "$planned" ]; then
-            echo "::error::shard $shard/$SHARD_TOTAL was assigned $planned files and ran $ran"
-            exit 1
-          fi
+
+          # The durations each half measured, as one file per shard as before (see the note above
+          # the job); --update-timings writes only the files its own part ran.
+          jq -s '{version: 1, files: (map(.files) | add)}' "$out"/timings-*.json > "$timings"
+
+          # The files this shard actually ran, read from both parts' junit reports (uploaded as
+          # junit-1.xml and junit-2.xml, not merged into one): every test file appears as a
+          # testsuite carrying its path in `file`. The gate compares these lists across shards.
+          cat "$out"/junit-*.xml | grep -o '<testsuite [^>]*' | sed -nE 's/.* file="([^"]*)".*/\1/p' | sort -u > "$out/ran-files.txt"
           if [ "$(wc -l < "$out/ran-files.txt" | tr -d ' ')" != "$ran" ]; then
-            echo "::error::bun reported $ran files and the junit report names $(wc -l < "$out/ran-files.txt" | tr -d ' ')"
+            echo "::error::bun reported $ran files and the junit reports name $(wc -l < "$out/ran-files.txt" | tr -d ' ') distinct ones"
             exit 1
           fi
           if [ -n "$(comm -23 "$out/ran-files.txt" <(sort "$RUNNER_TEMP/unit-pure-files.txt"))" ]; then
             echo "::error::this shard ran a file the classifier does not list"
-            exit 1
-          fi
-          if [ "$discovered" != "${#files[@]}" ]; then
-            echo "::error::the classifier listed ${#files[@]} files and bun matched $discovered, so a listed file does not exist as a test file"
             exit 1
           fi
 

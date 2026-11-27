@@ -449,6 +449,16 @@ export interface Bindings {
   // change, once ADR 0102's "Before it is switched on" is done.
   PUBLICATION_REVIEW_ENABLED?: string; // "1" enables the review
 
+  // The automatic denial of a publication request (ADR 0139; services/publication-auto-deny.ts).
+  // PUBLICATION_AUTO_DENY_MODE is exactly "off", "shadow" or "on"; anything else, unset included,
+  // is "off". Only "on" denies; "shadow" records "would deny" and denies nothing.
+  // PUBLICATION_AUTO_DENY_DAILY_CAP is how many denials (or would-denies) a day may record, digits
+  // from 0 to 1000; anything else reads 25. Both are the owner's: deliberately absent from every
+  // vars block in wrangler-sccn.toml (backend/test/auto-deny-switch-flag.test.ts fails a change that
+  // adds one), and set only by the owner in a reviewed change.
+  PUBLICATION_AUTO_DENY_MODE?: string;
+  PUBLICATION_AUTO_DENY_DAILY_CAP?: string;
+
   // Upstream re-pull merges a day (ADR 0111, decision 6). Every merge a NEMAR tool makes of a
   // re-pull pull request claims one unit first, N.0.0's and N.0.1's alike, in a fixed UTC day, and
   // a refused claim merges nothing, because every merge mints a DOI that cannot be withdrawn.
