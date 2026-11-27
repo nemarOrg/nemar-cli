@@ -15,7 +15,7 @@ nemarOrg/nemar-cli#2461 counted 807 of 812 ready copies built from a later commi
 The commits between are mostly NEMAR's readiness work: its records under `.nemar/`, its workflows under `.github/`, and the annex policy it rewrites in `.gitattributes` files across the fleet without a tag (`src/lib/fleet-annex-policy.ts`, `src/lib/import-normalize.ts`, ADR 0060).
 The ruling's invariant: the data and events a serving copy was created from are the tag's, so the copy is kept as the tag's.
 NEMAR's metadata changes without a tag; a tag changes when the dataset's data or metadata changes.
-nemar-process uses a row of the index only when the index's `source_commit` is exactly the run's `--source-commit` (`common/serving_index.py`, `ServingIndex.resolve`); it is gaining arguments that admit an index built at another commit for the run's commit (nemarOrg/nemar-process, `feat/serving-index-attested-commit`).
+nemar-process used a row of the index only when the index's `source_commit` was exactly the run's `--source-commit` (`common/serving_index.py`, `ServingIndex.resolve`); nemarOrg/nemar-process#108 adds the arguments that attest an index built at another commit for a run of the tag's commit.
 
 ## Decision
 
@@ -35,7 +35,7 @@ nemar-process uses a row of the index only when the index's `source_commit` is e
    - `index_behind_tag`: the compare answers `behind`.
    - `index_diverged`: the compare answers `diverged`, or ahead and behind at once, or there is no comparison (the repository lacks S, or shares no history with it).
    - `index_content_changed`: a path that is not NEMAR-owned metadata, or a `.gitattributes` edit that can change bytes.
-   - `index_delta_unlisted`: 300 or more files, a body over the compare's bound, or a `.gitattributes` change without its patch.
+   - `index_delta_unlisted`: 300 or more files, more changed paths than a job can carry (24, below), a body over the compare's bound, or a `.gitattributes` change without its patch.
 
    `source_commit_differs`, ADR 0141's word for every other commit, is no longer produced and stays a valid recorded word.
 4. **A compare GitHub cannot answer is a fault, never a guess.**
@@ -49,15 +49,16 @@ nemar-process uses a row of the index only when the index's `source_commit` is e
    An index of the tag's own commit is recorded as before.
    The launch specification carries only `{sha256, size}`, so its closed schema and its bytes are unchanged.
    The specification builder refuses an admission compared with another tag commit than the one handed, or one whose index commit is the tag's.
-   The derivative store keys such a run only when its specification hands exactly the recorded `tag_commit` (`serving_index_unattested` otherwise), and, per ADR 0143 decision 4, only when the record states that commit.
-   Until the recipe takes the arguments that admit S for T, it uses no row of an admitted index (`serving_index_stale`); the Worker adds those arguments in the change that follows nemar-process's.
+   The arguments attest the admission to the recipe (nemarOrg/nemar-process#108): after `--source-commit T` come `--serving-index-commit S` and one `--serving-index-delta-path` per changed path, a renamed file's old name included, each once and in code-unit order; the recipe uses a row only when its `--source-commit` is the attested T and the index's `source_commit` is S.
+   A job's argument vector holds at most 64 strings and such a run uses 16 of them, so it carries at most 24 paths (the recipe takes 32); a larger delta is refused as `index_delta_unlisted`, never handed in part.
+   The derivative store keys such a run only when its specification hands exactly the recorded `tag_commit`, attests exactly the recorded `index_commit` and as many paths as recorded, and attests nothing when no index ahead of its tag was staged (`serving_index_unattested` otherwise); and, per ADR 0143 decision 4, only when the record states the tag's commit.
 
 ## Consequences
 
 - The identity of a run, its record and its derivative is the tag's everywhere, so a version's digests do not move when NEMAR's metadata does. A later reconversion that only moves NEMAR's metadata changes the index's digest, and so the key, as any new index did under ADR 0141.
 - A nemar-ica dispatch whose index is of another commit makes one more GitHub request.
 - A copy built after a content change is still not staged, which is the rest of #2461 (rebuild the copy at the tag, or tag the change).
-- Until the nemar-process arguments land, an admitted index is staged and recorded but gives the recipe no row.
+- A run handed the attestation needs a runtime image built with nemarOrg/nemar-process#108; an older image refuses the arguments (exit 2, a usage error), so the image must move before nemar-ica runs over an admitted index.
 
 ## Alternatives considered
 

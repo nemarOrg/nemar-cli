@@ -21,7 +21,7 @@ earlier releases are described only by their generated notes.
   One GitHub compare of the tag's commit and the index's admits the index when every path between them is under `.nemar/` or `.github/`, or is a `.gitattributes` file whose patch adds or removes no `eol=crlf`, `working-tree-encoding`, `ident` or non-annex `filter`.
   The run stays the tag's: it is handed the tag's commit and keyed by it, and the job's specification records the index's own commit as provenance (`ahead_of_tag`).
   Any other commit is refused with a word that says why (`index_behind_tag`, `index_diverged`, `index_content_changed`, `index_delta_unlisted`) and the run goes ahead without the index; a compare GitHub cannot answer defers the run.
-  The recipe uses an admitted index's rows once nemar-process takes the arguments that admit it; until then it skips those views.
+  The run attests the admission to the recipe with `--serving-index-commit` and one `--serving-index-delta-path` per changed path (at most 24, or the index is refused as `index_delta_unlisted`); it needs a runtime image with nemarOrg/nemar-process#108.
 
 ### Fixed
 
