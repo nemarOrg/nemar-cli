@@ -262,7 +262,8 @@ function readsAsEvidence(e: unknown): e is PublicationReviewEvidence {
 
 /**
  * What `approve` adds to the review it prints, so an administrator is not asked to `--force` over a
- * reason such as `text_withheld` blind: what the model was shown, what was withheld for findings,
+ * reason such as `text_withheld` blind: what the model was shown, the LICENSE identification of a
+ * version-3 review, what was withheld for findings,
  * and a pointer to `show` for the rest. The same two lines `show` prints, from the same helpers;
  * the model's own summary and notes stay in `show`, under their labels. Empty for a request with no
  * review in force, one whose review has no evidence yet, and evidence of a shape this CLI does not
@@ -275,8 +276,12 @@ export function approveEvidenceLines(
   const evidence = review?.evidence;
   if (!readsAsEvidence(evidence)) return [];
   const withheld = withheldLine(evidence);
+  // A version-3 LICENSE identified with nothing added is `absent` in the shown line, because no
+  // text was sent: the identification says what the file is.
+  const licenseFile = licenseFileLine(evidence);
   return [
     shownLine(evidence),
+    ...(licenseFile === null ? [] : [licenseFile]),
     ...(withheld === null ? [] : [withheld]),
     `The whole review, with the model's questions and findings: nemar admin dataset publish show ${plain(datasetId)}`,
   ];

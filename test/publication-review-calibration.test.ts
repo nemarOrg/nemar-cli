@@ -1492,7 +1492,7 @@ describe("the calibration model: a listed model is accepted, an unlisted one is 
     const report = assemblePublicationReport(PASS_OUTPUT, facts, SONNET);
     expect(report.model).toBe(SONNET);
     const raw = {
-      v: 2,
+      v: 3,
       model: SONNET,
       questions: PASS_ANSWERS,
       findings: [],
@@ -1501,11 +1501,12 @@ describe("the calibration model: a listed model is accepted, an unlisted one is 
       evidence: facts,
       note_answer: "not_asked",
       record: {
-        prompt_version: "publication-review-prompt/2",
+        prompt_version: "publication-review-prompt/3",
         models: [{ model: SONNET, effort: "high" }],
         input_digest: "0".repeat(64),
         resolver_version: null,
         enrichment_source: null,
+        license_matcher: "unavailable",
       },
     };
     expect(parsePublicationReviewReport(raw, { models: CALIBRATION_MODELS }).model).toBe(SONNET);

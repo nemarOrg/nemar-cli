@@ -43,6 +43,7 @@ import {
   MIN_MATCH_SCORE,
 } from "../shared/license-file";
 import { RECOMMENDED_LICENSES, generateLicenseText } from "../shared/license-text";
+import { LICENSE_EXPRESSION_RE } from "../shared/publication-review";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "license-scan");
 const UID = process.getuid?.() ?? 0;
@@ -295,15 +296,21 @@ describe("a line ScanCode names that is not in the text is a scan of something e
   test.each([
     [
       "an end line of 2^53",
-      (s: ScanFile) => ((s.matches[0] as { end_line: number }).end_line = 2 ** 53),
+      (s: ScanFile) => {
+        (s.matches[0] as { end_line: number }).end_line = 2 ** 53;
+      },
     ],
     [
       "an end line one past the text",
-      (s: ScanFile) => ((s.matches[0] as { end_line: number }).end_line = count + 1),
+      (s: ScanFile) => {
+        (s.matches[0] as { end_line: number }).end_line = count + 1;
+      },
     ],
     [
       "a start line of 0",
-      (s: ScanFile) => ((s.matches[0] as { start_line: number }).start_line = 0),
+      (s: ScanFile) => {
+        (s.matches[0] as { start_line: number }).start_line = 0;
+      },
     ],
     [
       "a start after its end",
@@ -398,6 +405,47 @@ describe("the boundaries of the rule, each on a real result", () => {
     expect(isCompound("CC-BY-4.0 WITH Some-exception", "CC-BY-4.0")).toBe(true);
     expect(isCompound("MIT", "CC-BY-4.0")).toBe(true);
     expect(isCompound(null, "CC-BY-4.0")).toBe(false);
+  });
+
+  test("a compound expression past the parser's 512 characters is recorded as none (#2453)", () => {
+    const k = caseOf("compound-cc-by-and-cc0");
+    const base = scanOf(k).detected_license_expression_spdx as string;
+    const withTerms = (n: number) => {
+      const scan = copy(scanOf(k));
+      let expr = base;
+      for (let i = 0; expr.length < n; i++) expr += ` AND LicenseRef-scancode-x${i}`;
+      scan.detected_license_expression_spdx = expr.slice(0, n).trimEnd();
+      return scan;
+    };
+    const long = identify(k.text, k.field, withTerms(600));
+    expect(long.fact).toEqual({
+      state: "unrecognized",
+      spdx: "CC-BY-4.0",
+      additions: false,
+      expression: null,
+    });
+    // At 512 it is kept, as the Worker's parser keeps it.
+    const at = withTerms(512).detected_license_expression_spdx as string;
+    expect(at.length).toBeLessThanOrEqual(512);
+    expect(identify(k.text, k.field, withTerms(512)).fact.expression).toBe(at);
+    expect(LICENSE_EXPRESSION_RE.test(at)).toBe(true);
+    // A character outside the parser's set is recorded as none too.
+    const odd = copy(scanOf(k));
+    odd.detected_license_expression_spdx = "CC-BY-4.0 AND LicenseRef-scancode-a_b";
+    expect(identify(k.text, k.field, odd).fact.expression).toBeNull();
+  });
+
+  test("an identifier longer than the parser's 64 characters is not one", () => {
+    const scan = copy(scanOf(c));
+    const longId = `CC-BY-4.0${"x".repeat(64)}`;
+    for (const m of scan.matches) m.license_expression_spdx = longId;
+    scan.detected_license_expression_spdx = longId;
+    expect(identify(c.text, longId, scan).fact).toEqual({
+      state: "unrecognized",
+      spdx: null,
+      additions: false,
+      expression: null,
+    });
   });
 
   test("a scan error is unreadable, never a pass", () => {

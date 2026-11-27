@@ -21,6 +21,11 @@ earlier releases are described only by their generated notes.
   `GET /admin/publish/:id/review` carries `decision_card`, built once by the Worker, and `nemar admin dataset publish show` prints it first (and in `--json`): the suggested next action from a closed list that never says approve while a gate withholds approval, a license panel with a green, amber or red cue and its reason (the License field, the LICENSE identification, the lineage, the source's declared licenses, `resolved_at`), the enrichment's title, description, license, creators, keywords and funding beside `dataset_description.json`'s Name, License and Authors, the authors with placeholders flagged, each question's strongest finding, the identifier screen and any automatic denial.
   An unresolved review lineage is resolved again for the card and shown beside the review's own. Migration 0163 adds `publication_reviews.served_metadata`, the snapshot of what the review was served; a review from before it shows the fields NEMAR holds now, marked not as reviewed.
 
+### Changed
+
+- **The publication review job writes report v3 and prompt version 3 (ADR 0142, deploy 2).**
+  A LICENSE the matcher identifies conclusively is sent as no text, or as only the text it adds beyond the license (the whole file when part of the license is missing); the facts name the identification, the License field's normalized license and the matcher, and question 3 says to trust it. The report records `license_file`, the names of the description keys not shown, the lineage's `resolved_at` and the matcher; until the scan step is deployed every report carries `absent`, `annexed` or `unreadable` with matcher `unavailable`, and LICENSE is sent as before.
+
 ## 0.10.50 - 2026-11-27
 
 ### Changed

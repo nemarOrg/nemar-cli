@@ -86,7 +86,7 @@ import {
   listEntries,
   mutateCorpus,
 } from "./publication-review-corpus";
-import { evidenceFromDocuments } from "./publication-review-evidence";
+import { type LicenseView, evidenceFromDocuments } from "./publication-review-evidence";
 import {
   PUBLICATION_REVIEW_MODEL,
   assemblePublicationReport,
@@ -201,7 +201,11 @@ export function deriveOutcome(report: PublicationReviewReport): {
  * and the summary read from the corpus instead of git. A named, unreleased release (no tags file, so
  * no tag exists), and the BIDS result is not established here (`unknown`).
  */
-export function evidenceOf(entry: CorpusEntry): { facts: ReviewFacts; cleared: ClearedDocuments } {
+export function evidenceOf(entry: CorpusEntry): {
+  facts: ReviewFacts;
+  cleared: ClearedDocuments;
+  license: LicenseView;
+} {
   return evidenceFromDocuments(entry.docs, {
     head: entry.head,
     anonymous: false,
@@ -225,19 +229,21 @@ async function reviewEntry(
     ms: Math.round(performance.now() - started),
   });
   try {
-    const { facts, cleared } = evidenceOf(entry);
+    const { facts, cleared, license } = evidenceOf(entry);
     documents = { ...facts.documents };
     const { system, user } = buildPublicationReviewMessages({
       facts,
       cleared,
+      license,
       nonce: randomUUID().replaceAll("-", ""),
     });
     const modelOutput = await callPublicationReviewModel(system, user, model, (u) => {
       usage = u;
     });
     const report = assemblePublicationReport(modelOutput, facts, model, {
-      inputDigest: publicationInputDigest({ facts, cleared }),
+      inputDigest: publicationInputDigest({ facts, cleared, license }),
       resolverVersion: null,
+      licenseMatcher: license.matcher,
     });
     const { outcome, reasons } = deriveOutcome(report);
     return {
