@@ -592,7 +592,7 @@ describe("the caps", () => {
   });
 
   test("the platform's allowance does: 409 platform_limit, the row is declined, nothing is sent", async () => {
-    expect(PLATFORM_DAILY_CAP).toBe(150);
+    expect(PLATFORM_DAILY_CAP).toBe(500);
     fillPlatform(PLATFORM_DAILY_CAP);
     const { requestId } = request();
     const before = h.reviews().length;
