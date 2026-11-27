@@ -77,6 +77,7 @@ import {
   type GithubCompareStandin,
   startGithubCompareStandin,
 } from "./helpers/github-compare-standin";
+import { CUDA_DIGEST, CUDA_REF } from "./helpers/recipe-version-fixture";
 
 // --- The world ---------------------------------------------------------------------------------------
 
@@ -1492,13 +1493,6 @@ describe("the recipe of a runner job is the recipe's", () => {
  * the one `COMPUTE_RUNTIME_IMAGE` pins for every recipe (`test/fixtures/nemar-recipe-version.json`).
  */
 describe("nemar-ica's Zarr job is claimed by a runner with a GPU in its pool", () => {
-  const CUDA_REF = (
-    JSON.parse(
-      readFileSync(join(import.meta.dir, "../../test/fixtures/nemar-recipe-version.json"), "utf8"),
-    ) as { image: string }
-  ).image;
-  const CUDA_DIGEST = CUDA_REF.slice(CUDA_REF.indexOf("@") + 1);
-
   /** An administrator's runner dispatch of nemar-ica over a fresh dataset's serving copy, and its job id. */
   async function dispatchIca(e: Bindings): Promise<string> {
     const r = await dispatchPipelineJob(e, {
@@ -1550,6 +1544,23 @@ describe("nemar-ica's Zarr job is claimed by a runner with a GPU in its pool", (
     // The GPU runner does.
     const gpu = await runner(e, { pool: poolOfRecipe(ica), gpus: 1 });
     expect((await claimOne(gpu)).id).toBe(jobId);
+  });
+
+  test("a runner of exactly nemar-ica's shape claims it, and one a megabyte short does not (MUTATION: drop the memory term)", async () => {
+    const e = { ...env, COMPUTE_RUNTIME_IMAGE: CUDA_REF };
+    const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
+    const shape = {
+      pool: poolOfRecipe(ica),
+      cores: ica.cores,
+      memory_mb: ica.memoryMb as number,
+      gpus: ica.gpus,
+    };
+    const short = await runner(e, { ...shape, memory_mb: shape.memory_mb - 1 });
+    const jobId = await dispatchIca(e);
+    expect(RunnerClaimResponseSchema.parse((await claim(short, 1)).body).jobs).toHaveLength(0);
+    expect((await row(jobId)).runner_id).toBeNull();
+    const exact = await runner(e, shape);
+    expect((await claimOne(exact)).id).toBe(jobId);
   });
 });
 
