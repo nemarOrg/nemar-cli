@@ -94,6 +94,14 @@ export interface PublicationReviewRow {
    * (migration 0154; `parsePermissionBasis`), unparsed; null when none was stored.
    */
   lineageBasis: string | null;
+  /**
+   * When an administrator's re-review took this row's place (migration 0161; ADR 0102, amendment
+   * of 2026-11-27), or null. A superseded row is history only: never the review in force, and
+   * {@link readReviewByKey} and {@link readReviewsByKeys} never return it.
+   */
+  supersededAt: string | null;
+  /** The row that replaced it; set only with `supersededAt` (the column's CHECK). */
+  supersededBy: number | null;
 }
 
 /** Every column but `nonce`, which never leaves the callback module. */
@@ -102,7 +110,7 @@ export const ROW_COLUMNS =
   "detail, report, claimed_at, attempts, override_by, override_at, override_reasons, " +
   "created_at, decided_at, scanner_id, reader_versions, resolver_version, models, " +
   "prompt_version, input_digest, enrichment_source, confirm_of, auto_deny_state, auto_deny_at, " +
-  "lineage_basis";
+  "lineage_basis, superseded_at, superseded_by";
 
 const num = (v: unknown): number => Number(v);
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
@@ -140,6 +148,8 @@ export function toRow(raw: Record<string, unknown>): PublicationReviewRow {
     autoDenyState: typeof raw.auto_deny_state === "string" ? raw.auto_deny_state : "none",
     autoDenyAt: strOrNull(raw.auto_deny_at),
     lineageBasis: strOrNull(raw.lineage_basis),
+    supersededAt: strOrNull(raw.superseded_at),
+    supersededBy: numOrNull(raw.superseded_by),
   };
 }
 
@@ -153,7 +163,9 @@ export async function readReview(db: D1Database, id: number): Promise<Publicatio
 
 /**
  * The first run of one (request, screened commit, kind of release): the review in force when they
- * are the request's. A confirming row (`confirm_of` set) is never it.
+ * are the request's. A confirming row (`confirm_of` set) is never it, and neither is a row an
+ * administrator's re-review superseded (`superseded_at` set): the partial unique index of
+ * migration 0161 allows exactly one such row.
  */
 export async function readReviewByKey(
   db: D1Database,
@@ -164,7 +176,8 @@ export async function readReviewByKey(
   const r = await db
     .prepare(
       `SELECT ${ROW_COLUMNS} FROM publication_reviews
-        WHERE request_id = ? AND head_sha = ? AND anonymous = ? AND confirm_of IS NULL`,
+        WHERE request_id = ? AND head_sha = ? AND anonymous = ? AND confirm_of IS NULL
+          AND superseded_at IS NULL`,
     )
     .bind(requestId, headSha, anonymous ? 1 : 0)
     .first<Record<string, unknown>>();
@@ -211,7 +224,7 @@ export async function readReviewsByKeys(
     .prepare(
       `SELECT ${ROW_COLUMNS} FROM publication_reviews
         WHERE request_id IN (${marks(ids.length)}) AND head_sha IN (${marks(heads.length)})
-          AND confirm_of IS NULL`,
+          AND confirm_of IS NULL AND superseded_at IS NULL`,
     )
     .bind(...ids, ...heads)
     .all<Record<string, unknown>>();
@@ -225,7 +238,11 @@ export async function readReviewsByKeys(
 /** The most rows one history read returns. */
 export const MAX_HISTORY_ROWS = 200;
 
-/** A request's reviews, newest first, at most `limit` (clamped to 1 to {@link MAX_HISTORY_ROWS}). */
+/**
+ * A request's reviews, newest first, at most `limit` (clamped to 1 to {@link MAX_HISTORY_ROWS}).
+ * A history: superseded rows are listed (the row says so), because they are what the review in
+ * force replaced.
+ */
 export async function listReviewsOfRequest(
   db: D1Database,
   requestId: number,
@@ -314,6 +331,7 @@ export function reviewInFlightSql(name: string, atMs?: number): string {
          WHERE r.request_id = ${a}.id
            AND r.anonymous = ${a}.anonymous
            AND r.head_sha = ${screenedHeadSql(a)}
+           AND r.superseded_at IS NULL
            AND r.state = 'dispatched'
            AND r.created_at >= datetime(${now}, '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes'))`;
 }

@@ -942,7 +942,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         .prepare(
           `SELECT ${ROW_COLUMNS} FROM publication_reviews
             WHERE request_id = ? AND dataset_id = ? AND state = 'reported'
-              AND confirm_of IS NULL
+              AND confirm_of IS NULL AND superseded_at IS NULL
             ORDER BY id DESC LIMIT 1`,
         )
         .bind(request.id, datasetId)
