@@ -144,7 +144,7 @@ export interface ComputeRecipe {
   /**
    * The entry stands for a recipe that does not exist yet, or whose numbers nobody has verified. No
    * path dispatches a placeholder (`recipe_placeholder`): the entry is here so the registry's shape is
-   * held, and the flag is removed in the change that makes the recipe real.
+   * held, and the flag is removed or set false in the change that makes the recipe real.
    */
   placeholder?: boolean;
   eligibility: RecipeEligibility;
@@ -301,8 +301,9 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     minutes: 720,
     inputs: Object.freeze(["bids"] as const),
     executors: Object.freeze(["tapis"] as const),
+    // An administrator's run only: the daily dispatcher never runs it. No longer a placeholder (2026-11-27).
     autoDispatch: false,
-    placeholder: true,
+    placeholder: false,
     eligibility: "eeg",
     // The floor steps it re-runs as preparation map as in the floor, except its re-run `qc` (ADR 0134); its
     // quality plugins follow the decomposition at `quality` (ADR 0137).

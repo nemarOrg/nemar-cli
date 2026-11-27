@@ -447,8 +447,8 @@ describe("an input the executor does not run is refused before anything is writt
     const env = w.env();
     const id = await dataset(w);
     const before = await snapshot(w.d1);
-    // `nemar-ica` lists Tapis only. It is a placeholder, and asking where it may run comes first, so the real
-    // registry shows the answer for an unlisted executor (nemar-floor lists both).
+    // `nemar-ica` lists Tapis only, so the real registry shows the answer for an unlisted executor (nemar-floor
+    // lists both).
     for (const extra of [{}, { dry_run: true }]) {
       const r = await call(
         "POST",
@@ -468,24 +468,40 @@ describe("an input the executor does not run is refused before anything is writt
     expect(
       await pipelineDryRun(env, { recipe: "nemar-ica", datasetId: id, executor: "runner" }),
     ).toEqual({ ok: false, code: "invalid_spec", field: "executor" });
-    // Where it does run, the placeholder is still refused as one, through every door.
-    expect(await dispatch(env, id, { recipe: "nemar-ica" })).toMatchObject({
-      ok: false,
-      code: "recipe_placeholder",
+    expect(await snapshot(w.d1)).toEqual(before);
+  });
+
+  test("where it runs, nemar-ica is no longer refused as a placeholder: the dry run gives the run's verdict and an administrator's run dispatches it on Tapis (MUTATION: set placeholder back to true)", async () => {
+    const [w] = worlds() as [World];
+    await ready(w);
+    // Its pool is the GPU allocation: a job of 10 cores and a GPU for 12 hours is held against it.
+    await fundPipelines(w.env(), 100_000_000, true);
+    const env = w.env();
+    const id = await dataset(w);
+    const dry = await pipelineDryRun(env, { recipe: "nemar-ica", datasetId: id });
+    expect(dry).toMatchObject({
+      ok: true,
+      would_dispatch: [{ dataset_id: id, version: "v1.0.0" }],
     });
-    expect(await pipelineDryRun(env, { recipe: "nemar-ica", datasetId: id })).toEqual({
-      ok: false,
-      code: "recipe_placeholder",
-    });
-    const placeholder = await call(
+    const r = await call(
       "POST",
       "/compute/pipeline/run",
       "admin",
       { recipe: "nemar-ica", dataset: id },
       env,
     );
-    expect([placeholder.status, placeholder.body.code]).toEqual([422, "recipe_placeholder"]);
-    expect(await snapshot(w.d1)).toEqual(before);
+    expect([r.status, r.body.ok, r.body.code]).toEqual([201, true, undefined]);
+    const [stamp] = await stampsOf(w.d1, id);
+    expect([stamp?.recipe, stamp?.input, stamp?.state]).toEqual([
+      "nemar-ica",
+      "bids",
+      "dispatched",
+    ]);
+    const job = await w.d1
+      .prepare("SELECT executor, source FROM compute_jobs WHERE id = ?1")
+      .bind(stamp?.job_id)
+      .first<{ executor: string; source: string }>();
+    expect(job).toEqual({ executor: "tapis", source: "pipeline" });
   });
 
   test("a word that is not an input is invalid_body, not a refusal of the registry", async () => {

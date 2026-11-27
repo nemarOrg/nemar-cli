@@ -547,20 +547,28 @@ describe("what a run refuses, before it writes anything", () => {
     await nothingWritten(env);
   });
 
-  test("a placeholder recipe is refused on every path with recipe_placeholder, and nothing is written", async () => {
+  test("nemar-ica is no longer a placeholder: no path refuses it as one, and a run without GitHub credentials is deferred, holding nothing (MUTATION: set placeholder back to true)", async () => {
     const { env } = await world();
-    await fundPipelines(env, 10_000_000, true);
+    await fundPipelines(env, 100_000_000, true);
+    expect(await pipelineDryRun(env, { recipe: "nemar-ica", datasetId: "nm000104" })).toMatchObject(
+      {
+        ok: true,
+        would_dispatch: [{ dataset_id: "nm000104", version: "v1.0.0" }],
+      },
+    );
+    // A live run stages the serving index first; this Worker has no GitHub credentials, a fault (ADR 0141).
     expect(await run(env, { recipe: "nemar-ica" })).toMatchObject({
       ok: false,
-      code: "recipe_placeholder",
+      code: "serving_index_deferred",
+      reason: "no_github_credentials",
     });
     const queue = await dispatchEligible(env, { recipe: "nemar-ica", limit: 3, actor: ADMIN });
-    expect(queue).toMatchObject({ dispatched: 0, stoppedBy: "recipe_placeholder" });
-    expect(await pipelineDryRun(env, { recipe: "nemar-ica", datasetId: "nm000104" })).toEqual({
-      ok: false,
-      code: "recipe_placeholder",
-    });
-    await nothingWritten(env);
+    expect(queue.dispatched).toBe(0);
+    expect(queue.stoppedBy).not.toBe("recipe_placeholder");
+    // A deferral is a refused stamp and nothing else: no job, no hold, no submit.
+    expect((await stampsOf(env)).every((s) => s.state === "refused")).toBe(true);
+    expect(await jobCount(env)).toBe(0);
+    expect(submits()).toBe(0);
   });
 
   test("a specification that cannot be built leaves no claimed stamp, and is a word, not a throw", async () => {

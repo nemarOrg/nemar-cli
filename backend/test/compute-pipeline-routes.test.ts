@@ -216,19 +216,25 @@ describe("a dry run", () => {
     }).toEqual(before);
   });
 
-  test("a placeholder recipe is recipe_placeholder (422) on a live run of one dataset or the queue", async () => {
+  test("nemar-ica is no longer recipe_placeholder: a dry run gives the run's verdict, and a live run reaches the serving index (MUTATION: set placeholder back to true)", async () => {
     const env = await world(["nm000104"]);
+    await fundPipelines(env, 100_000_000, true);
     for (const body of [
-      { recipe: "nemar-ica", dataset: "nm000104" },
-      { recipe: "nemar-ica", eligible: true },
+      { recipe: "nemar-ica", dataset: "nm000104", dry_run: true },
+      { recipe: "nemar-ica", eligible: true, dry_run: true },
     ]) {
       const res = await run("admin", body, env);
-      expect([res.status, res.body.code ?? res.body.stopped_by]).toEqual([
-        422,
-        "recipe_placeholder",
-      ]);
+      expect([res.status, res.body.code]).toEqual([200, undefined]);
+      expect(res.body.would_dispatch).toEqual([{ dataset_id: "nm000104", version: "v1.0.0" }]);
     }
-    expect(await n(env, "compute_pipeline_stamps")).toBe(0);
+    // A live run stages the serving index first: this Worker has no GitHub credentials, a fault, so the run is
+    // deferred (ADR 0141), never refused as a placeholder.
+    const live = await run("admin", { recipe: "nemar-ica", dataset: "nm000104" }, env);
+    expect([live.status, live.body.code, live.body.reason]).toEqual([
+      503,
+      "serving_index_deferred",
+      "no_github_credentials",
+    ]);
   });
 
   test("an unknown recipe is recipe_unknown, with or without dry_run", async () => {

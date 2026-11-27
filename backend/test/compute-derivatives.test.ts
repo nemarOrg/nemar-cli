@@ -2275,10 +2275,10 @@ describe("a dataset that is no longer eligible after its job finished", () => {
 // --- nemar-ica on the archive input: the key names the serving index (ADR 0140) --------------------------------
 
 /**
- * A run of nemar-ica on the archive input. nemar-ica is a placeholder that no path dispatches, so the floor's
- * real BIDS job is made, finished and synced, and its stamp and outputs are then named as nemar-ica's: the
- * stamp's recipe, version and engine, and the record and table at nemar-ica's paths, in the results bucket and
- * in the launcher's manifest. `servingIndex` adds `--serving-index` to the recorded specification.
+ * A run of nemar-ica on the archive input. Its own dispatch stages the serving index, which this file does not
+ * play, so the floor's real BIDS job is made, finished and synced, and its stamp and outputs are then named as
+ * nemar-ica's: the stamp's recipe, version and engine, and the record and table at nemar-ica's paths, in the
+ * results bucket and in the launcher's manifest. `servingIndex` adds `--serving-index` to the recorded specification.
  */
 async function icaBidsJob(
   o: {

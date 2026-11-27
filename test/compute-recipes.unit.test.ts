@@ -127,8 +127,12 @@ describe("the registry", () => {
     expect(RECIPE_INPUTS).toEqual(["bids", "zarr"]);
   });
 
-  test("nemar-ica is a placeholder (its numbers are unverified) and nemar-floor is not", () => {
-    expect(findRecipe("nemar-ica")?.placeholder).toBe(true);
+  test("no recipe is a placeholder: nemar-ica was lifted, and is an administrator's run on Tapis only (MUTATION: set it back)", () => {
+    for (const recipe of COMPUTE_RECIPES)
+      expect([recipe.name, recipe.placeholder]).not.toEqual([recipe.name, true]);
+    const ica = findRecipe("nemar-ica");
+    expect(ica?.placeholder).toBe(false);
+    expect([ica?.autoDispatch, ica?.executors, ica?.inputs]).toEqual([false, ["tapis"], ["bids"]]);
     expect(findRecipe("nemar-floor")?.placeholder).toBeFalsy();
   });
 
