@@ -118,8 +118,10 @@ export interface ModelCallShape {
 
 /** The review's own call. */
 export const REVIEW_CALL: ModelCallShape = {
+  // TEST BRANCH ONLY: max effort, with the confirming run's streamed budget and deadline.
   effort: PUBLICATION_REVIEW_EFFORT,
-  maxTokens: MAX_TOKENS,
+  maxTokens: CONFIRM_MAX_TOKENS,
+  deadlineMs: CONFIRM_DEADLINE_MS,
 };
 
 /** The run errors this script may post: everything the Worker does not write itself. */

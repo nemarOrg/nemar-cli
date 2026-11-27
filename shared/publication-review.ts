@@ -70,7 +70,8 @@ export type PublicationReportVersion = (typeof PUBLICATION_REPORT_VERSIONS)[numb
 export const PUBLICATION_PROMPT_VERSION = "publication-review-prompt/2";
 
 /** The effort every call of the review is made at. One word, recorded with the model. */
-export const PUBLICATION_REVIEW_EFFORT = "high";
+// TEST BRANCH ONLY (model comparison, 2026-11-27): Haiku 5.5 at max effort. Never merged.
+export const PUBLICATION_REVIEW_EFFORT = "max";
 
 /**
  * Every effort a record may name: the review's, and the others a call can be made at (the
