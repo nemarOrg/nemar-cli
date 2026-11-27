@@ -1202,9 +1202,10 @@ const LICENSE_EXPRESSION_RE = /^[A-Za-z0-9.+\-() ]{1,512}$/;
  * The LICENSE identification (ADR 0142, decision 1), and its agreement with itself and with the
  * license document's state: `spdx` names an identifier exactly when the identification was
  * conclusive (and may when it was `unrecognized`), `additions` only for a conclusive one,
- * `expression` only for `unrecognized`; an absent file is an absent document, an annexed one a
- * `withheld_annexed` document, and leftover text or an unrecognized file reached the model in some
- * state, never `absent`. `unreadable` says nothing about the document: the job may not have scanned.
+ * `expression` only for `unrecognized`. An absent document is an absent file, or a conclusive file
+ * with nothing added; an annexed file is exactly a `withheld_annexed` document. So leftover text, an
+ * unrecognized file and an unreadable one all reached the model in some state other than `absent`
+ * (the job reports `absent` and `annexed` even with no matcher).
  */
 function parseLicenseFile(raw: unknown, license: DocumentState): LicenseFileFact {
   if (!isRecord(raw) || !hasExactKeys(raw, ["state", "spdx", "additions", "expression"])) {
@@ -1227,9 +1228,11 @@ function parseLicenseFile(raw: unknown, license: DocumentState): LicenseFileFact
     badEvidence();
   }
   if (expression !== null && state !== "unrecognized") badEvidence();
+  // Exact: an absent document is no file, or a conclusive file with nothing added (nothing to send);
+  // an annexed document is exactly an annexed file, which is never scanned.
   if (state === "absent" && license !== "absent") badEvidence();
-  if (state === "annexed" && license !== "withheld_annexed") badEvidence();
-  if ((state === "unrecognized" || additions) && license === "absent") badEvidence();
+  if (license === "absent" && state !== "absent" && !(conclusive && !additions)) badEvidence();
+  if ((state === "annexed") !== (license === "withheld_annexed")) badEvidence();
   return {
     state,
     spdx: spdx as string | null,

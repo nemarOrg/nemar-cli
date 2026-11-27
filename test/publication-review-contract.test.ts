@@ -3614,10 +3614,14 @@ describe("version 3 of the report (ADR 0142, decision 2)", () => {
         { documents: { ...ALL_SENT, license: "withheld_annexed" } },
       ],
       [{ state: "unreadable", spdx: null }, {}],
-      [{ state: "unreadable", spdx: null }, { documents: { ...ALL_SENT, license: "absent" } }],
       [
         { state: "unreadable", spdx: null },
-        { documents: { ...ALL_SENT, license: "withheld_annexed" } },
+        { documents: { ...ALL_SENT, license: "withheld_not_utf8" } },
+      ],
+      // A conclusive file with nothing added has nothing to send.
+      [
+        { state: "matches_other", spdx: "CC0-1.0" },
+        { documents: { ...ALL_SENT, license: "absent" } },
       ],
     ];
     for (const [file, evidence] of ok) {
@@ -3656,6 +3660,26 @@ describe("version 3 of the report (ADR 0142, decision 2)", () => {
       // Leftover, or an unrecognized file, reached the model in some state, never `absent`.
       [{ additions: true }, { documents: { ...ALL_SENT, license: "absent" } }],
       [{ state: "unrecognized", spdx: null }, { documents: { ...ALL_SENT, license: "absent" } }],
+      // The rule is exact: an unreadable file is not an absent document, and an annexed document
+      // is an annexed file and nothing else, because an annexed file is never scanned.
+      [{ state: "unreadable", spdx: null }, { documents: { ...ALL_SENT, license: "absent" } }],
+      [
+        { state: "unreadable", spdx: null },
+        { documents: { ...ALL_SENT, license: "withheld_annexed" } },
+      ],
+      [{}, { documents: { ...ALL_SENT, license: "withheld_annexed" } }],
+      [
+        { state: "matches_other", spdx: "CC0-1.0" },
+        { documents: { ...ALL_SENT, license: "withheld_annexed" } },
+      ],
+      [
+        { state: "unrecognized", spdx: null },
+        { documents: { ...ALL_SENT, license: "withheld_annexed" } },
+      ],
+      [
+        { state: "matches_other", spdx: "CC0-1.0", additions: true },
+        { documents: { ...ALL_SENT, license: "absent" } },
+      ],
     ];
     for (const [file, evidence] of bad) {
       expect({ file, r: refusal(v3ReportBody({ ...evidence, ...lf(file) })) }).toEqual({
