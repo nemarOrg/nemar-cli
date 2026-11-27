@@ -134,7 +134,11 @@ function env(): Bindings {
   } as Bindings;
 }
 
-function create(): Promise<Response> {
+function create(
+  files: Array<{ path: string; size: number; type: string }> = [
+    { path: "sub-01/eeg/sub-01_task-rest_eeg.set", size: 10, type: "data" },
+  ],
+): Promise<Response> {
   return app.request(
     "/datasets",
     {
@@ -146,7 +150,7 @@ function create(): Promise<Response> {
       },
       body: JSON.stringify({
         name: "Policy Rollback Fixture",
-        files: [{ path: "sub-01/eeg/sub-01_task-rest_eeg.set", size: 10, type: "data" }],
+        files,
       }),
     },
     env(),
@@ -314,6 +318,31 @@ describe("POST /datasets: a failed S3 permission rolls the create back (#2497)",
     });
     expect(datasetRows()).toBe(0);
     expect(s3.log.some((r) => r.method === "PUT")).toBe(false);
+  });
+});
+
+describe("POST /datasets: an upload-URL failure after the carve-out rolls back (#2497)", () => {
+  test("repository deleted, permission and row removed, no upload URL", async () => {
+    s3.setBucketPolicy(buildPublicAccessPolicy(BUCKET, ["nm000111"]));
+    const res = await create([{ path: "../escape.set", size: 10, type: "data" }]);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      dataset_id?: string;
+      rolled_back?: boolean;
+      upload_urls?: unknown;
+    };
+    expect(body.rolled_back).toBe(true);
+    expect(body.upload_urls).toBeUndefined();
+    expect(githubLog).toContainEqual({
+      method: "DELETE",
+      path: `/repos/nemarDatasets/${body.dataset_id}`,
+    });
+    expect(datasetRows()).toBe(0);
+    expect(permissionRows()).toBe(0);
+    // The carve-out landed before the failure and stays (harmless, ADR 0145).
+    expect(
+      isDatasetPrivate(s3.getBucketPolicy() as BucketPolicy, BUCKET, body.dataset_id as string),
+    ).toBe(true);
   });
 });
 

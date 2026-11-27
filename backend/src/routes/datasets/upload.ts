@@ -854,32 +854,71 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         );
       }
 
-      // Generate presigned URLs for data files using backend credentials
-      const { urls: uploadUrls, error: urlError } = await generateUploadUrlsForFiles(
-        c.env,
-        datasetId,
-        files,
-      );
-      if (urlError) {
-        return c.json(urlError.body, urlError.status as 400 | 500);
+      // Generate presigned URLs, then record the repository and the audit
+      // row. Any failure here rolls the create back like the branches above
+      // (#2497); the carve-out may stay, which is harmless (ADR 0145).
+      let uploadUrls: Record<string, string>;
+      try {
+        const generated = await generateUploadUrlsForFiles(c.env, datasetId, files);
+        if (generated.error) {
+          const leftovers = await rollBackNewDataset(
+            c.env,
+            datasetId,
+            user.id,
+            githubRepo.full_name,
+            pat,
+          );
+          return c.json(
+            {
+              ...generated.error.body,
+              dataset_id: datasetId,
+              rolled_back: leftovers.length === 0,
+              note:
+                leftovers.length === 0
+                  ? "Upload URLs could not be generated, so the dataset was not created. Fix the request and retry."
+                  : `Upload URLs could not be generated, and the rollback could not remove: ${leftovers.join(", ")}. Administrators have been notified.`,
+            },
+            generated.error.status as 400 | 500,
+          );
+        }
+        uploadUrls = generated.urls;
+
+        // Update the claimed dataset record with the GitHub repo info
+        await db
+          .prepare("UPDATE datasets SET github_repo = ? WHERE dataset_id = ?")
+          .bind(githubRepo.full_name, datasetId)
+          .run();
+
+        // Audit log
+        await db
+          .prepare(
+            `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+             VALUES (?, 'dataset_created', 'dataset', ?, ?)`,
+          )
+          .bind(user.id, datasetId, JSON.stringify({ name, file_count: files?.length || 0 }))
+          .run();
+      } catch (finishError) {
+        console.error(`Failed to finish creating ${datasetId}:`, finishError);
+        const leftovers = await rollBackNewDataset(
+          c.env,
+          datasetId,
+          user.id,
+          githubRepo.full_name,
+          pat,
+        );
+        return c.json(
+          {
+            error: "Failed to create dataset",
+            dataset_id: datasetId,
+            rolled_back: leftovers.length === 0,
+            note:
+              leftovers.length === 0
+                ? "The dataset could not be recorded, so it was not created. Retry `nemar dataset upload`."
+                : `The dataset could not be recorded, and the rollback could not remove: ${leftovers.join(", ")}. Administrators have been notified.`,
+          },
+          500,
+        );
       }
-
-      // Update the claimed dataset record with the GitHub repo info
-      await db
-        .prepare("UPDATE datasets SET github_repo = ? WHERE dataset_id = ?")
-        .bind(githubRepo.full_name, datasetId)
-        .run();
-
-      // Audit log
-      await db
-        .prepare(
-          `
-      INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
-      VALUES (?, 'dataset_created', 'dataset', ?, ?)
-    `,
-        )
-        .bind(user.id, datasetId, JSON.stringify({ name, file_count: files?.length || 0 }))
-        .run();
 
       // Note: We no longer return AWS credentials to the CLI
       // The CLI will use the presigned URLs for upload
