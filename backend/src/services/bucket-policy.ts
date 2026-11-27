@@ -347,6 +347,27 @@ export function ensurePublicAccessStatement(
   return withPrivateSet(policy, bucket, listPrivateDatasets(policy, bucket));
 }
 
+/**
+ * The policy the one-time migration (`scripts/migrate-s3-public-policy.ts`)
+ * writes: the public-read statement for `privateIds`, keeping the live
+ * statement's opaque carve-out entries (a rewrite never widens public access),
+ * followed by the `preserved` statements.
+ */
+export function buildMigratedPolicy(
+  current: BucketPolicy | null,
+  bucket: string,
+  privateIds: Iterable<string>,
+  preserved: PolicyStatement[],
+): BucketPolicy {
+  return {
+    Version: current?.Version ?? POLICY_VERSION,
+    Statement: [
+      buildPublicAccessStatement(bucket, privateIds, readCarveOut(current, bucket).opaque),
+      ...preserved,
+    ],
+  };
+}
+
 /** Add a dataset to the private carve-out (make its objects non-public). Idempotent. */
 export function addPrivateDataset(
   policy: BucketPolicy | null,
