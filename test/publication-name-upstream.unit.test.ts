@@ -29,6 +29,7 @@ import {
 import { v3PublicationReport } from "../backend/test/helpers/publication-review";
 import { REGISTRY_TEXT_LABEL } from "../shared/contract/decision-card";
 import type { LineageResult } from "../shared/license-lineage";
+import { nameFollowsUpstream } from "../shared/name-follows-upstream";
 import {
   AUTO_DENY_CODE_COPY,
   CONFIRMING_MODEL,
@@ -38,17 +39,20 @@ import {
   eligibleCodesOf,
 } from "../shared/publication-auto-deny";
 import {
+  type InputSource,
   PUBLICATION_PROMPT_VERSION,
   type PublicationReviewReport,
   type Question,
   REASONS,
   parsePublicationReviewEvidence,
   parsePublicationReviewReport,
+  parseReviewInputs,
   previousDenialReasonsOf,
   reportReasons,
   verdictOf,
 } from "../shared/publication-review";
 import { GATE_CLEAR, SNAPSHOT, detailOf, reasonView } from "./helpers/decision-card-fixtures";
+import { fullInputs } from "./helpers/review-inputs";
 
 const PASSING = {
   complete_and_honest: "pass",
@@ -143,6 +147,23 @@ describe("the evidence's name word", () => {
   });
 });
 
+describe("the served sources' latest flag", () => {
+  test("the inputs parser keeps resolved_latest only as true, and a body without it reads as before", () => {
+    const body = fullInputs();
+    const [src] = body.lineage.sources as [InputSource];
+    const read = (extra: Record<string, unknown>) =>
+      parseReviewInputs({
+        ...body,
+        lineage: { ...body.lineage, sources: [{ ...src, ...extra }] },
+      }).lineage.sources[0];
+    expect(read({ resolved_latest: true })?.resolved_latest).toBe(true);
+    for (const v of [false, "true", 1, null]) {
+      expect("resolved_latest" in (read({ resolved_latest: v }) ?? {}), String(v)).toBe(false);
+    }
+    expect("resolved_latest" in (read({}) ?? {})).toBe(false);
+  });
+});
+
 describe("the reasons", () => {
   test("differs fails the request whatever the model answered, and an override clears it", () => {
     const r = report("differs");
@@ -169,7 +190,9 @@ describe("the reasons", () => {
   test("the sentences name the rule, and no terminal", () => {
     for (const code of ["name_differs_from_upstream", "name_upstream_unconfirmed"] as const) {
       expect(REASONS[code].sentence).toContain("upstream dataset");
-      expect(REASONS[code].cure).toContain("an author and year may follow it");
+      expect(REASONS[code].cure).toContain(
+        "an author-year naming the dataset's authors may follow it",
+      );
       expect(REASONS[code].command).toBeUndefined();
     }
   });
@@ -249,6 +272,24 @@ describe("the automatic denial (ADR 0139 as amended on 2026-11-27)", () => {
     expect(eligibleCodesOf(nameFailed("differs")).codes).toContain("name_not_descriptive");
   });
 
+  test("a Name that follows only a README candidate shields nothing: the exception needs a declared source", () => {
+    const candidate = {
+      title: "Resting EEG",
+      status: "resolved",
+      origin: "readme",
+      outcome: "compatible" as const,
+    };
+    const word = nameFollowsUpstream("Resting EEG", [candidate]);
+    expect(word).toBe("not_applicable");
+    expect(eligibleCodesOf(nameFailed(word)).codes).toEqual(["name_not_descriptive"]);
+    // The same title declared in SourceDatasets is the upstream's name, and shields it.
+    const declared = nameFollowsUpstream("Resting EEG", [
+      { ...candidate, origin: "source_datasets" },
+    ]);
+    expect(declared).toBe("matches");
+    expect(eligibleCodesOf(nameFailed(declared)).codes).toEqual([]);
+  });
+
   test("the exception is about the name only: another eligible finding beside it still denies", () => {
     const r = report("matches", {
       questions: { name_adequate: "fail", complete_and_honest: "fail" },
@@ -275,7 +316,7 @@ describe("the automatic denial (ADR 0139 as amended on 2026-11-27)", () => {
   test("the depositor's copy names the rule and the shapes of the suffix", () => {
     const c = AUTO_DENY_CODE_COPY.name_differs_from_upstream;
     expect(c.statement).toBe(REASONS.name_differs_from_upstream.sentence);
-    expect(c.remedy).toContain("an author and year may follow it");
+    expect(c.remedy).toContain("an author-year naming the dataset's authors may follow it");
     expect(c.anchor).toEndWith("#automatic-denial-name-differs-from-upstream");
   });
 });
@@ -315,7 +356,7 @@ describe("the decision card", () => {
     const c = card(report("differs"), {}, ["Resting EEG of healthy adults"]);
     expect(c.next_action.action).toBe("ask_depositor");
     expect(c.next_action.sentence).toBe(ASK_DEPOSITOR_NAME_SENTENCE);
-    expect(c.next_action.sentence).toContain("start with the upstream dataset's title");
+    expect(c.next_action.sentence).toContain("be the upstream dataset's title");
     expect(c.upstream_name).toEqual({
       result: "differs",
       cue: "red",
@@ -328,6 +369,14 @@ describe("the decision card", () => {
     const c = card(report("differs"), { request_status: "blocked", block_reason: "minimums" });
     expect(c.next_action.action).toBe("ask_depositor");
     expect(c.next_action.sentence).toBe(ACTION_SENTENCE.ask_depositor);
+  });
+
+  test("the card sets a name fail aside only for a match on a declared source", () => {
+    const src = { title: "Resting EEG", status: "resolved", outcome: "compatible" as const };
+    const readmeOnly = nameFollowsUpstream("Resting EEG", [{ ...src, origin: "readme" }]);
+    const declared = nameFollowsUpstream("Resting EEG", [{ ...src, origin: "source_datasets" }]);
+    expect(card(nameFailed(readmeOnly)).next_action.action).toBe("deny");
+    expect(card(nameFailed(declared)).next_action.action).toBe("administrator_reads");
   });
 
   test("unknown is amber and an administrator's to read", () => {

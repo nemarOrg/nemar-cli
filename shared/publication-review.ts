@@ -2077,9 +2077,8 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
   name_differs_from_upstream: {
     class: "fail",
     clearedBy: "override",
-    sentence:
-      "The dataset's Name does not start with the title of the upstream dataset it was derived from.",
-    cure: `The depositor sets Name in dataset_description.json to the upstream dataset's title; an author and year may follow it. ${OVERRIDE}`,
+    sentence: "The dataset's Name is not the title of the upstream dataset it was derived from.",
+    cure: `The depositor sets Name in dataset_description.json to the upstream dataset's title; a version and an author-year naming the dataset's authors may follow it. ${OVERRIDE}`,
   },
   bids_failed_at_review: {
     class: "fail",
@@ -2175,7 +2174,7 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     clearedBy: "override",
     sentence:
       "Whether the dataset's Name follows the title of its upstream dataset could not be determined.",
-    cure: `Compare the Name with the upstream dataset's title yourself; it should start with that title, and an author and year may follow it. ${OVERRIDE}`,
+    cure: `Compare the Name with the upstream dataset's title yourself, as the upstream may have been renamed since the copy; the Name should be that title, and a version and an author-year naming the dataset's authors may follow it. ${OVERRIDE}`,
   },
   // ADR 0139, decision 5: the note's answer can only ask for a person, never fail or pass a request.
   resubmission_note_unaddressed: {

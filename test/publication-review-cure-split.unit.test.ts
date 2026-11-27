@@ -62,7 +62,7 @@ const GOLDEN: Record<string, { startable: string; notStartable?: string }> = {
     startable: `Read the dataset's text yourself; the review's answers cannot be relied on. ${TERM_OVERRIDE}`,
   },
   name_differs_from_upstream: {
-    startable: `The depositor sets Name in dataset_description.json to the upstream dataset's title; an author and year may follow it. ${TERM_OVERRIDE}`,
+    startable: `The depositor sets Name in dataset_description.json to the upstream dataset's title; a version and an author-year naming the dataset's authors may follow it. ${TERM_OVERRIDE}`,
   },
   bids_failed_at_review: {
     startable: `The depositor fixes the validation errors and requests publication again. ${TERM_OVERRIDE}`,
@@ -99,7 +99,7 @@ const GOLDEN: Record<string, { startable: string; notStartable?: string }> = {
     startable: `Read the license lineage: nemar admin dataset publish license-lineage nm000123. The depositor sends the original authors' evidence to support@nemar.org and an administrator records it against the request, which clears this reason; or the depositor corrects License in dataset_description.json. ${TERM_OVERRIDE}`,
   },
   name_upstream_unconfirmed: {
-    startable: `Compare the Name with the upstream dataset's title yourself; it should start with that title, and an author and year may follow it. ${TERM_OVERRIDE}`,
+    startable: `Compare the Name with the upstream dataset's title yourself, as the upstream may have been renamed since the copy; the Name should be that title, and a version and an author-year naming the dataset's authors may follow it. ${TERM_OVERRIDE}`,
   },
   resubmission_note_unaddressed: {
     startable: `Read the note and the previous denial yourself. ${TERM_OVERRIDE}`,
@@ -213,7 +213,7 @@ const NEUTRAL: Record<string, { startable: string; notStartable?: string }> = {
     startable: `Read the dataset's text yourself; the review's answers cannot be relied on. ${NEUTRAL_OVERRIDE}`,
   },
   name_differs_from_upstream: {
-    startable: `The depositor sets Name in dataset_description.json to the upstream dataset's title; an author and year may follow it. ${NEUTRAL_OVERRIDE}`,
+    startable: `The depositor sets Name in dataset_description.json to the upstream dataset's title; a version and an author-year naming the dataset's authors may follow it. ${NEUTRAL_OVERRIDE}`,
   },
   bids_failed_at_review: {
     startable: `The depositor fixes the validation errors and requests publication again. ${NEUTRAL_OVERRIDE}`,
@@ -248,7 +248,7 @@ const NEUTRAL: Record<string, { startable: string; notStartable?: string }> = {
     startable: `Read the license lineage. The depositor sends the original authors' evidence to support@nemar.org and an administrator records it against the request, which clears this reason; or the depositor corrects License in dataset_description.json. ${NEUTRAL_OVERRIDE}`,
   },
   name_upstream_unconfirmed: {
-    startable: `Compare the Name with the upstream dataset's title yourself; it should start with that title, and an author and year may follow it. ${NEUTRAL_OVERRIDE}`,
+    startable: `Compare the Name with the upstream dataset's title yourself, as the upstream may have been renamed since the copy; the Name should be that title, and a version and an author-year naming the dataset's authors may follow it. ${NEUTRAL_OVERRIDE}`,
   },
   resubmission_note_unaddressed: {
     startable: `Read the note and the previous denial yourself. ${NEUTRAL_OVERRIDE}`,

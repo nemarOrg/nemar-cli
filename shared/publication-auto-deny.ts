@@ -441,11 +441,10 @@ export const AUTO_DENY_CODE_COPY: Record<AutoDenyCode, AutoDenyCopy> = {
     anchor: anchor("name-not-descriptive"),
   },
   name_differs_from_upstream: {
-    statement:
-      "The dataset's Name does not start with the title of the upstream dataset it was derived from.",
+    statement: "The dataset's Name is not the title of the upstream dataset it was derived from.",
     read: "The Name in dataset_description.json at the requested commit, and the title of each upstream dataset in SourceDatasets as its registry gives it.",
     remedy:
-      'Set Name to the upstream dataset\'s title, as its registry gives it; an author and year may follow it, for example ", Lee 2019" or " (Lee et al. 2019)".',
+      'Set Name to the upstream dataset\'s title, as its registry gives it; a version and an author-year naming the dataset\'s authors may follow it, for example ", Lee 2019" or " (Lee et al., 2019)".',
     anchor: anchor("name-differs-from-upstream"),
   },
   steering_attempt: {

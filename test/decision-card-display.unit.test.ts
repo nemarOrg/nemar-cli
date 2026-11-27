@@ -102,7 +102,7 @@ const GOLDEN = `Decision card
     Lineage (now, resolved 2026-11-27T13:00:00.000Z): compatible
       Declared (as the source's registry declares it): 10.5281/zenodo.123456: Creative Commons Attribution 4.0 International
     Also: The upstream data's license could not be read.
-  Name: GREEN  The Name starts with the upstream dataset's title.
+  Name: GREEN  The Name is the upstream dataset's title.
     Upstream title (as the source's registry declares it): Resting EEG
   The dataset's own words (written by the depositor), as reviewed:
    .nemar/metadata.json:

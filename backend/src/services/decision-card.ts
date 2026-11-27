@@ -668,7 +668,7 @@ export function askedForNameOnly(d: CardDetail): boolean {
  * owner's rule of 2026-11-27): the rule itself, in words. Web-safe.
  */
 export const ASK_DEPOSITOR_NAME_SENTENCE =
-  "Ask the depositor to change the Name: it should start with the upstream dataset's title, as its registry gives it, and an author and year may follow it.";
+  "Ask the depositor to change the Name: it should be the upstream dataset's title, as its registry gives it, and a version and an author-year naming the dataset's authors may follow it.";
 /** The automatic-denial states in which a confirming run agreed that the request fails. */
 const AUTO_DENY_AGREED: readonly string[] = ["would_deny", "capped"];
 
@@ -1000,13 +1000,13 @@ function autoDenyOf(state: string | null): DecisionCard["auto_deny"] {
 
 /** What the card says of each name-rule word; `none` is a review on record that made no comparison. */
 export const UPSTREAM_NAME_LINE: Record<NameUpstreamResult | "none", string> = {
-  matches: "The Name starts with the upstream dataset's title.",
+  matches: "The Name is the upstream dataset's title.",
   differs:
-    "The Name does not start with the upstream dataset's title; it should, and an author and year may follow it.",
+    "The Name is not the upstream dataset's title; it should be, and a version and an author-year naming the dataset's authors may follow it.",
   not_applicable:
     "No upstream dataset with a title is declared, so there is no upstream title for the Name to follow.",
   unknown:
-    "Whether the Name follows the upstream dataset's title could not be determined; an administrator compares them.",
+    "Whether the Name follows the upstream dataset's title could not be determined (a record not read, or an upstream resolved to its latest version, which may have been renamed); an administrator compares them.",
   none: "No review on record compared the Name with the upstream dataset's title.",
 };
 
