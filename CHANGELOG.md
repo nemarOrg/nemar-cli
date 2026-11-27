@@ -34,6 +34,14 @@ earlier releases are described only by their generated notes.
   The derivative store's pass now resolves the `stored` checkpoint of each run it decided, so the read-only views no longer show it pending until the next stamp sync.
   The coverage's `complete` no longer counts a run whose derivative was skipped for good or lost.
 
+## 0.10.49 - 2026-11-27
+
+### Changed
+
+- **Automatic denial runs in shadow mode in production (ADR 0139 amendment).**
+  An eligible review fail gets its confirming run (Sonnet 5.5 at max), and an agreement is recorded as `would_deny`; nothing is denied and no depositor is mailed.
+  The administrators' daily digest lists the `would_deny` requests; past 25 agreements in a day they are recorded as `capped`. An administrator may review a `would_deny` commit again with `start --again`.
+
 ## 0.10.48 - 2026-11-27
 
 ### Changed
