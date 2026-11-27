@@ -2024,11 +2024,15 @@ export async function dispatchEligible(
   const recipe = findRecipe(input.recipe);
   // An unknown recipe or a placeholder is refused here, once, before any sync or read: the loop below never
   // meets either, so neither is among the words that stop it (`STOPS_A_RUN`).
-  const refused = recipe === null ? "recipe_unknown" : placeholderRefusal(recipe);
-  if (refused !== null || recipe === null) {
-    const code = refused ?? "recipe_unknown";
-    run.results.push(fail(code, ""));
-    run.stoppedBy = code;
+  if (recipe === null) {
+    run.results.push(fail("recipe_unknown", ""));
+    run.stoppedBy = "recipe_unknown";
+    return run;
+  }
+  const placeholder = placeholderRefusal(recipe);
+  if (placeholder !== null) {
+    run.results.push(fail(placeholder, ""));
+    run.stoppedBy = placeholder;
     return run;
   }
   if (input.sync !== false) await syncPipelineStamps(env);

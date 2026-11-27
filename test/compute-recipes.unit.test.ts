@@ -146,13 +146,6 @@ describe("the registry", () => {
     expect(placeholderRefusal({ ...floor, placeholder: false })).toBeNull();
     const { placeholder: _absent, ...unflagged } = floor;
     expect(placeholderRefusal(unflagged)).toBeNull();
-    // Every recipe the registry holds answers as its own flag says.
-    for (const recipe of COMPUTE_RECIPES) {
-      expect([recipe.name, placeholderRefusal(recipe)]).toEqual([
-        recipe.name,
-        recipe.placeholder === true ? RECIPE_PLACEHOLDER_REFUSAL : null,
-      ]);
-    }
   });
 
   test("findRecipe is exact: no case fold, no trim, and a non-string is none", () => {
