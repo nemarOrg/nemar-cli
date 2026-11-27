@@ -11,3 +11,13 @@ They come from the `license-scan-results` artifact of run https://github.com/nem
 The same `LICENSE` and `case.json` files live in that repository under `scripts/fixtures/license-scan/`, where the run checked every case against `scripts/ci/license-file-fact.ts`.
 
 To refresh them after a change of the pins, run that workflow again and replace each `result.json` with the artifact's.
+
+## The NEMAR-header cases (2026-11-27)
+
+`gate-cc-by-nc-4.0-{a,b,c}`, `gate-cc-by-sa-4.0-{a,b}`, `header-cc-by-4.0` and `header-cc-by-nc-4.0-and-mit` are not from that run.
+The first six are the root LICENSE files of the datasets the epic gate of 2026-11-27 reviewed (nm000677, nm000774, nm000968, nm000712, nm000924) and of nm000699, a CC-BY-4.0 dataset with the same header,
+with the dataset id on line 3 replaced by `nm000000`, because those datasets are not yet public.
+The seventh is the first of them with the MIT License text appended.
+Their `result.json` is ScanCode toolkit 32.5.0's output for that exact `LICENSE`, scanned with the workflow's options (`SCANCODE_ARGS`) from `scripts/ci/scancode-requirements.txt` in a `linux/amd64` `python:3.12.16-slim-bookworm` container,
+then trimmed with `jq` to the fields the parser reads (plus `matcher` and `rule_identifier`); no value was edited.
+The same container reproduced the runner's `cc-by-nc-4.0/result.json` `files` exactly, and the redaction left every match's rule, lines and score unchanged.
