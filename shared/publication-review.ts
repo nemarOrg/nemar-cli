@@ -43,6 +43,7 @@ import {
   type LineageOutcome,
   MAX_CREATORS,
 } from "./license-lineage.js";
+import { NAME_UPSTREAM_RESULTS, type NameUpstreamResult } from "./name-follows-upstream.js";
 import { SEMVER, isOneOf } from "./pr-review.js";
 import { PUBLICATION_DATASET_ID_RE } from "./publication-limits.js";
 import { MINIMUM_FAILURES, MIN_NAME_LENGTH, type MinimumFailure } from "./submission-minimums.js";
@@ -527,6 +528,16 @@ export interface PublicationReviewEvidence {
    * its fail from any automatic denial (`shared/publication-auto-deny.ts`).
    */
   license_file?: LicenseFileFact;
+  /**
+   * Whether the `Name` follows an upstream dataset source's title (`shared/name-follows-upstream.ts`,
+   * the owner's rule of 2026-11-27): the job's closed word, from the Name at the reviewed commit and
+   * the sources the Worker served. Present only in a version-3 block that has a lineage, and absent
+   * from every block written before the rule, which then reads as it was written. `differs` is the
+   * reason `name_differs_from_upstream` and `unknown` the reason `name_upstream_unconfirmed`; a
+   * `matches` keeps a `name_not_descriptive` finding from any automatic denial
+   * (`shared/publication-auto-deny.ts`). It is never sent to the model.
+   */
+  name_upstream?: NameUpstreamResult;
   summary: StructuralSummary;
   /**
    * What happened to each widened input ({@link REVIEW_INPUTS}), in the states a document has
@@ -895,6 +906,7 @@ export const PREVIOUS_DENIAL_SENDABLE = [
   "version_kept_after_anonymous_release",
   "question_failed",
   "steering_attempt",
+  "name_differs_from_upstream",
   "bids_failed_at_review",
   "version_already_released",
   "version_malformed",
@@ -1192,6 +1204,9 @@ const EVIDENCE_V3_KEYS = [
   "description_keys_not_shown_names",
 ] as const;
 
+/** A version-3 block written since the name rule: version 3's keys and the name's closed word. */
+const EVIDENCE_V3_NAMED_KEYS = [...EVIDENCE_V3_KEYS, "name_upstream"] as const;
+
 function parseLineage(raw: unknown, v3: boolean): ReviewLineage | null {
   if (raw === null) return null;
   const keys = v3 ? ["outcome", "credited", "resolved_at"] : ["outcome", "credited"];
@@ -1303,7 +1318,9 @@ export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
   if (!isRecord(raw)) badEvidence();
   // Version 1's keys exactly, version 2's exactly or version 3's exactly: a block is one of them,
   // never between. Version 3 is version 2 with more, so everything said of version 2 holds of it.
-  const v3 = hasExactKeys(raw as Record<string, unknown>, EVIDENCE_V3_KEYS);
+  // A version-3 block carries the name's word or not; nothing else may be added to it.
+  const named = hasExactKeys(raw as Record<string, unknown>, EVIDENCE_V3_NAMED_KEYS);
+  const v3 = named || hasExactKeys(raw as Record<string, unknown>, EVIDENCE_V3_KEYS);
   const v2 = v3 || hasExactKeys(raw as Record<string, unknown>, EVIDENCE_V2_KEYS);
   if (!v2 && !hasExactKeys(raw as Record<string, unknown>, EVIDENCE_KEYS)) badEvidence();
   const r = raw as Record<string, unknown>;
@@ -1394,6 +1411,11 @@ export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
       description_keys_not_shown,
     );
     evidence.license_file = parseLicenseFile(r.license_file, documents.license);
+  }
+  // The name's word is computed from the lineage's sources, so a block without a lineage has none.
+  if (named) {
+    if (lineage === null) badEvidence();
+    evidence.name_upstream = word(NAME_UPSTREAM_RESULTS, r.name_upstream);
   }
   return evidence as ReviewFacts;
 }
@@ -1891,6 +1913,7 @@ export const REASON_CODES = [
   "identifier_screen_needs_acknowledgment",
   "question_failed",
   "steering_attempt",
+  "name_differs_from_upstream",
   "bids_failed_at_review",
   "version_already_released",
   "version_malformed",
@@ -1903,6 +1926,7 @@ export const REASON_CODES = [
   "text_withheld",
   "question_unknown",
   "license_lineage_unconfirmed",
+  "name_upstream_unconfirmed",
   "resubmission_note_unaddressed",
   "bids_unconcluded_at_review",
   "version_missing",
@@ -2040,6 +2064,16 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     sentence: "Text in the dataset tried to instruct the reviewer.",
     cure: `Read the dataset's text yourself; the review's answers cannot be relied on. ${OVERRIDE}`,
   },
+  // The owner's rule of 2026-11-27 (ADR 0102, amended): a platform fact, from the Name and the
+  // upstream records alone, so it fails the request whatever the model answered; an automatic
+  // denial rests on it only when the model's own name question failed too (ADR 0139, amended).
+  name_differs_from_upstream: {
+    class: "fail",
+    clearedBy: "override",
+    sentence:
+      "The dataset's Name does not start with the title of the upstream dataset it was derived from.",
+    cure: `The depositor sets Name in dataset_description.json to the upstream dataset's title; an author and year may follow it. ${OVERRIDE}`,
+  },
   bids_failed_at_review: {
     class: "fail",
     clearedBy: "override",
@@ -2125,6 +2159,16 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
       "The license of an upstream source of this dataset could not be confirmed as allowing this release.",
     cure: `Read the license lineage: ${COMMAND_LINEAGE}. The depositor sends the original authors' evidence to ${LICENSE_EVIDENCE_ADDRESS} and an administrator records it against the request, which clears this reason; or the depositor corrects License in dataset_description.json. ${OVERRIDE}`,
     command: COMMAND_LINEAGE,
+  },
+  // The name rule cannot be decided (a declared source's record or title could not be read, or the
+  // Name could not): NEMAR's failure, not the depositor's, so an administrator decides and nobody is
+  // mailed (the owner's ruling of 2026-11-27: never a guess).
+  name_upstream_unconfirmed: {
+    class: "unknown",
+    clearedBy: "override",
+    sentence:
+      "Whether the dataset's Name follows the title of its upstream dataset could not be determined.",
+    cure: `Compare the Name with the upstream dataset's title yourself; it should start with that title, and an author and year may follow it. ${OVERRIDE}`,
   },
   // ADR 0139, decision 5: the note's answer can only ask for a person, never fail or pass a request.
   resubmission_note_unaddressed: {
@@ -2312,6 +2356,8 @@ export function reportReasons(report: PublicationReviewReport): Reason[] {
   if (e.lineage !== null && LINEAGE_UNCONFIRMED_OUTCOMES.includes(e.lineage.outcome)) {
     add("license_lineage_unconfirmed", e.lineage.outcome);
   }
+  if (e.name_upstream === "differs") add("name_differs_from_upstream");
+  if (e.name_upstream === "unknown") add("name_upstream_unconfirmed");
   // Fail and unknown alike ask for a person; a pass adds nothing, so a note never raises a verdict.
   if (report.note_answer === "fail" || report.note_answer === "unknown") {
     add("resubmission_note_unaddressed", report.note_answer);
