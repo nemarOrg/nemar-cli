@@ -15,6 +15,10 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.44 - 2026-11-26
+
+Pipeline checkpoints, live progress and quality views (epic #2324, ADR 0134, ADR 0137, ADR 0140): migrations 0156 to 0160, all dark while compute is off.
+
 ### Owner steps and order
 
 - **Owner steps and order (epic #2324).**
