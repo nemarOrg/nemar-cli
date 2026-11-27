@@ -661,7 +661,10 @@ export const RECIPE_SERVING_INDEX_DELTA_PATH_FLAG = "--serving-index-delta-path"
  * vector is at most 64 strings (`JobSpecSchema`), of which a run of the archive with an attested index uses 16
  * (the archive's 10, `--serving-index` and its path, `--source-commit` and the tag's commit,
  * `--serving-index-commit` and the index's), so 24 is what fits. The Worker refuses a larger delta
- * (`index_delta_unlisted`) rather than pass part of it.
+ * (`index_delta_unlisted`) rather than pass part of it. The count is the only bound applied at admission: a
+ * non-ASCII path costs six bytes a UTF-16 unit in the launch specification, so 24 long non-ASCII paths can exceed
+ * `LAUNCH_VARIABLE_BYTES_MAX`, and then the specification does not build and the dispatch answers `invalid_spec`
+ * before the claim, with nothing written.
  */
 export const RECIPE_SERVING_INDEX_MAX_DELTA_PATHS = 24;
 
