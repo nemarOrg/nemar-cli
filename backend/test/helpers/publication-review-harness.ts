@@ -52,6 +52,11 @@ export interface Harness {
   /** What the stand-in answers a dispatch with. Reset to 204 after every test. */
   dispatchStatus: number;
   /**
+   * Answers a GitHub read before the stand-in's own answers when it returns a response (a test that
+   * needs a failing or rate-limited GitHub). Null by default; reset after every test.
+   */
+  githubAnswer: ((req: Request, path: string) => Response | null) | null;
+  /**
    * Runs inside the stand-in while it answers a dispatch (whatever it answers it with), before it
    * answers.
    */
@@ -166,6 +171,7 @@ export function createHarness(): Harness {
     },
     calls: [],
     dispatchStatus: 204,
+    githubAnswer: null,
     duringDispatch: null,
     envOverrides: {},
     deferred: null,
@@ -293,7 +299,11 @@ export function createHarness(): Harness {
           if (h.duringDispatch) await h.duringDispatch();
           return new Response(h.dispatchStatus < 300 ? null : "{}", { status: h.dispatchStatus });
         }
-        return readsAnswer(req, url.pathname) ?? new Response("not found", { status: 404 });
+        return (
+          h.githubAnswer?.(req, url.pathname) ??
+          readsAnswer(req, url.pathname) ??
+          new Response("not found", { status: 404 })
+        );
       },
     });
     (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
@@ -308,6 +318,7 @@ export function createHarness(): Harness {
   afterEach(() => {
     h.calls = [];
     h.dispatchStatus = 204;
+    h.githubAnswer = null;
     h.duringDispatch = null;
     h.envOverrides = {};
     h.deferred = null;

@@ -21,6 +21,8 @@
 import { describe, expect, test } from "bun:test";
 import type { DecisionCard } from "../../shared/contract/decision-card";
 import { parseServedMetadata } from "../src/services/decision-card";
+import { CARD_HEAD_POLICY } from "../src/services/decision-card-inputs";
+import { verifyScreenHead } from "../src/services/identifier-screen";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
 import {
   seedPublicationReview,
@@ -262,4 +264,51 @@ describe("the approval's own gates on the card", () => {
     expect(c.identifier_screen.head).toBe("current");
     expect(c.next_action.action).toBe("wait");
   });
+});
+
+describe("the card's head check never stalls show", () => {
+  const refPath = `/repos/nemarDatasets/${PROD_DATASET}/git/ref/heads/main`;
+
+  test("a rate-limited GitHub is unverified at once: one try, and the card says wait", async () => {
+    let tries = 0;
+    h.githubAnswer = (_req, path) => {
+      if (path !== refPath) return null;
+      tries++;
+      return new Response('{"message":"API rate limit exceeded"}', {
+        status: 429,
+        headers: { "Retry-After": "30" },
+      });
+    };
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      state: "reported",
+      report: v3PublicationReport(),
+    });
+    const started = Date.now();
+    const c = await card();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(tries).toBe(1);
+    expect(c.identifier_screen.head).toBe("unverified");
+    expect(c.next_action.action).toBe("wait");
+  });
+
+  test("the card asks with its one-try policy; the approval gate keeps the default, which retries", async () => {
+    let tries = 0;
+    h.githubAnswer = (_req, path) => {
+      if (path !== refPath) return null;
+      tries++;
+      return new Response("unavailable", { status: 503, headers: { "Retry-After": "0" } });
+    };
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    const row = h.requestRow(requestId) as Parameters<typeof verifyScreenHead>[2];
+    const card = await verifyScreenHead(h.env(), PROD_DATASET, row, undefined, CARD_HEAD_POLICY);
+    expect(card.ok).toBe(false);
+    expect(tries).toBe(1);
+    tries = 0;
+    const gate = await verifyScreenHead(h.env(), PROD_DATASET, row);
+    expect(gate.ok).toBe(false);
+    expect(tries).toBeGreaterThan(1);
+  }, 15_000);
 });

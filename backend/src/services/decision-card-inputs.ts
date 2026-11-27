@@ -91,6 +91,12 @@ async function readRoot(
 }
 
 /**
+ * The card's head lookup: one try, interactive, so a drained rate-limit bucket or a failing GitHub is
+ * `unverified` at once instead of a sleep or a retry. The approval gate keeps its own default.
+ */
+export const CARD_HEAD_POLICY = LOOKUP_ONCE;
+
+/**
  * What the approval's own gates read that the detail does not: whether the screened commit is still
  * `main`, by the approval path's own check (`verifyScreenHead`; a lookup that fails is
  * `unverified`, as the gate refuses it), and whether an approval run holds the request right now
@@ -113,7 +119,7 @@ async function gateFactsOf(env: Bindings, detail: CardDetail): Promise<GateFacts
   if (!r) return { head: "unverified", approvalInFlight: false };
   if (detail.screen_gate === "exempt")
     return { head: "exempt", approvalInFlight: r.in_flight === 1 };
-  const outcome = await verifyScreenHead(env, detail.dataset_id, r);
+  const outcome = await verifyScreenHead(env, detail.dataset_id, r, undefined, CARD_HEAD_POLICY);
   const head = outcome.ok ? "current" : outcome.refusal.gate === "stale" ? "stale" : "unverified";
   return { head, approvalInFlight: r.in_flight === 1 };
 }
