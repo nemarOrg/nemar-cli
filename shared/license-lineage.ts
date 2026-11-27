@@ -1137,6 +1137,11 @@ export interface SourceRecord {
    * part, for display only. Absent for every other record.
    */
   parts?: NormalizedLicenseValue[];
+  /**
+   * A Zenodo concept record (`isZenodoConcept`): the DOI that names every version, whose
+   * metadata follows the latest one. Absent for every other record.
+   */
+  concept?: true;
 }
 
 /** The most creators' names a record keeps. */
@@ -2042,6 +2047,7 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
         resource_type: rtg,
         ...dataciteDescribed(a),
         evidence_url: dcUrl,
+        ...(isZenodoConcept(doi, a.relatedIdentifiers) ? { concept: true as const } : {}),
       },
       values,
       raws,
@@ -2133,6 +2139,12 @@ export function isValidCachedRecord(hit: unknown): hit is SourceRecord {
   );
 }
 
+/**
+ * The cache key prefix of a DOI's record. `doi2:` since records carry the Zenodo concept flag, so
+ * a record cached before it is read again rather than served without it.
+ */
+const DOI_CACHE_KEY = "doi2:";
+
 async function cached(
   key: string,
   cache: LineageCache | undefined,
@@ -2153,7 +2165,7 @@ async function resolveRef(
 ): Promise<SourceRecord> {
   switch (ref.kind) {
     case "doi":
-      return cached(`doi:${ref.doi}`, cache, () => resolveDoiUncached(ref.doi, o));
+      return cached(`${DOI_CACHE_KEY}${ref.doi}`, cache, () => resolveDoiUncached(ref.doi, o));
     case "url":
       return failedRecord(ref.url, "no_doi", null);
     case "figshare_article":
@@ -2185,7 +2197,7 @@ async function resolveRef(
         return failedRecord(id, "not_found", url);
       }
       const doi = normalizeDoiKey(first.id);
-      return cached(`doi:${doi}`, cache, () => resolveDoiUncached(doi, o));
+      return cached(`${DOI_CACHE_KEY}${doi}`, cache, () => resolveDoiUncached(doi, o));
     }
   }
 }
@@ -2281,6 +2293,51 @@ export function combineOutcomes(
 export interface LineageSource extends SourceRecord {
   origin: SourceOrigin;
   outcome: LineageOutcome;
+  /**
+   * The record was resolved to its latest version, not to a version the dataset declared
+   * ({@link isLatestRef}): the upstream may have changed, its title included, since the copy.
+   * Absent otherwise. The name rule (`shared/name-follows-upstream.ts`) reads it.
+   */
+  resolved_latest?: true;
+}
+
+/**
+ * A reference that names no version and is resolved to the latest one: a version-less OpenNeuro
+ * DOI or URL, a figshare article URL or figshare DOI without a version, a PhysioNet project
+ * without one.
+ */
+/**
+ * A Zenodo concept DOI's DataCite record: a `10.5281/` DOI whose record lists versions
+ * (`HasVersion`) and is not itself a version of another (`IsVersionOf`). Its title follows the
+ * latest version, so it is not the version a dataset was copied from.
+ */
+export function isZenodoConcept(doi: string, relatedIdentifiers: unknown): boolean {
+  if (!doi.startsWith("10.5281/") || !Array.isArray(relatedIdentifiers)) return false;
+  const types = relatedIdentifiers.map((r) => (isRecord(r) ? r.relationType : null));
+  return types.includes("HasVersion") && !types.includes("IsVersionOf");
+}
+
+/**
+ * A source whose record is not fixed to the version the dataset declared: a reference resolved to
+ * the latest version ({@link isLatestRef}), a Zenodo concept record, or an OSF node, whose title is
+ * edited in place. The name rule reads it as `resolved_latest`.
+ */
+export function isLatestSource(ref: SourceRef, rec: SourceRecord): boolean {
+  return isLatestRef(ref) || rec.concept === true || rec.resolver === "osf";
+}
+
+export function isLatestRef(ref: SourceRef): boolean {
+  switch (ref.kind) {
+    case "openneuro_latest":
+      return true;
+    case "figshare_article":
+    case "physionet":
+      return ref.version === null;
+    case "doi":
+      return /^10\.6084\/m9\.figshare\.(?:c\.)?\d+$/.test(ref.doi);
+    case "url":
+      return false;
+  }
 }
 
 export interface LineageResult {
@@ -2382,6 +2439,9 @@ export async function resolveLicenseLineage(
     ...rec,
     origin: refs[i].origin,
     outcome: sourceOutcome(rec, target),
+    ...(rec.status === "resolved" && isLatestSource(refs[i], rec)
+      ? { resolved_latest: true as const }
+      : {}),
   }));
   const { kept, skipped } = dropStaleRelations(resolved, refs);
   const sources: LineageSource[] = [...kept, ...unreadable];

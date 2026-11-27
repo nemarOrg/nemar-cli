@@ -434,6 +434,8 @@ export async function publicationReviewInputs(
         status: s.status,
         origin: s.origin,
         outcome: s.outcome,
+        // An older job ignores the key; the name rule reads it (`shared/name-follows-upstream.ts`).
+        ...(s.resolved_latest === true ? { resolved_latest: true as const } : {}),
       })),
       resolver_version: lineage.resolver_version,
       resolved_at: lineage.resolved_at,

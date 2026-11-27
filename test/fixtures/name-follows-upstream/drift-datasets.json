@@ -1,0 +1,198 @@
+{
+  "captured": "2026-11-27",
+  "how": "Name and SourceDatasets from nemarDatasets/<id> dataset_description.json on main (gh api, read-only); sources from resolveLicenseLineage (license-lineage/6) against the public registries",
+  "datasets": [
+    {
+      "dataset": "nm000781",
+      "name": "Defenderfer 2019; fNIRS data files for event-related vocoding/background noise study",
+      "source_datasets": [
+        {
+          "DOI": "doi:10.17632/4cjgvyg5p2",
+          "URL": "https://data.mendeley.com/datasets/4cjgvyg5p2"
+        }
+      ],
+      "sources": [
+        {
+          "id": "10.17632/4cjgvyg5p2",
+          "resolver": "datacite",
+          "resource_type": "Dataset",
+          "title": "Defenderfer 2019; fNIRS data files for event-related vocoding/background noise study",
+          "status": "resolved",
+          "origin": "source_datasets",
+          "outcome": "compatible_attribution"
+        }
+      ]
+    },
+    {
+      "dataset": "nm000690",
+      "name": "Symmetry and Visual Working Memory (SVWM)",
+      "source_datasets": [
+        {
+          "DOI": "doi:10.17605/osf.io/z7kw3",
+          "URL": "https://doi.org/10.17605/OSF.IO/Z7KW3"
+        }
+      ],
+      "sources": [
+        {
+          "id": "10.17605/osf.io/z7kw3",
+          "resolver": "osf",
+          "resource_type": "Dataset",
+          "title": "SVWM",
+          "status": "resolved",
+          "origin": "source_datasets",
+          "outcome": "compatible_attribution",
+          "resolved_latest": true
+        }
+      ]
+    },
+    {
+      "dataset": "nm000710",
+      "name": "Replication Data for: Parenting Experience Facilitates Couple’s Brain-to-Brain Synchrony (fNIRS)",
+      "source_datasets": [
+        {
+          "DOI": "doi:10.21979/n9/kf1jog",
+          "URL": "https://doi.org/10.21979/N9/KF1JOG"
+        }
+      ],
+      "sources": [
+        {
+          "id": "10.21979/n9/kf1jog",
+          "resolver": "datacite",
+          "resource_type": "Dataset",
+          "title": "Replication Data for: Parenting Experience Facilitates Couple’s Brain-to-Brain Synchrony",
+          "status": "resolved",
+          "origin": "source_datasets",
+          "outcome": "compatible_nc"
+        }
+      ]
+    },
+    {
+      "dataset": "nm000716",
+      "name": "Replication Data for: fNIRS RSFC in Tinnitus",
+      "source_datasets": [
+        {
+          "DOI": "doi:10.7910/dvn/znzzbv",
+          "URL": "https://doi.org/10.7910/DVN/ZNZZBV"
+        }
+      ],
+      "sources": [
+        {
+          "id": "10.7910/dvn/znzzbv",
+          "resolver": "datacite",
+          "resource_type": "Dataset",
+          "title": "Replication Data for: fNIRS RSFC in Tinnitus",
+          "status": "resolved",
+          "origin": "source_datasets",
+          "outcome": "compatible"
+        }
+      ]
+    },
+    {
+      "dataset": "nm000766",
+      "name": "fNIRS based dataset for motor task",
+      "source_datasets": [
+        {
+          "DOI": "doi:10.6084/m9.figshare.31871557",
+          "URL": "https://doi.org/10.6084/m9.figshare.31871557"
+        }
+      ],
+      "sources": [
+        {
+          "id": "10.6084/m9.figshare.31871557",
+          "resolver": "datacite",
+          "resource_type": "Dataset",
+          "title": "fNIRS based dataset for motor task",
+          "status": "resolved",
+          "origin": "source_datasets",
+          "outcome": "compatible_attribution",
+          "resolved_latest": true
+        }
+      ]
+    },
+    {
+      "dataset": "nm000778",
+      "name": "Both Knees fNIRS MI dataset",
+      "source_datasets": [
+        {
+          "DOI": "doi:10.6084/m9.figshare.29979529.v1",
+          "URL": "https://figshare.com/articles/dataset/Both_Knees_fNIRS_MI_dataset/29979529"
+        }
+      ],
+      "sources": [
+        {
+          "id": "10.6084/m9.figshare.29979529.v1",
+          "resolver": "datacite",
+          "resource_type": "Dataset",
+          "title": "Both Knees fNIRS MI dataset",
+          "status": "resolved",
+          "origin": "source_datasets",
+          "outcome": "compatible_attribution"
+        }
+      ]
+    },
+    {
+      "dataset": "nm000804",
+      "name": "A Guide to Parent-Child fNIRS Hyperscanning Data Analysis",
+      "source_datasets": [
+        {
+          "DOI": "doi:10.17605/osf.io/wspz4",
+          "URL": "https://osf.io/wspz4"
+        }
+      ],
+      "sources": [
+        {
+          "id": "10.17605/osf.io/wspz4",
+          "resolver": "osf",
+          "resource_type": "Text",
+          "title": "A Guide to Parent-Child fNIRS Hyperscanning Data Analysis",
+          "status": "resolved",
+          "origin": "source_datasets",
+          "outcome": "compatible_attribution",
+          "resolved_latest": true
+        }
+      ]
+    },
+    {
+      "dataset": "nm000805",
+      "name": "EEG-fNIRShybrid SMR BCI data S1-S8",
+      "source_datasets": [
+        {
+          "DOI": "doi:10.6084/m9.figshare.1619640",
+          "URL": "https://figshare.com/articles/dataset/EEG_fNIRShybrid_SMR_BCI_data_S1_S8/1619640"
+        }
+      ],
+      "sources": [
+        {
+          "id": "10.6084/m9.figshare.1619640",
+          "resolver": "datacite",
+          "resource_type": "Dataset",
+          "title": "EEG-fNIRShybrid SMR BCI data S1-S8",
+          "status": "resolved",
+          "origin": "source_datasets",
+          "outcome": "compatible_attribution",
+          "resolved_latest": true
+        }
+      ]
+    },
+    {
+      "dataset": "nm000807",
+      "name": "Missing Data Of Patient F For Chaudhary Et Al 2017 Plos Biology Publication (fNIRS)",
+      "source_datasets": [
+        {
+          "URL": "https://doi.org/10.5281/zenodo.1419151"
+        }
+      ],
+      "sources": [
+        {
+          "id": "10.5281/zenodo.1419151",
+          "resolver": "datacite",
+          "resource_type": "Dataset",
+          "title": "Missing Data Of Patient F For Chaudhary Et Al 2017 Plos Biology Publication",
+          "status": "resolved",
+          "origin": "source_datasets",
+          "outcome": "compatible_attribution"
+        }
+      ]
+    }
+  ]
+}
