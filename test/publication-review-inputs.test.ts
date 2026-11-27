@@ -33,6 +33,7 @@ import {
   type ReviewDocument,
   type ReviewInputsBody,
   ReviewInputsError,
+  answersOf,
   lineageCredited,
   parsePublicationReviewEvidence,
   parsePublicationReviewReport,
@@ -664,5 +665,56 @@ describe("the record as it is read back", () => {
       row(JSON.stringify([{ model: "claude-haiku-5-5", effort: "huge" }])),
     );
     expect(odd?.models).toBeNull();
+  });
+});
+
+describe("a LICENSE leftover goes through the same pre-send as the file (ADR 0142)", () => {
+  /** The evidence for a conclusive CC-BY-4.0 LICENSE whose added text is `leftover`. */
+  const withLeftover = (leftover: string[]) =>
+    evidenceFromDocuments(DOCS, {
+      head: HEAD,
+      anonymous: false,
+      tagsText: "",
+      bidsRuns: null,
+      summary: SUMMARY,
+      licenseFile: {
+        fact: { state: "matches", spdx: "CC-BY-4.0", additions: true, expression: null },
+        matcher: "scancode-32.5.0+spdx-3.27",
+        leftover,
+        partial: false,
+      },
+    });
+
+  test("a leftover holding a path on someone's machine is withheld for a finding, never sent", () => {
+    const { facts, cleared, license } = withLeftover([
+      "Use only as described in /Users/jdoe/terms.txt",
+    ]);
+    expect(license.text).toBe("additions_only");
+    expect(facts.documents.license).toBe("withheld_finding");
+    expect(cleared.license).toBeUndefined();
+    expect(Object.keys(facts.withheld_findings)).toContain("local-user-path");
+    const { user } = buildPublicationReviewMessages({ facts, cleared, license, nonce: NONCE });
+    expect(user).not.toContain("/Users/jdoe");
+    expect(user).not.toContain('kind="license"');
+    // The model did not see the added text, so the question it needs cannot pass.
+    const report = assemblePublicationReport(
+      { questions: ALL_PASS, findings: [], summary: "A dataset.", steering: false },
+      facts,
+      undefined,
+      { inputDigest: "a".repeat(64), resolverVersion: null, licenseMatcher: license.matcher },
+    );
+    expect(answersOf(report).answers.authors_and_license).toBe("unknown");
+  });
+
+  test("a leftover past the 4,000-character cap is cut, and the cut is a fact", () => {
+    const long = Array.from({ length: 200 }, (_, i) => `Added term number ${i} of this file.`);
+    expect(long.join("\n").length).toBeGreaterThan(4_000);
+    const { facts, cleared, license } = withLeftover(long);
+    expect(facts.documents.license).toBe("sent_cut");
+    expect(cleared.license?.endsWith("[cut]")).toBe(true);
+    expect((cleared.license ?? "").length).toBeLessThanOrEqual(4_000 + "\n[cut]".length);
+    const { user } = buildPublicationReviewMessages({ facts, cleared, license, nonce: NONCE });
+    expect(user).toContain("Added term number 0 of this file.");
+    expect(user).not.toContain("Added term number 199 of this file.");
   });
 });
