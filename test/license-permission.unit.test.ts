@@ -79,13 +79,21 @@ describe("the depositor's message", () => {
   });
 
   test("each outcome's message, filled from the basis", () => {
-    const authors = (o: "needs_permission" | "share_alike_mismatch" | "source_is_publication") =>
+    const authors = (o: "needs_permission" | "share_alike_mismatch") =>
       expect(licensePermissionRequest(DS, o, basis([SOURCE], o))).toBe(
         `The license of the upstream data (${SOURCE}, cc-by-nc-nd 4.0) does not permit this copy under cc-by. Please send evidence from the original authors that they accept this copy being published under cc-by, for example an email from them, to support@nemar.org, quoting ${DS}. An administrator will record it and the review will continue.`,
       );
     authors("needs_permission");
     authors("share_alike_mismatch");
-    authors("source_is_publication");
+    expect(
+      licensePermissionRequest(
+        DS,
+        "source_is_publication",
+        basis([SOURCE], "source_is_publication"),
+      ),
+    ).toBe(
+      `The upstream source you named (${SOURCE}, cc-by-nc-nd 4.0) is a publication, not a dataset, so its license is not the data's license. Name the dataset the data came from in dataset_description.json SourceDatasets (its DOI or repository URL), or send evidence that the original authors accept this copy under cc-by, to support@nemar.org, quoting ${DS}.`,
+    );
     expect(
       licensePermissionRequest(
         DS,
@@ -126,6 +134,29 @@ describe("the depositor's message", () => {
     expect(unread).not.toContain("drop");
   });
 
+  test("the target is named as the dataset declares it, when that is a license id of the same license", () => {
+    const declared = (d: unknown, target: PermissionBasis["target_license"] = "cc-by") =>
+      licensePermissionRequest(DS, "needs_permission", {
+        ...basis([SOURCE], "needs_permission", target),
+        target_license_declared: d as string | null,
+      });
+    expect(declared("CC-BY-4.0")).toContain(
+      "does not permit this copy under CC-BY-4.0. Please send evidence from the original authors that they accept this copy being published under CC-BY-4.0,",
+    );
+    expect(declared("CC0", "cc0")).toContain("under CC0.");
+    // Text that is not a license id, or that names another license, is never quoted.
+    for (const d of ["CC BY 4.0 <b>", "CC-BY-NC-4.0", "https://example.org/x", null, 7]) {
+      expect(declared(d)).toContain("does not permit this copy under cc-by.");
+    }
+    // The publication sentence names it too.
+    expect(
+      licensePermissionRequest(DS, "source_is_publication", {
+        ...basis([SOURCE], "source_is_publication"),
+        target_license_declared: "CC-BY-4.0",
+      }),
+    ).toContain("accept this copy under CC-BY-4.0, to support@nemar.org");
+  });
+
   test("without a basis, or with one of another outcome, the sources are left out", () => {
     for (const b of [null, basis([SOURCE], "unresolved")]) {
       expect(licensePermissionRequest(DS, "needs_permission", b)).toStartWith(
@@ -155,11 +186,37 @@ describe("the basis a review keeps", () => {
     expect(b).toEqual({
       outcome: "needs_permission",
       target_license: "cc-by",
+      target_license_declared: null,
       sources: [
         { id: SOURCE, license: "cc-by-nd", license_version: "4.0", outcome: "needs_permission" },
       ],
     });
     expect(parsePermissionBasis(JSON.stringify(b))).toEqual(b);
+  });
+
+  test("the declared License is kept when it is a license id that reads as the target", () => {
+    const of = (raw: string | null) =>
+      permissionBasisOf({
+        outcome: "needs_permission",
+        target_license: "cc-by",
+        target_license_raw: raw,
+        sources: [source(SOURCE, "needs_permission", "cc-by-nd")],
+      });
+    const kept = of("CC-BY-4.0");
+    expect(kept.target_license_declared).toBe("CC-BY-4.0");
+    expect(parsePermissionBasis(JSON.stringify(kept))).toEqual(kept);
+    for (const raw of ["Creative Commons Attribution 4.0", "CC-BY-SA-4.0", "", null]) {
+      expect(of(raw).target_license_declared).toBeNull();
+    }
+    // A basis stored before the field existed still reads, and names the target by its word.
+    const { target_license_declared: _, ...old } = kept;
+    expect(parsePermissionBasis(JSON.stringify(old))).toEqual(old);
+    // A stored declared value that is not quotable, or reads as another license, is refused.
+    for (const bad of ["CC BY <b>", "CC-BY-NC-4.0", 4]) {
+      expect(
+        parsePermissionBasis(JSON.stringify({ ...kept, target_license_declared: bad })),
+      ).toBeNull();
+    }
   });
 
   test("two compatible sources that conflict: both are behind the outcome", () => {

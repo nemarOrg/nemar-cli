@@ -33,6 +33,7 @@ import {
   type LineageResult,
   NORMALIZED_LICENSES,
   type NormalizedLicense,
+  normalizeLicense,
 } from "./license-lineage.js";
 import { PUBLICATION_DATASET_ID_RE } from "./publication-limits.js";
 
@@ -74,7 +75,32 @@ export interface BasisSource {
 export interface PermissionBasis {
   outcome: LineageOutcome;
   target_license: NormalizedLicense | null;
+  /**
+   * The dataset's License as it declares it (`CC-BY-4.0`), kept only when it is a license
+   * identifier ({@link DECLARED_TARGET}) that normalizes to `target_license`; null otherwise, and
+   * absent from a basis stored before 2026-11-27. The depositor's message names the target by it;
+   * what a permission covers never reads it.
+   */
+  target_license_declared?: string | null;
   sources: BasisSource[];
+}
+
+/**
+ * A declared License the depositor's message may quote: an SPDX-like identifier of letters,
+ * digits, dots, plus signs and hyphens (`CC-BY-4.0`, `CC0`, `ODC-By-1.0`). The value is text the
+ * depositor wrote, so anything else (spaces, markup, a URL) is never quoted.
+ */
+export const DECLARED_TARGET = /^[A-Za-z0-9][A-Za-z0-9.+-]{0,39}$/;
+
+/** The declared License when it is quotable and reads as `target`, else null. */
+export function declaredTargetOf(
+  declared: unknown,
+  target: NormalizedLicense | null,
+): string | null {
+  if (typeof declared !== "string" || target === null || !DECLARED_TARGET.test(declared)) {
+    return null;
+  }
+  return normalizeLicense(declared).license === target ? declared : null;
 }
 
 /**
@@ -84,7 +110,8 @@ export interface PermissionBasis {
  * them. A compatible outcome has no source behind it.
  */
 export function permissionBasisOf(
-  result: Pick<LineageResult, "outcome" | "target_license" | "sources">,
+  result: Pick<LineageResult, "outcome" | "target_license" | "sources"> &
+    Partial<Pick<LineageResult, "target_license_raw">>,
 ): PermissionBasis {
   const blocking = result.sources.filter((s) => !COMPATIBLE_OUTCOMES.has(s.outcome));
   const behind = isActionRequiredOutcome(result.outcome)
@@ -95,6 +122,7 @@ export function permissionBasisOf(
   return {
     outcome: result.outcome,
     target_license: result.target_license,
+    target_license_declared: declaredTargetOf(result.target_license_raw, result.target_license),
     sources: behind.slice(0, MAX_BASIS_SOURCES).map((s) => ({
       id: s.id,
       license: s.license,
@@ -131,8 +159,14 @@ export function parsePermissionBasis(raw: unknown): PermissionBasis | null {
   } catch {
     return null;
   }
-  if (!isRecord(x) || !exactKeys(x, ["outcome", "target_license", "sources"])) return null;
+  if (!isRecord(x)) return null;
+  // A basis stored before 2026-11-27 has no declared target; one stored since always has the key.
+  const declaredKey = Object.hasOwn(x, "target_license_declared");
+  const keys = ["outcome", "target_license", "sources"];
+  if (!exactKeys(x, declaredKey ? [...keys, "target_license_declared"] : keys)) return null;
   if (!isOutcome(x.outcome) || !isLicenseOrNull(x.target_license)) return null;
+  const declared = declaredKey ? x.target_license_declared : null;
+  if (declared !== null && declaredTargetOf(declared, x.target_license) === null) return null;
   if (!Array.isArray(x.sources) || x.sources.length > MAX_BASIS_SOURCES) return null;
   const sources: BasisSource[] = [];
   for (const s of x.sources as unknown[]) {
@@ -147,7 +181,12 @@ export function parsePermissionBasis(raw: unknown): PermissionBasis | null {
       outcome: s.outcome,
     });
   }
-  return { outcome: x.outcome, target_license: x.target_license, sources };
+  return {
+    outcome: x.outcome,
+    target_license: x.target_license,
+    ...(declaredKey ? { target_license_declared: declared as string | null } : {}),
+    sources,
+  };
 }
 
 /** What a recorded permission was recorded for. */
@@ -219,7 +258,7 @@ function sourceWords(s: BasisSource): string {
 /**
  * The depositor's message for an outcome that needs action, from `LINEAGE_PERMISSION_REQUEST`,
  * filled from the review's basis: each source's identifier (when quotable) and license, the target
- * license and the dataset id. Never a free-text value: identifiers that do not match a known form
+ * license as the dataset declares it (when quotable; its closed word otherwise) and the dataset id. Never a free-text value: identifiers that do not match a known form
  * are named generically, licenses are closed words, and a malformed dataset id is not quoted. With
  * no basis (a review from before bases were stored) the sources are left out.
  */
@@ -230,9 +269,11 @@ export function licensePermissionRequest(
 ): string {
   const usable = basis !== null && basis.outcome === outcome;
   const sources = usable ? basis.sources.map(sourceWords).join("; ") : "";
+  // The target as the dataset declares it (`CC-BY-4.0`), checked again here, else its closed word.
   const target =
     usable && basis.target_license !== null
-      ? licenseWords(basis.target_license, null)
+      ? (declaredTargetOf(basis.target_license_declared, basis.target_license) ??
+        licenseWords(basis.target_license, null))
       : "a license NEMAR could not read";
   const dataset = PUBLICATION_DATASET_ID_RE.test(datasetId) ? datasetId : "your dataset's id";
   let text = LINEAGE_PERMISSION_REQUEST[outcome];

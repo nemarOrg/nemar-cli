@@ -56,6 +56,7 @@ const NOTICE_SUBJECT = `Publication request needs license evidence: ${PROD_DATAS
 interface Basis {
   outcome: string;
   target_license: string | null;
+  target_license_declared?: string | null;
   sources: {
     id: string;
     license: string | null;
@@ -266,6 +267,7 @@ describe("the inputs route stores the review's basis", () => {
     expect(JSON.parse(String(h.review(reviewId).lineage_basis))).toEqual({
       outcome: "no_upstream_declared",
       target_license: "none",
+      target_license_declared: null,
       sources: [],
     });
   });
@@ -333,6 +335,33 @@ describe("the depositor's notice", () => {
       expect(h.db.query("SELECT COUNT(*) AS n FROM license_permission_notices").get()).toEqual({
         n: 0,
       });
+    });
+  });
+
+  test("a publication named as the source gets its own message, naming the declared license", async () => {
+    await accounts();
+    const article = "10.1371/journal.pone.0211710";
+    await withFakeResend(async (calls) => {
+      await reviewed({
+        outcome: "source_is_publication",
+        target_license: "cc-by",
+        target_license_declared: "CC-BY-4.0",
+        sources: [
+          {
+            id: article,
+            license: "cc-by",
+            license_version: "4.0",
+            outcome: "source_is_publication",
+          },
+        ],
+      });
+      const mails = noticesTo(calls);
+      expect(mails).toHaveLength(1);
+      const text = textOf(mails[0]?.html ?? "");
+      expect(text).toContain(
+        `The upstream source you named (${article}, cc-by 4.0) is a publication, not a dataset, so its license is not the data's license. Name the dataset the data came from in dataset_description.json SourceDatasets (its DOI or repository URL), or send evidence that the original authors accept this copy under CC-BY-4.0, to support@nemar.org, quoting ${PROD_DATASET}.`,
+      );
+      expect(text).not.toContain("does not permit this copy");
     });
   });
 

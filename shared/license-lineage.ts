@@ -391,14 +391,18 @@ export const LICENSE_EVIDENCE_ADDRESS = "support@nemar.org";
  * publication status, the notice mail and the CLI.
  *
  * The placeholders are `{sources}` (each source's identifier and license), `{target}` (the
- * dataset's license) and `{dataset}` (the dataset id). `licensePermissionRequest` in
- * `shared/license-permission.ts` fills them from the lineage result's closed words and checked
- * identifiers only, never from free text, and drops ` ({sources})` when no source can be named.
+ * dataset's License as it declares it, `CC-BY-4.0`, when that is a license identifier that reads
+ * as the license the outcome was judged against; otherwise the normalized word) and `{dataset}`
+ * (the dataset id). `licensePermissionRequest` in `shared/license-permission.ts` fills them from
+ * the lineage result's closed words and checked identifiers only, never from free text, and drops
+ * ` ({sources})` when no source can be named. `source_is_publication` has its own sentence (ADR
+ * 0139 decision 7, amendment of 2026-11-27): a paper named as the source is not a license
+ * conflict, and the first remedy is to name the dataset instead.
  */
 export const LINEAGE_PERMISSION_REQUEST: Record<ActionRequiredOutcome, string> = {
   needs_permission: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the original authors that they accept this copy being published under {target}, for example an email from them, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}. An administrator will record it and the review will continue.`,
   share_alike_mismatch: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the original authors that they accept this copy being published under {target}, for example an email from them, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}. An administrator will record it and the review will continue.`,
-  source_is_publication: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the original authors that they accept this copy being published under {target}, for example an email from them, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}. An administrator will record it and the review will continue.`,
+  source_is_publication: `The upstream source you named ({sources}) is a publication, not a dataset, so its license is not the data's license. Name the dataset the data came from in dataset_description.json SourceDatasets (its DOI or repository URL), or send evidence that the original authors accept this copy under {target}, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}.`,
   redistribution_prohibited: `The license of the upstream data ({sources}) does not permit this copy under {target}. Please send evidence from the repository that holds the upstream data, for example PhysioNet, that it permits this copy being published under {target}, to ${LICENSE_EVIDENCE_ADDRESS}, quoting {dataset}; its data use agreement may bind the original authors too, so their permission alone may not be enough. An administrator will record it and the review will continue.`,
   unresolved: `NEMAR could not read the upstream license ({sources}); reply to ${LICENSE_EVIDENCE_ADDRESS} with a link to it, quoting {dataset}, or wait for the next check.`,
 };
