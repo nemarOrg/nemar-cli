@@ -1,8 +1,9 @@
 /**
  * Where the publication review's flag is set, and where it is not (ADR 0102).
  *
- * `PUBLICATION_REVIEW_ENABLED` is `1` in `[env.dev.vars]` and absent from `[vars]`, so production is
- * dark and turning it on is a reviewed change to the configuration file. It is never a Worker
+ * `PUBLICATION_REVIEW_ENABLED` is `1` in `[env.dev.vars]` and, since the owner's decision of
+ * 2026-11-25 (epic #2182, plan step D0), in `[vars]` too, so production runs the review. Changing
+ * either value is a reviewed change to the configuration file and to this test. It is never a Worker
  * secret in this file's sense, and `wrangler deploy` replaces the Worker's variables with the ones
  * here, so a dashboard-only value would be dropped by the next deploy.
  *
@@ -14,7 +15,8 @@
  * terminal inside a live web claim included, is recorded as itself. The code is fixed; what
  * remains before production is lit is the executor's workflow sending that token (the maintainer
  * changes it) and the staging audit query showing web approvals attributed to their clickers (ADR
- * 0102, "Before it is switched on", item 7; ADR 0105, Rollout).
+ * 0102, "Before it is switched on", item 7; ADR 0105, Rollout). Both were confirmed in the pull
+ * request that lit production.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -39,13 +41,13 @@ describe("backend/wrangler-sccn.toml", () => {
     expect(reviewEnabled({ PUBLICATION_REVIEW_ENABLED: "1" })).toBe(true);
   });
 
-  test("the flag is NOT in [vars], so production is dark", () => {
-    expect(Object.keys(config.vars ?? {})).not.toContain("PUBLICATION_REVIEW_ENABLED");
+  test("the flag is on in [vars], so production runs the review (owner, 2026-11-25)", () => {
+    expect(config.vars?.PUBLICATION_REVIEW_ENABLED).toBe("1");
     expect(
       reviewEnabled({
         PUBLICATION_REVIEW_ENABLED: config.vars?.PUBLICATION_REVIEW_ENABLED as string | undefined,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   test("the flag is in no other environment's vars either", () => {

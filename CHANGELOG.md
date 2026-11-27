@@ -35,6 +35,15 @@ earlier releases are described only by their generated notes.
 
 - **The test workflow checks out nemar-process `dev` again (#2411)**, removing the `a5125c7b` pin of 0.10.44: the recipe, observation-schema and queue drift tests compare with nemar-process `dev`.
 
+## 0.10.46 - 2026-11-27
+
+### Changed
+
+- **The publication review runs in production (#2370, ADR 0102).**
+  `PUBLICATION_REVIEW_ENABLED = "1"` joins production `[vars]`, and the platform allowance rises from 50 to 150 model calls in any 24 hours; the per-depositor allowance stays 5, and an administrator's start skips it.
+  The review never approves or denies on its own: it holds the admin mail until it reports, and the approval gate reads its verdict.
+  Automatic denial stays off (`PUBLICATION_AUTO_DENY_MODE` is unset), so the first reviews are shadow runs started by hand.
+
 ## 0.10.45 - 2026-11-26
 
 ### Changed

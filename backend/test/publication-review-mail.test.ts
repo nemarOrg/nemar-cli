@@ -93,10 +93,13 @@ function env(over: Partial<Bindings> = {}): Bindings {
   } as Bindings;
 }
 
-/** A fresh native dataset id per request, so one test can seed several. */
+/**
+ * A fresh native dataset id per request, so one test can seed several. The platform-allowance
+ * trigger seeds a full day's allowance of other requests, so the range is wider than 100.
+ */
 function nextDataset(): string {
   counter += 1;
-  return `nm0006${String(counter).padStart(2, "0")}`;
+  return `nm06${String(counter).padStart(4, "0")}`;
 }
 
 /** A native request whose screen reported and whose admin mail has not gone out. */
