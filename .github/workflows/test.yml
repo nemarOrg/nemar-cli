@@ -1035,11 +1035,15 @@ jobs:
       # pre-release branch: that repo has no release train, so what is on main is
       # what runs.
       #
-      # nemarDatasets/.github is PUBLIC, so no token is needed. Sparse, non-cone, four
+      # nemarDatasets/.github is PUBLIC, so no token is needed. Sparse, non-cone, five
       # files (non-cone mode takes file paths, one per line). They land in
       # dataset-workflows-live/ at the repo root, which the unit-pure file glob does
       # not reach, so they cannot be mistaken for test files. A workflow added to
-      # this list needs its own NEMAR_*_LIVE variable in the test step below.
+      # this list needs its own NEMAR_*_LIVE variable in the test step below, except
+      # approve-publication.yml: it is not authored here, and
+      # test/approve-publication-path.unit.test.ts reads it from the directory of
+      # NEMAR_DATASET_WORKFLOW_LIVE (#2348), so it skips exactly when the onboarding
+      # parity test does.
       - name: Check out the deployed dataset workflows
         uses: actions/checkout@v4
         with:
@@ -1050,6 +1054,7 @@ jobs:
             .github/workflows/run-pr-review.yml
             .github/workflows/run-publication-review.yml
             .github/workflows/run-upstream-repull.yml
+            .github/workflows/approve-publication.yml
           sparse-checkout-cone-mode: false
           ref: main
 
