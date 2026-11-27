@@ -15,6 +15,13 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Changed
+
+- **nemar-ica is no longer a placeholder: an administrator can run it (owner decision of 2026-11-27).**
+  `nemar admin compute pipeline run nemar-ica` (with `--dataset`, or `--eligible` and `--limit`, and `--dry-run`) is no longer refused with `recipe_placeholder`; it goes through every other check a run has, on Tapis only, and stages the serving index first (ADR 0141), so a GitHub or index fault defers it (`serving_index_deferred`).
+  It is still never run by the daily dispatcher (`autoDispatch` is false), still runs on Tapis only, and still needs the owner's compute switches, the Tapis configuration and a funded GPU pool.
+  The pipeline grid and coverage now report it with `placeholder: false`, so the admin page no longer says it is a placeholder.
+
 ## 0.10.48 - 2026-11-27
 
 ### Changed
