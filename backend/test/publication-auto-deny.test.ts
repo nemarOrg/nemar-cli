@@ -14,7 +14,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { AUTO_DENY_STATE_COPY, CONFIRMING_MODEL } from "../../shared/publication-auto-deny";
-import { PUBLICATION_PROMPT_VERSION, REVIEW_INPUTS } from "../../shared/publication-review";
+import {
+  PLATFORM_DAILY_CAP,
+  PUBLICATION_PROMPT_VERSION,
+  REVIEW_INPUTS,
+} from "../../shared/publication-review";
 import { AUTO_DENY_AUDIT_ACTION } from "../../shared/resubmission-note";
 import { notifyAdminsOfScreen } from "../src/services/identifier-screen";
 import { autoDenyStep, sendAutoDenyDigest } from "../src/services/publication-auto-deny";
@@ -1033,9 +1037,9 @@ describe("a confirming run and the allowances (ADR 0139: the platform's own chec
   test("it is held by the platform's allowance: past it, the confirming run is declined and nothing denies", async () => {
     await accounts();
     h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
-    // The platform's fifty calls today, on another dataset.
+    // The platform's full allowance of calls today, on another dataset.
     const { requestId: other } = seedScreenedRequest(h.db, { datasetId: "nm000488" });
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < PLATFORM_DAILY_CAP; i++) {
       seedPublicationReview(h.db, {
         requestId: other,
         datasetId: "nm000488",

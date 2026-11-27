@@ -107,8 +107,8 @@ export const REVIEW_OVERDUE_VIEW_MINUTES = 60;
 /** Model calls one depositor's requests may cost in any 24 hours. */
 export const DEPOSITOR_DAILY_CAP = 5;
 
-/** Model calls the whole platform may spend in any 24 hours. */
-export const PLATFORM_DAILY_CAP = 50;
+/** Model calls the whole platform may spend in any 24 hours (150 from 2026-11-25, owner, epic #2182; ADR 0102 decided 50). */
+export const PLATFORM_DAILY_CAP = 150;
 
 /**
  * The line every rendering of a review ends with. ADR 0065 leaves README, Funding,
