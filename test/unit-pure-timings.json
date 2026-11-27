@@ -144,6 +144,7 @@
     "backend/test/compute-pipeline-caps.test.ts": 1385,
     "backend/test/compute-pipeline-dispatch.test.ts": 1606,
     "backend/test/compute-pipeline-eligibility.test.ts": 318,
+    "backend/test/compute-pipeline-flavor.test.ts": 5706,
     "backend/test/compute-pipeline-grid.test.ts": 5274,
     "backend/test/compute-pipeline-input.test.ts": 3017,
     "backend/test/compute-pipeline-progress-migration.test.ts": 2364,
