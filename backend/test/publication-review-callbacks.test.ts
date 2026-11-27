@@ -15,6 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   NEVER_REACHED_MODEL,
+  PLATFORM_DAILY_CAP,
   PUBLICATION_RUN_ERRORS,
   WORKER_ONLY_RUN_ERRORS,
   parsePublicationCallbackOutcome,
@@ -1837,9 +1838,9 @@ describe("an administrator's start", () => {
   const counted = () =>
     (h.db.query(PLATFORM_RANK_SQL).get(Number.MAX_SAFE_INTEGER) as { n: number }).n;
 
-  test("a restart of an attempt that reached a model is a second call: it fits at fifty", async () => {
-    // 48 other calls and this row's own earlier call are 49; the restart is the 50th.
-    fillPlatform(48);
+  test("a restart of an attempt that reached a model is a second call: it fits at the cap", async () => {
+    // Cap minus two other calls and this row's own earlier call; the restart is the cap-th call.
+    fillPlatform(PLATFORM_DAILY_CAP - 2);
     const target = startable("errored", "model_unavailable", 0, PROD_DATASET, true);
     const out = await startPublicationReview(h.env(), {
       requestId: target.requestId,
@@ -1850,12 +1851,12 @@ describe("an administrator's start", () => {
     expect(state(target.reviewId)).toMatchObject({ state: "dispatched", attempts: 2 });
   });
 
-  test("and it is declined at fifty-one, where counting it once would have let it through", async () => {
-    // 49 other calls and this row's own earlier call are 50. Counted once the restart would
-    // read 50 and pass; it is a second call, so it is the 51st, and the platform's cap holds.
-    fillPlatform(49);
+  test("and it is declined one past the cap, where counting it once would have let it through", async () => {
+    // Cap-minus-one other calls and this row's own earlier call fill the cap. Counted once the restart would
+    // read the cap and pass; it is a second call, so it is one past the cap, and the platform's cap holds.
+    fillPlatform(PLATFORM_DAILY_CAP - 1);
     const target = startable("errored", "model_unavailable", 0, PROD_DATASET, true);
-    expect(counted()).toBe(50);
+    expect(counted()).toBe(PLATFORM_DAILY_CAP);
     const out = await startPublicationReview(h.env(), {
       requestId: target.requestId,
       datasetId: PROD_DATASET,
@@ -1872,19 +1873,19 @@ describe("an administrator's start", () => {
 
   test("a restart the platform declines does not erase the call the row already spent", async () => {
     // The row's earlier call was real. Declining the restart must leave it counted: written off,
-    // the tally dropped by one, the next start was admitted, and fifty-one calls were made in a day.
-    fillPlatform(49);
+    // the tally dropped by one, the next start was admitted, and one call past the cap was made in a day.
+    fillPlatform(PLATFORM_DAILY_CAP - 1);
     const target = startable("unreported", undefined, 120, PROD_DATASET, true);
-    expect(counted()).toBe(50);
+    expect(counted()).toBe(PLATFORM_DAILY_CAP);
     const out = await startPublicationReview(h.env(), {
       requestId: target.requestId,
       datasetId: PROD_DATASET,
       ...admin,
     });
     expect(out.reason).toBe("platform_limit");
-    expect(counted()).toBe(50);
+    expect(counted()).toBe(PLATFORM_DAILY_CAP);
 
-    // So the next start, of another request, is still the fifty-first and is declined.
+    // So the next start, of another request, is still one past the cap and is declined.
     const other = seedScreenedRequest(h.db, { datasetId: "nm000481" });
     const next = await startPublicationReview(h.env(), {
       requestId: other.requestId,
@@ -1895,9 +1896,9 @@ describe("an administrator's start", () => {
   });
 
   test("a restart whose dispatch fails does not erase the call the row already spent", async () => {
-    fillPlatform(48);
+    fillPlatform(PLATFORM_DAILY_CAP - 2);
     const target = startable("errored", "model_unavailable", 0, PROD_DATASET, true);
-    expect(counted()).toBe(49);
+    expect(counted()).toBe(PLATFORM_DAILY_CAP - 1);
     h.dispatchStatus = 500;
     const out = await startPublicationReview(h.env(), {
       requestId: target.requestId,
@@ -1911,9 +1912,9 @@ describe("an administrator's start", () => {
       nonce: null,
     });
     // The failed attempt is free, the call before it is not.
-    expect(counted()).toBe(49);
+    expect(counted()).toBe(PLATFORM_DAILY_CAP - 1);
 
-    // One more start fits (the fiftieth); the one after it does not.
+    // One more start fits (the last within the cap); the one after it does not.
     h.dispatchStatus = 204;
     const a = seedScreenedRequest(h.db, { datasetId: "nm000481" });
     const b = seedScreenedRequest(h.db, { datasetId: "nm000482" });
@@ -1938,7 +1939,7 @@ describe("an administrator's start", () => {
     for (const outcome of ["declined", "dispatch_failed", "started"] as const) {
       test(`restarting a spent ${rowState}${detail ? ` (${detail})` : ""} row that ${outcome === "started" ? "goes ahead" : `ends ${outcome}`} never lowers what is counted`, async () => {
         const target = startable(rowState as never, detail, 120, PROD_DATASET, true);
-        if (outcome === "declined") fillPlatform(49);
+        if (outcome === "declined") fillPlatform(PLATFORM_DAILY_CAP - 1);
         const before = counted();
         h.dispatchStatus = outcome === "dispatch_failed" ? 500 : 204;
         await startPublicationReview(h.env(), {
@@ -1954,7 +1955,7 @@ describe("an administrator's start", () => {
   }
 
   test("a declined row costs one call, not two, when it is restarted", async () => {
-    fillPlatform(49);
+    fillPlatform(PLATFORM_DAILY_CAP - 1);
     const target = startable("declined", "depositor_limit");
     const out = await startPublicationReview(h.env(), {
       requestId: target.requestId,
@@ -1963,21 +1964,21 @@ describe("an administrator's start", () => {
     });
     expect(out.reason).toBe("redispatched");
     expect(state(target.reviewId).attempts).toBe(1);
-    // One more other call and the same restart is the 51st.
+    // One more other call and the same restart is one past the cap.
   });
 
   test("a declined row, the one kind that never reached a model, is not counted when it is declined again", async () => {
-    // Fifty other calls: the platform is full, and the declined row holds nothing of it.
-    fillPlatform(50);
+    // Cap-many other calls: the platform is full, and the declined row holds nothing of it.
+    fillPlatform(PLATFORM_DAILY_CAP);
     const target = startable("declined", "depositor_limit");
-    expect(counted()).toBe(50);
+    expect(counted()).toBe(PLATFORM_DAILY_CAP);
     const out = await startPublicationReview(h.env(), {
       requestId: target.requestId,
       datasetId: PROD_DATASET,
       ...admin,
     });
     expect(out.reason).toBe("platform_limit");
-    expect(counted()).toBe(50);
+    expect(counted()).toBe(PLATFORM_DAILY_CAP);
   });
 
   test("without the callback secret or a GitHub credential nothing is sent, and the row says why", async () => {

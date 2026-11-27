@@ -1131,3 +1131,11 @@ Where the two differ, this is the later text.
 5. **An approval that leaves the request `approving` is not a success.**
    See ADR 0105, decision 12: `approve` exits 1 and `next` counts it as failed.
 
+
+## Amendment 2026-11-25 (owner, epic #2182): the platform cap is 150, and production is lit
+
+The owner raised the platform's allowance (judgment call 9) from 50 to 150 model calls in any 24 hours, so the publication queue (363 requests on 2026-11-25) can be reviewed in days rather than weeks.
+The per-depositor allowance stays at 5, and an administrator's start still skips it.
+In the same change, `PUBLICATION_REVIEW_ENABLED = "1"` joins production `[vars]`.
+The items of "Before it is switched on" that remained open are listed in that pull request, and it merged only after the owner confirmed each one.
+ADR 0139 builds on this review.
