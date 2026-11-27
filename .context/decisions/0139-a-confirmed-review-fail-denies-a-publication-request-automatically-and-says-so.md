@@ -187,15 +187,18 @@ A container's license is read from what it contains, never from a summary that c
 Measured on the depositor's sources after the first hotfix:
 
 - **A DataCite `Collection`'s own rights are never used.**
-  A figshare collection (`10.6084/m9.figshare.c.<id>`) is judged by its members: the resolver lists them through figshare's API and reads each member's license, and the most restrictive wins.
+  A figshare collection (`10.6084/m9.figshare.c.<id>`) is judged by its members: the resolver lists them through figshare's API and reads each member's license.
   `10.6084/m9.figshare.c.6979581.v1` declares CC BY 4.0 on DataCite, while figshare gives the collection no license and its one member is CC0.
   A collection with no member, more than ten, or a member whose license cannot be read is `unresolved`.
   Any other repository's collection is `unresolved`: an administrator decides.
 - **An OSF project**, an OSF DOI whose DataCite resourceType is `Project` (OSF registers projects as `Text`, as `10.17605/osf.io/f8sq3`, or as `Dataset`), holds data.
-  It is read from OSF's API whatever DataCite's rights say: the node's license and each child component's, the most restrictive winning, and a child that declares none counts as none.
-  A children list that cannot be read, or that has more than one page, leaves no verdict.
+  It is read from OSF's API whatever DataCite's rights say: the node's license and each direct child component's, and a child that declares none counts as none.
+  A children list that cannot be read, or that has more than one page, leaves no verdict, and so does a child with children of its own: the tree is not walked, and an administrator decides.
   Every other `Text` record stays a publication.
 - **A Crossref `component`** (supplementary material) is judged only for PLOS (`10.1371/`), whose policy puts supplementary files under the article's CC BY.
   A PLOS component takes the license Crossref gives it, else its article's version-of-record license (the article from `relation.is-component-of`, else the DOI without its `.sNNN` suffix; the PLOS file `10.1371/journal.pone.0303144.s001` is not in DataCite).
   Every other publisher's component, and a PLOS component with no license from either, is `unresolved`, never compatible by default; such a record is never cached.
+- **Each part is judged on its own.**
+  A container's members or children are never merged into one license: each is judged against the dataset's license, and they combine as separate sources do (the most restrictive outcome, and a conflict such as share-alike beside NonCommercial needs permission).
+  One merged rank would read CC BY-SA beside CC BY-NC as NonCommercial alone, and a CC BY-SA 4.0 part beside a 3.0 one as compatible with a 3.0 target.
 - Genuine publications stay publications: `10.5281/zenodo.6529724` and `10.6084/m9.figshare.28309157` are `JournalArticle` records.
