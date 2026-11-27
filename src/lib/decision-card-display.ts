@@ -150,7 +150,7 @@ export function decisionCardLines(card: unknown): string[] {
       : [];
     out.push(
       `  Authors: ${a.count}${ph > 0 ? chalk.red(`, ${ph} placeholder${ph === 1 ? "" : "s"}`) : ""}${
-        flagged.length > 0 ? ` (${flagged.join("; ")})` : ""
+        flagged.length > 0 ? ` (flagged: ${flagged.join("; ")})` : ""
       }`,
     );
   }

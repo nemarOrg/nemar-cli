@@ -110,7 +110,7 @@ const GOLDEN = `Decision card
     License      CC-BY-4.0
     Authors      Ada Lovelace; TBD
     Version      1.0.0
-  Authors: 2, 1 placeholder (TBD)
+  Authors: 2, 1 placeholder (flagged: TBD)
   Questions:
     complete_and_honest  pass     [note] other
     meets_standards      pass
