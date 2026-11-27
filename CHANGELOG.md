@@ -15,6 +15,13 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Changed
+
+- **nemar-ica is handed a serving index built after its version's tag when only NEMAR's own metadata changed since (ADR 0144).**
+  One GitHub compare of the tag's commit and the index's admits the index when every path between them is under `.nemar/` or `.github/`, or is a `.gitattributes` file; the job's specification records both commits (`ahead_of_tag`), and the run is handed the index's commit as `--source-commit`, which is the one the recipe accepts the index with.
+  Any other commit is refused with a word that says why (`index_behind_tag`, `index_diverged`, `index_content_changed`, `index_delta_unlisted`) and the run goes ahead without the index; a compare GitHub cannot answer defers the run.
+  Of 40 sampled datasets whose index is newer than their tag, 33 are now admitted (#2461).
+
 ### Fixed
 
 - **Every Worker-dispatched run of the archive is handed its version's tag commit, so its derivative can be stored (ADR 0143).**
