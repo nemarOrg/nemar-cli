@@ -65,7 +65,7 @@ One description key is withheld from the model in 34 of the 37 reviews, and the 
   the header gains these lines in the same change.
 - **`unavailable` is never silent after deploy 3.**
   Before the workflow change it is expected; after it, it means the install, the sandbox or the scan broke.
-  The card's license panel then says "License matcher unavailable" as its amber reason, and the administrators' existing review mail and the daily digest of ADR 0139 decision 4 carry the same line, so a broken matcher shows on the first review it touches.
+  The card's license panel then says "License matcher unavailable" as its amber reason, and the administrators' existing review mail carries the same line, so a broken matcher shows on the first review it touches (the daily digest of ADR 0139 decision 4 lists automatic denials only and does not carry it).
 - **Its cost.**
   The download is about 153 MB (the ScanCode wheel is 126 MB), and the environment is about 667 MB installed, 573 MB of it the license index.
   A cold install took 20 seconds on a laptop, so 30 to 60 seconds is the estimate on a GitHub runner; one file scans in about 5 seconds, start-up included.
