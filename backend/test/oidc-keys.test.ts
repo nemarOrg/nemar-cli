@@ -169,8 +169,10 @@ describe("the private key is ciphertext, readable only under OIDC_SECRET", () =>
     await bootstrap();
     for (const row of rows()) {
       expect(() => JSON.parse(row.private_jwk_encrypted)).toThrow();
-      expect(row.private_jwk_encrypted).not.toContain("kty");
-      expect(row.private_jwk_encrypted).not.toContain("P-256");
+      // Quoted members, which no base64 text can hold: the bare words occur in random ciphertext.
+      expect(row.private_jwk_encrypted).not.toContain('"kty"');
+      expect(row.private_jwk_encrypted).not.toContain('"P-256"');
+      expect(row.private_jwk_encrypted).toMatch(/^[A-Za-z0-9+/]+=*$/);
     }
   });
 
