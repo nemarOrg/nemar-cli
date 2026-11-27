@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.51 - 2026-11-27
+
 ### Fixed
 
 - **The license notice no longer mails depositors wrongly (resolver version 4; ADR 0139 decision 7 and ADR 0142 decision 3, amendments of 2026-11-27).**
