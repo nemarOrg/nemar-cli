@@ -451,7 +451,7 @@ Not verified against a real tenant, and listed so nobody reads it as fact: how t
    A tuple whose stamp failed is not a candidate of the queue for 7 days after the failure, nor once it has failed 3 times (both initial, `RETRY_COOLDOWN_DAYS` and `MAX_FAILED_ATTEMPTS`), so datasets that keep failing cannot take the page of every run.
    Only failures a dataset can cause count toward either: the platform's failure codes, a cancel, and the words for the Worker's and the registry's own faults (`NON_DATASET_FAILURE_WORDS`) do not, so transient errors on three days cannot shut a dataset out until its version changes.
    The cooldown and the cap govern the queue and the cron only: an administrator's dispatch of one named dataset bypasses both, and is still refused for a live stamp, a held tuple or an ineligible dataset.
-   A placeholder recipe (`nemar-ica`) is refused on every path with `recipe_placeholder`.
+   A placeholder recipe (`nemar-ica` until 2026-11-27, when it was lifted; none since) is refused on every path with `recipe_placeholder`.
 4. **The image digest a recipe job passes is checked against the launcher's provenance.**
    `--image-digest` is the caller's claim and the recipe cannot check it.
    `verifyResults` compares the one value the recorded specification passes with the digest `provenance.json` says the launcher ran, and fails the job `result_verification_failed` with `image_digest_mismatch` (flagged for an administrator) on a difference, a missing flag, a malformed value or a second flag.

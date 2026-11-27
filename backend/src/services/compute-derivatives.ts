@@ -2,7 +2,8 @@
  * The derivative store (portable compute, card V1b; ADR 0123 as amended 2026-11-16; plan D14): a finished
  * pipeline job's product becomes a keyed, retained derivative in a private bucket of its own.
  *
- *   `syncDerivatives`        one bounded pass: free what is due, key the stamps that have no derivative, and copy
+ *   `syncDerivatives`        one bounded pass: free what is due, key the stamps that have no derivative, copy,
+ *                            and resolve the decided runs' `stored` checkpoint (`resolveDecidedStored`)
  *   `runComputeDerivativesCron`  the daily call: production only, one `syncDerivatives`
  *   `promoteDerivative`      `canary` to `catalog` (an administrator), `catalog` to `published` (the owner only)
  *   `listDerivatives`, `getDerivativeView`   what an administrator reads
@@ -42,7 +43,10 @@
 import {
   COMPUTE_RECIPES,
   RECIPE_PRODUCT_OUTPUT_PREFIX,
+  RECIPE_SERVING_INDEX_COMMIT_FLAG,
+  RECIPE_SERVING_INDEX_DELTA_PATH_FLAG,
   RECIPE_SERVING_INDEX_FLAG,
+  RECIPE_SOURCE_COMMIT_FLAG,
   type RecipeInput,
   findRecipe,
   recipeCheckpointMap,
@@ -71,16 +75,21 @@ import {
   inputDigestV2,
   validateDerivativeKeyFields,
 } from "../../../shared/contract/derivatives.js";
-import { QUALITY_TABLE_MAX_BYTES } from "../../../shared/contract/quality-route.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { VERSION_DOI_SQL } from "./anonymity.js";
+import {
+  DERIVATIVE_OBJECT_PREFIX,
+  RECORD_READ_MAX_BYTES,
+  TABLE_READ_MAX_BYTES,
+} from "./compute-derivative-constants.js";
 import {
   PIPELINE_ELIGIBLE_SQL,
   type PipelineEnv,
   VERSION_TAG_SQL,
   pipelineEligibleSql,
 } from "./compute-pipeline-eligibility.js";
+import { resolveDecidedStored } from "./compute-pipeline-progress.js";
 import { OUTPUTS_BODY_CEILING_BYTES } from "./compute-records.js";
 import {
   type ComputeS3,
@@ -116,9 +125,6 @@ export const DERIVATIVE_STAMPS_PER_CALL = 20;
 /** The failed or expired rows one call cleans at most. */
 export const DERIVATIVE_ROWS_PER_CLEANUP = 10;
 
-/** The most a derivative row's objects are named by: `d/<key>/<relative path>`. */
-export const DERIVATIVE_OBJECT_PREFIX = "d/";
-
 /** The description a stored derivative carries, beside its files. */
 export const DERIVATIVE_DESCRIPTION_FILE = "derivative.json";
 
@@ -129,15 +135,9 @@ export const DERIVATIVE_DESCRIPTION_FORMAT = "nemar.derivative.v1";
 export const DERIVATIVE_PROMOTE_AUDIT_ACTION = "compute.derivative.promoted";
 export const DERIVATIVE_SYNC_AUDIT_ACTION = "compute.derivatives.sync";
 
-/** The recipe's dataset record is at most 256 KB; the read bound is the stamp sync's own. */
-export const RECORD_READ_MAX_BYTES = 512 * 1024;
-
-/**
- * The recordings table of a dataset of 25,000 stores is a few megabytes; this is a bound, not a size. It is
- * the quality route's own (`QUALITY_TABLE_MAX_BYTES`), so every reader of a run's table (reconciliation,
- * keying, the admin listing and the processing endpoint) takes the same tables.
- */
-export const TABLE_READ_MAX_BYTES = QUALITY_TABLE_MAX_BYTES;
+// Declared in the leaf module the progress and quality modules read them from (no import cycle), and
+// re-exported here for the callers that always took them from the store.
+export { DERIVATIVE_OBJECT_PREFIX, RECORD_READ_MAX_BYTES, TABLE_READ_MAX_BYTES };
 
 /** The most JSON the record's `process` block may be for the description to carry it. */
 const PROCESS_BLOCK_MAX_BYTES = 16 * 1024;
@@ -404,9 +404,25 @@ function tableHasTransientCode(text: string): boolean | null {
   return false;
 }
 
+/** Every value a specification's arguments hand with `flag` (the flag and its value, or `flag=value`). */
+function flagValues(args: readonly string[], flag: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === flag) out.push(args[i + 1] ?? "");
+    else if (a.startsWith(`${flag}=`)) out.push(a.slice(flag.length + 1));
+  }
+  return out;
+}
+
+/** Every value a specification's arguments hand as `--source-commit`. */
+const handedSourceCommits = (args: readonly string[]): string[] =>
+  flagValues(args, RECIPE_SOURCE_COMMIT_FLAG);
+
 /**
  * Decide one stamp, in the order of ADR 0123 decision 7 and card V1b item 9, the first check that fails
- * deciding the word: the stamp states a digest; the spec names no `--recording`; no row of the recordings
+ * deciding the word: the stamp states a digest; the spec names no `--recording`; a BIDS stamp's digest is the
+ * commit the spec hands as `--source-commit`, when it hands one; no row of the recordings
  * table has a transient code; for a Zarr input the record's `stores_unread` is an empty list, its
  * `stores_content` a non-empty list, the paths of its rows exactly its `stores` (each once), and the
  * RECOMPUTED `inputDigestV2` of those rows equals the record's `input_digest` and the stamp's; last, the eight
@@ -448,10 +464,48 @@ export async function keyStamp(stores: Stores, stamp: CandidateStamp): Promise<K
         if (flagged !== 1 || at < 0 || spec.args[at + 1] !== SERVING_INDEX_CONTAINER_PATH) {
           return unkeyable("serving_index_unattested");
         }
+        // An index admitted ahead of its tag (ADR 0144) is handed with the TAG's commit, the one its admission
+        // was compared with, and attested with the index's own commit and the recorded number of changed paths;
+        // the index's commit is provenance and is not keyed. An index of the tag's own commit is attested by
+        // nothing.
+        const ahead = staged.ahead_of_tag;
+        const attested = flagValues(spec.args, RECIPE_SERVING_INDEX_COMMIT_FLAG);
+        const deltaPaths = flagValues(spec.args, RECIPE_SERVING_INDEX_DELTA_PATH_FLAG);
+        if (ahead !== undefined) {
+          const handed = handedSourceCommits(spec.args);
+          if (
+            handed.length !== 1 ||
+            handed[0] !== ahead.tag_commit ||
+            attested.length !== 1 ||
+            attested[0] !== ahead.index_commit ||
+            deltaPaths.length !== ahead.changed_path_count
+          ) {
+            return unkeyable("serving_index_unattested");
+          }
+        } else if (attested.length > 0 || deltaPaths.length > 0) {
+          return unkeyable("serving_index_unattested");
+        }
         servingIndex = `sha256:${staged.sha256}`;
       } else {
-        if (flagged > 0) return unkeyable("serving_index_unattested");
+        // No index staged: nothing names one, and nothing attests one.
+        if (
+          flagged > 0 ||
+          flagValues(spec.args, RECIPE_SERVING_INDEX_COMMIT_FLAG).length > 0 ||
+          flagValues(spec.args, RECIPE_SERVING_INDEX_DELTA_PATH_FLAG).length > 0
+        ) {
+          return unkeyable("serving_index_unattested");
+        }
         servingIndex = SERVING_INDEX_NONE;
+      }
+    }
+    // A BIDS stamp's `git:` digest is the commit its record states. When the dispatcher handed the run a commit
+    // (`--source-commit` in the RECORDED specification, ADR 0143), the digest must be exactly that commit: a
+    // record that states another, or a specification that hands two, is `digest_mismatch`, never keyed as if
+    // the run had read what it claims. A specification from before the dispatcher handed one is not checked.
+    if (stamp.input === "bids") {
+      const handed = handedSourceCommits(spec.args);
+      if (handed.length > 1 || (handed.length === 1 && stamp.input_digest !== `git:${handed[0]}`)) {
+        return unkeyable("digest_mismatch");
       }
     }
 
@@ -1210,8 +1264,9 @@ const bounded = (requested: number | undefined, fallback: number, most: number):
 
 /**
  * One bounded pass over the store: mark what is due `expired` and delete the objects of failed and expired rows,
- * decide the stamps that have no derivative (a row for each keyable one), and copy. Nothing here throws for a
- * stamp or a row: each is handled in its own try and counted. With the store dark it answers
+ * decide the stamps that have no derivative (a row for each keyable one), copy, and resolve the `stored`
+ * checkpoint of the runs whose derivative is decided. Nothing here throws for a stamp or a row: each is handled
+ * in its own try and counted. With the store dark it answers
  * `{ available: false }` and writes nothing.
  */
 export async function syncDerivatives(
@@ -1299,6 +1354,16 @@ export async function syncDerivatives(
     console.error(`[compute-derivatives] copy_scan_failed error=${errorName(err)}`);
     counts.errored++;
   }
+
+  // 4. Each run whose derivative is now decided (a skip logged, a row stored, failed or expired) has its `stored`
+  //    checkpoint resolved now, as many as this pass can have decided, so the grid, the coverage and a run's
+  //    detail (which never sync) read the decision at once; the stamp sync resolves any left over. It never
+  //    throws: a row that cannot be resolved is logged and counted by it.
+  const stored = await resolveDecidedStored(
+    db,
+    DERIVATIVE_STAMPS_PER_CALL + DERIVATIVE_ROWS_PER_CLEANUP,
+  );
+  counts.errored += stored.errored;
   return { available: true, ...counts };
 }
 

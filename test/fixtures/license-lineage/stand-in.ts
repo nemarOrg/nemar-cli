@@ -40,6 +40,13 @@ export interface Override {
   delayMs?: number;
   /** The body to answer with (with `status`), for a 200 that is not a record. */
   body?: string;
+  /** Headers to answer with (with `status`), such as `Retry-After`. */
+  headers?: Record<string, string>;
+  /**
+   * Apply to only the first `times` matching requests, then answer with the recording: a
+   * transient failure that a retry gets past. Every matching request when omitted.
+   */
+  times?: number;
 }
 
 export interface StandIn {
@@ -47,8 +54,11 @@ export interface StandIn {
   origin: string;
   requests: string[];
   misses: string[];
-  /** Answer `GET <origin>/api<path>` (the NEMAR API a spawned CLI is configured with) with `body`. */
-  setApi(path: string, body: unknown): void;
+  /**
+   * Answer `GET <origin>/api<path>` (the NEMAR API a spawned CLI is configured with) with `body`,
+   * and `status` (200 when omitted).
+   */
+  setApi(path: string, body: unknown, status?: number): void;
   /** Set an HTTP condition on every request whose key contains `match`. */
   override(match: string, o: Override): void;
   stop(): void;
@@ -60,7 +70,7 @@ export function startStandIn(): StandIn {
     table.set(keyOf(r.method, r.registry, r.path, r.body?.query), r);
   }
   const overrides: Array<[string, Override]> = [];
-  const api = new Map<string, unknown>();
+  const api = new Map<string, { body: unknown; status: number }>();
   const requests: string[] = [];
   const misses: string[] = [];
   const server = Bun.serve({
@@ -79,12 +89,17 @@ export function startStandIn(): StandIn {
       if (registry === "api") {
         const sub = url.pathname.slice("/api".length);
         if (sub === "/notices") return Response.json({ notices: [] });
-        if (api.has(sub)) return Response.json(api.get(sub));
+        const answer = api.get(sub);
+        if (answer) return Response.json(answer.body, { status: answer.status });
         return Response.json({ error: "Not found" }, { status: 404 });
       }
-      const o = overrides.find(([m]) => key.includes(m))?.[1];
+      const entry = overrides.find(([m, ov]) => key.includes(m) && (ov.times ?? 1) > 0);
+      const o = entry?.[1];
+      if (o && o.times !== undefined) o.times--;
       if (o?.delayMs) await Bun.sleep(o.delayMs);
-      if (o?.status) return new Response(o.body ?? "{}", { status: o.status });
+      if (o?.status) {
+        return new Response(o.body ?? "{}", { status: o.status, headers: o.headers });
+      }
       const rec = table.get(key);
       if (!rec) {
         misses.push(key);
@@ -104,15 +119,17 @@ export function startStandIn(): StandIn {
       openalex: `${origin}/openalex`,
       openneuro: `${origin}/openneuro`,
       physionet: `${origin}/physionet`,
+      osf: `${origin}/osf`,
     },
     origin,
     requests,
     misses,
-    setApi: (path, body) => {
-      api.set(path, body);
+    setApi: (path, body, status = 200) => {
+      api.set(path, { body, status });
     },
     override: (match, o) => {
-      overrides.push([match, o]);
+      // A copy: `times` counts down here, never in the caller's object.
+      overrides.push([match, { ...o }]);
     },
     stop: () => server.stop(true),
   };

@@ -155,3 +155,10 @@ The owner reads the shadow results on the queue before switching to `on`, which 
 The daily cap stays unset (25); past 25 agreements in a day, an agreement is recorded as `capped`, not `would_deny`, and the confirming run has been spent either way.
 The daily digest lists the `would_deny` rows to the administrators.
 A `would_deny` first run may be reviewed again by an administrator (`start --again`), because nothing was denied.
+
+## Amendment 2026-11-27 (owner, epic #2449): the record names the license matcher
+
+Decision 9's record gains the license matcher version (`scancode-32.5.0+spdx-3.27`), and decision 7's lineage records when it was resolved (ADR 0142).
+A LICENSE file that names a different license from the `License` field (`license_file.state` `matches_other`) lowers `authors_and_license` to `unknown`,
+and decision 1 gains a condition: while the state is `matches_other`, a `fail` of `authors_and_license` is not eligible for an automatic denial, whatever finding it carries (`license_inconsistent` included),
+because both runs would see the same platform fact and their agreement would check nothing.

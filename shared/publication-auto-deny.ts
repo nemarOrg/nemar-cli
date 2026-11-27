@@ -12,7 +12,9 @@
  * digest; for a named (not anonymous) request still waiting for its decision, whose review is the
  * one in force; on a dataset with fewer than {@link MAX_EARLIER_AUTO_DENIALS} earlier automatic
  * denials. Nothing about the identifier screen, the license lineage or the infrastructure is ever
- * an eligible reason: those are not in the lists below, and a test pins that.
+ * an eligible reason: those are not in the lists below, and a test pins that. Nor is a fail of
+ * `authors_and_license` while the LICENSE file names another license than the `License` field
+ * ({@link licenseFileDiffers}; ADR 0142, and ADR 0139 as amended on 2026-11-27).
  */
 
 import {
@@ -159,9 +161,37 @@ export type Eligibility =
   | { eligible: false; why: IneligibleWhy };
 
 /**
+ * The LICENSE file was identified as another license than the `License` field (a version-3
+ * report's `license_file.state` is `matches_other`). Both runs would see that same platform fact
+ * and likely return the same blocker, so their agreement would check nothing: while it holds, a
+ * fail of `authors_and_license` is never eligible, whatever finding it carries
+ * (`license_inconsistent` included). The other questions keep their eligibility.
+ */
+export function licenseFileDiffers(report: PublicationReviewReport): boolean {
+  return report.evidence.license_file?.state === "matches_other";
+}
+
+/** The finding codes about the license itself, which the differing file decides whatever question carries them. */
+const LICENSE_FINDING_CODES: readonly PublicationFindingCode[] = [
+  "license_missing",
+  "license_inconsistent",
+];
+
+/**
+ * A finding about the license, under any question: one of {@link LICENSE_FINDING_CODES}, or any
+ * finding about the LICENSE document. While {@link licenseFileDiffers}, none is eligible, or a
+ * model could carry the same blocker to another question and deny through it.
+ */
+function isAboutTheLicense(f: PublicationReviewReport["findings"][number]): boolean {
+  return f.document === "license" || LICENSE_FINDING_CODES.includes(f.code);
+}
+
+/**
  * The eligible codes a report gives by itself: `steering_attempt` when it steered, and every
- * blocker finding of {@link AUTO_DENY_FINDING_CODES} against a question it failed. Empty when its
- * derived verdict is not `fail`.
+ * blocker finding of {@link AUTO_DENY_FINDING_CODES} against a question it failed, except, while
+ * {@link licenseFileDiffers}, one against `authors_and_license` or one about the license under any
+ * question ({@link isAboutTheLicense}). Empty when its derived verdict
+ * is not `fail`.
  */
 export function eligibleCodesOf(report: PublicationReviewReport): {
   codes: AutoDenyCode[];
@@ -178,7 +208,10 @@ export function eligibleCodesOf(report: PublicationReviewReport): {
   const failed = new Set(
     reasons.filter((r) => r.code === "question_failed").map((r) => r.detail ?? ""),
   );
+  const differs = licenseFileDiffers(report);
+  if (differs) failed.delete("authors_and_license" satisfies Question);
   for (const f of report.findings) {
+    if (differs && isAboutTheLicense(f)) continue;
     if (
       f.severity === "blocker" &&
       failed.has(f.question) &&

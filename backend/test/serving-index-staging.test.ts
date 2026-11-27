@@ -8,14 +8,16 @@
  *      kept under their SHA-256, and the size and digest are the bytes';
  *  (b) an index of another commit is refused, and so is one that differs from the tag by metadata only (the
  *      Zarr input's `metadata_only` allowance is never asked for: no compare is requested);
- *  (c) every other failure is a word, and none refuses the run;
+ *  (c) every other failure is a word, and none refuses the run; the tag's commit is the dispatcher's, read before
+ *      staging for every run of the archive: a GitHub fault defers the run for as long as it lasts and an absent
+ *      tag refuses it (ADR 0143), so staging is handed the commit and asks GitHub nothing;
  *  (d) nemar-ica's archive job carries the index's path and the tag's commit, and records the digest or the word;
  *  (e) the launch specification carries a staged index, and nothing of an absent one;
  *  (f) the serving index route signs the copy the RECORDED specification names, and refuses every other job
  *      with the one answer of the launcher's door.
  *
- * nemar-ica stays a placeholder (no path dispatches it), so the dispatch is exercised through the functions it
- * calls, in its order: `stageServingIndex`, `recipeJobSpec`, `createJob`, `buildLaunch`.
+ * The dispatch is exercised through the functions it calls, in its order: `stageServingIndex`, `recipeJobSpec`,
+ * `createJob`, `buildLaunch` (a run through the admin route is `compute-pipeline-input.test.ts`'s).
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -39,9 +41,13 @@ import { createJob } from "../src/services/compute-jobs";
 import { buildLaunch } from "../src/services/compute-lifecycle";
 import {
   SERVING_INDEX_DEFERRED_WORD,
+  SOURCE_COMMIT_DEFERRED_WORD,
+  dispatchPipelineJob,
   recipeJobSpec,
   servingIndexForRun,
   servingIndexRefusal,
+  sourceCommitForRun,
+  sourceCommitRefusal,
 } from "../src/services/compute-pipeline";
 import { servingIndexKey } from "../src/services/compute-records";
 import { signComputeToken } from "../src/services/compute-tokens";
@@ -53,6 +59,10 @@ import {
   isServingIndexFault,
   stageServingIndex,
 } from "../src/services/serving-index-staging";
+import {
+  SERVING_INDEX_MAX_GITATTRIBUTES_FILES,
+  isNemarOwnedMetadataPath,
+} from "../src/services/zarr-source-check";
 import type { Bindings } from "../src/types/bindings";
 import {
   CALLBACK_SECRET,
@@ -148,53 +158,47 @@ describe("the index is staged only when it was built from the tag's own commit",
     const text = indexText(T);
     github.tag(ID, TAG, T);
     github.index(ID, text);
-    const staged = await stageServingIndex(devEnv(), ID, TAG);
+    const staged = await stageServingIndex(devEnv(), ID, T);
     const bytes = new TextEncoder().encode(text);
-    expect(staged).toEqual({
-      staged: true,
-      sha256: sha(bytes),
-      size: bytes.length,
-      sourceCommit: T,
-    });
+    expect(staged).toEqual({ staged: true, sha256: sha(bytes), size: bytes.length });
     const kept = await fx.harness.records.get(servingIndexKey(sha(bytes)));
     expect(new Uint8Array(await (kept as R2ObjectBody).arrayBuffer())).toEqual(bytes);
-    // The tag is looked up as a tag; no compare is ever asked.
-    expect(github.log.some((r) => r.path.endsWith(`/commits/refs/tags/${TAG}`))).toBe(true);
+    // Staging is handed the tag's commit and asks GitHub nothing: no tag, no compare.
+    expect(github.log.filter((r) => r.path.startsWith("/repos/"))).toEqual([]);
     expect(compareRequests()).toEqual([]);
   });
 
-  test("an index of another commit is not staged, and nothing is kept (MUTATION: accept any commit)", async () => {
+  test("an index of another commit that GitHub does not show on the tag's line is index_diverged, and nothing is kept (MUTATION: accept any commit)", async () => {
     github.tag(ID, TAG, T);
     github.index(ID, indexText(S));
-    expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
+    expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
       staged: false,
-      reason: "source_commit_differs",
+      reason: "index_diverged",
     });
     expect(await servingCopies()).toEqual([]);
   });
 
-  test("an index that differs from the tag by metadata only is refused too: metadata_only is never asked (MUTATION: fall back to checkZarrSource's allowance)", async () => {
+  test("an index ahead of the tag by NEMAR-owned metadata only is staged, with what was admitted, from one compare (ADR 0144; MUTATION: refuse every other commit)", async () => {
+    const text = indexText(S);
     github.tag(ID, TAG, T);
-    github.index(ID, indexText(S));
-    // What GitHub would answer: S is ahead of T by a metadata path only, which the Zarr input accepts.
+    github.index(ID, text);
     github.compare(ID, T, S, {
       status: "ahead",
       behind_by: 0,
       ahead_by: 1,
       files: [{ filename: ".nemar/zarr.json", status: "modified" }],
     });
-    expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
-      staged: false,
-      reason: "source_commit_differs",
+    const bytes = new TextEncoder().encode(text);
+    expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
+      staged: true,
+      sha256: sha(bytes),
+      size: bytes.length,
+      ahead: { tagCommit: T, indexCommit: S, deltaPaths: [".nemar/zarr.json"] },
     });
-    expect(compareRequests()).toEqual([]);
-    expect(await servingCopies()).toEqual([]);
-  });
-
-  test("a tag without its leading v is found as the Zarr check finds it", async () => {
-    github.tag(ID, "1.0.0", T);
-    github.index(ID, indexText(T));
-    expect((await stageServingIndex(devEnv(), ID, TAG)).staged).toBe(true);
+    expect(compareRequests().map((r) => r.path)).toEqual([
+      `/repos/nemarDatasets/${ID}/compare/${T}...${S}`,
+    ]);
+    expect(await servingCopies()).toEqual([servingIndexKey(sha(bytes))]);
   });
 });
 
@@ -243,20 +247,11 @@ describe("anything else stages nothing, with a word, and never throws", () => {
       },
       "index_commit_unusable",
     ],
-    ["a tag GitHub does not have", () => github.index(ID, indexText(T)), "tag_absent"],
-    [
-      "a tag GitHub cannot answer",
-      () => {
-        github.tag(ID, TAG, { http: 502 });
-        github.index(ID, indexText(T));
-      },
-      "github_unreadable",
-    ],
   ];
   for (const [label, arrange, reason] of cases) {
     test(`${label}: ${reason}`, async () => {
       arrange();
-      expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({ staged: false, reason });
+      expect(await stageServingIndex(devEnv(), ID, T)).toEqual({ staged: false, reason });
       expect(await servingCopies()).toEqual([]);
     });
   }
@@ -264,20 +259,10 @@ describe("anything else stages nothing, with a word, and never throws", () => {
   test("an index over the recipe's 64 MiB is not read past its bound (MUTATION: drop the bound)", async () => {
     github.tag(ID, TAG, T);
     github.index(ID, { stream: " ".repeat(COMPUTE_SERVING_INDEX_MAX_BYTES + 1) });
-    expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
+    expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
       staged: false,
       reason: "index_too_large",
     });
-  });
-
-  test("production without the GitHub App asks nothing and stages nothing", async () => {
-    github.tag(ID, TAG, T);
-    github.index(ID, indexText(T));
-    expect(await stageServingIndex(fx.env(), ID, TAG)).toEqual({
-      staged: false,
-      reason: "no_github_credentials",
-    });
-    expect(github.log).toEqual([]);
   });
 
   test("a key that holds other bytes is never overwritten, and nothing is staged (MUTATION: keep whatever is there)", async () => {
@@ -287,7 +272,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
     await fx.harness.records.put(servingIndexKey(sha(text)), "other bytes");
     let staged: unknown;
     const lines = await logged(async () => {
-      staged = await stageServingIndex(devEnv(), ID, TAG);
+      staged = await stageServingIndex(devEnv(), ID, T);
     });
     expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
     // Its own line, with the digest, never the generic one (MUTATION: share the put failure's line).
@@ -301,8 +286,8 @@ describe("anything else stages nothing, with a word, and never throws", () => {
   test("a copy already kept with the same bytes is staged again, as one object", async () => {
     github.tag(ID, TAG, T);
     github.index(ID, indexText(T));
-    const first = await stageServingIndex(devEnv(), ID, TAG);
-    const second = await stageServingIndex(devEnv(), ID, TAG);
+    const first = await stageServingIndex(devEnv(), ID, T);
+    const second = await stageServingIndex(devEnv(), ID, T);
     expect(second).toEqual(first);
     expect(await servingCopies()).toHaveLength(1);
   });
@@ -316,7 +301,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
       staged = await stageServingIndex(
         { ...env, COMPUTE_RECORDS: undefined } as unknown as Bindings,
         ID,
-        TAG,
+        T,
       );
     });
     expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
@@ -340,7 +325,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
     } as unknown as R2Bucket;
     let staged: unknown;
     const lines = await logged(async () => {
-      staged = await stageServingIndex({ ...env, COMPUTE_RECORDS: broken }, ID, TAG);
+      staged = await stageServingIndex({ ...env, COMPUTE_RECORDS: broken }, ID, T);
     });
     expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
     expect(lines.filter((l) => l.startsWith("[serving-index]"))).toEqual([
@@ -390,7 +375,7 @@ describe("an index the recipe cannot use is index_unusable, and the run goes ahe
     test(`${label}: index_unusable, nothing kept, and no deferral`, async () => {
       github.tag(ID, TAG, T);
       github.index(ID, text);
-      expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
+      expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
         staged: false,
         reason: "index_unusable",
       });
@@ -409,7 +394,7 @@ describe("an index the recipe cannot use is index_unusable, and the run goes ahe
       github.reset();
       github.tag(ID, TAG, T);
       github.index(ID, indexText(T, over));
-      expect((await stageServingIndex(devEnv(), ID, TAG)).staged, JSON.stringify(over)).toBe(true);
+      expect((await stageServingIndex(devEnv(), ID, T)).staged, JSON.stringify(over)).toBe(true);
     }
   });
 });
@@ -417,7 +402,7 @@ describe("an index the recipe cannot use is index_unusable, and the run goes ahe
 // --- (c3): a fault defers the run, for at most 24 hours ------------------------------------------------------
 
 describe("a fault defers the run; after 24 hours, or for an absent index, it runs without one", () => {
-  const run = (env: Bindings) => servingIndexForRun(env, ica, "bids", ID, TAG);
+  const run = (env: Bindings) => servingIndexForRun(env, ica, "bids", ID, TAG, T);
   const deferredStamps = async (env: Bindings) =>
     (
       await env.DB.prepare(
@@ -434,14 +419,6 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
       .run();
 
   for (const [label, arrange, reason] of [
-    [
-      "GitHub cannot be read",
-      () => {
-        github.tag(ID, TAG, { http: 502 });
-        github.index(ID, indexText(T));
-      },
-      "github_unreadable",
-    ],
     [
       "the index cannot be read",
       () => {
@@ -472,11 +449,10 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
     });
   }
 
-  test("a fault 24 hours after the first deferral runs without the index, recording the fault (MUTATION: defer for ever; measure from the newest deferral)", async () => {
+  test("a fault 24 hours after the first deferral runs without the index, recording the fault, and with the tag's commit (MUTATION: defer for ever; measure from the newest deferral)", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
-    github.index(ID, indexText(T));
+    github.index(ID, { http: 503 });
     expect((await run(env)).kind).toBe("deferred");
     expect((await run(env)).kind).toBe("deferred");
     // The first deferral 25 hours ago and the second an hour ago: the wait is measured from the first.
@@ -485,16 +461,40 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
     ).run();
     expect(await run(env)).toEqual({
       kind: "run",
-      servingIndex: { staged: false, reason: "github_unreadable" },
+      servingIndex: { staged: false, reason: "index_unreadable" },
     });
-    const spec = icaSpec({ staged: false, reason: "github_unreadable" });
-    expect(spec.serving_index).toEqual({ reason: "github_unreadable" });
+    const spec = icaSpec({ staged: false, reason: "index_unreadable" });
+    expect(spec.serving_index).toEqual({ reason: "index_unreadable" });
+    expect(spec.args.slice(-2)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, T]);
+  });
+
+  test("a deferral of the run's commit in between does not restart the 24 hours (MUTATION: count source_commit_deferred as another kind)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.index(ID, { http: 503 });
+    expect((await run(env)).kind).toBe("deferred");
+    // A later pass could not read the tag's commit: the run is deferred for that, by another word.
+    github.tag(ID, TAG, { http: 502 });
+    expect(await sourceCommitForRun(env, ica, "bids", ID, TAG)).toMatchObject({
+      kind: "deferred",
+      reason: "github_unreadable",
+    });
+    // The first deferral, of the index, was 25 hours ago; the commit's deferral an hour ago.
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_stamps SET created_at = datetime('now', CASE WHEN refusal_code = ?1 THEN '-25 hours' ELSE '-1 hours' END)",
+    )
+      .bind(SERVING_INDEX_DEFERRED_WORD)
+      .run();
+    expect(await run(env)).toEqual({
+      kind: "run",
+      servingIndex: { staged: false, reason: "index_unreadable" },
+    });
   });
 
   test("a fault under 24 hours keeps deferring (MUTATION: end the wait early)", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, { http: 503 });
     expect((await run(env)).kind).toBe("deferred");
     await backdate(env, 23);
     expect((await run(env)).kind).toBe("deferred");
@@ -503,7 +503,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
   test("an earlier run's deferral never shortens a later run's wait", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, { http: 503 });
     expect((await run(env)).kind).toBe("deferred");
     await backdate(env, 48);
     // That run went ahead and ended: a failed stamp of the same tuple.
@@ -524,9 +524,8 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
         github.tag(ID, TAG, T);
         github.index(ID, indexText(S));
       },
-      "source_commit_differs",
+      "index_diverged",
     ],
-    ["a tag GitHub does not have", () => github.index(ID, indexText(T)), "tag_absent"],
     [
       "an index the recipe cannot use",
       () => {
@@ -540,7 +539,10 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
       const env = devEnv();
       await seedEegDataset(env, ID);
       arrange();
-      expect(await run(env)).toEqual({ kind: "run", servingIndex: { staged: false, reason } });
+      expect(await run(env)).toEqual({
+        kind: "run",
+        servingIndex: { staged: false, reason },
+      });
       expect(await deferredStamps(env)).toEqual([]);
     });
   }
@@ -557,7 +559,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
   test("a live stamp of the tuple refuses the deferral's claim as live_attempt_exists", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, { http: 503 });
     await env.DB.prepare(
       `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, input, attempt, state)
        VALUES (?1, ?2, ?3, ?4, ?5, 'bids', 1, 'dispatched')`,
@@ -570,7 +572,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
   test("the dispatch answers a deferral with serving_index_deferred, the word, the stamp and when it runs without the index (MUTATION: dispatch through a deferral)", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, { http: 503 });
     const before = Date.now();
     const deferred = await run(env);
     if (deferred.kind !== "deferred") throw new Error("not deferred");
@@ -580,7 +582,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
       code: "serving_index_deferred",
       datasetId: ID,
       version: TAG,
-      reason: "github_unreadable",
+      reason: "index_unreadable",
       stampId: deferred.stampId,
       runsWithoutIndexAfter: deferred.runsWithoutIndexAfter,
     });
@@ -607,7 +609,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
   test("exactly 1,440 minutes after the first deferral the run goes ahead; a minute short it is deferred", async () => {
     const env = devEnv();
     await seedEegDataset(env, ID);
-    github.tag(ID, TAG, { http: 502 });
+    github.index(ID, { http: 503 });
     expect((await run(env)).kind).toBe("deferred");
     const setAge = (minutes: number) =>
       env.DB.prepare(
@@ -634,7 +636,7 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
 });
 
 describe("a 403 is read with the dataset row: an absent index runs at once, a ready copy's 403 defers", () => {
-  const run = (env: Bindings) => servingIndexForRun(env, ica, "bids", ID, TAG);
+  const run = (env: Bindings) => servingIndexForRun(env, ica, "bids", ID, TAG, T);
   const S3 = {
     S3_BUCKET: "example-bucket",
     AWS_REGION: "us-east-2",
@@ -723,21 +725,166 @@ describe("a 403 is read with the dataset row: an absent index runs at once, a re
   }
 });
 
+// --- (c4): every run of the archive is handed its tag's commit, or waits for it (ADR 0143) -------------------------
+
+describe("every run of the archive reads its tag's commit first: a fault defers it for as long as it lasts, an absent tag refuses it", () => {
+  const stamps = async (env: Bindings) =>
+    (
+      await env.DB.prepare(
+        "SELECT state, refusal_code, job_id FROM compute_pipeline_stamps WHERE dataset_id = ?1 ORDER BY id",
+      )
+        .bind(ID)
+        .all<{ state: string; refusal_code: string | null; job_id: string | null }>()
+    ).results;
+
+  for (const recipe of [ica, floor]) {
+    test(`${recipe.name}: the tag's commit, found with or without the tag's leading v, and nothing written`, async () => {
+      const env = devEnv();
+      await seedEegDataset(env, ID);
+      github.tag(ID, "1.0.0", T);
+      expect(await sourceCommitForRun(env, recipe, "bids", ID, TAG)).toEqual({
+        kind: "commit",
+        commit: T,
+      });
+      expect(await stamps(env)).toEqual([]);
+    });
+  }
+
+  test("a tag the repository does not have is tag_absent: refused as version_tag_absent with nothing written, and logged (MUTATION: run it without a commit)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    let decided: unknown;
+    const lines = await logged(async () => {
+      decided = await sourceCommitForRun(env, floor, "bids", ID, TAG);
+    });
+    expect(decided).toEqual({ kind: "tag_absent" });
+    expect(lines).toContain(`[compute-pipeline] version_tag_absent dataset=${ID} version=${TAG}`);
+    expect(await stamps(env)).toEqual([]);
+    expect(sourceCommitRefusal({ kind: "tag_absent" }, ID, TAG)).toEqual({
+      ok: false,
+      code: "version_tag_absent",
+      datasetId: ID,
+      version: TAG,
+    });
+    expect(COMPUTE_PIPELINE_REFUSAL_STATUS.version_tag_absent).toBe(409);
+  });
+
+  for (const [label, env, arrange, reason] of [
+    [
+      "GitHub cannot answer",
+      () => devEnv(),
+      () => github.tag(ID, TAG, { http: 502 }),
+      "github_unreadable",
+    ],
+    [
+      "production without the GitHub App",
+      () => fx.env(),
+      () => github.tag(ID, TAG, T),
+      "no_github_credentials",
+    ],
+  ] as Array<[string, () => Bindings, () => void, string]>) {
+    test(`${label}: deferred with a refused stamp, and still deferred two days on, never run without its commit (MUTATION: let the deferral run out; run on a fault)`, async () => {
+      const on = env();
+      await seedEegDataset(on, ID);
+      arrange();
+      const first = await sourceCommitForRun(on, floor, "bids", ID, TAG);
+      expect(first).toMatchObject({ kind: "deferred", reason });
+      expect(await stamps(on)).toEqual([
+        { state: "refused", refusal_code: SOURCE_COMMIT_DEFERRED_WORD, job_id: null },
+      ]);
+      await on.DB.prepare(
+        "UPDATE compute_pipeline_stamps SET created_at = datetime('now', '-48 hours') WHERE dataset_id = ?1",
+      )
+        .bind(ID)
+        .run();
+      expect(await sourceCommitForRun(on, floor, "bids", ID, TAG)).toMatchObject({
+        kind: "deferred",
+        reason,
+      });
+      if (first.kind !== "deferred") throw new Error("not deferred");
+      expect(sourceCommitRefusal(first, ID, TAG)).toEqual({
+        ok: false,
+        code: "source_commit_deferred",
+        datasetId: ID,
+        version: TAG,
+        reason,
+        stampId: first.stampId,
+      });
+      expect(COMPUTE_PIPELINE_REFUSAL_STATUS.source_commit_deferred).toBe(503);
+    });
+  }
+
+  test("production without the GitHub App asks GitHub nothing", async () => {
+    const env = fx.env();
+    await seedEegDataset(env, ID);
+    await sourceCommitForRun(env, floor, "bids", ID, TAG);
+    expect(github.log).toEqual([]);
+  });
+
+  test("a live stamp of the tuple refuses the deferral's claim as live_attempt_exists", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, { http: 502 });
+    await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, input, attempt, state)
+       VALUES (?1, ?2, ?3, ?4, ?5, 'bids', 1, 'dispatched')`,
+    )
+      .bind(ID, TAG, floor.name, floor.version, floor.engine)
+      .run();
+    expect(await sourceCommitForRun(env, floor, "bids", ID, TAG)).toEqual({
+      kind: "live_attempt_exists",
+    });
+  });
+
+  test("through the dispatch, a floor run of the archive is deferred or refused before any job is made (MUTATION: dispatch without reading the commit)", async () => {
+    const env = devEnv();
+    await seedPipelinesAccount(env);
+    await fundPipelines(env);
+    await seedEegDataset(env, ID);
+    const admin = { kind: "admin", userId: 1 } as const;
+    const dispatch = () =>
+      dispatchPipelineJob(env, { recipe: "nemar-floor", datasetId: ID, actor: admin });
+    github.tag(ID, TAG, { http: 502 });
+    expect(await dispatch()).toMatchObject({
+      ok: false,
+      code: "source_commit_deferred",
+      reason: "github_unreadable",
+    });
+    github.reset();
+    expect(await dispatch()).toMatchObject({ ok: false, code: "version_tag_absent", version: TAG });
+    const jobs = await env.DB.prepare("SELECT COUNT(*) AS n FROM compute_jobs").first<{
+      n: number;
+    }>();
+    expect(jobs?.n).toBe(0);
+    expect((await stamps(env)).map((s) => [s.state, s.refusal_code])).toEqual([
+      ["refused", SOURCE_COMMIT_DEFERRED_WORD],
+    ]);
+    // And with the tag there, the job is made and handed the commit.
+    github.tag(ID, TAG, T);
+    const made = await dispatch();
+    expect(made).toMatchObject({ ok: true });
+  });
+});
+
 // --- (d): the job --------------------------------------------------------------------------------------------
 
 const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
 const floor = findRecipe("nemar-floor") as NonNullable<ReturnType<typeof findRecipe>>;
 const image = { ref: RUNTIME_IMAGE, digest: RUNTIME_IMAGE_DIGEST };
 const HEX = "7".repeat(64);
-const STAGED = { staged: true as const, sha256: HEX, size: 812, sourceCommit: T };
+const STAGED = { staged: true as const, sha256: HEX, size: 812 };
 
-function icaSpec(servingIndex: Parameters<typeof recipeJobSpec>[1]["servingIndex"]) {
+function icaSpec(
+  servingIndex: Parameters<typeof recipeJobSpec>[1]["servingIndex"],
+  sourceCommit: string | undefined = T,
+) {
   return recipeJobSpec(ica, {
     datasetId: ID,
     tag: TAG,
     input: "bids",
     image,
     env: { ENVIRONMENT: "development" },
+    ...(sourceCommit === undefined ? {} : { sourceCommit }),
     ...(servingIndex === undefined ? {} : { servingIndex }),
   });
 }
@@ -759,10 +906,67 @@ describe("nemar-ica's archive job names what was staged", () => {
     expect(spec.serving_index).toEqual({ sha256: HEX, size: 812 });
   });
 
-  test("none staged: the arguments are the archive's own, and the word is recorded (MUTATION: hand the flag anyway)", () => {
-    const spec = icaSpec({ staged: false, reason: "source_commit_differs" });
-    expect(spec.args).toEqual(base);
-    expect(spec.serving_index).toEqual({ reason: "source_commit_differs" });
+  test("none staged: the arguments hand the run the tag's commit and no index, and the word is recorded (MUTATION: hand the flag anyway; hand the commit only with a staged index)", () => {
+    for (const reason of [
+      "source_commit_differs",
+      "no_index",
+      "index_unusable",
+      "index_too_large",
+      "index_unreadable",
+    ] as const) {
+      const spec = icaSpec({ staged: false, reason });
+      expect(spec.args).toEqual([...base, RECIPE_SOURCE_COMMIT_FLAG, T]);
+      expect(spec.args).not.toContain(RECIPE_SERVING_INDEX_FLAG);
+      expect(spec.serving_index).toEqual({ reason });
+    }
+  });
+
+  test("a run of the archive with no commit, or one that is not a full commit, is a programming error, never a job (ADR 0143)", () => {
+    expect(() =>
+      recipeJobSpec(ica, {
+        datasetId: ID,
+        tag: TAG,
+        input: "bids",
+        image,
+        env: { ENVIRONMENT: "development" },
+        servingIndex: { staged: false, reason: "no_index" },
+      }),
+    ).toThrow(RangeError);
+    expect(() => icaSpec({ staged: false, reason: "no_index" }, T.slice(0, 12))).toThrow(
+      RangeError,
+    );
+  });
+
+  test("an admitted index is handed with the tag's commit and recorded with both; an admission that does not fit the commit handed is a programming error (ADR 0144)", () => {
+    const ahead = { tagCommit: T, indexCommit: S, deltaPaths: [".gitattributes", ".nemar/a.json"] };
+    const spec = icaSpec({ ...STAGED, ahead });
+    // The exact vector nemar-process#108 reads: the tag's commit, then the index's and every changed path.
+    expect(spec.args).toEqual([
+      ...base,
+      RECIPE_SERVING_INDEX_FLAG,
+      SERVING_INDEX_CONTAINER_PATH,
+      RECIPE_SOURCE_COMMIT_FLAG,
+      T,
+      "--serving-index-commit",
+      S,
+      "--serving-index-delta-path",
+      ".gitattributes",
+      "--serving-index-delta-path",
+      ".nemar/a.json",
+    ]);
+    // An index of the tag's own commit is attested by nothing (MUTATION: attest every staged index).
+    expect(icaSpec(STAGED).args).not.toContain("--serving-index-commit");
+    expect(spec.serving_index).toEqual({
+      sha256: HEX,
+      size: 812,
+      ahead_of_tag: { tag_commit: T, index_commit: S, changed_path_count: 2 },
+    });
+    // Compared with another tag commit than the one handed (MUTATION: drop the check).
+    expect(() => icaSpec({ ...STAGED, ahead: { ...ahead, tagCommit: S, indexCommit: T } })).toThrow(
+      RangeError,
+    );
+    // Ahead by nothing: the index's commit is the tag's (MUTATION: drop the check).
+    expect(() => icaSpec({ ...STAGED, ahead: { ...ahead, indexCommit: T } })).toThrow(RangeError);
   });
 
   test("a recipe that keys the index cannot be specified without what was staged", () => {
@@ -776,10 +980,13 @@ describe("nemar-ica's archive job names what was staged", () => {
       input: "bids",
       image,
       env: { ENVIRONMENT: "development" },
+      sourceCommit: T,
       servingIndex: STAGED,
     });
     expect(spec.serving_index).toBeUndefined();
     expect(spec.args).not.toContain(RECIPE_SERVING_INDEX_FLAG);
+    // It is handed the tag's commit all the same (ADR 0143).
+    expect(spec.args.slice(-2)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, T]);
   });
 });
 
@@ -831,13 +1038,840 @@ const tokenOf = async (env: Bindings, jobId: string) =>
     CALLBACK_SECRET,
   );
 
+/** The `.gitattributes` patch of on007823 between its tag and its index's commit, as GitHub's compare gave it. */
+const ON007823_GITATTRIBUTES_PATCH = [
+  "@@ -1,15 +1,8 @@",
+  " * annex.backend=SHA256E",
+  " **/.git* annex.largefiles=nothing",
+  "-*.bval annex.largefiles=nothing",
+  "-*.bvec annex.largefiles=nothing",
+  "-*.json text eol=lf annex.largefiles=largerthan=1mb",
+  "-*.tsv text eol=lf annex.largefiles=largerthan=1mb",
+  "-phenotype/*.tsv annex.largefiles=anything",
+  "-dataset_description.json annex.largefiles=nothing",
+  "-datacite.yml annex.largefiles=nothing",
+  "-datacite.yaml annex.largefiles=nothing",
+  "-.bidsignore annex.largefiles=nothing",
+  "-CHANGES text eol=lf annex.largefiles=nothing",
+  "-README* text eol=lf annex.largefiles=nothing",
+  "-LICENSE* text eol=lf annex.largefiles=nothing",
+  "-CITATION.cff text eol=lf annex.largefiles=nothing",
+  "+*.json text eol=lf",
+  "+*.tsv text eol=lf",
+  "+CHANGES text eol=lf",
+  "+README* text eol=lf",
+].join("\n");
+
+/** on007823's whole `.gitattributes` at its index's commit, as GitHub's contents API gave it. */
+const ON007823_GITATTRIBUTES_AT_S = [
+  "* annex.backend=SHA256E",
+  "**/.git* annex.largefiles=nothing",
+  "*.json text eol=lf",
+  "*.tsv text eol=lf",
+  "CHANGES text eol=lf",
+  "README* text eol=lf",
+  "LICENSE* text eol=lf",
+  "CITATION.cff text eol=lf",
+  "",
+].join("\n");
+
+/**
+ * Files of on007823's tree at its index's commit, as GitHub's recursive listing gave them: of its 1,537 files (none
+ * listed truncated), the top level, NEMAR's own and one recording's. Its root `.gitattributes` is its only one.
+ */
+const ON007823_TREE_AT_S = [
+  ".bidsignore",
+  ".datalad/config",
+  ".gitattributes",
+  ".github/workflows/bids-validation.yml",
+  ".github/workflows/pr-merge.yml",
+  ".github/workflows/version-check.yml",
+  ".nemar/availability-report.json",
+  ".nemar/metadata.json",
+  "CHANGES",
+  "README.md",
+  "datacite.yml",
+  "dataset_description.json",
+  "participants.json",
+  "participants.tsv",
+  "sub-CUCOV001/eeg/sub-CUCOV001_coordsystem.json",
+  "sub-CUCOV001/eeg/sub-CUCOV001_electrodes.tsv",
+  "sub-CUCOV001/eeg/sub-CUCOV001_task-COVID_channels.tsv",
+  "sub-CUCOV001/eeg/sub-CUCOV001_task-COVID_eeg.edf",
+  "sub-CUCOV001/eeg/sub-CUCOV001_task-COVID_eeg.json",
+  "sub-CUCOV001/eeg/sub-CUCOV001_task-COVID_events.tsv",
+];
+
+describe("an index built from another commit than the tag's (on007823 in the local run of 2026-11-27)", () => {
+  /** on007823's delta between its tag and its index's commit, as GitHub's compare lists it, patch included. */
+  const ON007823_DELTA = [
+    { filename: ".gitattributes", status: "modified", patch: ON007823_GITATTRIBUTES_PATCH },
+    ...[
+      ".github/workflows/bids-validation.yml",
+      ".github/workflows/version-check.yml",
+      ".nemar/availability-report.json",
+      ".nemar/metadata.json",
+    ].map((filename) => ({ filename, status: "modified" })),
+  ];
+
+  test("ahead by NEMAR's own metadata (on007823's delta): staged, the index's commit recorded as provenance, and the run is still handed the TAG's commit (MUTATION: hand the index's commit)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, { status: "ahead", behind_by: 0, ahead_by: 6, files: ON007823_DELTA });
+    // Every `.gitattributes` at S is listed and read whole too (its one): it turns no CR LF conversion on.
+    github.tree(ID, S, { paths: ON007823_TREE_AT_S });
+    github.contents(ID, S, ".gitattributes", ON007823_GITATTRIBUTES_AT_S);
+    const decided = await servingIndexForRun(env, ica, "bids", ID, TAG, T);
+    if (decided.kind !== "run" || !decided.servingIndex.staged) throw new Error("not staged");
+    const spec = icaSpec(decided.servingIndex);
+    expect(spec.serving_index).toEqual({
+      sha256: decided.servingIndex.sha256,
+      size: decided.servingIndex.size,
+      ahead_of_tag: { tag_commit: T, index_commit: S, changed_path_count: 5 },
+    });
+    // The run's identity is the tag's: the data and events the copy was built from are the tag's (ADR 0144). The
+    // index's commit and the five paths, in code-unit order, attest it (nemar-process#108).
+    expect(spec.args).toEqual([
+      ...recipeArguments({ datasetId: ID, tag: TAG, imageDigest: RUNTIME_IMAGE_DIGEST }),
+      RECIPE_SERVING_INDEX_FLAG,
+      SERVING_INDEX_CONTAINER_PATH,
+      RECIPE_SOURCE_COMMIT_FLAG,
+      T,
+      "--serving-index-commit",
+      S,
+      ...[
+        ".gitattributes",
+        ".github/workflows/bids-validation.yml",
+        ".github/workflows/version-check.yml",
+        ".nemar/availability-report.json",
+        ".nemar/metadata.json",
+      ].flatMap((path) => ["--serving-index-delta-path", path]),
+    ]);
+    const job = await icaJob(env, decided.servingIndex);
+    const launch = await launchOf(env, job.id);
+    // The launch carries the digest and size only: the launcher's schema is closed (ADR 0141 decision 1).
+    expect(launch.serving_index).toEqual({
+      sha256: decided.servingIndex.sha256,
+      size: decided.servingIndex.size,
+    });
+  });
+
+  test("ahead by a dataset file as well: refused as index_content_changed, and the run is handed the tag's commit and no index (MUTATION: admit any path)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      ahead_by: 7,
+      files: [...ON007823_DELTA, { filename: "participants.tsv", status: "modified" }],
+    });
+    const decided = await servingIndexForRun(env, ica, "bids", ID, TAG, T);
+    expect(decided).toEqual({
+      kind: "run",
+      servingIndex: { staged: false, reason: "index_content_changed" },
+    });
+    if (decided.kind !== "run") throw new Error("not run");
+    const job = await icaJob(env, decided.servingIndex);
+    const args = (await launchOf(env, job.id)).args as string[];
+    expect(args.slice(-2)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, T]);
+    expect(args).not.toContain(RECIPE_SERVING_INDEX_FLAG);
+    expect(await servingCopies()).toEqual([]);
+  });
+});
+
+describe("what an index ahead of its tag is admitted for, and the word for what is not (ADR 0144)", () => {
+  /** A changed file; a `.gitattributes` one carries an annex-only patch unless a case gives its own. */
+  const files = (...names: string[]) =>
+    names.map((filename) =>
+      filename.split("/").at(-1) === ".gitattributes"
+        ? {
+            filename,
+            status: "modified",
+            patch: "@@ -1 +1 @@\n-* annex.largefiles=nothing\n+* annex.backend=SHA256E",
+          }
+        : { filename, status: "modified" },
+    );
+  /** A `.gitattributes` change with this patch, alone. */
+  const attrs = (patch: unknown) => ({
+    status: "ahead",
+    behind_by: 0,
+    files: [{ filename: ".gitattributes", status: "modified", patch }],
+  });
+  const cases: Array<[string, unknown, string | number]> = [
+    ["only .nemar/", { status: "ahead", behind_by: 0, files: files(".nemar/metadata.json") }, 1],
+    [
+      ".github/ and a root .gitattributes",
+      { status: "ahead", behind_by: 0, files: files(".github/workflows/x.yml", ".gitattributes") },
+      2,
+    ],
+    [
+      "nested .gitattributes (DataLad's and a subject's), which NEMAR's annex policy rewrites",
+      {
+        status: "ahead",
+        behind_by: 0,
+        files: files(".datalad/.gitattributes", "sub-01/.gitattributes"),
+      },
+      2,
+    ],
+    ["commits that change no file", { status: "ahead", behind_by: 0, files: [] }, 0],
+    [
+      "the tag ahead of the index",
+      { status: "behind", behind_by: 2, files: [] },
+      "index_behind_tag",
+    ],
+    ["histories that diverged", { status: "diverged", behind_by: 1, files: [] }, "index_diverged"],
+    [
+      "ahead but also behind",
+      { status: "ahead", behind_by: 1, files: files(".nemar/x.json") },
+      "index_diverged",
+    ],
+    [
+      "a BIDS file",
+      { status: "ahead", behind_by: 0, files: files(".nemar/x.json", "participants.tsv") },
+      "index_content_changed",
+    ],
+    [
+      "a data file",
+      { status: "ahead", behind_by: 0, files: files("sub-01/eeg/sub-01_task-rest_eeg.edf") },
+      "index_content_changed",
+    ],
+    [
+      ".bidsignore, which the dataset's authors own too",
+      { status: "ahead", behind_by: 0, files: files(".bidsignore") },
+      "index_content_changed",
+    ],
+    [
+      "a data file renamed into .nemar/",
+      {
+        status: "ahead",
+        behind_by: 0,
+        files: [
+          {
+            filename: ".nemar/old.edf",
+            previous_filename: "sub-01/eeg/old.edf",
+            status: "renamed",
+          },
+        ],
+      },
+      "index_content_changed",
+    ],
+    [
+      "a path that is not a plain path",
+      { status: "ahead", behind_by: 0, files: files(".nemar/../participants.tsv") },
+      "index_content_changed",
+    ],
+    [
+      "300 files, more than GitHub lists",
+      {
+        status: "ahead",
+        behind_by: 0,
+        files: Array.from({ length: 300 }, (_, i) => ({
+          filename: `.nemar/f${i}.json`,
+          status: "added",
+        })),
+      },
+      "index_delta_unlisted",
+    ],
+    ["an answer that is not a comparison", { status: "weird" }, "github_unreadable"],
+    [
+      "status identical, which two different commits never are",
+      { status: "identical", behind_by: 0, files: [] },
+      "github_unreadable",
+    ],
+    ["status ahead with no behind_by", { status: "ahead", files: [] }, "github_unreadable"],
+    [
+      "a file entry that is not an object",
+      { status: "ahead", behind_by: 0, files: ["x"] },
+      "github_unreadable",
+    ],
+    [
+      "a file entry with no filename",
+      { status: "ahead", behind_by: 0, files: [{ status: "added" }] },
+      "github_unreadable",
+    ],
+    [
+      "a filename that is not text",
+      { status: "ahead", behind_by: 0, files: [{ filename: 7 }] },
+      "github_unreadable",
+    ],
+    [
+      "a previous filename that is not text",
+      { status: "ahead", behind_by: 0, files: [{ filename: ".nemar/x", previous_filename: 7 }] },
+      "github_unreadable",
+    ],
+    // .gitattributes: admitted only when the edit cannot change the bytes of a checkout (ADR 0144).
+    [
+      "a .gitattributes edit to annex rules, removing text and eol=lf lines",
+      attrs(ON007823_GITATTRIBUTES_PATCH),
+      1,
+    ],
+    [
+      "a .gitattributes line that adds eol=crlf",
+      attrs("@@ -0,0 +1 @@\n+*.tsv text eol=crlf"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that removes eol=crlf",
+      attrs("@@ -1 +0,0 @@\n-*.tsv eol=crlf"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that adds working-tree-encoding",
+      attrs("@@ -0,0 +1 @@\n+*.txt working-tree-encoding=UTF-16"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that adds ident",
+      attrs("@@ -0,0 +1 @@\n+*.m ident"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that unsets ident",
+      attrs("@@ -0,0 +1 @@\n+*.m -ident"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that adds a filter other than git-annex's",
+      attrs("@@ -0,0 +1 @@\n+*.edf filter=lfs diff=lfs merge=lfs -text"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that adds git-annex's filter",
+      attrs("@@ -0,0 +1 @@\n+* filter=annex"),
+      1,
+    ],
+    [
+      "a quoted pattern with a space and a byte-changing attribute",
+      attrs('@@ -0,0 +1 @@\n+"a b.txt" eol=crlf'),
+      "index_content_changed",
+    ],
+    ["a comment that names eol=crlf", attrs("@@ -0,0 +1 @@\n+# eol=crlf is not used here"), 1],
+    // The allow-list (round 2): an unset or reset eol or text, a macro, and lines that read like file headers.
+    [
+      "a .gitattributes line that resets eol",
+      attrs("@@ -0,0 +1 @@\n+*.tsv !eol"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that unsets eol",
+      attrs("@@ -0,0 +1 @@\n+*.tsv -eol"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that unsets text",
+      attrs("@@ -0,0 +1 @@\n+*.tsv -text"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that uses a macro",
+      attrs("@@ -0,0 +1 @@\n+*.tsv m"),
+      "index_content_changed",
+    ],
+    [
+      "a macro used on an added line, defined as eol=crlf on an unchanged one",
+      attrs("@@ -1 +1,2 @@\n [attr]m eol=crlf\n+*.tsv m"),
+      "index_content_changed",
+    ],
+    [
+      "an added line that starts like a file header",
+      attrs("@@ -0,0 +1 @@\n+++x eol=crlf"),
+      "index_content_changed",
+    ],
+    [
+      "a removed line that starts like a file header",
+      attrs("@@ -1 +0,0 @@\n---y working-tree-encoding=UTF-16"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line with text=auto",
+      attrs("@@ -0,0 +1 @@\n+*.tsv text=auto"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line with the legacy crlf",
+      attrs("@@ -0,0 +1 @@\n+*.tsv crlf"),
+      "index_content_changed",
+    ],
+    [
+      "a .gitattributes line that unsets binary",
+      attrs("@@ -0,0 +1 @@\n+*.edf -binary"),
+      "index_content_changed",
+    ],
+    [
+      "a removed line that unset text",
+      attrs("@@ -1 +0,0 @@\n-*.tsv -text"),
+      "index_content_changed",
+    ],
+    [
+      "an added text line beside an unchanged eol=crlf",
+      attrs("@@ -1 +1,2 @@\n *.txt eol=crlf\n+*.tsv text"),
+      "index_content_changed",
+    ],
+    ["a .gitattributes line that sets binary", attrs("@@ -0,0 +1 @@\n+*.edf binary"), 1],
+    [
+      "diff and merge in any form",
+      attrs("@@ -0,0 +1 @@\n+*.tsv -diff merge=union !merge diff=tsv"),
+      1,
+    ],
+    [
+      "a macro defined with annex rules only",
+      attrs("@@ -0,0 +1 @@\n+[attr]nemar annex.largefiles=nothing -annex.numcopies"),
+      1,
+    ],
+    [
+      "a .gitattributes edit with no patch (a large or binary diff)",
+      attrs(undefined),
+      "index_delta_unlisted",
+    ],
+  ];
+  for (const [label, answer, expected] of cases) {
+    test(`${label}: ${typeof expected === "number" ? `staged, ${expected} changed paths` : expected}`, async () => {
+      github.tag(ID, TAG, T);
+      github.index(ID, indexText(S));
+      github.compare(ID, T, S, answer as never);
+      // Every `.gitattributes` at S is listed and read whole: here the ones the edit leaves, each on007823's own,
+      // which is clean, among on007823's other files.
+      const kept: string[] = [];
+      for (const file of ((answer as { files?: unknown[] }).files ?? []) as Array<{
+        filename?: unknown;
+        status?: unknown;
+      }>) {
+        if (
+          typeof file?.filename === "string" &&
+          file.filename.split("/").at(-1) === ".gitattributes" &&
+          file.status !== "removed"
+        ) {
+          kept.push(file.filename);
+          github.contents(ID, S, file.filename, ON007823_GITATTRIBUTES_AT_S);
+        }
+      }
+      github.tree(ID, S, {
+        paths: [...ON007823_TREE_AT_S.filter((path) => path !== ".gitattributes"), ...kept],
+      });
+      const staged = await stageServingIndex(devEnv(), ID, T);
+      if (typeof expected === "number") {
+        expect(staged).toMatchObject({ staged: true, ahead: { tagCommit: T, indexCommit: S } });
+        expect(staged.staged && staged.ahead?.deltaPaths).toHaveLength(expected);
+      } else {
+        expect(staged).toEqual({ staged: false, reason: expected });
+        expect(await servingCopies()).toEqual([]);
+      }
+    });
+  }
+
+  test("the changed paths are handed each once, in code-unit order, a renamed file's old name included", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [
+        { filename: ".nemar/new.json", previous_filename: ".nemar/old.json", status: "renamed" },
+        { filename: ".github/x.yml", status: "modified" },
+        { filename: ".nemar/new.json", status: "modified" },
+      ],
+    } as never);
+    const staged = await stageServingIndex(devEnv(), ID, T);
+    expect(staged.staged && staged.ahead?.deltaPaths).toEqual([
+      ".github/x.yml",
+      ".nemar/new.json",
+      ".nemar/old.json",
+    ]);
+    // A delta that changes no `.gitattributes` lists no tree and reads no file.
+    expect(
+      github.log.filter((r) => r.path.includes("/git/trees/") || r.path.includes("/contents/")),
+    ).toEqual([]);
+  });
+
+  /** `count` changed paths under `.nemar/`, each 512 characters, the longest the rule takes. */
+  const longPaths = (count: number) =>
+    Array.from({ length: count }, (_, i) => {
+      const head = `.nemar/${String(i).padStart(3, "0")}-`;
+      return { filename: `${head}${"a".repeat(512 - head.length)}`, status: "added" };
+    });
+
+  test("24 changed paths of the longest length fit a job: staged, and the specification builds (MUTATION: lower the bound below the argument budget)", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, { status: "ahead", behind_by: 0, files: longPaths(24) } as never);
+    const staged = await stageServingIndex(devEnv(), ID, T);
+    expect(staged.staged && staged.ahead?.deltaPaths).toHaveLength(24);
+    const spec = icaSpec(staged);
+    expect(spec.args).toHaveLength(64);
+    expect(spec.args.filter((a) => a === "--serving-index-delta-path")).toHaveLength(24);
+  });
+
+  test("25 changed paths do not fit: index_delta_unlisted, never a delta cut short (MUTATION: drop the bound)", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, { status: "ahead", behind_by: 0, files: longPaths(25) } as never);
+    expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
+      staged: false,
+      reason: "index_delta_unlisted",
+    });
+    expect(await servingCopies()).toEqual([]);
+  });
+
+  test("a path with a lone surrogate has no UTF-8 form for the recipe: index_content_changed", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [{ filename: ".nemar/a\ud800.json", status: "added" }],
+    } as never);
+    expect(await stageServingIndex(devEnv(), ID, T)).toEqual({
+      staged: false,
+      reason: "index_content_changed",
+    });
+  });
+
+  test("a compare too large to read is index_delta_unlisted, not a fault: the run goes ahead at once without the index (MUTATION: read it as unreadable)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [],
+      padding: "x".repeat(8 * 1024 * 1024 + 1),
+    } as never);
+    expect(await servingIndexForRun(env, ica, "bids", ID, TAG, T)).toEqual({
+      kind: "run",
+      servingIndex: { staged: false, reason: "index_delta_unlisted" },
+    });
+  });
+
+  test("a compare GitHub cannot answer is a fault: the run is deferred, and nothing is staged blind (MUTATION: stage on an unread compare)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, { http: 502 });
+    expect(await stageServingIndex(env, ID, T)).toEqual({
+      staged: false,
+      reason: "github_unreadable",
+    });
+    expect(await servingIndexForRun(env, ica, "bids", ID, TAG, T)).toMatchObject({
+      kind: "deferred",
+      reason: "github_unreadable",
+    });
+    expect(await servingCopies()).toEqual([]);
+  });
+
+  /** A `.gitattributes` edit to annex rules only, with the file at S answered as `atS`. */
+  async function stagedWithFileAtS(atS: string | { http: number } | { body: unknown } | null) {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [
+        {
+          filename: ".gitattributes",
+          status: "modified",
+          patch: "@@ -1 +1 @@\n-* annex.largefiles=nothing\n+* annex.backend=SHA256E",
+        },
+      ],
+    } as never);
+    github.tree(ID, S, { paths: ON007823_TREE_AT_S });
+    if (atS !== null) github.contents(ID, S, ".gitattributes", atS);
+    return stageServingIndex(devEnv(), ID, T);
+  }
+
+  test("an unchanged `* text eol=crlf` far from the hunk, read in the whole file at S, refuses (MUTATION: read the patch alone)", async () => {
+    const far = [
+      ...Array.from({ length: 40 }, (_, i) => `sub-${i}/** annex.largefiles=nothing`),
+      "* text eol=crlf",
+      "* annex.backend=SHA256E",
+    ].join("\n");
+    expect(await stagedWithFileAtS(far)).toEqual({
+      staged: false,
+      reason: "index_content_changed",
+    });
+    // A macro definition that turns it on counts too, and so does the legacy crlf.
+    expect(await stagedWithFileAtS("[attr]m eol=crlf\n* annex.backend=SHA256E\n")).toEqual({
+      staged: false,
+      reason: "index_content_changed",
+    });
+    expect(await stagedWithFileAtS("*.txt crlf\n")).toEqual({
+      staged: false,
+      reason: "index_content_changed",
+    });
+    // The file is read at the index's commit, exactly once.
+    expect(
+      github.log.filter((r) => r.path === `/repos/nemarDatasets/${ID}/contents/.gitattributes`),
+    ).toHaveLength(3);
+  });
+
+  test("on007823's real file at S admits", async () => {
+    expect(await stagedWithFileAtS(ON007823_GITATTRIBUTES_AT_S)).toMatchObject({ staged: true });
+  });
+
+  test("a file at S that cannot be read whole defers like the compare, never admits blind (MUTATION: admit on an unread file)", async () => {
+    for (const atS of [null, { http: 500 }, { body: { encoding: "none", content: "" } }]) {
+      github.reset();
+      expect(await stagedWithFileAtS(atS)).toEqual({ staged: false, reason: "github_unreadable" });
+    }
+    github.reset();
+    // Over the read's bound (1 MiB of JSON).
+    expect(
+      await stagedWithFileAtS({ body: { encoding: "base64", content: "A".repeat(1_100_000) } }),
+    ).toEqual({
+      staged: false,
+      reason: "github_unreadable",
+    });
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.reset();
+    await stagedWithFileAtS({ http: 502 });
+    expect(await servingIndexForRun(env, ica, "bids", ID, TAG, T)).toMatchObject({
+      kind: "deferred",
+      reason: "github_unreadable",
+    });
+  });
+
+  test("a deleted .gitattributes has nothing to read; a renamed one is read under its new name", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [
+        {
+          filename: "a/.gitattributes",
+          status: "removed",
+          patch: "@@ -1 +0,0 @@\n-* annex.largefiles=nothing",
+        },
+        {
+          filename: "c/.gitattributes",
+          previous_filename: "b/.gitattributes",
+          status: "renamed",
+          patch: "@@ -1 +1 @@\n-* annex.largefiles=nothing\n+* annex.backend=SHA256E",
+        },
+      ],
+    } as never);
+    github.tree(ID, S, { paths: ["c/.gitattributes", "participants.tsv"] });
+    github.contents(ID, S, "c/.gitattributes", "* annex.backend=SHA256E\n");
+    expect(await stageServingIndex(devEnv(), ID, T)).toMatchObject({ staged: true });
+    expect(contentReads()).toEqual(["c/.gitattributes"]);
+  });
+
+  /** The files read whole, by path, in order. */
+  const contentReads = () =>
+    github.log
+      .filter((r) => r.path.includes("/contents/"))
+      .map((r) => r.path.slice(`/repos/nemarDatasets/${ID}/contents/`.length));
+
+  /**
+   * A delta that edits `edited` to add `*.tsv binary` (admitted by its patch), with the tree at S answered as
+   * `tree` and each file of `texts` answered at S.
+   */
+  async function stagedWithTreeAtS(
+    tree: { paths: string[]; truncated?: boolean } | { http: number } | { body: unknown },
+    texts: Record<string, string>,
+    edited = "sub-01/.gitattributes",
+  ) {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [
+        {
+          filename: edited,
+          status: "modified",
+          patch: "@@ -1 +1,2 @@\n * annex.largefiles=nothing\n+*.tsv binary",
+        },
+      ],
+    } as never);
+    github.tree(ID, S, tree);
+    for (const [path, text] of Object.entries(texts)) github.contents(ID, S, path, text);
+    return stageServingIndex(devEnv(), ID, T);
+  }
+
+  const NESTED_TREE = {
+    paths: [
+      ".gitattributes",
+      "participants.tsv",
+      "sub-01/.gitattributes",
+      "sub-01/eeg/sub-01_task-x_events.tsv",
+    ],
+  };
+  const NESTED_EDITED = "* annex.largefiles=nothing\n*.tsv binary\n";
+
+  test("an `eol=crlf` in a .gitattributes the delta does not touch refuses an edit elsewhere: a root `* eol=crlf` under a nested `binary`, and a nested one under a root edit (MUTATION: read only the changed files; list the top level only)", async () => {
+    // The root file is unchanged; the nested edit takes `*.tsv` out of the CR LF conversion it turns on.
+    expect(
+      await stagedWithTreeAtS(NESTED_TREE, {
+        ".gitattributes": "* eol=crlf\n* annex.backend=SHA256E\n",
+        "sub-01/.gitattributes": NESTED_EDITED,
+      }),
+    ).toEqual({ staged: false, reason: "index_content_changed" });
+    expect(await servingCopies()).toEqual([]);
+    github.reset();
+    // The other way round: the nested file is unchanged, and found only by a recursive listing.
+    expect(
+      await stagedWithTreeAtS(
+        NESTED_TREE,
+        { ".gitattributes": NESTED_EDITED, "sub-01/.gitattributes": "*.tsv eol=crlf\n" },
+        ".gitattributes",
+      ),
+    ).toEqual({ staged: false, reason: "index_content_changed" });
+  });
+
+  test("with no CR LF rule anywhere the same edit is admitted, from one recursive listing, and each file is read once, the changed one too (MUTATION: read a changed file twice)", async () => {
+    expect(
+      await stagedWithTreeAtS(NESTED_TREE, {
+        ".gitattributes": "* annex.backend=SHA256E\n",
+        "sub-01/.gitattributes": NESTED_EDITED,
+      }),
+    ).toMatchObject({ staged: true, ahead: { deltaPaths: ["sub-01/.gitattributes"] } });
+    const listings = github.log.filter((r) => r.path.includes("/git/trees/"));
+    expect(listings.map((r) => [r.path, r.query])).toEqual([
+      [`/repos/nemarDatasets/${ID}/git/trees/${S}`, "recursive=1"],
+    ]);
+    expect(contentReads()).toEqual([".gitattributes", "sub-01/.gitattributes"]);
+  });
+
+  test("a listing GitHub truncates cannot show every file: index_delta_unlisted, and nothing is read (MUTATION: read what was listed)", async () => {
+    expect(
+      await stagedWithTreeAtS(
+        { ...NESTED_TREE, truncated: true },
+        { ".gitattributes": "* annex.backend=SHA256E\n", "sub-01/.gitattributes": NESTED_EDITED },
+      ),
+    ).toEqual({ staged: false, reason: "index_delta_unlisted" });
+    expect(contentReads()).toEqual([]);
+    expect(await servingCopies()).toEqual([]);
+  });
+
+  test(`${SERVING_INDEX_MAX_GITATTRIBUTES_FILES} .gitattributes files are read; one more is index_delta_unlisted, and none is read (MUTATION: drop the bound)`, async () => {
+    const atS = (count: number) => {
+      const paths = Array.from(
+        { length: count - 1 },
+        (_, i) => `d${String(i).padStart(2, "0")}/.gitattributes`,
+      );
+      return [...paths, "sub-01/.gitattributes"];
+    };
+    const texts = (paths: string[]) =>
+      Object.fromEntries(
+        paths.map((path) => [
+          path,
+          path === "sub-01/.gitattributes" ? NESTED_EDITED : "* annex.backend=SHA256E\n",
+        ]),
+      );
+    const most = atS(SERVING_INDEX_MAX_GITATTRIBUTES_FILES);
+    expect(await stagedWithTreeAtS({ paths: most }, texts(most))).toMatchObject({ staged: true });
+    expect(contentReads()).toHaveLength(SERVING_INDEX_MAX_GITATTRIBUTES_FILES);
+    github.reset();
+    const over = atS(SERVING_INDEX_MAX_GITATTRIBUTES_FILES + 1);
+    expect(await stagedWithTreeAtS({ paths: over }, texts(over))).toEqual({
+      staged: false,
+      reason: "index_delta_unlisted",
+    });
+    expect(contentReads()).toEqual([]);
+  });
+
+  test("a listing GitHub cannot answer, or answers in another shape, defers like the compare; one over its bound is index_delta_unlisted (MUTATION: admit on an unread listing)", async () => {
+    const clean = {
+      ".gitattributes": "* annex.backend=SHA256E\n",
+      "sub-01/.gitattributes": NESTED_EDITED,
+    };
+    const unread: Array<{ http: number } | { body: unknown }> = [
+      { http: 404 },
+      { http: 500 },
+      { body: { tree: [] } },
+      { body: { truncated: false } },
+      { body: { truncated: false, tree: [{ path: 7, type: "blob" }] } },
+    ];
+    for (const tree of unread) {
+      github.reset();
+      expect(await stagedWithTreeAtS(tree, clean)).toEqual({
+        staged: false,
+        reason: "github_unreadable",
+      });
+      expect(contentReads()).toEqual([]);
+    }
+    github.reset();
+    expect(
+      await stagedWithTreeAtS(
+        { body: { truncated: false, tree: [], padding: "x".repeat(8 * 1024 * 1024 + 1) } },
+        clean,
+      ),
+    ).toEqual({ staged: false, reason: "index_delta_unlisted" });
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.reset();
+    await stagedWithTreeAtS({ http: 502 }, clean);
+    expect(await servingIndexForRun(env, ica, "bids", ID, TAG, T)).toMatchObject({
+      kind: "deferred",
+      reason: "github_unreadable",
+    });
+    expect(await servingCopies()).toEqual([]);
+  });
+
+  test("a changed .gitattributes the listing lacks is still read, never taken as clean (MUTATION: read the listing alone)", async () => {
+    const lacking = { paths: ["participants.tsv"] };
+    expect(
+      await stagedWithTreeAtS(lacking, {
+        "sub-01/.gitattributes": `${NESTED_EDITED}*.json eol=crlf\n`,
+      }),
+    ).toEqual({ staged: false, reason: "index_content_changed" });
+    github.reset();
+    expect(await stagedWithTreeAtS(lacking, {})).toEqual({
+      staged: false,
+      reason: "github_unreadable",
+    });
+  });
+
+  test("an index of the tag's own commit asks no compare and records nothing admitted", async () => {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(T));
+    const staged = await stageServingIndex(devEnv(), ID, T);
+    expect(staged.staged && "ahead" in staged).toBe(false);
+    expect(compareRequests()).toEqual([]);
+    expect(icaSpec(staged).serving_index).not.toHaveProperty("ahead_of_tag");
+  });
+
+  test("the path rule: NEMAR's own metadata only", () => {
+    for (const path of [
+      ".nemar/a.json",
+      ".github/workflows/x.yml",
+      ".gitattributes",
+      "a/b/.gitattributes",
+    ]) {
+      expect([path, isNemarOwnedMetadataPath(path)]).toEqual([path, true]);
+    }
+    for (const path of [
+      "participants.tsv",
+      "README",
+      ".bidsignore",
+      "sub-01/eeg/x.json",
+      ".nemarx/a",
+      ".gitattributes/x",
+      "",
+      ".nemar//a",
+      "./.nemar/a",
+      ".nemar/\u0001",
+      `.nemar/${"a".repeat(600)}`,
+    ]) {
+      expect([path, isNemarOwnedMetadataPath(path)]).toEqual([path, false]);
+    }
+  });
+});
+
 describe("the launch specification and the serving index route", () => {
   test("a staged index is in the launch specification, and the route signs exactly that copy for ten minutes", async () => {
     const env = devEnv();
     const text = indexText(T);
     github.tag(ID, TAG, T);
     github.index(ID, text);
-    const staged = await stageServingIndex(env, ID, TAG);
+    const staged = await stageServingIndex(env, ID, T);
     if (!staged.staged) throw new Error(staged.reason);
     const job = await icaJob(env, staged);
     const launch = await launchOf(env, job.id);
@@ -870,7 +1904,7 @@ describe("the launch specification and the serving index route", () => {
     const env = devEnv();
     github.tag(ID, TAG, T);
     github.index(ID, indexText(T));
-    const staged = await stageServingIndex(env, ID, TAG);
+    const staged = await stageServingIndex(env, ID, T);
     if (!staged.staged) throw new Error(staged.reason);
     const job = await icaJob(env, staged);
     const token = await tokenOf(env, job.id);
@@ -887,7 +1921,7 @@ describe("the launch specification and the serving index route", () => {
     const env = devEnv();
     github.tag(ID, TAG, T);
     github.index(ID, indexText(T));
-    const staged = await stageServingIndex(env, ID, TAG);
+    const staged = await stageServingIndex(env, ID, T);
     if (!staged.staged) throw new Error(staged.reason);
     const job = await icaJob(env, staged);
     const key = `records/${job.id}/spec.json`;
@@ -901,7 +1935,7 @@ describe("the launch specification and the serving index route", () => {
     const env = devEnv();
     github.tag(ID, TAG, T);
     github.index(ID, indexText(T));
-    const staged = await stageServingIndex(env, ID, TAG);
+    const staged = await stageServingIndex(env, ID, T);
     if (!staged.staged) throw new Error(staged.reason);
     const job = await icaJob(env, staged);
     const token = await tokenOf(env, job.id);

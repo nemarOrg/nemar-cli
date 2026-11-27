@@ -137,6 +137,7 @@ import {
   type GithubCompareStandin,
   startGithubCompareStandin,
 } from "./helpers/github-compare-standin";
+import { GITHUB_TAGS_ENV, seedGithubTagsToken } from "./helpers/github-tags";
 
 // --- The fixture and the two engines ---------------------------------------------------------------
 
@@ -470,7 +471,7 @@ describe("the recipe registry", () => {
     }
   });
 
-  test("a Zarr input's job has no dataset and the vector; a BIDS input's job is what it was (MUTATION: stage the dataset anyway)", () => {
+  test("a Zarr input's job has no dataset and the vector; a BIDS input's job stages the dataset and hands the tag's commit (MUTATION: stage the dataset anyway)", () => {
     const image = {
       ref: `ghcr.io/example/nemar-python@sha256:${"b".repeat(64)}`,
       digest: `sha256:${"b".repeat(64)}`,
@@ -524,13 +525,27 @@ describe("the recipe registry", () => {
       image,
       // Never read for a BIDS input.
       zarrSource: EXACT,
+      sourceCommit: COMMIT,
       env: production,
     });
     expect(bids.datasets).toEqual([{ id: "nm000104", version: "v1.0.0" }]);
-    expect(bids.args).toEqual(
-      recipeArguments({ datasetId: "nm000104", tag: "v1.0.0", imageDigest: image.digest }),
-    );
-    expect(bids.args).not.toContain("--source-commit");
+    // The archive's own arguments and the tag's commit (ADR 0143), and nothing of the Zarr attestation.
+    expect(bids.args).toEqual([
+      ...recipeArguments({ datasetId: "nm000104", tag: "v1.0.0", imageDigest: image.digest }),
+      "--source-commit",
+      COMMIT,
+    ]);
+    expect(bids.args).not.toContain("--tag-commit");
+    // A BIDS input with no commit is a programming error (MUTATION: hand none).
+    expect(() =>
+      recipeJobSpec(findRecipe("nemar-floor") as never, {
+        datasetId: "nm000104",
+        tag: "v1.0.0",
+        input: "bids",
+        image,
+        env: production,
+      }),
+    ).toThrow(RangeError);
     // The BIDS input is the recipe's default: its command is what it was before a recipe had two inputs.
     expect(bids.command).toEqual(["nemar-recipe", "run", "nemar-floor"]);
   });
@@ -762,15 +777,21 @@ describe("what did not change", () => {
   });
 
   test("a Tapis pipeline job is as it was: a hold, a ledger entry, su, tapis, submitted (MUTATION: write none for every job)", async () => {
-    const env = runnerEnv();
+    // A run of the archive reads its tag's commit first (ADR 0143): the App configuration and the tag.
+    const env = runnerEnv(GITHUB_TAGS_ENV);
+    seedGithubTagsToken();
+    github.tag("nm000104", "v1.0.0", COMMIT);
     await seedPipelinesAccount(env);
     await fundPipelines(env);
     await seedEegDataset(env, "nm000104");
     const before = await n(env, "compute_ledger");
-    const r = await call("POST", "/compute/pipeline/run", "admin", {
-      recipe: "nemar-floor",
-      dataset: "nm000104",
-    });
+    const r = await call(
+      "POST",
+      "/compute/pipeline/run",
+      "admin",
+      { recipe: "nemar-floor", dataset: "nm000104" },
+      env,
+    );
     expect(r.status).toBe(201);
     expect(r.body.executor).toBe("tapis");
     expect(r.body.results[0].submit).toBe("submitted");

@@ -606,6 +606,9 @@ Examples:
         for (const line of lineageLines(result)) console.log(line);
       }
       process.exitCode = lineageExitCode(result.outcome);
+      // Exit 2 is the outcome (`unresolved`, `needs_permission`, ...), the command's answer: no
+      // bug-report prompt (ADR 0142 decision 3). A failed request keeps it unless the Worker answered.
+      markReportedExit();
     } catch (error) {
       failWith(error, null, "Failed to read the license lineage", undefined, {
         json: options.json,

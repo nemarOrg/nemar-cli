@@ -174,6 +174,8 @@ async function dispatchRunnerJob(): Promise<string> {
 async function finishedTapisJob(): Promise<string> {
   const datasetId = `nm${String(2000 + ++seq).padStart(6, "0")}`;
   await seedEegDataset(env, datasetId);
+  // A run of the archive reads the commit of its version's tag first (ADR 0143).
+  github.tag(datasetId, "v1.0.0", COMMIT);
   const r = await dispatchPipelineJob(env, {
     recipe: "nemar-floor",
     datasetId,

@@ -10,7 +10,9 @@
  *    non-production environment with compute off, says why a named dataset would be refused, and counts
  *    what blocks each term over the catalog;
  *  - a run over the queue with `limit` 2 dispatches two, stops at a hold the pool refused, and does not
- *    stop at a refusal that is about one dataset.
+ *    stop at a refusal that is about one dataset;
+ *  - the tag's commit (ADR 0143): a credential fault stops the queue at the first dataset, one repository GitHub
+ *    cannot answer is deferred and passed over, and datasets refused for a missing tag never fill the room.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -18,7 +20,9 @@ import { findRecipe } from "../../shared/compute-recipes";
 import { runComputeAdvanceCron } from "../src/services/compute-advance";
 import {
   MAX_FAILED_ATTEMPTS,
+  PIPELINE_RUN_EXTRA_TRIES,
   RETRY_COOLDOWN_DAYS,
+  SOURCE_COMMIT_DEFERRED_WORD,
   dispatchEligible,
   dispatchPipelineJob,
   pipelineCandidates,
@@ -39,7 +43,7 @@ import {
 let fx: LifecycleFixture;
 
 beforeAll(async () => {
-  fx = await startLifecycleFixture();
+  fx = await startLifecycleFixture({ githubTags: true });
 }, 120_000);
 
 afterAll(async () => {
@@ -586,5 +590,66 @@ describe("a run over the queue", () => {
       (await env.DB.prepare("SELECT state FROM compute_pipeline_stamps").first<{ state: string }>())
         ?.state,
     ).toBe("succeeded");
+  });
+});
+
+describe("a run over the queue reads each dataset's tag commit (ADR 0143)", () => {
+  /** `count` datasets nm000201, nm000202, ... in that order, all eligible. */
+  const ids = (count: number) =>
+    Array.from({ length: count }, (_, i) => `nm${String(201 + i).padStart(6, "0")}`);
+  const stampsOf = async (env: Bindings) =>
+    (
+      await env.DB.prepare(
+        "SELECT dataset_id, state, refusal_code FROM compute_pipeline_stamps ORDER BY id",
+      ).all<{ dataset_id: string; state: string; refusal_code: string | null }>()
+    ).results;
+
+  test("a credential fault stops the queue at the first dataset, with one deferral written (MUTATION: never stop on source_commit_deferred)", async () => {
+    const env = await world(ids(3));
+    // A production Worker without the GitHub App: every dataset would meet the same fault.
+    const bare = fx.env({ GITHUB_APP_ID: undefined, GITHUB_APP_PRIVATE_KEY: undefined });
+    const run = await dispatchEligible(bare, { recipe: "nemar-floor", limit: 2, actor: ADMIN });
+    expect([run.dispatched, run.stoppedBy]).toEqual([0, "source_commit_deferred"]);
+    expect(run.results).toHaveLength(1);
+    expect(run.results[0]).toMatchObject({
+      ok: false,
+      code: "source_commit_deferred",
+      reason: "no_github_credentials",
+      datasetId: "nm000201",
+    });
+    expect(await stampsOf(env)).toEqual([
+      { dataset_id: "nm000201", state: "refused", refusal_code: SOURCE_COMMIT_DEFERRED_WORD },
+    ]);
+  });
+
+  test("one repository GitHub cannot answer is deferred and passed over: the next dataset dispatches (MUTATION: stop on every source_commit_deferred)", async () => {
+    const env = await world(ids(3));
+    fx.tags?.answer("nm000201", "v1.0.0", { http: 502 });
+    const run = await dispatchEligible(env, { recipe: "nemar-floor", limit: 1, actor: ADMIN });
+    expect(run.dispatched).toBe(1);
+    expect(run.results.map((r) => [r.datasetId, r.ok ? "dispatched" : r.code])).toEqual([
+      ["nm000201", "source_commit_deferred"],
+      ["nm000202", "dispatched"],
+    ]);
+    expect(run.results[0]).toMatchObject({ reason: "github_unreadable" });
+    expect(run.stoppedBy).not.toBe("source_commit_deferred");
+  });
+
+  test("ten datasets refused for a missing tag at the head of the order do not fill the room: the one behind them dispatches (MUTATION: ask for the room's worth of candidates only)", async () => {
+    const all = ids(11);
+    const env = await world(all);
+    for (const id of all.slice(0, 10)) fx.tags?.answer(id, "v1.0.0", "absent");
+    expect(PIPELINE_RUN_EXTRA_TRIES).toBeGreaterThanOrEqual(10);
+    const run = await dispatchEligible(env, { recipe: "nemar-floor", limit: 1, actor: ADMIN });
+    expect(run.dispatched).toBe(1);
+    expect(run.results).toHaveLength(11);
+    expect(run.results.slice(0, 10).every((r) => !r.ok && r.code === "version_tag_absent")).toBe(
+      true,
+    );
+    expect(run.results[10]).toMatchObject({ ok: true, datasetId: "nm000211" });
+    // A refusal for a missing tag writes nothing; the one dispatch is the only stamp.
+    expect(await stampsOf(env)).toEqual([
+      { dataset_id: "nm000211", state: "dispatched", refusal_code: null },
+    ]);
   });
 });

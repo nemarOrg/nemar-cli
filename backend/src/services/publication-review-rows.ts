@@ -79,6 +79,8 @@ export interface PublicationReviewRow {
   promptVersion: string | null;
   inputDigest: string | null;
   enrichmentSource: string | null;
+  /** The license matcher of a version-3 report (migration 0162), or null. */
+  licenseMatcher: string | null;
   /**
    * The first run this row confirms (migration 0153; ADR 0139, decision 1), or null for a first
    * run. A confirming row is never the review in force: {@link readReviewByKey} and
@@ -110,7 +112,7 @@ export const ROW_COLUMNS =
   "detail, report, claimed_at, attempts, override_by, override_at, override_reasons, " +
   "created_at, decided_at, scanner_id, reader_versions, resolver_version, models, " +
   "prompt_version, input_digest, enrichment_source, confirm_of, auto_deny_state, auto_deny_at, " +
-  "lineage_basis, superseded_at, superseded_by";
+  "lineage_basis, superseded_at, superseded_by, license_matcher";
 
 const num = (v: unknown): number => Number(v);
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
@@ -144,6 +146,7 @@ export function toRow(raw: Record<string, unknown>): PublicationReviewRow {
     promptVersion: strOrNull(raw.prompt_version),
     inputDigest: strOrNull(raw.input_digest),
     enrichmentSource: strOrNull(raw.enrichment_source),
+    licenseMatcher: strOrNull(raw.license_matcher),
     confirmOf: numOrNull(raw.confirm_of),
     autoDenyState: typeof raw.auto_deny_state === "string" ? raw.auto_deny_state : "none",
     autoDenyAt: strOrNull(raw.auto_deny_at),

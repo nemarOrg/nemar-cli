@@ -13,12 +13,18 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { LICENSE_MATCHER_VERSION } from "../../shared/license-file";
 import {
   NEVER_REACHED_MODEL,
   PLATFORM_DAILY_CAP,
+  PUBLICATION_REPORT_VERSION,
   PUBLICATION_RUN_ERRORS,
   WORKER_ONLY_RUN_ERRORS,
+  answersOf,
   parsePublicationCallbackOutcome,
+  parsePublicationReviewReport,
+  reportReasons,
+  verdictOf,
 } from "../../shared/publication-review";
 import { MINIMUM_FAILURES, minimumFailureSentence } from "../../shared/submission-minimums";
 import { sanitizeNote } from "../../shared/untrusted-text";
@@ -50,6 +56,7 @@ import {
   evidenceFor,
   seedPublicationReview,
   seedScreenedRequest,
+  v3PublicationReport,
 } from "./helpers/publication-review";
 import {
   CALLBACK_SECRET,
@@ -2399,5 +2406,120 @@ describe("what the caps count", () => {
       });
       expect(costOf(id), row.state).toBe(1);
     }
+  });
+});
+
+describe("a version-3 report (ADR 0142, decision 2, first deploy)", () => {
+  test("the job still writes version 2; the Worker already reads version 3", () => {
+    expect(PUBLICATION_REPORT_VERSION).toBe(2);
+  });
+
+  test("it stores whole, its matcher joins the record, and its verdict is derived", async () => {
+    const { reviewId } = dispatched({ claimed: true });
+    const body = v3PublicationReport();
+    const res = await h.result(reviewId, { outcome: "reported", report: body });
+    expect(res.status).toBe(200);
+    const row = state(reviewId);
+    expect(row).toMatchObject({
+      state: "reported",
+      verdict: "pass",
+      license_matcher: LICENSE_MATCHER_VERSION,
+      prompt_version: (body.record as Record<string, unknown>).prompt_version,
+    });
+    const stored = JSON.parse(row.report as string);
+    expect(stored).toMatchObject({
+      v: 3,
+      record: { license_matcher: LICENSE_MATCHER_VERSION },
+      evidence: {
+        license_file: { state: "matches", spdx: "CC-BY-4.0", additions: false, expression: null },
+        description_keys_not_shown_names: ["Version"],
+        lineage: { resolved_at: "2026-11-27 12:00:00" },
+      },
+    });
+    // What was stored reads back as itself.
+    expect(parsePublicationReviewReport(stored)).toEqual(parsePublicationReviewReport(body));
+  });
+
+  test("a LICENSE that names another license stores action required, never fail", async () => {
+    const { reviewId } = dispatched({ claimed: true });
+    const body = v3PublicationReport({
+      license_file: { state: "matches_other", spdx: "CC0-1.0", additions: false, expression: null },
+    });
+    await h.result(reviewId, { outcome: "reported", report: body });
+    const row = state(reviewId);
+    expect(row).toMatchObject({ state: "reported", verdict: "action_required" });
+    const report = parsePublicationReviewReport(JSON.parse(row.report as string));
+    expect(answersOf(report).answers.authors_and_license).toBe("unknown");
+    expect(verdictOf(reportReasons(report))).toBe("action_required");
+  });
+
+  test("a version-3 report with a word outside the closed lists is report_invalid, and stores no record", async () => {
+    for (const [i, evidence] of [
+      { license_file: { state: "partial", spdx: null, additions: false, expression: null } },
+      { description_keys_not_shown_names: ["DepositorKey"] },
+    ].entries()) {
+      const dataset = ds(120 + i);
+      const { reviewId } = dispatched({ dataset, claimed: true });
+      const body = {
+        ...v3PublicationReport(),
+        evidence: { ...(v3PublicationReport().evidence as object), ...evidence },
+      };
+      await h.result(
+        reviewId,
+        { outcome: "reported", report: body },
+        undefined,
+        undefined,
+        dataset,
+      );
+      expect(state(reviewId)).toMatchObject({
+        state: "errored",
+        detail: "report_invalid",
+        license_matcher: null,
+        report: null,
+      });
+    }
+  });
+
+  test("a version-2 report stores no matcher", async () => {
+    const { reviewId } = dispatched({ claimed: true });
+    const v3 = v3PublicationReport();
+    const {
+      license_file: _f,
+      description_keys_not_shown_names: _n,
+      ...v2Evidence
+    } = v3.evidence as Record<string, unknown>;
+    const { license_matcher: _m, ...v2Record } = v3.record as Record<string, unknown>;
+    const body = {
+      ...v3,
+      v: 2,
+      evidence: { ...v2Evidence, lineage: { outcome: "compatible", credited: false } },
+      record: v2Record,
+    };
+    await h.result(reviewId, { outcome: "reported", report: body });
+    expect(state(reviewId)).toMatchObject({ state: "reported", license_matcher: null });
+  });
+
+  test("migration 0162: the matcher is a reported row's alone, and bounded", () => {
+    const { reviewId } = dispatched();
+    expect(() =>
+      h.db.run("UPDATE publication_reviews SET license_matcher = 'unavailable' WHERE id = ?", [
+        reviewId,
+      ]),
+    ).toThrow(/CHECK/);
+    const reported = dispatched({ dataset: ds(130) });
+    h.db.run(
+      "UPDATE publication_reviews SET state = 'reported', verdict = 'pass', report = '{}', nonce = NULL, decided_at = datetime('now') WHERE id = ?",
+      [reported.reviewId],
+    );
+    expect(() =>
+      h.db.run("UPDATE publication_reviews SET license_matcher = ? WHERE id = ?", [
+        "x".repeat(65),
+        reported.reviewId,
+      ]),
+    ).toThrow(/CHECK/);
+    h.db.run("UPDATE publication_reviews SET license_matcher = 'unavailable' WHERE id = ?", [
+      reported.reviewId,
+    ]);
+    expect(state(reported.reviewId).license_matcher).toBe("unavailable");
   });
 });

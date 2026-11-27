@@ -106,7 +106,9 @@ const totalsSql = (eligible: string): string => `SELECT g.status AS status, COUN
 
 /**
  * A recipe's coverage over the eligible datasets: `?1` recipe, `?2` the registry's recipe version, `?3`
- * the recipe's last declared checkpoint (`complete` is every recording passed there).
+ * the recipe's last declared checkpoint (`complete` is every recording passed there, and, once the derivative
+ * store has decided the run, every recording `stored`: a derivative it skipped for good or lost reads
+ * incomplete here as it reads `stored: skipped` or failed on the grid and in the run's detail).
  */
 const coverageSql = (eligible: string): string => `SELECT
     COUNT(*) AS eligible,
@@ -119,7 +121,10 @@ const coverageSql = (eligible: string): string => `SELECT
        WHERE c.dataset_id = d.dataset_id AND c.recipe = ?1 AND c.recipe_version = ?2
          AND c.state = 'succeeded'
          AND c.version = ${VERSION_TAG_SQL(`(${NEWEST_VERSION_SQL("d")})`)}
-         AND p.reconciled = 1 AND p.total > 0 AND p.passed = p.total)), 0) AS complete,
+         AND p.reconciled = 1 AND p.total > 0 AND p.passed = p.total
+         AND NOT EXISTS (SELECT 1 FROM compute_pipeline_progress ps
+           WHERE ps.stamp_id = c.id AND ps.checkpoint = '${STORED_CHECKPOINT}'
+             AND ps.reconciled = 1 AND ps.passed < ps.total))), 0) AS complete,
     COALESCE(SUM(EXISTS (SELECT 1 FROM compute_pipeline_stamps c
        WHERE c.dataset_id = d.dataset_id AND c.recipe = ?1 AND c.state = 'succeeded'
          AND c.version = ${VERSION_TAG_SQL(`(${NEWEST_VERSION_SQL("d")})`)})), 0) AS covered_any_version

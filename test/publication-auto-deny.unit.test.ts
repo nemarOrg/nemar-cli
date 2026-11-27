@@ -7,7 +7,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { evidenceFor, goodPublicationReport } from "../backend/test/helpers/publication-review";
+import {
+  evidenceFor,
+  goodPublicationReport,
+  v3PublicationReport,
+} from "../backend/test/helpers/publication-review";
+import { LICENSE_FILE_STATES, type LicenseFileState } from "../shared/license-file";
 import { LINEAGE_OUTCOMES } from "../shared/license-lineage";
 import {
   AUTO_DENY_ANCHORS,
@@ -27,6 +32,8 @@ import {
   autoDenyStateLine,
   confirmationOf,
   deniedReasonOf,
+  eligibleCodesOf,
+  licenseFileDiffers,
 } from "../shared/publication-auto-deny";
 import {
   PUBLICATION_FINDING_CODES,
@@ -255,6 +262,138 @@ describe("what may deny", () => {
     expect(autoDenyEligibility(input({ report: r }))).toEqual({
       eligible: false,
       why: "no_eligible_reason",
+    });
+  });
+
+  describe("a LICENSE that names another license than the field (ADR 0142; ADR 0139 as amended 2026-11-27)", () => {
+    /** A version-3 report whose `failed` questions each carry one blocker of `code`, beside `state`. */
+    const v3 = (
+      state: LicenseFileState,
+      failed: Array<[string, string, string?]>,
+      model: "claude-haiku-5-5" | "claude-sonnet-5-5" = "claude-haiku-5-5",
+    ): PublicationReviewReport => {
+      const conclusive = state === "matches" || state === "matches_other";
+      const documents = {
+        ...(evidenceFor().documents as Record<string, string>),
+        license: state === "absent" ? "absent" : state === "annexed" ? "withheld_annexed" : "sent",
+      };
+      const questions: Record<string, string> = {
+        complete_and_honest: "pass",
+        meets_standards: "pass",
+        authors_and_license: "pass",
+        name_adequate: "pass",
+      };
+      for (const [q] of failed) questions[q] = "fail";
+      const body = v3PublicationReport(
+        {
+          documents,
+          license_file: {
+            state,
+            spdx: conclusive ? "CC0-1.0" : null,
+            additions: false,
+            expression: null,
+          },
+        },
+        {
+          questions,
+          findings: failed.map(([question, code, document]) => ({
+            question,
+            severity: "blocker",
+            code,
+            document: document ?? (question === "authors_and_license" ? "license" : "readme"),
+            note: "n",
+          })),
+        },
+      );
+      if (model === "claude-sonnet-5-5") {
+        body.model = model;
+        body.record = {
+          ...(body.record as Record<string, unknown>),
+          models: [{ model, effort: "max" }],
+        };
+      }
+      return parsePublicationReviewReport(
+        body,
+        model === "claude-haiku-5-5" ? {} : { models: [CONFIRMING_MODEL] },
+      );
+    };
+
+    test("an authors_and_license fail is never eligible, whatever eligible finding it carries", () => {
+      for (const code of AUTO_DENY_FINDING_CODES) {
+        const r = v3("matches_other", [["authors_and_license", code]]);
+        expect(licenseFileDiffers(r)).toBe(true);
+        // The model's fail stands: lowering to unknown never lifts a fail.
+        expect(autoDenyEligibility(input({ report: r }))).toEqual({
+          eligible: false,
+          why: "no_eligible_reason",
+        });
+        // Nor does a confirming run that agrees make it eligible: both saw the same fact.
+        const c = v3("matches_other", [["authors_and_license", code]], "claude-sonnet-5-5");
+        expect(eligibleCodesOf(c)).toEqual({ codes: [], reasons: [] });
+      }
+    });
+
+    test("license_inconsistent itself, the code the fact suggests, is not eligible either", () => {
+      const r = v3("matches_other", [["authors_and_license", "license_inconsistent"]]);
+      expect(eligibleCodesOf(r)).toEqual({ codes: [], reasons: [] });
+    });
+
+    test("the other questions keep their eligibility beside it", () => {
+      const r = v3("matches_other", [
+        ["authors_and_license", "license_inconsistent"],
+        ["complete_and_honest", "readme_missing_or_stub"],
+      ]);
+      expect(autoDenyEligibility(input({ report: r }))).toEqual({
+        eligible: true,
+        codes: ["readme_missing_or_stub"],
+        reasons: ["question_failed"],
+      });
+    });
+
+    test("a license finding carried to another failed question is not eligible either", () => {
+      for (const failed of [
+        [["complete_and_honest", "license_inconsistent"]],
+        [["meets_standards", "license_missing"]],
+        // Any finding about the LICENSE document, whatever its code.
+        [["complete_and_honest", "description_incomplete", "license"]],
+        [
+          ["authors_and_license", "license_inconsistent"],
+          ["name_adequate", "license_inconsistent", "dataset_description"],
+        ],
+      ] as Array<Array<[string, string, string?]>>) {
+        const r = v3("matches_other", failed);
+        expect({ failed, e: eligibleCodesOf(r) }).toEqual({
+          failed,
+          e: { codes: [], reasons: [] },
+        });
+        // The same findings without the differing file are eligible, as before.
+        const m = v3("matches", failed);
+        expect({ failed, e: eligibleCodesOf(m).codes.length > 0 }).toEqual({ failed, e: true });
+      }
+      // A finding about another document, under another question, keeps its eligibility.
+      const r = v3("matches_other", [
+        ["complete_and_honest", "license_inconsistent"],
+        ["meets_standards", "description_incomplete", "dataset_description"],
+      ]);
+      expect(eligibleCodesOf(r)).toEqual({
+        codes: ["description_incomplete"],
+        reasons: ["question_failed"],
+      });
+    });
+
+    test("every other LICENSE state leaves the authors_and_license fail eligible, as before", () => {
+      for (const state of LICENSE_FILE_STATES.filter((s) => s !== "matches_other")) {
+        const r = v3(state, [["authors_and_license", "license_inconsistent"]]);
+        expect(licenseFileDiffers(r)).toBe(false);
+        expect({ state, e: autoDenyEligibility(input({ report: r })) }).toEqual({
+          state,
+          e: { eligible: true, codes: ["license_inconsistent"], reasons: ["question_failed"] },
+        });
+      }
+      // A version-2 report has no identification, and keeps the rule it had.
+      const v2 = failing("license_inconsistent", "blocker", "authors_and_license");
+      expect(licenseFileDiffers(v2)).toBe(false);
+      expect(autoDenyEligibility(input({ report: v2 }))).toMatchObject({ eligible: true });
     });
   });
 

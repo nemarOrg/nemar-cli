@@ -13,10 +13,16 @@
  *    At most {@link MAX_SOURCES} are read; any beyond are listed as `not_checked`.
  * 2. RECORDS. For each DOI: DataCite, then Crossref, then OpenAlex, stopping at the first answer.
  *    Only "the registry has no such DOI" moves on to the next registry; a registry that did not
- *    answer (timeout, 5xx, 429, an unparseable body) leaves the source `unresolved`, because a
- *    verdict is never stamped from an infrastructure error. A DataCite Dataset record with no
- *    usable rights whose DOI or landing page is OpenNeuro or PhysioNet is completed from that
- *    repository's own API: the registries hold no license for either (measured 2026-11-25).
+ *    answer (timeout, 5xx, 429, an unparseable body) is asked again ({@link LINEAGE_RETRY}, within
+ *    {@link LINEAGE_FETCH_BUDGET} and {@link LINEAGE_RETRY_WINDOW_MS}), and one that still does not
+ *    answer leaves the source `unresolved`, because a verdict is never stamped from an
+ *    infrastructure error (ADR 0142 decision 3: 9 of 13 review-time `unresolved` outcomes were
+ *    transient). A DataCite Dataset record with no usable rights whose DOI or landing page is
+ *    OpenNeuro or PhysioNet is completed from that repository's own API: the registries hold no
+ *    license for either (measured 2026-11-25). An Open Science Framework (OSF) DOI
+ *    (`10.17605/osf.io/<guid>`, which an `https://osf.io/<guid>` URL maps to) that DataCite does
+ *    not hold, or holds with no rights, is completed from the license OSF's API declares for the
+ *    node (measured 2026-11-27: OSF projects often have no DataCite DOI at all).
  * 3. RULE. Each source's license is normalized into a closed set, judged against the target
  *    license, and the sources are combined on a restriction lattice where the most restrictive
  *    outcome wins ({@link OUTCOME_RANK}). No outcome denies anything automatically (ADR 0139).
@@ -30,10 +36,12 @@ import { normalizeDoiKey } from "./never-data-paper.js";
 
 /**
  * Stamped on every result, so two results can be compared. Bump it when a rule changes, or when a
- * record gains a field (version 2: each source's title, creators and publisher, epic #2182 card B4);
+ * record gains a field (version 2: each source's title, creators and publisher, epic #2182 card B4;
+ * version 3: the declared license, osf.io sources, cut README DOIs dropped, retried fetches, and
+ * `resolved_at`, ADR 0142 decision 3);
  * the cache key carries it, so a record of an older version is never served.
  */
-export const RESOLVER_VERSION = "license-lineage/2";
+export const RESOLVER_VERSION = "license-lineage/3";
 
 /** The User-Agent of every registry request. It carries no contact details on purpose. */
 export const LICENSE_CHECK_USER_AGENT = "nemar-license-check/1";
@@ -44,8 +52,50 @@ export const FETCH_TIMEOUT_MS = 8_000;
 /** At most this many sources of one dataset are read. */
 export const MAX_SOURCES = 10;
 
-/** How long a registry answer is cached, per DOI. */
+/**
+ * How long a registry answer is cached, per DOI. Only an answer is cached ({@link isValidCachedRecord}):
+ * a failure, and `not_found` (which makes the source `unresolved`), are never stored, so an
+ * `unresolved` source is never served from the cache (ADR 0142 decision 3).
+ */
 export const CACHE_TTL_SECONDS = 24 * 60 * 60;
+
+/** How a failed fetch (network, timeout, 429, 5xx, an unparseable body) is asked again. */
+export interface RetryPolicy {
+  /** Attempts in all, the first included; 1 asks once. */
+  attempts: number;
+  /** The wait before each retry, in order; the last repeats when there are more retries. */
+  backoffMs: readonly number[];
+}
+
+/** One attempt, no retry (tests of a single failure). */
+export const NO_RETRY: RetryPolicy = { attempts: 1, backoffMs: [] };
+
+/** The resolver's default: two retries, after 250 ms and 1 s (a `Retry-After` of up to 2 s wins). */
+export const LINEAGE_RETRY: RetryPolicy = { attempts: 3, backoffMs: [250, 1_000] };
+
+/** The longest `Retry-After` honored; a longer one waits this long. */
+export const MAX_RETRY_AFTER_MS = 2_000;
+
+/**
+ * The most requests one lineage makes, retries included. The first attempts of {@link MAX_SOURCES}
+ * sources need at most 30 (three registries or repository calls each); the rest is for retries, and
+ * a request past it is a failed fetch, never a verdict. Far below the Worker's subrequest limit, so
+ * the review inputs route's GitHub reads still fit beside it.
+ */
+export const LINEAGE_FETCH_BUDGET = 60;
+
+/**
+ * No retry starts once it could end later than this after the lineage began: the review job waits
+ * 60 s for its inputs (scripts/ci/publication-review.ts), and the first attempts must still fit.
+ */
+export const LINEAGE_RETRY_WINDOW_MS = 30_000;
+
+/** The shortest DOI suffix taken from free text; a shorter one is a fragment (`10.17605/o`). */
+export const MIN_DOI_SUFFIX_LENGTH = 5;
+
+/** The most declared-license entries a source keeps, and the longest text or URL of one. */
+export const MAX_DECLARED_LICENSES = 5;
+export const MAX_DECLARED_LICENSE_LENGTH = 300;
 
 /** The docs page whose sections explain each outcome (anchors follow the outcome names). */
 export const LINEAGE_DOCS_URL = "https://docs.nemar.org/policies/contributor-terms/";
@@ -125,7 +175,14 @@ export const SOURCE_STATUSES = [
 ] as const;
 export type SourceStatus = (typeof SOURCE_STATUSES)[number];
 
-export const RESOLVERS = ["datacite", "crossref", "openalex", "openneuro", "physionet"] as const;
+export const RESOLVERS = [
+  "datacite",
+  "crossref",
+  "openalex",
+  "openneuro",
+  "physionet",
+  "osf",
+] as const;
 export type Resolver = (typeof RESOLVERS)[number];
 
 /** Where a source was declared. */
@@ -169,9 +226,10 @@ export const RESOLVER_READ: Record<Resolver, string> = {
     "OpenNeuro: the snapshot's dataset_description.json License, read through its GraphQL API; the title, creators and publisher are DataCite's.",
   physionet:
     "PhysioNet: the published project's license name, access policy and title, read through its API.",
+  osf: "OSF: the node's license (name and URL) and title, read through its API when DataCite holds no DOI or no rights for it.",
 };
 
-const READ_SOURCES = `The upstream sources declared in dataset_description.json (SourceDatasets), .nemar/metadata.json (IsDerivedFrom and IsIdenticalTo), the deposit attestation and the README (data-repository DOIs and OpenNeuro, Zenodo or PhysioNet URLs only). Then, per source: ${Object.values(
+const READ_SOURCES = `The upstream sources declared in dataset_description.json (SourceDatasets), .nemar/metadata.json (IsDerivedFrom and IsIdenticalTo), the deposit attestation and the README (data-repository DOIs and OpenNeuro, Zenodo, PhysioNet or OSF URLs only; a DOI cut short in the text is dropped). Then, per source: ${Object.values(
   RESOLVER_READ,
 ).join(" ")}`;
 
@@ -280,7 +338,7 @@ export const SOURCE_STATUS_COPY: Record<SourceStatus, Copy> = {
   no_doi: {
     statement: "The source is a URL that maps to no DOI.",
     read: "The declared URL.",
-    remedy: "Give the source as a DOI, or as an OpenNeuro, Zenodo or PhysioNet URL.",
+    remedy: "Give the source as a DOI, or as an OpenNeuro, Zenodo, PhysioNet or OSF URL.",
     anchor: anchor("unresolved"),
   },
   description_unreadable: {
@@ -360,9 +418,16 @@ export interface NormalizedLicenseValue {
   version: string | null;
 }
 
-/** An access-rights statement (`info:eu-repo/semantics/openAccess`), which is not a license. */
+/**
+ * An access-rights statement, which is not a license: the URI (`info:eu-repo/semantics/openAccess`)
+ * or its bare word (`openAccess`, `restrictedAccess`, as PsychArchives records give it; measured
+ * 2026-11-27, where `openAccess` beside CC BY made the source `other`).
+ */
 export function isAccessRightsUri(text: string): boolean {
-  return /^info:eu-repo\/semantics\//i.test(text.trim());
+  return (
+    /^info:eu-repo\/semantics\//i.test(text.trim()) ||
+    /^(open|restricted|embargoed|closed|metadataOnly)Access$/i.test(text.trim())
+  );
 }
 
 function versionOf(text: string): string | null {
@@ -563,8 +628,34 @@ const OPENNEURO_URL = /openneuro\.org\/datasets\/(ds\d{6})(?:\/versions\/([0-9][
 const OPENNEURO_DOI = /^10\.18112\/openneuro\.(ds\d{6})(?:\.v([0-9][\w.-]*))?$/i;
 const ZENODO_URL = /zenodo\.org\/(?:records?|deposit)\/(\d+)/i;
 const PHYSIONET_URL = /physionet\.org\/(?:content|files)\/([a-z0-9][a-z0-9-]*)(?:\/(\d[\w.]*))?/i;
+/**
+ * An OSF node URL: `osf.io/` and a five-character GUID, then the end, a slash, a query or a
+ * fragment (`https://osf.io/rmafj/`, `https://osf.io/j3s7g/files/osfstorage`). OSF's own pages of
+ * five letters are not GUIDs ({@link OSF_RESERVED_PATHS}).
+ */
+const OSF_URL = /^https?:\/\/(?:www\.)?osf\.io\/([a-z0-9]{5})(?=[/?#]|$)/i;
+const OSF_DOI = /^10\.17605\/osf\.io\/([a-z0-9]{5})$/;
+/** OSF site paths of five characters, which an OSF URL can start with and which are not GUIDs. */
+const OSF_RESERVED_PATHS: ReadonlySet<string> = new Set([
+  "about",
+  "files",
+  "login",
+  "users",
+  "legal",
+  "store",
+  "terms",
+  "nodes",
+]);
 const KNOWN_URLS_IN_TEXT =
-  /https?:\/\/(?:www\.)?(?:openneuro\.org\/datasets\/ds\d{6}(?:\/versions\/[0-9][\w.-]*)?|zenodo\.org\/(?:records?|deposit)\/\d+|physionet\.org\/(?:content|files)\/[a-z0-9][a-z0-9-]*(?:\/\d[\w.]*)?)/gi;
+  /https?:\/\/(?:www\.)?(?:openneuro\.org\/datasets\/ds\d{6}(?:\/versions\/[0-9][\w.-]*)?|zenodo\.org\/(?:records?|deposit)\/\d+|physionet\.org\/(?:content|files)\/[a-z0-9][a-z0-9-]*(?:\/\d[\w.]*)?|osf\.io\/[a-z0-9]{5}(?![a-z0-9]))/gi;
+
+/** The DataCite DOI of an OSF node URL (`https://osf.io/rmafj` -> `10.17605/osf.io/rmafj`), or null. */
+export function osfDoiOfUrl(url: string): string | null {
+  const m = OSF_URL.exec(url.trim());
+  if (!m) return null;
+  const guid = m[1].toLowerCase();
+  return OSF_RESERVED_PATHS.has(guid) ? null : `10.17605/osf.io/${guid}`;
+}
 
 function trimVersion(v: string): string {
   return v.replace(/[.,;:]+$/, "");
@@ -596,6 +687,8 @@ export function refFromIdentifier(
   }
   const zen = ZENODO_URL.exec(t);
   if (zen) return { kind: "doi", doi: `10.5281/zenodo.${zen[1]}`, origin };
+  const osf = osfDoiOfUrl(t);
+  if (osf) return { kind: "doi", doi: osf, origin };
   const zenDoi = /zenodo\.org\/doi\/(10\.\d{4,9}\/\S+)/i.exec(t);
   if (zenDoi) return doiRef(zenDoi[1], origin);
   const pn = PHYSIONET_URL.exec(t);
@@ -610,19 +703,83 @@ export function refFromIdentifier(
   return { kind: "url", url: t, origin };
 }
 
-/** DOIs and known repository URLs in free text. `anyDoi` false keeps only data-repository DOIs. */
-export function refsFromText(text: string, origin: SourceOrigin, anyDoi: boolean): SourceRef[] {
+/**
+ * Markdown emphasis and code marks, and the punctuation after them, that a DOI match can carry at
+ * its end (`` `10.5281/zenodo.1`, ``, `**10.5281/zenodo.1**.`).
+ */
+const TRAILING_MARKUP = /[`*_~.,;:]+$/;
+
+/**
+ * The suffix shape of each data-repository DOI prefix, the only DOIs a README is read for. A README
+ * candidate of one of these prefixes whose suffix does not have the shape was cut out of the text
+ * (`10.17605/o` from a wrapped `10.17605/OSF.IO/...`; `10.5281/zenodo.` before a line break).
+ */
+export const DATA_REPOSITORY_DOI_SHAPES: Record<
+  (typeof DATA_REPOSITORY_DOI_PREFIXES)[number],
+  RegExp
+> = {
+  "10.18112": /^openneuro\.ds\d{6}(?:\.v[0-9][\w.-]*)?$/,
+  "10.5281": /^zenodo\.\d+$/,
+  "10.13026": /^[a-z0-9][a-z0-9-]{4,}$/,
+  // An item or a collection (`m9.figshare.c.3307977`), with or without a version.
+  "10.6084": /^m9\.figshare\.(?:c\.)?\d+(?:\.v\d+)?$/,
+  "10.17605": /^osf\.io\/[a-z0-9]{5}$/,
+  // A dataset, or one of its files (`dryad.8pm4nv0/1`).
+  "10.5061": /^dryad\.[a-z0-9]+(?:\/\d+)?$/,
+  // Harvard Dataverse's older five-character identifiers (`DVN/29379`) as well as the newer six.
+  "10.7910": /^dvn\/[a-z0-9]{5,}(?:\/[a-z0-9]+)?$/,
+};
+
+/**
+ * Whether a DOI candidate in free text was cut short, so it is not a source (ADR 0142 decision 3):
+ * its suffix (markup and trailing punctuation already removed) is shorter than
+ * {@link MIN_DOI_SUFFIX_LENGTH}, as `10.17605/o` in a production README was, or, for a README
+ * candidate (`shaped`), a data-repository DOI whose suffix lacks its repository's shape
+ * ({@link DATA_REPOSITORY_DOI_SHAPES}).
+ */
+export function isCutDoiCandidate(doi: string, shaped: boolean): boolean {
+  const slash = doi.indexOf("/");
+  const suffix = doi.slice(slash + 1);
+  if (suffix.length < MIN_DOI_SUFFIX_LENGTH) return true;
+  if (!shaped) return false;
+  const shape = (DATA_REPOSITORY_DOI_SHAPES as Record<string, RegExp>)[doi.slice(0, slash)];
+  return shape !== undefined && !shape.test(suffix);
+}
+
+/** What one text declares: its sources, and how many DOI candidates were dropped as cut short. */
+export interface TextSources {
+  refs: SourceRef[];
+  dropped: number;
+}
+
+/**
+ * DOIs and known repository URLs in free text, and the count of DOI candidates dropped as cut short
+ * ({@link isCutDoiCandidate}); a dropped candidate is never a source, so it never makes the lineage
+ * `unresolved`. `anyDoi` false keeps only data-repository DOIs.
+ */
+export function sourcesFromText(text: string, origin: SourceOrigin, anyDoi: boolean): TextSources {
   const refs: SourceRef[] = [];
+  let dropped = 0;
   for (const m of text.match(DOI_IN_TEXT) ?? []) {
-    const doi = normalizeDoiKey(m);
+    const doi = normalizeDoiKey(m.replace(TRAILING_MARKUP, ""));
     if (!anyDoi && !DATA_REPOSITORY_DOI_PREFIXES.some((p) => doi.startsWith(`${p}/`))) continue;
+    if (isCutDoiCandidate(doi, origin === "readme")) {
+      dropped++;
+      continue;
+    }
     refs.push(doiRef(doi, origin));
   }
   for (const m of text.match(KNOWN_URLS_IN_TEXT) ?? []) {
     const ref = refFromIdentifier(m, origin);
-    if (ref) refs.push(ref);
+    // An OSF site page (`osf.io/about`) is not a node, and maps to no source.
+    if (ref && ref.kind !== "url") refs.push(ref);
   }
-  return refs;
+  return { refs, dropped };
+}
+
+/** DOIs and known repository URLs in free text. `anyDoi` false keeps only data-repository DOIs. */
+export function refsFromText(text: string, origin: SourceOrigin, anyDoi: boolean): SourceRef[] {
+  return sourcesFromText(text, origin, anyDoi).refs;
 }
 
 export function refKey(ref: SourceRef): string {
@@ -720,7 +877,16 @@ export function declaredLicense(datasetDescription: unknown): string | null {
 
 /** Every declared source, in the decided order, de-duplicated. */
 export function extractSourceRefs(inputs: SourceInputs): SourceRef[] {
+  return extractSources(inputs).refs;
+}
+
+/**
+ * Every declared source, in the decided order, de-duplicated, and the count of DOI candidates in
+ * the attestation and the README dropped as cut short.
+ */
+export function extractSources(inputs: SourceInputs): TextSources {
   const refs: SourceRef[] = [];
+  let dropped = 0;
   const desc = inputs.datasetDescription;
   if (isRecord(desc) && Array.isArray(desc.SourceDatasets)) {
     for (const entry of desc.SourceDatasets) {
@@ -749,15 +915,17 @@ export function extractSourceRefs(inputs: SourceInputs): SourceRef[] {
     }
   }
   if (inputs.attestationUpstreamSource) {
-    refs.push(...refsFromText(inputs.attestationUpstreamSource, "attestation", true));
+    const found = sourcesFromText(inputs.attestationUpstreamSource, "attestation", true);
+    refs.push(...found.refs);
+    dropped += found.dropped;
   }
   if (inputs.readme) {
     // A README names its own dataset: never NEMAR's own DOIs, which no upstream source carries.
+    const found = sourcesFromText(inputs.readme, "readme", false);
     refs.push(
-      ...refsFromText(inputs.readme, "readme", false).filter(
-        (r) => !(r.kind === "doi" && r.doi.startsWith(`${NEMAR_DOI_PREFIX}/`)),
-      ),
+      ...found.refs.filter((r) => !(r.kind === "doi" && r.doi.startsWith(`${NEMAR_DOI_PREFIX}/`))),
     );
+    dropped += found.dropped;
   }
 
   // A dataset is not its own upstream source, whichever input names it.
@@ -766,13 +934,14 @@ export function extractSourceRefs(inputs: SourceInputs): SourceRef[] {
       ? normalizeDoiKey(desc.DatasetDOI)
       : null;
   const seen = new Set<string>();
-  return refs.filter((r) => {
+  const unique = refs.filter((r) => {
     if (own !== null && r.kind === "doi" && r.doi === own) return false;
     const k = refKey(r);
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
   });
+  return { refs: unique, dropped };
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +955,8 @@ export interface RegistryBases {
   /** The OpenNeuro origin; GraphQL is at `/crn/graphql`. */
   openneuro: string;
   physionet: string;
+  /** The OSF API origin; a node is at `/v2/nodes/<guid>/`. */
+  osf: string;
 }
 
 export const DEFAULT_BASES: RegistryBases = {
@@ -794,7 +965,20 @@ export const DEFAULT_BASES: RegistryBases = {
   openalex: "https://api.openalex.org",
   openneuro: "https://openneuro.org",
   physionet: "https://physionet.org",
+  osf: "https://api.osf.io",
 };
+
+/**
+ * One license entry exactly as the source's record declares it, shown beside the normalized word
+ * (ADR 0142 decision 3: `needs_permission` shows the license the source declares): DataCite's
+ * `rights` and `rightsUri`, Crossref's license URL, OpenAlex's license id, OpenNeuro's `License`,
+ * PhysioNet's license name, OSF's license name and URL. Registry text, never deposit content;
+ * control characters are removed and each value is at most {@link MAX_DECLARED_LICENSE_LENGTH}.
+ */
+export interface DeclaredLicense {
+  text: string | null;
+  url: string | null;
+}
 
 /** What one source's record said. Cached per DOI; only answers are cached, never a failure. */
 export interface SourceRecord {
@@ -811,6 +995,11 @@ export interface SourceRecord {
   license_version: string | null;
   /** The license text exactly as the record gave it (joined when several). */
   raw: string | null;
+  /**
+   * Each license the record declares, as it declares it; empty when it declares none (or when
+   * no record was read: see `status`).
+   */
+  declared_licenses: DeclaredLicense[];
   evidence_url: string | null;
   status: SourceStatus;
 }
@@ -825,6 +1014,28 @@ const NOT_DESCRIBED: Described = { title: null, creators: [], publisher: null };
 
 function text(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+}
+
+/** A registry value made safe to print: control characters removed, length capped; null if empty. */
+function declaredValue(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the point is to remove them.
+  const clean = v.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();
+  if (clean === "") return null;
+  return clean.length > MAX_DECLARED_LICENSE_LENGTH
+    ? `${clean.slice(0, MAX_DECLARED_LICENSE_LENGTH - 1)}\u2026`
+    : clean;
+}
+
+/** A declared-license entry, or null when it carries neither a text nor a URL. */
+function declared(textValue: unknown, urlValue: unknown): DeclaredLicense | null {
+  const t = declaredValue(textValue);
+  const u = declaredValue(urlValue);
+  return t === null && u === null ? null : { text: t, url: u };
+}
+
+function declaredList(entries: Array<DeclaredLicense | null>): DeclaredLicense[] {
+  return entries.filter((e): e is DeclaredLicense => e !== null).slice(0, MAX_DECLARED_LICENSES);
 }
 
 function names(list: unknown, nameOf: (entry: Record<string, unknown>) => string | null): string[] {
@@ -897,6 +1108,12 @@ export interface ResolveOptions {
   timeoutMs?: number;
   cache?: LineageCache;
   now?: () => Date;
+  /** How a failed fetch is asked again; {@link LINEAGE_RETRY} when omitted. */
+  retry?: RetryPolicy;
+  /** The most requests the lineage makes; {@link LINEAGE_FETCH_BUDGET} when omitted. */
+  fetchBudget?: number;
+  /** How a retry waits; a real timer when omitted. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 type Fetched =
@@ -904,7 +1121,19 @@ type Fetched =
   | { kind: "absent" }
   | { kind: "failed"; status: SourceStatus };
 
-async function getJson(url: string, timeoutMs: number, init?: RequestInit): Promise<Fetched> {
+/** One attempt's answer: a failure says whether asking again may help, and what the server asked. */
+type Attempt =
+  | { kind: "ok"; body: unknown }
+  | { kind: "absent" }
+  | { kind: "failed"; status: SourceStatus; retryable: boolean; retryAfterMs: number | null };
+
+/** A `Retry-After` header in seconds, as milliseconds; null when absent or not a number. */
+function retryAfterMs(header: string | null): number | null {
+  if (header === null || !/^\d{1,6}$/.test(header.trim())) return null;
+  return Number(header.trim()) * 1000;
+}
+
+async function fetchOnce(url: string, timeoutMs: number, init?: RequestInit): Promise<Attempt> {
   let response: Response;
   try {
     response = await fetch(url, {
@@ -917,7 +1146,7 @@ async function getJson(url: string, timeoutMs: number, init?: RequestInit): Prom
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch {
-    return { kind: "failed", status: "fetch_failed" };
+    return { kind: "failed", status: "fetch_failed", retryable: true, retryAfterMs: null };
   }
   if (response.status === 404 || response.status === 410) {
     await response.body?.cancel();
@@ -925,15 +1154,71 @@ async function getJson(url: string, timeoutMs: number, init?: RequestInit): Prom
   }
   if (!response.ok) {
     await response.body?.cancel();
-    return { kind: "failed", status: "fetch_failed" };
+    // A 429 or a 5xx may answer next time; any other refusal (a private OSF node's 401) will not.
+    const retryable = response.status === 429 || response.status >= 500;
+    return {
+      kind: "failed",
+      status: "fetch_failed",
+      retryable,
+      retryAfterMs: retryAfterMs(response.headers.get("Retry-After")),
+    };
   }
   try {
     return { kind: "ok", body: await response.json() };
   } catch {
     // A body that stops mid-stream (the timeout) is a failed fetch; one that arrived and is not
-    // JSON is unparseable. Both are unresolved.
-    return { kind: "failed", status: "unparseable" };
+    // JSON is unparseable. Both are unresolved, and both are asked again.
+    return { kind: "failed", status: "unparseable", retryable: true, retryAfterMs: null };
   }
+}
+
+/** The resolver's fetch: one GET or POST of JSON, retried and counted against the lineage's budget. */
+type GetJson = (url: string, init?: RequestInit) => Promise<Fetched>;
+
+/** What every resolver step reads: the registry origins and the lineage's one fetch. */
+interface FetchContext {
+  bases: RegistryBases;
+  get: GetJson;
+}
+
+/**
+ * The lineage's fetch: each request is an attempt counted against `budget`; a retryable failure is
+ * asked again by `retry`, after its backoff (or the server's `Retry-After`, at most
+ * {@link MAX_RETRY_AFTER_MS}), while the budget lasts and only when the retry could end within
+ * {@link LINEAGE_RETRY_WINDOW_MS} of `startedAt`. A request past the budget is a failed fetch.
+ */
+function lineageFetch(args: {
+  timeoutMs: number;
+  retry: RetryPolicy;
+  budget: { left: number };
+  sleep: (ms: number) => Promise<void>;
+  clock: () => number;
+  startedAt: number;
+}): GetJson {
+  const attempts = Math.max(1, Math.floor(args.retry.attempts));
+  return async (url, init) => {
+    let last: Fetched = { kind: "failed", status: "fetch_failed" };
+    let lastRetryAfter: number | null = null;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (args.budget.left <= 0) return last;
+      if (attempt > 0) {
+        const backoff =
+          args.retry.backoffMs[Math.min(attempt - 1, args.retry.backoffMs.length - 1)] ?? 0;
+        const wait = Math.min(MAX_RETRY_AFTER_MS, Math.max(backoff, lastRetryAfter ?? 0));
+        const elapsed = args.clock() - args.startedAt;
+        if (elapsed + wait + args.timeoutMs > LINEAGE_RETRY_WINDOW_MS) return last;
+        await args.sleep(wait);
+        if (args.budget.left <= 0) return last;
+      }
+      args.budget.left--;
+      const got = await fetchOnce(url, args.timeoutMs, init);
+      if (got.kind !== "failed") return got;
+      last = { kind: "failed", status: got.status };
+      lastRetryAfter = got.retryAfterMs;
+      if (!got.retryable) return last;
+    }
+    return last;
+  };
 }
 
 function failedRecord(id: string, status: SourceStatus, evidence: string | null): SourceRecord {
@@ -945,16 +1230,18 @@ function failedRecord(id: string, status: SourceStatus, evidence: string | null)
     license: null,
     license_version: null,
     raw: null,
+    declared_licenses: [],
     evidence_url: evidence,
     status,
   };
 }
 
 function withLicense(
-  base: Omit<SourceRecord, "license" | "license_version" | "raw" | "status">,
+  base: Omit<SourceRecord, "license" | "license_version" | "raw" | "status" | "declared_licenses">,
   values: NormalizedLicenseValue[],
   raws: string[],
   isDataset: boolean,
+  declaredLicenses: DeclaredLicense[],
 ): SourceRecord {
   const chosen = mostRestrictive(values);
   return {
@@ -962,18 +1249,24 @@ function withLicense(
     license: chosen.license,
     license_version: chosen.version,
     raw: raws.length > 0 ? raws.join(" | ") : null,
+    declared_licenses: declaredLicenses,
     status: isDataset ? "resolved" : "publication",
   };
 }
 
-/** DataCite's `rightsList`, access-rights statements removed. */
-export function dataciteLicenses(rightsList: unknown): {
+/** The licenses one record lists: normalized, the raw text, and each entry as declared. */
+export interface RecordLicenses {
   values: NormalizedLicenseValue[];
   raws: string[];
-} {
+  declared: DeclaredLicense[];
+}
+
+/** DataCite's `rightsList`, access-rights statements removed. */
+export function dataciteLicenses(rightsList: unknown): RecordLicenses {
   const values: NormalizedLicenseValue[] = [];
   const raws: string[] = [];
-  if (!Array.isArray(rightsList)) return { values, raws };
+  const entries: Array<DeclaredLicense | null> = [];
+  if (!Array.isArray(rightsList)) return { values, raws, declared: [] };
   for (const r of rightsList) {
     if (!isRecord(r)) continue;
     const texts = [r.rightsIdentifier, r.rightsUri, r.rights].filter(
@@ -987,18 +1280,17 @@ export function dataciteLicenses(rightsList: unknown): {
     }
     values.push(value);
     raws.push(String(r.rightsUri ?? r.rightsIdentifier ?? r.rights));
+    entries.push(declared(r.rights ?? r.rightsIdentifier, r.rightsUri));
   }
-  return { values, raws };
+  return { values, raws, declared: declaredList(entries) };
 }
 
 /** Crossref's `license[]`: only `vor` or `unspecified` content versions, no TDM or STM-ASF terms. */
-export function crossrefLicenses(license: unknown): {
-  values: NormalizedLicenseValue[];
-  raws: string[];
-} {
+export function crossrefLicenses(license: unknown): RecordLicenses {
   const values: NormalizedLicenseValue[] = [];
   const raws: string[] = [];
-  if (!Array.isArray(license)) return { values, raws };
+  const entries: Array<DeclaredLicense | null> = [];
+  if (!Array.isArray(license)) return { values, raws, declared: [] };
   for (const l of license) {
     if (!isRecord(l) || typeof l.URL !== "string") continue;
     const cv = typeof l["content-version"] === "string" ? l["content-version"] : "unspecified";
@@ -1006,8 +1298,9 @@ export function crossrefLicenses(license: unknown): {
     if (/\/tdm\/|stm-asf|text-and-data-mining/i.test(l.URL)) continue;
     values.push(normalizeLicense(l.URL));
     raws.push(l.URL);
+    entries.push(declared(null, l.URL));
   }
-  return { values, raws };
+  return { values, raws, declared: declaredList(entries) };
 }
 
 const CROSSREF_DATA_TYPES = new Set(["dataset", "database"]);
@@ -1019,11 +1312,11 @@ async function resolveOpenNeuro(
   resourceType: string | null,
   /** The DataCite record's title, creators and publisher: OpenNeuro's answer holds only the license. */
   described: Described,
-  o: Required<Omit<ResolveOptions, "cache" | "now">>,
+  o: FetchContext,
 ): Promise<SourceRecord> {
   const evidence = `https://openneuro.org/datasets/${ds}/versions/${version}`;
   const query = `query { snapshot(datasetId: "${ds}", tag: "${version}") { tag description { License } } }`;
-  const got = await getJson(`${o.bases.openneuro}/crn/graphql`, o.timeoutMs, {
+  const got = await o.get(`${o.bases.openneuro}/crn/graphql`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query }),
@@ -1050,6 +1343,7 @@ async function resolveOpenNeuro(
     raw ? [normalizeLicense(raw)] : [],
     raw ? [raw] : [],
     (resourceType ?? "Dataset") === "Dataset",
+    declaredList([declared(raw, null)]),
   );
 }
 
@@ -1082,14 +1376,14 @@ async function resolvePhysioNet(
   fallbackId: string,
   slug: string,
   version: string | null,
-  o: Required<Omit<ResolveOptions, "cache" | "now">>,
+  o: FetchContext,
   /** The DataCite record's creators and publisher, when it led here; PhysioNet's API names none. */
   described: Described = NOT_DESCRIBED,
 ): Promise<SourceRecord> {
   const api = `${o.bases.physionet}/api/v1/project/published/${encodeURIComponent(slug)}/`;
   let ver = version;
   if (!ver) {
-    const list = await getJson(api, o.timeoutMs);
+    const list = await o.get(api);
     if (list.kind === "absent") return failedRecord(fallbackId, "not_found", api);
     if (list.kind === "failed") return failedRecord(fallbackId, list.status, api);
     if (!Array.isArray(list.body)) return failedRecord(fallbackId, "unparseable", api);
@@ -1101,7 +1395,7 @@ async function resolvePhysioNet(
     ver = versions[versions.length - 1];
   }
   const url = `${api}${encodeURIComponent(ver)}/`;
-  const got = await getJson(url, o.timeoutMs);
+  const got = await o.get(url);
   if (got.kind === "absent") return failedRecord(fallbackId, "not_found", url);
   if (got.kind === "failed") return failedRecord(fallbackId, got.status, url);
   const p = got.body;
@@ -1132,17 +1426,78 @@ async function resolvePhysioNet(
     [value],
     raws,
     resourceType === "Dataset",
+    declaredList([declared(name, null)]),
   );
 }
 
-/** One DOI's record: DataCite, then Crossref, then OpenAlex; a repository API completes it. */
-async function resolveDoiUncached(
+/**
+ * An OSF node's license, from OSF's API (`/v2/nodes/<guid>/?embed=license`): the license OSF
+ * declares for the node, for an OSF DOI DataCite does not hold or holds with no rights (ADR 0142
+ * decision 3). A node with no license relationship declares none (`none`); one whose relationship
+ * is there but whose embedded license is not is unparseable. A private node answers 401, which is
+ * a failed fetch and not retried.
+ */
+async function resolveOsf(
   doi: string,
-  o: Required<Omit<ResolveOptions, "cache" | "now">>,
+  guid: string,
+  resourceType: string | null,
+  /** The DataCite record's title, creators and publisher, when it holds the DOI. */
+  described: Described,
+  o: FetchContext,
 ): Promise<SourceRecord> {
+  const url = `${o.bases.osf}/v2/nodes/${encodeURIComponent(guid)}/?embed=license`;
+  const got = await o.get(url);
+  if (got.kind === "absent") return failedRecord(doi, "not_found", url);
+  if (got.kind === "failed") return failedRecord(doi, got.status, url);
+  const body = got.body;
+  if (!isRecord(body) || !isRecord(body.data) || !isRecord(body.data.attributes)) {
+    return failedRecord(doi, "unparseable", url);
+  }
+  const node = body.data;
+  const attributes = node.attributes as Record<string, unknown>;
+  const relationships = isRecord(node.relationships) ? node.relationships : {};
+  let license: Record<string, unknown> | null = null;
+  if (relationships.license !== null && relationships.license !== undefined) {
+    const embedded = isRecord(node.embeds) ? node.embeds.license : null;
+    if (!isRecord(embedded) || !isRecord(embedded.data) || !isRecord(embedded.data.attributes)) {
+      return failedRecord(doi, "unparseable", url);
+    }
+    license = embedded.data.attributes;
+  }
+  const texts = [license?.url, license?.name].filter(
+    (t): t is string => typeof t === "string" && t.trim() !== "",
+  );
+  let value: NormalizedLicenseValue | null = null;
+  for (const t of texts) {
+    value = normalizeLicense(t);
+    if (value.license !== "other") break;
+  }
+  const type = resourceType ?? "Dataset";
+  return withLicense(
+    {
+      id: doi,
+      resolver: "osf",
+      resource_type: type,
+      title: described.title ?? text(attributes.title),
+      creators: described.creators,
+      publisher: described.publisher ?? "OSF",
+      evidence_url: url,
+    },
+    value ? [value] : [],
+    texts,
+    type === "Dataset",
+    license ? declaredList([declared(license.name, license.url)]) : [],
+  );
+}
+
+/**
+ * One DOI's record: DataCite, then Crossref, then OpenAlex; a repository API completes it. An OSF
+ * DOI that DataCite does not hold goes to OSF's API, never to Crossref or OpenAlex.
+ */
+async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceRecord> {
   const enc = encodeURIComponent(doi);
   const dcUrl = `${o.bases.datacite}/dois/${enc}`;
-  const dc = await getJson(dcUrl, o.timeoutMs);
+  const dc = await o.get(dcUrl);
   if (dc.kind === "failed") return failedRecord(doi, dc.status, dcUrl);
   if (dc.kind === "ok") {
     const body = dc.body;
@@ -1152,7 +1507,7 @@ async function resolveDoiUncached(
     const a = body.data.attributes;
     const types = isRecord(a.types) ? a.types : {};
     const rtg = typeof types.resourceTypeGeneral === "string" ? types.resourceTypeGeneral : null;
-    const { values, raws } = dataciteLicenses(a.rightsList);
+    const { values, raws, declared: declaredLicenses } = dataciteLicenses(a.rightsList);
     const isDataset = rtg === "Dataset";
     const landing = typeof a.url === "string" ? a.url : "";
     if (isDataset && values.length === 0) {
@@ -1175,6 +1530,10 @@ async function resolveDoiUncached(
         return { ...rec, id: doi };
       }
     }
+    const osf = OSF_DOI.exec(doi);
+    if (osf && values.length === 0 && (isDataset || rtg === null)) {
+      return resolveOsf(doi, osf[1], rtg, dataciteDescribed(a), o);
+    }
     return withLicense(
       {
         id: doi,
@@ -1186,17 +1545,21 @@ async function resolveDoiUncached(
       values,
       raws,
       isDataset,
+      declaredLicenses,
     );
   }
 
+  const osf = OSF_DOI.exec(doi);
+  if (osf) return resolveOsf(doi, osf[1], null, NOT_DESCRIBED, o);
+
   const crUrl = `${o.bases.crossref}/works/${enc}`;
-  const cr = await getJson(crUrl, o.timeoutMs);
+  const cr = await o.get(crUrl);
   if (cr.kind === "failed") return failedRecord(doi, cr.status, crUrl);
   if (cr.kind === "ok") {
     const msg = isRecord(cr.body) ? cr.body.message : null;
     if (!isRecord(msg)) return failedRecord(doi, "unparseable", crUrl);
     const type = typeof msg.type === "string" ? msg.type : null;
-    const { values, raws } = crossrefLicenses(msg.license);
+    const { values, raws, declared: declaredLicenses } = crossrefLicenses(msg.license);
     return withLicense(
       {
         id: doi,
@@ -1208,11 +1571,12 @@ async function resolveDoiUncached(
       values,
       raws,
       type !== null && CROSSREF_DATA_TYPES.has(type),
+      declaredLicenses,
     );
   }
 
   const oaUrl = `${o.bases.openalex}/works/doi:${enc}`;
-  const oa = await getJson(oaUrl, o.timeoutMs);
+  const oa = await o.get(oaUrl);
   if (oa.kind === "failed") return failedRecord(doi, oa.status, oaUrl);
   if (oa.kind === "absent") return failedRecord(doi, "not_found", oaUrl);
   const w = oa.body;
@@ -1231,11 +1595,16 @@ async function resolveDoiUncached(
     lic ? [normalizeLicense(lic)] : [],
     lic ? [lic] : [],
     type === "dataset",
+    declaredList([declared(lic, null)]),
   );
 }
 
-/** Statuses that are answers and may be cached; a failure is asked again next time. */
-const CACHEABLE: ReadonlySet<SourceStatus> = new Set(["resolved", "publication", "not_found"]);
+/**
+ * Statuses that are answers and may be cached. A failure is asked again next time, and so is
+ * `not_found`: it makes the source `unresolved`, and an `unresolved` source is never served from
+ * the cache (ADR 0142 decision 3), since a registry that does not yet index a new DOI answers it.
+ */
+const CACHEABLE: ReadonlySet<SourceStatus> = new Set(["resolved", "publication"]);
 
 /** A cached answer is used only when it is a record this version could have written; else a miss. */
 export function isValidCachedRecord(hit: unknown): hit is SourceRecord {
@@ -1244,6 +1613,7 @@ export function isValidCachedRecord(hit: unknown): hit is SourceRecord {
     typeof hit.id === "string" &&
     typeof hit.status === "string" &&
     Array.isArray(hit.creators) &&
+    Array.isArray(hit.declared_licenses) &&
     (SOURCE_STATUSES as readonly string[]).includes(hit.status) &&
     CACHEABLE.has(hit.status as SourceStatus) &&
     (hit.license === null ||
@@ -1266,7 +1636,7 @@ async function cached(
 
 async function resolveRef(
   ref: SourceRef,
-  o: Required<Omit<ResolveOptions, "cache" | "now">>,
+  o: FetchContext,
   cache: LineageCache | undefined,
 ): Promise<SourceRecord> {
   switch (ref.kind) {
@@ -1288,7 +1658,7 @@ async function resolveRef(
         "page[size]": "1",
       });
       const url = `${o.bases.datacite}/dois?${q.toString()}`;
-      const got = await getJson(url, o.timeoutMs);
+      const got = await o.get(url);
       const id = `10.18112/openneuro.${ref.ds}`;
       if (got.kind === "failed") return failedRecord(id, got.status, url);
       if (got.kind === "absent") return failedRecord(id, "not_found", url);
@@ -1395,7 +1765,18 @@ export interface LineageResult {
   /** The License value as the dataset declares it. */
   target_license_raw: string | null;
   sources: LineageSource[];
+  /**
+   * DOI candidates in the README and the attestation dropped as cut short
+   * ({@link isCutDoiCandidate}): counted, never sources.
+   */
+  dropped_doi_candidates: number;
   resolver_version: string;
+  /**
+   * When this lineage was resolved (an instant, ISO 8601): the review's lineage and the decision
+   * card's each carry their own, so the two can be shown side by side (ADR 0142 decision 3).
+   */
+  resolved_at: string;
+  /** The same instant as `resolved_at`, kept for readers of resolver version 2. */
   fetched_at: string;
 }
 
@@ -1404,11 +1785,19 @@ export async function resolveLicenseLineage(
   inputs: LineageInputs,
   options: ResolveOptions = {},
 ): Promise<LineageResult> {
-  const o = {
-    bases: options.bases ?? DEFAULT_BASES,
-    timeoutMs: options.timeoutMs ?? FETCH_TIMEOUT_MS,
-  };
   const now = options.now ?? (() => new Date());
+  const clock = () => Date.now();
+  const o: FetchContext = {
+    bases: options.bases ?? DEFAULT_BASES,
+    get: lineageFetch({
+      timeoutMs: options.timeoutMs ?? FETCH_TIMEOUT_MS,
+      retry: options.retry ?? LINEAGE_RETRY,
+      budget: { left: options.fetchBudget ?? LINEAGE_FETCH_BUDGET },
+      sleep: options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+      clock,
+      startedAt: clock(),
+    }),
+  };
   const { states, sources: parsed } = readLineageInputs(inputs);
   const unreadable: LineageSource[] = [];
   if (states.dataset_description !== "read") {
@@ -1427,19 +1816,22 @@ export async function resolveLicenseLineage(
     });
   }
   if (states.dataset_description !== "read") {
+    const at = now().toISOString();
     return {
       outcome: "unresolved",
       inputs: states,
       target_license: null,
       target_license_raw: null,
       sources: unreadable,
+      dropped_doi_candidates: 0,
       resolver_version: RESOLVER_VERSION,
-      fetched_at: now().toISOString(),
+      resolved_at: at,
+      fetched_at: at,
     };
   }
   const targetRaw = declaredLicense(parsed.datasetDescription);
   const target = normalizeLicense(targetRaw);
-  const refs = extractSourceRefs(parsed);
+  const { refs, dropped } = extractSources(parsed);
   const records = await Promise.all(
     refs.map(async (ref, i): Promise<SourceRecord> => {
       if (i >= MAX_SOURCES) {
@@ -1460,15 +1852,43 @@ export async function resolveLicenseLineage(
     })),
     ...unreadable,
   ];
+  const at = now().toISOString();
   return {
-    outcome: combineOutcomes(sources),
+    // A README that names a source only as a DOI cut short has declared one: `unresolved` (the
+    // check could not read it), never `no_upstream_declared`, which reads as nothing to do.
+    outcome: sources.length === 0 && dropped > 0 ? "unresolved" : combineOutcomes(sources),
     inputs: states,
     target_license: target.license,
     target_license_raw: targetRaw,
     sources,
+    dropped_doi_candidates: dropped,
     resolver_version: RESOLVER_VERSION,
-    fetched_at: now().toISOString(),
+    resolved_at: at,
+    fetched_at: at,
   };
+}
+
+/** A source's declared licenses as one line's words: each text and URL, or that it declares none. */
+export function declaredLicenseWords(
+  source: Pick<SourceRecord, "status"> & { declared_licenses?: DeclaredLicense[] },
+): string {
+  // A result from a Worker of resolver version 2 carries no declared licenses at all.
+  if (source.declared_licenses === undefined) return "not recorded (an older resolver version)";
+  const list = source.declared_licenses;
+  if (list.length === 0) {
+    return source.status === "resolved" || source.status === "publication"
+      ? "none (the record lists no license)"
+      : "not read (no record was read)";
+  }
+  return list
+    .map((d) =>
+      d.text !== null && d.url !== null
+        ? `"${d.text}" <${d.url}>`
+        : d.text !== null
+          ? `"${d.text}"`
+          : `<${d.url}>`,
+    )
+    .join("; ");
 }
 
 /** `nemar dataset license-check` exit code: 0 for a compatible outcome, 2 for every other. */
@@ -1499,12 +1919,25 @@ export function lineageLines(result: LineageResult): string[] {
     lines.push(
       `      read: ${s.resolver ? RESOLVER_READ[s.resolver] : SOURCE_STATUS_COPY[s.status].read}`,
     );
+    // What the source itself declares, beside the normalized word: for every source that needs
+    // action, `needs_permission` and `unresolved` included (ADR 0142 decision 3).
+    if (!COMPATIBLE_OUTCOMES.has(s.outcome)) {
+      lines.push(`      declared license: ${declaredLicenseWords(s)}`);
+    }
     if (s.evidence_url) lines.push(`      evidence: ${s.evidence_url}`);
     if (s.status !== "resolved") lines.push(`      remedy: ${SOURCE_STATUS_COPY[s.status].remedy}`);
+  }
+  // `?? 0` and `?? fetched_at`: a Worker of resolver version 2 sends neither field.
+  if ((result.dropped_doi_candidates ?? 0) > 0) {
+    lines.push(
+      `Dropped: ${result.dropped_doi_candidates} DOI candidate(s) cut short in the README or attestation (not sources).`,
+    );
   }
   lines.push(`Read: ${copy.read}`);
   lines.push(`Remedy: ${copy.remedy}`);
   lines.push(`Docs: ${copy.anchor}`);
-  lines.push(`Resolver: ${result.resolver_version}, fetched ${result.fetched_at}`);
+  lines.push(
+    `Resolver: ${result.resolver_version}, resolved ${result.resolved_at ?? result.fetched_at}`,
+  );
   return lines;
 }

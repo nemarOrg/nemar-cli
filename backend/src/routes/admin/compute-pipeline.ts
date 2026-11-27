@@ -54,6 +54,7 @@ import {
   RECIPE_INPUTS,
   defaultInput,
   findRecipe,
+  placeholderRefusal,
   recipeRunsInput,
   recipeRunsOn,
 } from "../../../../shared/compute-recipes.js";
@@ -133,6 +134,10 @@ const SENTENCES = {
     "The Zarr copy or the tagged version could not be read, so nothing was checked; try again shortly.",
   serving_index_deferred:
     "The serving index could not be staged because of a temporary fault, so the run is deferred, not failed: its stamp records the deferral, a later dispatch tries again, and 24 hours after the first deferral the run goes ahead without the index (runs_without_index_after says when).",
+  source_commit_deferred:
+    "GitHub could not give the commit of that version's tag, so the run is deferred, not failed: its stamp records the deferral and a later dispatch tries again. A run of the archive is never dispatched without its commit.",
+  version_tag_absent:
+    "The dataset's repository has no tag for that version, so the run could never be keyed and nothing was written; the tag must be restored first.",
   runtime_unavailable: "NEMAR's runtime image is not configured.",
   pipelines_account_missing: "The pipelines account is not set up.",
   compute_disabled: COMPUTE_ROUTE_SENTENCES.compute_disabled,
@@ -439,7 +444,8 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
         executorIssue("that recipe is not dispatched to that executor"),
       );
     }
-    if (recipe.placeholder === true) return refuse(c, "recipe_placeholder");
+    const placeholder = placeholderRefusal(recipe);
+    if (placeholder !== null) return refuse(c, placeholder);
     if (executor === "runner" && body.dataset === undefined) {
       return invalid(c, "invalid_body", executorIssue("a runner run names one dataset"));
     }

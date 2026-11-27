@@ -3,8 +3,8 @@
  * `services/quality-admin.ts`, epic #2324 phase B3), through the REAL admin router with its authentication,
  * admin and cookie-origin middleware, over a real bun:sqlite D1 carrying every production migration, real
  * API keys (hashed as production hashes them) and Miniflare's R2 as the derivatives bucket. The dataset,
- * stamp and derivative rows are written with SQL the tables accept (nemar-ica is a placeholder no path
- * dispatches); the recordings table is nemar-ica's real one, or one built in its columns.
+ * stamp and derivative rows are written with SQL the tables accept (a nemar-ica run is a Tapis job this suite
+ * does not make); the recordings table is nemar-ica's real one, or one built in its columns.
  *
  * What is pinned, each case by the mutation it kills (the PR's mutation table names them):
  *  - who may: no key, a member's key and a revoked admin key are refused; an admin and an owner are not;

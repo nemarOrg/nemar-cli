@@ -10,6 +10,10 @@ Completed by nemarOrg/nemar-process#98 on nemar-process `dev` (the launcher's pa
 Refines [ADR 0140](0140-a-run-handed-the-serving-index-names-it-in-its-derivative-key.md) decision 3 and [ADR 0118](0118-the-compute-gateway-records-every-tenant-job-and-keeps-the-ledger-in-expanse-service-units.md) where it fixes the launch specification `nemar.launch-spec.v1`.
 Every key ADR 0140 defines keeps its bytes.
 
+Refined by [ADR 0143](0143-every-worker-dispatched-run-of-the-archive-is-handed-its-tags-commit-or-waits-for-it.md) (2026-11-27), which also supersedes the last clause of ADR 0121 decision 10: every Worker-dispatched run of the archive is handed its tag's commit, staged index or not, and the tag is read before the index; a GitHub fault reading it defers the run without end and an absent tag refuses it, so decision 3's deferral covers the index's own faults only.
+
+Decision 2 is superseded in part by [ADR 0144](0144-a-serving-index-ahead-of-its-tag-by-nemars-own-metadata-is-staged-as-the-tags.md) (2026-11-27): an index whose commit is ahead of the tag's by NEMAR-owned metadata only (`.nemar/`, `.github/`, and a `.gitattributes` edit that cannot change checkout bytes) is staged as the tag's, its own commit recorded as provenance, and the run is still handed the tag's commit; any other commit is refused with a word that says why.
+
 ## Context
 
 A run of nemar-ica on the archive copy (`--input bids`) declares the views of the serving copy only when it is handed the serving copy's index as a file (`--serving-index`), together with `--dataset-id` and `--source-commit`, and it uses a row of the index only when the index's `source_commit` is exactly the run's `--source-commit` (nemarOrg/nemar-process#95).
@@ -57,7 +61,7 @@ A launcher that reads version 1 would therefore refuse a specification that carr
 ## Consequences
 
 - A run staged with an index and a run staged without one now have different keys and both are stored, so `serving_index_unattested` no longer applies to a run the platform staged.
-- nemar-ica stays a placeholder: no path dispatches it until the owner lifts that, so no index has been staged and no job has carried the member.
+- nemar-ica stayed a placeholder that no path dispatched until that was lifted (amended 2026-11-27), so until then no index was staged and no job carried the member; since then an administrator's run dispatches it on Tapis, and the daily dispatcher still never does (`autoDispatch` is false).
 - The kept copies are content-addressed and shared by every job of one index; `serving-index/` is outside a job's own records prefix and outside the records' lock and retention rules, so per-job retention does not delete them, and none is swept today. A future sweep must never remove a copy that a live job's recorded specification names.
 - The launcher's `provenance.json` does not name the index, and the binding is indirect: the provenance's `launch_spec_digest` is the digest of the launch specification that carried `serving_index`, the Worker checks it against the digest it stored before submitting, and the derivative key reads the same digest from the job's recorded specification. That binds the digest the launcher was handed, not proof that the launcher checked the file: the check is the launcher's code (a size or digest that differs ends the job `serving_index_mismatch`), and nothing the run returns attests that it ran.
 - nemar-process copies the schema under its new name and bumps its pin; its launcher validates version 2.

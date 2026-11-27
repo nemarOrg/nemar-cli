@@ -54,7 +54,7 @@ let fx: LifecycleFixture;
 const handle = makeComputeApp();
 
 beforeAll(async () => {
-  fx = await startLifecycleFixture();
+  fx = await startLifecycleFixture({ githubTags: true });
 }, 120_000);
 
 beforeEach(async () => {
@@ -320,7 +320,8 @@ describe("(e) the order of the refusals and the dry run", () => {
     expect(await asked(env, "nemar-floor", cron, "runner")).toMatchObject({
       code: "recipe_not_automatic",
     });
-    expect(await asked(env, "nemar-ica", admin)).toMatchObject({ code: "recipe_placeholder" });
+    // nemar-ica is no longer a placeholder: a Tapis-only recipe meets this Worker's missing Tapis.
+    expect(await asked(env, "nemar-ica", admin)).toMatchObject({ code: "tapis_unconfigured" });
     // The input the executor does not run, then the runners switch: a runner run never reaches the Tapis check.
     expect(await asked(env, "nemar-floor", admin, "runner", "bids")).toMatchObject({
       code: "invalid_spec",

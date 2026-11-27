@@ -43,6 +43,7 @@ import { __resetTapisTokenCacheForTests } from "../../src/services/tapis/auth";
 import type { Bindings } from "../../src/types/bindings";
 import { type ComputeHarness, startComputeHarness } from "./compute-harness";
 import { fundAccount, fundPlatform, seedUser, setPolicy, sha256Hex } from "./compute-seed";
+import { GITHUB_TAGS_ENV, type GithubTags, startGithubTags } from "./github-tags";
 import { type TapisStandin, startTapisStandin } from "./tapis-standin";
 
 export const CALLBACK_SECRET = "lifecycle-callback-secret-0123456789abcdef";
@@ -167,6 +168,11 @@ export interface LifecycleFixture {
   mail: MailCapture;
   /** The owner account policy writes are made as. */
   ownerId: number;
+  /**
+   * The GitHub tag stand-in (ADR 0143), when the fixture was started with `githubTags`: every run of the archive
+   * reads its version's tag commit from it, and the environment carries the App configuration to ask.
+   */
+  tags: GithubTags | null;
   /** A Worker environment: production, compute on, Tapis and the buckets configured. */
   env(over?: Partial<Bindings>): Bindings;
   reset(): Promise<void>;
@@ -174,9 +180,14 @@ export interface LifecycleFixture {
 }
 
 export async function startLifecycleFixture(
-  options: { withD1?: boolean } = {},
+  options: {
+    withD1?: boolean;
+    /** Answer every dataset version's tag commit (`startGithubTags`), for a suite that dispatches a BIDS run. */
+    githubTags?: boolean;
+  } = {},
 ): Promise<LifecycleFixture> {
-  const harness = await startComputeHarness(options);
+  const harness = await startComputeHarness({ withD1: options.withD1 });
+  const tags = options.githubTags === true ? startGithubTags() : null;
   const tapis = startTapisStandin();
   // The stand-in's `up()` listens unconditionally, so a case that left it down must be brought back
   // exactly once and a case that did not must not be.
@@ -202,9 +213,11 @@ export async function startLifecycleFixture(
     tapis,
     proxy,
     mail,
+    tags,
     ownerId: 0,
     env(over = {}) {
       return harness.env({
+        ...(tags === null ? {} : GITHUB_TAGS_ENV),
         COMPUTE_ENABLED: "1",
         TAPIS_AUTH_STRATEGY: "password",
         TAPIS_USERNAME: tapis.username,
@@ -225,12 +238,14 @@ export async function startLifecycleFixture(
       tapis.reset();
       proxy.loseSubmitAnswers(0);
       mail.mails.length = 0;
+      tags?.reset();
       __resetTapisTokenCacheForTests();
       fx.ownerId = await seedUser(fx.env().DB, { role: "owner" });
       // A platform budget that does not bind, so a case sees only what it is about.
       await fundPlatform(fx.env().DB, "people", 1_000_000_000);
     },
     async dispose() {
+      tags?.stop();
       mail.stop();
       proxy.stop();
       tapis.stop();

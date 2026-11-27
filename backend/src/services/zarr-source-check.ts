@@ -60,6 +60,7 @@
  * local stack's user agent, not the Worker's.
  */
 
+import { RECIPE_SERVING_INDEX_MAX_DELTA_PATHS } from "../../../shared/compute-recipes.js";
 import { computeIsWellFormed, launchStringBytes } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
@@ -83,6 +84,18 @@ export const ZARR_SOURCE_MAX_GITHUB_REQUESTS = 3;
 export const ZARR_SOURCE_COMMIT_MAX_BYTES = 1024 * 1024;
 /** The most of a compare's body that is read. */
 export const ZARR_SOURCE_COMPARE_MAX_BYTES = 8 * 1024 * 1024;
+/**
+ * The most of a recursive tree listing's body that is read. GitHub truncates a listing at 100,000 entries or 7 MB, so
+ * every listing it answers whole fits; the fleet's largest measured (22,044 entries) is about 6.3 MB.
+ */
+export const ZARR_SOURCE_TREE_MAX_BYTES = 8 * 1024 * 1024;
+/**
+ * The most `.gitattributes` files an index ahead of its tag is checked against (ADR 0144): each is one GitHub request,
+ * so a check makes at most this many reads after its compare and its tree listing. A dataset carries one or two (the
+ * root's, and `.datalad/`'s); across the 396 repositories GitHub's code search indexed on 2026-11-27, none carried
+ * more than two. More is `index_delta_unlisted`: the files cannot all be read, so a CR LF rule cannot be ruled out.
+ */
+export const SERVING_INDEX_MAX_GITATTRIBUTES_FILES = 24;
 /** The most of an index's body that is read over HTTP: the recipe's own bound. */
 export const ZARR_SOURCE_INDEX_MAX_BYTES = 64 * 1024 * 1024;
 /** GitHub lists at most 300 files of a compare; that many or more is a mismatch. */
@@ -209,9 +222,16 @@ async function readBounded(res: Response, max: number): Promise<string | null> {
   return new TextDecoder().decode(bytes);
 }
 
-type Got = { kind: "ok"; body: unknown } | { kind: "absent" } | { kind: "unreadable" };
+type Got =
+  | { kind: "ok"; body: unknown }
+  | { kind: "absent" }
+  | { kind: "unreadable" }
+  | { kind: "too_large" };
 
-/** One bounded GET of JSON: 404 and 422 are `absent`, every other failure (a throw, a status, a size) is `unreadable`. */
+/**
+ * One bounded GET of JSON: 404 and 422 are `absent`, a body over `maxBytes` is `too_large` (a caller that reads it
+ * as any other failure treats it as `unreadable`), and every other failure (a throw, a status) is `unreadable`.
+ */
 async function getJson(
   url: string,
   headers: Record<string, string>,
@@ -245,7 +265,7 @@ async function getJson(
   }
   try {
     const text = await readBounded(res, maxBytes);
-    if (text === null) return { kind: "unreadable" };
+    if (text === null) return { kind: "too_large" };
     return { kind: "ok", body: JSON.parse(text) };
   } catch {
     return { kind: "unreadable" };
@@ -402,6 +422,34 @@ export async function tagCommit(
   return { ok: false, reason: "tag_absent" };
 }
 
+/** Why the commit of a version's tag is not known: no such tag, or a fault of GitHub or its credentials. */
+export type VersionTagCommitReason =
+  | "tag_absent"
+  | "github_unreadable"
+  | "token_mint_failed"
+  | "no_github_credentials";
+
+/**
+ * The commit of a dataset version's tag (the data-plane tag, `v1.0.2`), read for every Worker-dispatched run of the
+ * archive (ADR 0143), or why it is not known: `tag_absent` when GitHub answers that the repository has no such tag,
+ * a fault's word otherwise. One tag lookup (`tagCommit`'s two requests at most), with `githubAccess`'s credentials.
+ * Never throws: a throw is GitHub's, `github_unreadable`.
+ */
+export async function versionTagCommit(
+  env: Bindings,
+  datasetId: string,
+  tag: string,
+): Promise<{ ok: true; commit: string } | { ok: false; reason: VersionTagCommitReason }> {
+  try {
+    const access = await githubAccess(env);
+    if (!access.ok) return { ok: false, reason: access.reason };
+    const tagged = await tagCommit(datasetId, tag, access);
+    return tagged.ok ? { ok: true, commit: tagged.commit } : { ok: false, reason: tagged.reason };
+  } catch {
+    return { ok: false, reason: "github_unreadable" };
+  }
+}
+
 // --- The compare ------------------------------------------------------------------------------------------
 
 /**
@@ -480,6 +528,318 @@ async function metadataOnlyDelta(
   if (paths.length === 0) return mismatch("no_delta_path");
   return { ok: true, deltaPaths: paths };
 }
+
+// --- A serving index ahead of its tag (ADR 0144) ---------------------------------------------------------------
+
+/**
+ * Whether a changed path is NEMAR-owned metadata, which NEMAR changes without a new tag (ADR 0144): anything under
+ * `.nemar/` (NEMAR's own records) or `.github/` (NEMAR's workflows), or a `.gitattributes` file at any depth, which
+ * NEMAR's annex policy rewrites across the fleet (`src/lib/fleet-annex-policy.ts`, ADR 0060). A `.gitattributes`
+ * edit is admitted only when its patch passes {@link gitattributesPatchProblem}; this rule decides the path alone. A data file, a BIDS file (`participants.tsv`, `README`, a sidecar) and `.bidsignore`,
+ * which the dataset's authors own too, are not; neither is a path that is not a plain path.
+ */
+export function isNemarOwnedMetadataPath(path: string): boolean {
+  if (path === "" || path.length > ZARR_SOURCE_DELTA_PATH_MAX) return false;
+  for (let i = 0; i < path.length; i++) {
+    const code = path.charCodeAt(i);
+    if (code < 32 || code === 127) return false;
+  }
+  const parts = path.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === "..")) return false;
+  // A lone surrogate has no UTF-8 form, so the recipe could not be handed it (nemar-process#108).
+  if (!computeIsWellFormed(path)) return false;
+  return (
+    path.startsWith(".nemar/") || path.startsWith(".github/") || parts.at(-1) === ".gitattributes"
+  );
+}
+
+/** Whether a path is a `.gitattributes` file, at any depth. */
+const isGitattributes = (path: string): boolean => path.split("/").at(-1) === ".gitattributes";
+
+/**
+ * The attributes of one `.gitattributes` line, without its pattern: whitespace-separated after the pattern, which may
+ * be a quoted string (git's own quoting). A blank line or a comment has none.
+ */
+function lineAttributes(line: string): string[] {
+  const text = line.trim();
+  if (text === "" || text.startsWith("#")) return [];
+  let rest: string;
+  if (text.startsWith('"')) {
+    let at = 1;
+    while (at < text.length && text[at] !== '"') at += text[at] === "\\" ? 2 : 1;
+    rest = text.slice(at + 1);
+  } else {
+    rest = text.replace(/^\S+/, "");
+  }
+  return rest.split(/\s+/).filter((token) => token !== "");
+}
+
+/** An attribute token as git reads it: set (`name`), unset (`-name`), reset (`!name`) or given a value. */
+function parseAttribute(token: string): {
+  form: "set" | "unset" | "reset" | "value";
+  name: string;
+  value: string | null;
+} {
+  const prefix = token[0] === "-" ? "unset" : token[0] === "!" ? "reset" : null;
+  const bare = prefix === null ? token : token.slice(1);
+  const eq = bare.indexOf("=");
+  if (eq >= 0) return { form: "value", name: bare.slice(0, eq), value: bare.slice(eq + 1) };
+  return { form: prefix ?? "set", name: bare, value: null };
+}
+
+/**
+ * Whether one attribute on a line a `.gitattributes` edit adds or removes is ADMITTED (ADR 0144): an allow-list,
+ * because a name this does not know may be a macro whose definition, on a line the edit does not touch, carries
+ * anything. Admitted:
+ *  - `annex.*` in any form: it says where git-annex keeps a file, never what a checkout writes;
+ *  - `diff` and `merge` in any form: they choose how git shows and merges a file, never what a checkout writes;
+ *  - `filter=annex`, git-annex's own filter, which gives the content git-annex keeps;
+ *  - `text`, `binary` (`-diff -merge -text`) and `eol=lf`, set: a checkout of LF-stored text writes the same bytes
+ *    with or without them unless CR LF conversion is in effect for the file, which needs `eol=crlf` or the legacy
+ *    `crlf`; a patch that shows either anywhere is refused ({@link gitattributesPatchProblem}), and so is a delta
+ *    with either in any `.gitattributes` at the index's commit ({@link servingIndexAheadOfTag}).
+ * Refused: `eol` in any other form (`eol=crlf`, `-eol`, `!eol`), `text` and `binary` unset, reset or valued
+ * (`-text`, `!text`, `text=auto`), `filter` with any other value or form, `working-tree-encoding`, `ident`, and every
+ * other name.
+ */
+function isAdmittedAttribute(token: string): boolean {
+  const { form, name, value } = parseAttribute(token);
+  if (name.startsWith("annex.")) return true;
+  if (name === "diff" || name === "merge") return true;
+  if (name === "filter") return form === "value" && value === "annex";
+  if (name === "eol") return form === "value" && value === "lf";
+  if (name === "text" || name === "binary") return form === "set";
+  return false;
+}
+
+/** Whether an attribute can turn CR LF conversion on: `eol=crlf`, or the legacy `crlf` in any form. */
+function enablesCrlf(token: string): boolean {
+  const { name, value } = parseAttribute(token);
+  return (name === "eol" && value === "crlf") || name === "crlf";
+}
+
+/**
+ * Why a `.gitattributes` edit cannot be admitted, from the patch GitHub's compare gives for it, or null when it can
+ * (ADR 0144). The patch is hunk lines only (`@@`, then lines starting with `+`, `-` or a space, and `\` notes); a
+ * line that starts `+++` or `---` is an added or removed line like any other.
+ *  - `index_delta_unlisted` when there is no patch to read (GitHub leaves it out of a large or binary change);
+ *  - `index_content_changed` when a line the edit adds or removes carries an attribute that is not
+ *    {@link isAdmittedAttribute} (on a macro definition, `[attr]name`, the definition's attributes), or when any line
+ *    of the patch, the unchanged context included, can turn CR LF conversion on ({@link enablesCrlf}).
+ * So annex rules may change, `text` and `eol=lf` lines may come and go, and nothing else may.
+ */
+export function gitattributesPatchProblem(
+  patch: unknown,
+): "index_content_changed" | "index_delta_unlisted" | null {
+  if (typeof patch !== "string") return "index_delta_unlisted";
+  for (const line of patch.split("\n")) {
+    const mark = line[0];
+    if (mark !== "+" && mark !== "-" && mark !== " ") continue;
+    const attributes = lineAttributes(line.slice(1));
+    if (attributes.some(enablesCrlf)) return "index_content_changed";
+    if (mark !== " " && !attributes.every(isAdmittedAttribute)) return "index_content_changed";
+  }
+  return null;
+}
+
+/**
+ * Whether the whole of a `.gitattributes` file, read at the index's commit, can turn CR LF conversion on: any line,
+ * a macro definition included, that carries `eol=crlf` or the legacy `crlf` ({@link enablesCrlf}). A patch shows
+ * only the lines an edit touches and a few around them, and nothing of a file the edit does not touch; this reads
+ * the rest. One `contents` request at `ref`, bounded by {@link ZARR_SOURCE_COMMIT_MAX_BYTES}: a file that cannot be
+ * read whole (absent at `ref` though the compare or the tree listing names it, over the bound, or answered in
+ * another shape) is `github_unreadable`, never read as clean.
+ */
+async function gitattributesFileProblem(
+  repo: string,
+  refCommit: string,
+  path: string,
+  access: GithubAccess & { ok: true },
+): Promise<"index_content_changed" | "github_unreadable" | null> {
+  const encoded = path.split("/").map(ref).join("/");
+  const got = await getJson(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${ref(repo)}/contents/${encoded}?ref=${refCommit}`,
+    githubHeaders(access),
+    ZARR_SOURCE_GITHUB_TIMEOUT_MS,
+    ZARR_SOURCE_COMMIT_MAX_BYTES,
+    true,
+    access.onUnauthorized,
+  );
+  if (got.kind !== "ok" || !isRecord(got.body)) return "github_unreadable";
+  const { encoding, content } = got.body;
+  if (encoding !== "base64" || typeof content !== "string") return "github_unreadable";
+  let text: string;
+  try {
+    const binary = atob(content.replace(/\s/g, ""));
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
+      Uint8Array.from(binary, (c) => c.charCodeAt(0)),
+    );
+  } catch {
+    return "github_unreadable";
+  }
+  for (const line of text.split("\n")) {
+    if (lineAttributes(line).some(enablesCrlf)) return "index_content_changed";
+  }
+  return null;
+}
+
+/**
+ * Every `.gitattributes` file in the tree at `refCommit`, from ONE recursive tree listing (bounded by
+ * {@link ZARR_SOURCE_TREE_MAX_BYTES}), or why there is no full list: a listing GitHub truncates, or one over the bound,
+ * cannot show every file (`index_delta_unlisted`); a listing GitHub could not answer, or answered in another shape,
+ * is `github_unreadable`. Only a file (`blob`) counts: a directory or a submodule of that name holds no attributes.
+ */
+async function gitattributesPathsAt(
+  repo: string,
+  refCommit: string,
+  access: GithubAccess & { ok: true },
+): Promise<
+  | { ok: true; paths: string[] }
+  | { ok: false; reason: "index_delta_unlisted" | "github_unreadable" }
+> {
+  const got = await getJson(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${ref(repo)}/git/trees/${refCommit}?recursive=1`,
+    githubHeaders(access),
+    ZARR_SOURCE_GITHUB_TIMEOUT_MS,
+    ZARR_SOURCE_TREE_MAX_BYTES,
+    true,
+    access.onUnauthorized,
+  );
+  if (got.kind === "too_large") return { ok: false, reason: "index_delta_unlisted" };
+  if (got.kind !== "ok" || !isRecord(got.body)) return { ok: false, reason: "github_unreadable" };
+  const { truncated, tree } = got.body;
+  if (truncated === true) return { ok: false, reason: "index_delta_unlisted" };
+  if (truncated !== false || !Array.isArray(tree))
+    return { ok: false, reason: "github_unreadable" };
+  const paths: string[] = [];
+  for (const entry of tree) {
+    if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.type !== "string") {
+      return { ok: false, reason: "github_unreadable" };
+    }
+    if (entry.type === "blob" && isGitattributes(entry.path)) paths.push(entry.path);
+  }
+  return { ok: true, paths };
+}
+
+/** Why an index built from another commit than its tag's is not admitted (fixed words of the serving index). */
+export type ServingIndexAheadRefusal =
+  | "index_behind_tag"
+  | "index_diverged"
+  | "index_content_changed"
+  | "index_delta_unlisted";
+
+/**
+ * Whether the serving index's commit `indexCommit` is ahead of the version's tag `tagCommit` by NEMAR-owned
+ * metadata only (ADR 0144), from ONE GitHub compare of `tagCommit...indexCommit` (the same request, timeout and
+ * bound as the Zarr check's): `ahead`, `behind_by` 0, fewer than 300 files listed, every changed path (and a
+ * renamed file's previous path) {@link isNemarOwnedMetadataPath}, and every `.gitattributes` edit one that cannot
+ * change the bytes of a checkout ({@link gitattributesPatchProblem}). A compare that lists no file at all (commits
+ * that change nothing) is admitted. The changed paths, a renamed file's old name included, each once and in
+ * code-unit order, are what the run is handed (`--serving-index-delta-path`), so more than a job can carry
+ * ({@link RECIPE_SERVING_INDEX_MAX_DELTA_PATHS}) is `index_delta_unlisted` and never cut short; so is a compare
+ * body over its bound: what changed cannot be shown. When the delta changes a `.gitattributes` and is otherwise
+ * admitted, every `.gitattributes` at the index's commit, changed or not, is listed ({@link gitattributesPathsAt})
+ * and read whole ({@link gitattributesFileProblem}), each once: no rule anywhere may turn CR LF conversion on, since
+ * an admitted `text`, `binary` or `eol=lf` in one file changes bytes under an `eol=crlf` in another. That is one
+ * listing and at most {@link SERVING_INDEX_MAX_GITATTRIBUTES_FILES} reads more; more files is `index_delta_unlisted`.
+ * A compare, listing or file GitHub could not answer, or answered in a shape this does not read, is
+ * `github_unreadable`, a fault: the caller defers, and never stages an index it could not show to be the tag's data.
+ * Never throws.
+ */
+export async function servingIndexAheadOfTag(
+  repo: string,
+  tagCommitSha: string,
+  indexCommit: string,
+  access: GithubAccess & { ok: true },
+): Promise<
+  | { ok: true; deltaPaths: string[] }
+  | { ok: false; reason: ServingIndexAheadRefusal | "github_unreadable" }
+> {
+  try {
+    const got = await getJson(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${ref(repo)}/compare/${tagCommitSha}...${indexCommit}?per_page=${ZARR_SOURCE_COMPARE_PAGE}`,
+      githubHeaders(access),
+      ZARR_SOURCE_GITHUB_TIMEOUT_MS,
+      ZARR_SOURCE_COMPARE_MAX_BYTES,
+      true,
+      access.onUnauthorized,
+    );
+    // The tag's commit was just read, so a 404 or 422 says the repository does not have the index's commit or
+    // shares no history with it: the copy was not built on this version's line.
+    if (got.kind === "absent") return { ok: false, reason: "index_diverged" };
+    // A comparison too large to read in full cannot show what changed; a retry would read the same.
+    if (got.kind === "too_large") return { ok: false, reason: "index_delta_unlisted" };
+    if (got.kind !== "ok" || !isRecord(got.body)) return { ok: false, reason: "github_unreadable" };
+    const body = got.body;
+    if (body.status === "behind") return { ok: false, reason: "index_behind_tag" };
+    if (body.status === "diverged") return { ok: false, reason: "index_diverged" };
+    if (body.status !== "ahead" || typeof body.behind_by !== "number") {
+      return { ok: false, reason: "github_unreadable" };
+    }
+    if (body.behind_by !== 0) return { ok: false, reason: "index_diverged" };
+    const files = body.files;
+    if (!Array.isArray(files)) return { ok: false, reason: "github_unreadable" };
+    if (files.length >= ZARR_SOURCE_COMPARE_FILES_LIMIT) {
+      return { ok: false, reason: "index_delta_unlisted" };
+    }
+    const paths = new Set<string>();
+    // Whether the delta changes a `.gitattributes` (adds, edits, renames or deletes one), and the ones it leaves at
+    // the index's commit.
+    let attributesChanged = false;
+    const attributesAtIndex: string[] = [];
+    for (const file of files) {
+      if (!isRecord(file) || typeof file.filename !== "string") {
+        return { ok: false, reason: "github_unreadable" };
+      }
+      // A rename out of a data path is a deletion of data, whatever the new name is.
+      const names = [file.filename];
+      if (file.previous_filename !== undefined) {
+        if (typeof file.previous_filename !== "string") {
+          return { ok: false, reason: "github_unreadable" };
+        }
+        names.push(file.previous_filename);
+      }
+      for (const name of names) {
+        if (!isNemarOwnedMetadataPath(name)) return { ok: false, reason: "index_content_changed" };
+        paths.add(name);
+      }
+      // A `.gitattributes` edit, by its patch: it may move files between git and git-annex, never change bytes.
+      if (names.some(isGitattributes)) {
+        attributesChanged = true;
+        const problem = gitattributesPatchProblem(file.patch);
+        if (problem !== null) return { ok: false, reason: problem };
+        // A deleted file has nothing to read; a renamed one is read under its new name.
+        if (isGitattributes(file.filename) && file.status !== "removed") {
+          attributesAtIndex.push(file.filename);
+        }
+      }
+    }
+    // Every path is handed to the run, so a delta that does not fit is refused whole.
+    if (paths.size > RECIPE_SERVING_INDEX_MAX_DELTA_PATHS) {
+      return { ok: false, reason: "index_delta_unlisted" };
+    }
+    // The lines a patch does not show and the files the delta does not touch: once an edit is admitted by its
+    // patch, no `.gitattributes` at the index's commit may turn CR LF conversion on anywhere.
+    if (attributesChanged) {
+      const listed = await gitattributesPathsAt(repo, indexCommit, access);
+      if (!listed.ok) return { ok: false, reason: listed.reason };
+      // A changed file the listing lacks is read too: a listing at odds with the compare is never read as clean.
+      const toRead = new Set([...listed.paths, ...attributesAtIndex]);
+      if (toRead.size > SERVING_INDEX_MAX_GITATTRIBUTES_FILES) {
+        return { ok: false, reason: "index_delta_unlisted" };
+      }
+      for (const path of [...toRead].sort(compareCodeUnits)) {
+        const problem = await gitattributesFileProblem(repo, indexCommit, path, access);
+        if (problem !== null) return { ok: false, reason: problem };
+      }
+    }
+    return { ok: true, deltaPaths: [...paths].sort(compareCodeUnits) };
+  } catch {
+    return { ok: false, reason: "github_unreadable" };
+  }
+}
+
+const compareCodeUnits = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 // --- The verdict -------------------------------------------------------------------------------------------
 

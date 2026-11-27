@@ -144,7 +144,7 @@ export interface ComputeRecipe {
   /**
    * The entry stands for a recipe that does not exist yet, or whose numbers nobody has verified. No
    * path dispatches a placeholder (`recipe_placeholder`): the entry is here so the registry's shape is
-   * held, and the flag is removed in the change that makes the recipe real.
+   * held, and the flag is removed or set false in the change that makes the recipe real.
    */
   placeholder?: boolean;
   eligibility: RecipeEligibility;
@@ -301,8 +301,9 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     minutes: 720,
     inputs: Object.freeze(["bids"] as const),
     executors: Object.freeze(["tapis"] as const),
+    // An administrator's run only: the daily dispatcher never runs it. No longer a placeholder (2026-11-27).
     autoDispatch: false,
-    placeholder: true,
+    placeholder: false,
     eligibility: "eeg",
     // The floor steps it re-runs as preparation map as in the floor, except its re-run `qc` (ADR 0134); its
     // quality plugins follow the decomposition at `quality` (ADR 0137).
@@ -407,6 +408,20 @@ export function recipeQualityPlugins(recipe: Pick<ComputeRecipe, "checkpoints">)
   const plugins: readonly string[] = RECIPE_PLUGIN_STEPS;
   const quality = recipe.checkpoints.find((c) => c.checkpoint === "quality");
   return (quality?.steps ?? []).filter((s) => plugins.includes(s));
+}
+
+/** The one word a placeholder recipe is refused with, on every path (ADR 0118 amendment of 2026-11-05, item 3). */
+export const RECIPE_PLACEHOLDER_REFUSAL = "recipe_placeholder";
+
+/**
+ * Whether a recipe is refused as a placeholder, and with which word: the one decision the admin run route, the
+ * dispatch, the dry run and the queue each ask, after where the recipe may run and before anything is read. A
+ * recipe is a placeholder only when its entry says `placeholder: true`; a missing flag or `false` runs.
+ */
+export function placeholderRefusal(
+  recipe: Pick<ComputeRecipe, "placeholder">,
+): typeof RECIPE_PLACEHOLDER_REFUSAL | null {
+  return recipe.placeholder === true ? RECIPE_PLACEHOLDER_REFUSAL : null;
 }
 
 /**
@@ -612,10 +627,80 @@ export function recipeServingIndexArguments(input: {
   if (typeof input.path !== "string" || !input.path.startsWith("/")) {
     throw new RangeError("the serving index path is absolute");
   }
-  if (!isSourceCommit(input.sourceCommit)) {
+  return [
+    RECIPE_SERVING_INDEX_FLAG,
+    input.path,
+    ...recipeSourceCommitArguments(input.sourceCommit),
+  ];
+}
+
+/**
+ * The argument every Worker-dispatched run of the archive is handed when no serving index was staged for it
+ * (ADR 0143): `--source-commit` and the commit of the version's tag, which the recipe records as
+ * `extensions.nemar.dataset.source_commit`, the `git:` input digest a BIDS derivative is keyed by (ADR 0123
+ * decision 3). It follows {@link recipeArguments}, as {@link recipeServingIndexArguments} does, which ends with
+ * the same two values. A commit that is not 40 lowercase hex digits is a programming error, never passed on.
+ */
+export function recipeSourceCommitArguments(sourceCommit: string): string[] {
+  if (!isSourceCommit(sourceCommit)) {
     throw new RangeError("a source commit is 40 lowercase hex digits");
   }
-  return [RECIPE_SERVING_INDEX_FLAG, input.path, RECIPE_SOURCE_COMMIT_FLAG, input.sourceCommit];
+  return [RECIPE_SOURCE_COMMIT_FLAG, sourceCommit];
+}
+
+/**
+ * The flag that attests the commit a staged serving index was built from, when it is ahead of the version's tag
+ * by NEMAR-owned metadata only (ADR 0144; nemar-process `nemar_ica/options.py`, nemarOrg/nemar-process#108).
+ */
+export const RECIPE_SERVING_INDEX_COMMIT_FLAG = "--serving-index-commit";
+/** The repeatable flag that names one path changed between the tag's commit and the index's (nemar-process#108). */
+export const RECIPE_SERVING_INDEX_DELTA_PATH_FLAG = "--serving-index-delta-path";
+
+/**
+ * The most changed paths a run handed an index ahead of its tag can carry. The recipe takes 32; a job's argument
+ * vector is at most 64 strings (`JobSpecSchema`), of which a run of the archive with an attested index uses 16
+ * (the archive's 10, `--serving-index` and its path, `--source-commit` and the tag's commit,
+ * `--serving-index-commit` and the index's), so 24 is what fits. The Worker refuses a larger delta
+ * (`index_delta_unlisted`) rather than pass part of it. The count is the only bound applied at admission: a
+ * non-ASCII path costs six bytes a UTF-16 unit in the launch specification, so 24 long non-ASCII paths can exceed
+ * `LAUNCH_VARIABLE_BYTES_MAX`, and then the specification does not build and the dispatch answers `invalid_spec`
+ * before the claim, with nothing written.
+ */
+export const RECIPE_SERVING_INDEX_MAX_DELTA_PATHS = 24;
+
+/**
+ * The arguments that attest an index built ahead of the version's tag (ADR 0144): `--serving-index-commit` and the
+ * index's commit, then one `--serving-index-delta-path` per changed path, a renamed file's old name included. They
+ * follow {@link recipeServingIndexArguments}, which hands the tag's commit as `--source-commit`. A commit that is not
+ * 40 lowercase hex digits or is the tag's, a path that is empty or given twice, or more paths than
+ * {@link RECIPE_SERVING_INDEX_MAX_DELTA_PATHS} is a programming error, never passed on: the Worker decides the paths
+ * and their rule (`isNemarOwnedMetadataPath`), and the recipe checks them again.
+ */
+export function recipeServingIndexAttestationArguments(input: {
+  tagCommit: string;
+  indexCommit: string;
+  deltaPaths: readonly string[];
+}): string[] {
+  if (!isSourceCommit(input.tagCommit) || !isSourceCommit(input.indexCommit)) {
+    throw new RangeError("a commit is 40 lowercase hex digits");
+  }
+  if (input.indexCommit === input.tagCommit) {
+    throw new RangeError("an index of the tag's own commit needs no attestation");
+  }
+  if (input.deltaPaths.length > RECIPE_SERVING_INDEX_MAX_DELTA_PATHS) {
+    throw new RangeError("more changed paths than a job can carry");
+  }
+  if (
+    input.deltaPaths.some((path) => typeof path !== "string" || path === "") ||
+    new Set(input.deltaPaths).size !== input.deltaPaths.length
+  ) {
+    throw new RangeError("a changed path is a non-empty string, given once");
+  }
+  return [
+    RECIPE_SERVING_INDEX_COMMIT_FLAG,
+    input.indexCommit,
+    ...input.deltaPaths.flatMap((path) => [RECIPE_SERVING_INDEX_DELTA_PATH_FLAG, path]),
+  ];
 }
 
 /**
@@ -807,8 +892,11 @@ function zarrCoverageRefusal(block: Record<string, unknown> | null): StampRefusa
  *    `sha256:` and 64 hexadecimal digits), the digest only when the record shows it covers every store of the
  *    run ({@link zarrCoverageRefusal});
  *  - `bids`: the input digest `git:` and `extensions.nemar.dataset.source_commit`, when that is a full commit
- *    (40 lowercase hexadecimal digits); no reader and no Zarr engine. A Worker-dispatched BIDS run is not given
- *    a source commit, so its record carries none and its digest is null: an expected null, not logged as absent.
+ *    (40 lowercase hexadecimal digits); no reader and no Zarr engine. The record states the commit the run was
+ *    handed (`--source-commit`), and every Worker-dispatched BIDS run is handed the commit of its version's tag,
+ *    or is not dispatched at all (ADR 0143). A record that states none (a job from before, or a recipe that did
+ *    not write it) has a null digest, not logged as absent, and its derivative is never keyed (`no_input_digest`);
+ *    the derivative store also checks a stated digest against the commit the specification handed.
  * A value that does not fit is left null and named in `refused` with its reason; a Zarr value the record does
  * not state is null and named in `absent`. Nothing the record says is stored as it came: the record is the
  * job's own statement and the columns hold fixed shapes only.
@@ -855,7 +943,7 @@ export function stampInputFields(value: unknown, input: RecipeInput): StampInput
       }
     }
   } else {
-    // The digest of a BIDS input is the commit the files were read at; a record that names none is the usual case.
+    // The digest of a BIDS input is the commit the files were read at; a run handed none states none (see above).
     const commit = object(nemar?.dataset)?.source_commit;
     if (commit !== undefined && commit !== null) {
       if (typeof commit === "string" && SOURCE_COMMIT_RE.test(commit)) {

@@ -138,6 +138,8 @@ describe("POST /webhooks/publication-review-inputs", () => {
       sources: [],
       resolver_version: RESOLVER_VERSION,
     });
+    // Resolved again at serve time, and stamped (ADR 0142 decision 3).
+    expect(Number.isNaN(Date.parse(body.lineage.resolved_at ?? ""))).toBe(false);
     expect(body.coverage).toEqual({
       source: "screen_v1",
       formats: { edf: { files: 4, read: 4, partial: 0, failed: 0 } },
