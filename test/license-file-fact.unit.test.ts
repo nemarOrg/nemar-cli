@@ -207,9 +207,42 @@ describe("text on a matched line outside the match's span is leftover", () => {
     expect(id.leftover.join(" ")).toContain("Commercial use of this dataset is not permitted.");
   });
 
-  test("the words before a notice's span are leftover too", () => {
+  test("a lead-in before a notice's span is not leftover; any other words are", () => {
     const c = caseOf("short-notice");
-    expect(identify(c.text, "CC-BY-4.0", scanOf(c)).leftover).toEqual(["This dataset is"]);
+    const scan = scanOf(c);
+    expect(identify(c.text, "CC-BY-4.0", scan).leftover).toEqual([]);
+    const other = c.text.replace("This dataset is", "Our lab says this dataset is");
+    expect(identify(other, "CC-BY-4.0", scan).leftover).toEqual(["Our lab says this dataset is"]);
+    const more = c.text.replace("This dataset is", "This dataset is, for members only,");
+    expect(identify(more, "CC-BY-4.0", scan).fact.additions).toBe(true);
+  });
+
+  test("text between two spans of the same license on one line is leftover", () => {
+    const c = caseOf("short-notice");
+    const text = "Licensed under CC BY 4.0; commercial users must ask first; see CC BY 4.0\n";
+    const scan = copy(scanOf(c));
+    const base = scan.matches[0] as ScanFile["matches"][number];
+    scan.matches = [
+      {
+        ...base,
+        start_line: 1,
+        end_line: 1,
+        matched_text_diagnostics: "CC BY 4.0",
+        matched_text: text.trim(),
+      },
+      {
+        ...base,
+        start_line: 1,
+        end_line: 1,
+        matched_text_diagnostics: "CC BY 4.0",
+        matched_text: text.trim(),
+        matched_length: base.matched_length - 1,
+      },
+    ];
+    const id = identify(text, "CC-BY-4.0", scan);
+    expect(id.fact).toMatchObject({ state: "matches", additions: true });
+    // Exactly the text between the spans: the second span is found after the first.
+    expect(id.leftover).toEqual(["; commercial users must ask first; see"]);
   });
 
   test("a full text whose span is its whole lines has none", () => {
@@ -421,8 +454,26 @@ describe("the License field against the file's identifier", () => {
     // Only the identifier itself, case aside, or a field that names no version.
     ["cc-by-4.0", "CC-BY-4.0", "match"],
     [" CC-BY-4.0 ", "CC-BY-4.0", "match"],
-    ["CC BY 4.0", "CC-BY-4.0", "differ"],
-    ["https://creativecommons.org/licenses/by/4.0/", "CC-BY-4.0", "differ"],
+    // The closed spellings of one Creative Commons license.
+    ["CC BY 4.0", "CC-BY-4.0", "match"],
+    ["CC_BY_4.0", "CC-BY-4.0", "match"],
+    ["CC BY 4.0 International", "CC-BY-4.0", "match"],
+    ["CC BY-NC-SA 4.0", "CC-BY-NC-SA-4.0", "match"],
+    ["https://creativecommons.org/licenses/by/4.0/", "CC-BY-4.0", "match"],
+    ["https://creativecommons.org/licenses/by-nc/4.0/legalcode", "CC-BY-NC-4.0", "match"],
+    ["http://creativecommons.org/licenses/by-sa/4.0", "CC-BY-SA-4.0", "match"],
+    ["https://creativecommons.org/publicdomain/zero/1.0/", "CC0-1.0", "match"],
+    ["https://creativecommons.org/publicdomain/zero/1.0/legalcode", "CC0-1.0", "match"],
+    ["CC BY", "CC-BY-4.0", "match"],
+    ["CC_BY_NC", "CC-BY-NC-4.0", "match"],
+    // Anything else differs: other words, another version, another URL.
+    ["https://creativecommons.org/licenses/by/4.0/deed.en", "CC-BY-4.0", "differ"],
+    ["https://creativecommons.org/licenses/by/3.0/", "CC-BY-4.0", "differ"],
+    ["CC BY 4.0 Worldwide", "CC-BY-4.0", "differ"],
+    ["CC-BY, no commercial use", "CC-BY-4.0", "differ"],
+    ["CC-BY except commercial", "CC-BY-4.0", "differ"],
+    ["CC0 but cite us", "CC0-1.0", "differ"],
+    ["CC BY", "CC-BY-3.0-US", "differ"],
     // The review's own examples of a field that is not the file's license.
     ["BSD-3-Clause-Clear", "BSD-3-Clause", "differ"],
     ["BSD-2-Clause-Patent", "BSD-2-Clause", "differ"],
@@ -436,9 +487,10 @@ describe("the License field against the file's identifier", () => {
     ["CC-BY-4.0", "CC-BY-3.0", "differ"],
     ["CC-BY-4.0", "CC-BY-NC-4.0", "differ"],
     ["CC0", "CC0-1.0", "match"],
-    ["PD", "CC0-1.0", "match"],
+    ["PD", "CC0-1.0", "differ"],
     ["ODC-By-1.0", "ODC-By-1.0", "match"],
-    ["ODbL", "ODbL-1.0", "match"],
+    ["ODbL", "ODbL-1.0", "differ"],
+    ["ODbL-1.0", "ODbL-1.0", "match"],
     ["MIT", "MIT", "match"],
     ["MIT", "BSD-3-Clause", "differ"],
     ["BSD-3-Clause", "MIT", "differ"],

@@ -323,23 +323,56 @@ const COMPARABLE = new Set([
   "cc-by-nc-nd",
 ]);
 
-/** Whether the field's own text names a version (`4.0`, `-3-`), not one normalization implies. */
-function namesVersion(field: string): boolean {
-  return /\d\.\d/.test(field) || /(?:^|[-\s_])\d+(?=$|[-\s_])/.test(field);
-}
-
 /** An SPDX operator in the field: the field is an expression, not one license. */
 const FIELD_EXPRESSION = /\s(AND|OR|WITH)\s/i;
+
+/** The Creative Commons families a field may name with no version, as SPDX spells them. */
+const CC_FAMILIES = [
+  "CC-BY",
+  "CC-BY-SA",
+  "CC-BY-NC",
+  "CC-BY-NC-SA",
+  "CC-BY-ND",
+  "CC-BY-NC-ND",
+  "CC0",
+];
+
+/** An exact Creative Commons URL, `legalcode` optional: the license's code and version. */
+const CC_URL =
+  /^https?:\/\/(?:www\.)?creativecommons\.org\/licenses\/(by(?:-nc)?(?:-nd|-sa)?)\/(\d\.\d)\/?(?:legalcode(?:\.txt)?\/?)?$/i;
+const CC0_URL =
+  /^https?:\/\/(?:www\.)?creativecommons\.org\/publicdomain\/zero\/1\.0\/?(?:legalcode(?:\.txt)?\/?)?$/i;
+
+/**
+ * The one SPDX identifier or bare family a field's spelling stands for, from a closed list of
+ * spellings, or null. The identifier itself (case aside); for a Creative Commons license, spaces
+ * or underscores for its hyphens and an optional trailing `International` (`CC BY 4.0`,
+ * `CC_BY_4.0`, `CC BY 4.0 International`), or its exact URL; a bare family in the same spellings
+ * (`CC-BY`, `CC BY-NC`, `CC0`). Any other word makes it null: the field says something more.
+ */
+function canonicalSpelling(field: string, spdx: string): string | null {
+  const t = field.trim().replace(/\s+/g, " ");
+  if (t.toLowerCase() === spdx.toLowerCase()) return spdx;
+  const url = CC_URL.exec(t);
+  if (url) return `CC-${(url[1] as string).toUpperCase()}-${url[2]}`;
+  if (CC0_URL.test(t)) return "CC0-1.0";
+  const token = t
+    .toUpperCase()
+    .replace(/[ _]+/g, "-")
+    .replace(/-INTERNATIONAL$/, "");
+  if (/^CC-BY(?:-NC)?(?:-ND|-SA)?-\d\.\d$/.test(token) || token === "CC0-1.0") return token;
+  if (CC_FAMILIES.includes(token)) return token;
+  return null;
+}
 
 /**
  * Whether a `License` field and a file's SPDX identifier name the same license.
  * - `incomparable`: the field does not normalize (absent, free text, restricted, unknown), or it
  *   is an expression (`CC-BY-4.0 AND MIT`): the file cannot be judged against one license.
- * - `match`: the trimmed field is the identifier itself (case aside), or the field names no
- *   version (`CC-BY`, `CC0`, `ODbL`) and normalizes to the identifier's family. MIT, BSD and Apache
- *   share a normalized family, so they match by identifier only.
- * - `differ`: anything else, including a field that adds words or a suffix to an identifier
- *   (`CC BY 4.0`, `CC-BY-4.0-NC`, `CC-BY-4.0, no commercial use`): a person reads the difference.
+ * - `match`: the field is one of the closed spellings of {@link canonicalSpelling} and stands for
+ *   the identifier, or for its bare family (`CC-BY` and `CC-BY-4.0`, `CC0` and `CC0-1.0`).
+ * - `differ`: anything else, including a field with words beyond a spelling (`CC-BY, no commercial
+ *   use`, `CC0 but cite us`, `CC-BY-4.0-NC`): a person reads the difference.
  */
 export function compareLicenseField(
   field: string | null,
@@ -348,11 +381,14 @@ export function compareLicenseField(
   if (field === null) return "incomparable";
   const trimmed = field.trim();
   if (FIELD_EXPRESSION.test(trimmed)) return "incomparable";
-  const f = normalizeLicense(trimmed);
-  if (!COMPARABLE.has(f.license)) return "incomparable";
-  if (trimmed.toLowerCase() === spdx.toLowerCase()) return "match";
-  if (f.license === "permissive-attribution" || namesVersion(trimmed)) return "differ";
-  return normalizeLicense(spdx).license === f.license ? "match" : "differ";
+  if (!COMPARABLE.has(normalizeLicense(trimmed).license)) return "incomparable";
+  const canonical = canonicalSpelling(trimmed, spdx);
+  if (canonical === null) return "differ";
+  if (canonical.toUpperCase() === spdx.toUpperCase()) return "match";
+  if (canonical === "CC0") return spdx === "CC0-1.0" ? "match" : "differ";
+  return CC_FAMILIES.includes(canonical) && new RegExp(`^${canonical}-\\d\\.\\d$`).test(spdx)
+    ? "match"
+    : "differ";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -443,8 +479,8 @@ export function leftoverOf(scan: ScanFile, p: string, text: string): string[] {
     for (const hit of m.matched_text_diagnostics.matchAll(/\[([^\]\n]*)\]/g)) {
       out.push({ line: m.start_line, text: hit[1] ?? "" });
     }
-    for (const edge of spanEdges(m, lines)) out.push(edge);
   }
+  for (const edge of spanEdges(own, lines)) out.push(edge);
   for (const m of scan.matches) {
     if (m.license_expression_spdx === p) continue;
     if (m.license_expression_spdx === UNKNOWN_REFERENCE) {
@@ -485,27 +521,81 @@ export function leftoverOf(scan: ScanFile, p: string, text: string): string[] {
 const unbracket = (s: string) => s.replace(/[[\]]/g, "");
 
 /**
- * The text of a match's first line before the span, and of its last line after it. A span edge
- * that cannot be found in its line makes the whole line leftover: the safe direction.
+ * The lead-ins a notice may have before its span that are not leftover, whitespace-collapsed and
+ * case-insensitive, and only as the whole text before the span.
  */
-function spanEdges(m: ScanMatch, lines: string[]): { line: number; text: string }[] {
-  const out: { line: number; text: string }[] = [];
-  const span = linesOf(m.matched_text_diagnostics);
-  const head = unbracket(span[0] ?? "").trim();
-  const tail = unbracket(span.at(-1) ?? "").trim();
-  const first = lines[m.start_line - 1] ?? "";
-  const last = lines[m.end_line - 1] ?? "";
-  const at = head === "" ? -1 : first.indexOf(head);
-  const end = tail === "" ? -1 : last.lastIndexOf(tail);
-  if (at < 0 || end < 0) {
-    out.push({ line: m.start_line, text: first });
-    if (m.end_line !== m.start_line) out.push({ line: m.end_line, text: last });
-    return out;
+const LEAD_INS = new Set(
+  ["this dataset is", "this data is", "this work is"].flatMap((subject) => [
+    subject,
+    ...["licensed under", "released under", "available under"].map((v) => `${subject} ${v}`),
+  ]),
+);
+for (const v of ["licensed under", "released under", "available under"]) LEAD_INS.add(v);
+
+function isLeadIn(prefix: string): boolean {
+  return LEAD_INS.has(prefix.replace(/\s+/g, " ").trim().toLowerCase());
+}
+
+/**
+ * The text of every line where a match of `p` starts or ends that lies outside every span of
+ * `p` on it (the diagnostics are the span itself; the matched text is whole lines). Each span is
+ * found in its line after the one before it, so text between two spans on one line stays
+ * leftover. Text before the first span is ignored only when it is a lead-in; text that is only
+ * punctuation is ignored. A span that cannot be found makes its whole line leftover: the safe
+ * direction.
+ */
+function spanEdges(own: ScanMatch[], lines: string[]): { line: number; text: string }[] {
+  const spans = new Map<number, [number, number][]>();
+  const cursor = new Map<number, number>();
+  const lost = new Set<number>();
+  const place = (line: number, needle: string, toEnd: boolean, fromStart: boolean) => {
+    const text = lines[line - 1] ?? "";
+    const from = cursor.get(line) ?? 0;
+    const at = needle === "" ? -1 : text.indexOf(needle, from);
+    if (at < 0) {
+      lost.add(line);
+      return;
+    }
+    const begin = fromStart ? 0 : at;
+    const end = toEnd ? text.length : at + needle.length;
+    cursor.set(line, at + needle.length);
+    const list = spans.get(line) ?? [];
+    list.push([begin, end]);
+    spans.set(line, list);
+  };
+  const ordered = [...own].sort((a, b) => a.start_line - b.start_line || a.end_line - b.end_line);
+  for (const m of ordered) {
+    const span = linesOf(m.matched_text_diagnostics);
+    const head = unbracket(span[0] ?? "").trim();
+    const tail = unbracket(span.at(-1) ?? "").trim();
+    if (m.start_line === m.end_line) {
+      place(m.start_line, head, false, false);
+    } else {
+      place(m.start_line, head, true, false);
+      place(m.end_line, tail, false, true);
+    }
   }
-  const before = first.slice(0, at);
-  const after = last.slice(end + tail.length);
-  if (!ONLY_PUNCTUATION.test(before)) out.push({ line: m.start_line, text: before.trim() });
-  if (!ONLY_PUNCTUATION.test(after)) out.push({ line: m.end_line, text: after.trim() });
+  const out: { line: number; text: string }[] = [];
+  for (const line of [...new Set([...spans.keys(), ...lost])].sort((a, b) => a - b)) {
+    const text = lines[line - 1] ?? "";
+    if (lost.has(line)) {
+      out.push({ line, text });
+      continue;
+    }
+    const list = (spans.get(line) ?? []).sort((a, b) => a[0] - b[0]);
+    let pos = 0;
+    for (const [begin, end] of list) {
+      if (begin > pos) {
+        const gap = text.slice(pos, begin);
+        if (!(pos === 0 && isLeadIn(gap)) && !ONLY_PUNCTUATION.test(gap)) {
+          out.push({ line, text: gap.trim() });
+        }
+      }
+      pos = Math.max(pos, end);
+    }
+    const rest = text.slice(pos);
+    if (!ONLY_PUNCTUATION.test(rest)) out.push({ line, text: rest.trim() });
+  }
   return out;
 }
 
