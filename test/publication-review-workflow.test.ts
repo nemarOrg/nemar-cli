@@ -1943,7 +1943,9 @@ describe("the license matcher runs pinned, apart and sandboxed (ADR 0142)", () =
         scan: readScanOutput(scanDir, null),
       });
       expect(id.fact.state).toBe("annexed");
-      expect(id.matcher).toBe("scancode-32.5.0+spdx-3.27");
+      expect(id.matcher).toBe(
+        `scancode-${SCANCODE_TOOLKIT_VERSION}+spdx-${SPDX_LICENSE_LIST_VERSION}`,
+      );
     });
   });
 });
