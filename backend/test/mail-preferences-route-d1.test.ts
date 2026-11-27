@@ -110,6 +110,7 @@ describe("reading", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
       news: true,
       rfcs: true,
       maintenance: true,

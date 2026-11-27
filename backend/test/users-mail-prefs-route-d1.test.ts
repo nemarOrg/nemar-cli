@@ -275,6 +275,7 @@ for (const mount of MOUNTS) {
         "identifier_sweep",
         "support_tickets",
         "compute_requests",
+        "storage_alerts",
       ]) {
         test(`the admin alert ${alert} is refused by name`, async () => {
           const res = await call(mount, "PUT", { key: MEMBER_KEY }, { [alert]: false });

@@ -31,14 +31,13 @@ import {
   PUBLIC_ACCESS_SID,
   type PolicyStatement,
   STAGING_PREFIX,
-  buildPublicAccessStatement,
+  buildMigratedPolicy,
   derivePublicPrefixes,
   isDatasetPrivate,
   listPrivateDatasets,
   policyByteSize,
 } from "../backend/src/services/bucket-policy.ts";
 
-const POLICY_VERSION = "2012-10-17";
 const LEGACY_SID_PREFIX = "PublicReadDataset_";
 
 interface Args {
@@ -137,10 +136,8 @@ function main(): void {
 
   // Preserve any unrelated statements that already exist on the live policy.
   const preserved = basePolicyStatements(current);
-  const newPolicy: BucketPolicy = {
-    Version: current?.Version ?? POLICY_VERSION,
-    Statement: [buildPublicAccessStatement(bucket, privateIds), ...preserved],
-  };
+  // Opaque carve-out entries on the live statement are kept (#2497).
+  const newPolicy = buildMigratedPolicy(current, bucket, privateIds, preserved);
   const size = policyByteSize(newPolicy);
 
   console.log(`Top-level prefixes : ${allPrefixes.length}`);

@@ -29,6 +29,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 
@@ -46,6 +47,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 
@@ -68,6 +70,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 
@@ -102,6 +105,17 @@ describe("parseEmailPreferences", () => {
     expect(parseEmailPreferences(null).compute_requests).toBe(true);
   });
 
+  test("an explicit storage_alerts: false is honored, and a row that predates it opts in", () => {
+    // #2497 (ADR 0145): bucket-policy alerts are their own category, opted in by default.
+    expect(parseEmailPreferences(JSON.stringify({ storage_alerts: false })).storage_alerts).toBe(
+      false,
+    );
+    expect(parseEmailPreferences(JSON.stringify({ compute_requests: false })).storage_alerts).toBe(
+      true,
+    );
+    expect(parseEmailPreferences(null).storage_alerts).toBe(true);
+  });
+
   test("an explicit identifier_sweep: false is honored, and a row that predates it opts in", () => {
     // Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. Same
     // default as dataset_anonymity above, and the same control in both directions.
@@ -125,6 +139,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 
@@ -140,6 +155,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 
@@ -155,6 +171,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 
@@ -170,6 +187,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 
@@ -185,6 +203,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 
@@ -202,6 +221,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 
@@ -243,6 +263,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 
@@ -261,6 +282,7 @@ describe("parseEmailPreferences", () => {
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
+      storage_alerts: true,
     });
   });
 });

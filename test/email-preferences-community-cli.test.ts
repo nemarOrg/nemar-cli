@@ -195,6 +195,7 @@ describe("update", () => {
         identifier_sweep: false,
         support_tickets: false,
         compute_requests: false,
+        storage_alerts: false,
         news: false,
         rfcs: false,
         maintenance: false,

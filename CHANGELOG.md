@@ -15,6 +15,15 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Fixed
+
+- **Dataset creation works again when the bucket policy is near its cap (#2497; ADR 0145).**
+  The public-by-default bucket policy had grown to 628 private carve-outs and 20,431 of AWS's 20,480 bytes, so every new dataset failed with "Failed to secure dataset storage" and left an empty dataset record and an empty GitHub repository behind.
+  The carve-out list is now compacted (a fully private decade of ids is one `?` wildcard entry, a fully private hundred one `??` entry), which takes the measured list to 223 entries and about 7 KB on the first write after deploy.
+  Creation checks the policy's headroom before claiming an id and refuses with 503 when it is full; a carve-out or S3 permission that still fails rolls the create back (repository, S3 permission and record deleted).
+  A policy written above 80% (and again above 95%) of the cap, a refused create or visibility change, and a rollback that left something behind are logged with stable tags and mailed to the admins, at most once a day per condition.
+- **A new admin mail category, `storage_alerts` (`nemar admin users email-preferences update --storage-alerts <bool>`), on by default, carries those alerts.**
+
 ### Added
 
 - **The publication review checks that the dataset's Name follows its upstream dataset's title (owner rule of 2026-11-27; ADR 0102, 0107, 0139 and 0142, amendments of that date).**

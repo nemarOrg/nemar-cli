@@ -1562,6 +1562,8 @@ export interface AdminAlertPreferences {
   support_tickets: boolean;
   /** Epic #2021 phase D1 (ADR 0118): a person asked for compute access. */
   compute_requests: boolean;
+  /** #2497 (ADR 0145): bucket-policy near-cap, full and incomplete-rollback alerts. */
+  storage_alerts: boolean;
 }
 
 /**
