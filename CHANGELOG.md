@@ -15,12 +15,17 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.42 - 2026-11-26
+
 ### Publication queue: decide (epic #2182, ADR 0139)
 
 **Release note.**
 Publication requests can now be decided at scale with evidence that the depositor can check.
 Deploy the Worker and the review script together.
-Reviews that start between the two report `inputs_unavailable`; restart them with `nemar admin dataset publish start <id>`.
+The review script runs from `main` as soon as the release merges, while the Worker deploys a few minutes later:
+a review that starts in that window gets no inputs from the older Worker and ends `unreported` (an older Worker does not know the `inputs_unavailable` word the new script sends), and one started against the new Worker without inputs reports `inputs_unavailable`.
+Either way, restart it with `nemar admin dataset publish start <id>`.
+Production runs no reviews until `PUBLICATION_REVIEW_ENABLED` is on, so this matters only on staging today.
 Two switches stay off until the owner turns them on, each in a reviewed change: `PUBLICATION_REVIEW_ENABLED` in production (pull request #2370), and `PUBLICATION_AUTO_DENY_MODE` (`off`, `shadow` or `on`) with its owner-set `PUBLICATION_AUTO_DENY_DAILY_CAP`; neither may appear in `backend/wrangler-sccn.toml` except through such a change.
 
 - **Upstream license lineage.** `nemar dataset license-check <path>` and `nemar admin dataset publish license-lineage <id>` find a dataset's upstream sources and read each license from DataCite, Crossref, OpenAlex, or OpenNeuro's and PhysioNet's own records. They return one outcome: compatible, attribution, NC, share-alike mismatch, needs permission, redistribution prohibited, source is a publication, no upstream declared, or unresolved. Unresolved is never compatible.
@@ -31,6 +36,12 @@ Two switches stay off until the owner turns them on, each in a reviewed change: 
 - **Resubmission note.** `nemar dataset publish request --note` (or the prompt after a denial) tells the reviewer what changed.
 - **Automatic denial (off by default).** A review fail with a reason that is eligible for automatic denial, confirmed by a second Sonnet run on the same inputs, denies the request as nemarAdmin. The denial mail says an automated agent decided, gives remedies and reproduce commands, and invites a resubmission. A pass with a clear screen mails administrators "Ready to approve". `nemar admin dataset publish restore <id>` reverses a denial.
 - Migrations 0150 to 0154.
+
+### Continuous integration
+
+- **The unit-pure shards no longer run out of memory (#2423, fixing #2351).**
+  The shard 1 "hangs" were the runner running out of memory: `test/unit-pure-timings.json` missed 262 files, which bun then weighed as almost nothing and piled into shard 1.
+  The table now covers every pure file (a test fails when one is missing, and the scrub table has the same check), and each shard runs as two bun processes, in `test.yml` and in `deploy-backend.yml`'s test gate.
 
 ## 0.10.41 - 2026-11-26
 
