@@ -202,3 +202,25 @@ Measured on the depositor's sources after the first hotfix:
   A container's members or children are never merged into one license: each is judged against the dataset's license, and they combine as separate sources do (the most restrictive outcome, and a conflict such as share-alike beside NonCommercial needs permission).
   One merged rank would read CC BY-SA beside CC BY-NC as NonCommercial alone, and a CC BY-SA 4.0 part beside a 3.0 one as compatible with a 3.0 target.
 - Genuine publications stay publications: `10.5281/zenodo.6529724` and `10.6084/m9.figshare.28309157` are `JournalArticle` records.
+
+## Amendment 2026-11-27 (owner, third lineage fix): figshare article URLs and stale relations
+
+The owner's ruling for the lineage: anything the resolver cannot determine is an administrator's decision (`unresolved`: amber on the card, no depositor mail), never a guess in either direction.
+Resolver `license-lineage/6`.
+
+- **A figshare article URL** (`https://<host>.figshare.com/articles/<...>/<id>[/<version>]`) is read from figshare's API, and the figshare record decides.
+  A `dataset` with a license is a dataset under that license.
+  A paper-like type (journal contribution, preprint, thesis, book, chapter, conference contribution, poster, presentation, report, monograph, peer review, educational resource) is a publication.
+  Any other type (a figure or media item can be a recording or an illustration; software, models and workflows are code), a dataset with no license, a metadata-only record (`is_metadata_record`: the data is held elsewhere or on request), and a record that cannot be read are `unresolved`.
+  A version in the URL is read; else the SourceDatasets entry's `Version` when it is a figshare version number; else the latest.
+  The record's DOI names the source; a PLOS figshare dataset shares its article's DOI (`10.1371/journal.pone.0211710`, nm000830), so that DOI is never then read from Crossref, which calls it the journal article.
+- **An IsDerivedFrom in NEMAR's own metadata is never carried forward on its own.**
+  Enrichment's seed stage dropped no earlier IsDerivedFrom, so a paper a depositor moved from SourceDatasets to ReferencesAndLinks stayed IsDerivedFrom through every re-enrichment.
+  Once this run has resolved the DOIs (stage 1d), an earlier IsDerivedFrom that SourceDatasets does not name and that resolved to something other than a DataCite `Dataset` is not carried forward: it becomes `References` when ReferencesAndLinks names it, else it is dropped.
+  One that resolved to a Dataset (an earlier rule-checked promotion) or whose lookup failed, was skipped or found nothing is kept, so a failed lookup never turns a real dataset relation into a reference.
+- **In the resolver, a stale enrichment relation is not a source.**
+  An IsDerivedFrom or IsIdenticalTo in `.nemar/metadata.json` that resolves to a publication and that SourceDatasets does not name is skipped and counted (`skipped_stale_relations`), so stale metadata cannot hold a request before its next re-enrichment.
+  A relation that resolves to the same record as a SourceDatasets entry is that entry.
+  A relation that cannot be read is not skipped: it stays `unresolved`.
+  When skipped relations were all a dataset named, the outcome is `unresolved` (an administrator decides), never `no_upstream_declared`; the decision card and `show` print how many were skipped.
+

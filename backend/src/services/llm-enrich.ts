@@ -16,6 +16,7 @@ import {
   datasetLandingUrl,
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
+import { isPaperRecord } from "../../../shared/license-lineage.js";
 import {
   DATA_DESCRIBING_RELATION_TYPES,
   NEVER_DATA_PAPER_DOIS,
@@ -349,6 +350,86 @@ export function validateLlmResultV2(raw: Record<string, unknown>): LlmEnrichment
  * - DatasetType -> resource_type_general
  * - Dataset platform URLs (GitHub, NEMAR) -> related_identifiers with "IsDescribedBy"
  */
+/** Every DOI a list of BIDS entries names (`SourceDatasets` objects or ReferencesAndLinks strings), normalized. */
+function doisNamedIn(entries: unknown): Set<string> {
+  const out = new Set<string>();
+  if (!Array.isArray(entries)) return out;
+  for (const e of entries) {
+    const texts =
+      typeof e === "string"
+        ? [e]
+        : e && typeof e === "object"
+          ? [(e as Record<string, unknown>).DOI, (e as Record<string, unknown>).URL]
+          : [];
+    for (const t of texts) {
+      if (typeof t !== "string") continue;
+      const m = t.match(/(?:doi\.org\/|doi:|^)(10\.\d{4,}\/\S+)/i);
+      if (m) out.add(normalizeDoiKey(m[1]));
+    }
+  }
+  return out;
+}
+
+/**
+ * An earlier IsDerivedFrom that the current SourceDatasets does not name and that this run's DOI
+ * lookups resolved to a record positively typed as a paper (`isPaperRecord`) is not carried
+ * forward (ADR 0139 decision 7, amendment of 2026-11-27): it becomes `References` when
+ * ReferencesAndLinks names it, else it is dropped. Kept: one SourceDatasets names, one resolved to
+ * anything not positively a paper (a Dataset from an earlier rule-checked LLM promotion, a
+ * Collection, a Crossref dataset or component, a record with no type or an unrecognized one), one
+ * whose lookup failed, was skipped or found nothing, and every URL entry. Without this, a
+ * paper a depositor moved from SourceDatasets to ReferencesAndLinks stayed IsDerivedFrom through
+ * every re-enrichment (nm000830), and the license lineage read it as the upstream source.
+ */
+export function dropStaleDerivations(
+  target: NemarMetadataV2,
+  bidsDescription: Record<string, unknown>,
+  resolution: DoiResolution,
+): { result: NemarMetadataV2; demoted: string[]; dropped: string[] } {
+  const rels = target.related_identifiers;
+  if (!rels || rels.length === 0) return { result: target, demoted: [], dropped: [] };
+  const named = doisNamedIn(bidsDescription.SourceDatasets);
+  const referenced = doisNamedIn(bidsDescription.ReferencesAndLinks);
+  // Only a record positively typed as a paper: a Crossref dataset or component, a DataCite
+  // Collection, and a record with no type or an unrecognized one keep the relation.
+  const publications = new Set(
+    resolution.resolved
+      .filter((r) => isPaperRecord(r.resource_type_general ?? null, r.type ?? null))
+      .map((r) => r.doi),
+  );
+  const demoted: string[] = [];
+  const dropped: string[] = [];
+  const kept: RelatedIdentifierEntry[] = [];
+  for (const r of rels) {
+    const key = r.identifier_type === "DOI" ? normalizeDoiKey(r.identifier) : null;
+    if (
+      r.relation_type !== "IsDerivedFrom" ||
+      key === null ||
+      named.has(key) ||
+      !publications.has(key)
+    ) {
+      kept.push(r);
+      continue;
+    }
+    if (referenced.has(key)) {
+      demoted.push(r.identifier);
+      kept.push({ ...r, relation_type: "References" });
+    } else {
+      dropped.push(r.identifier);
+    }
+  }
+  // A demoted entry may meet a References entry for the same DOI: keep one.
+  const seen = new Set<string>();
+  const unique = kept.filter((r) => {
+    if (r.identifier_type !== "DOI") return true;
+    const k = `${normalizeDoiKey(r.identifier)} ${r.relation_type}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return { result: { ...target, related_identifiers: unique }, demoted, dropped };
+}
+
 export function seedFromBids(
   bidsDescription: Record<string, unknown>,
   existing: NemarMetadataV2 | null,
@@ -403,6 +484,9 @@ export function seedFromBids(
   // and drop the retired legacy NEMAR landing URL so re-enrichment REPLACES it
   // with the canonical datasetLandingUrl below (epic #837) rather than letting
   // the old `dataexplorer/detail` and new `/dataset/` IsDescribedBy URLs accumulate.
+  // An earlier IsDerivedFrom SourceDatasets no longer names is kept here: whether it still holds
+  // is decided after this run resolves the DOIs (`dropStaleDerivations`), because a run whose
+  // lookups failed must not turn a real dataset relation into a reference.
   const relatedIds: RelatedIdentifierEntry[] = (existing?.related_identifiers || []).filter(
     (r) =>
       !r.identifier.includes("nemar.org/dataexplorer/") &&
@@ -412,7 +496,9 @@ export function seedFromBids(
   // SourceDatasets -> IsDerivedFrom
   for (const doi of sourceDatasetDois) {
     const alreadyExists = relatedIds.some(
-      (r) => r.identifier === doi && r.relation_type === "IsDerivedFrom",
+      (r) =>
+        r.relation_type === "IsDerivedFrom" &&
+        normalizeDoiKey(r.identifier) === normalizeDoiKey(doi),
     );
     if (!alreadyExists) {
       relatedIds.push({

@@ -122,6 +122,11 @@ export interface CardLineage {
   declared_licenses: { label: string; licenses: string[] };
   /** README DOIs the resolver dropped as cut short, when any; why a lineage may show no source. */
   dropped_doi_candidates?: number;
+  /**
+   * Enrichment relations (IsDerivedFrom or IsIdenticalTo) skipped as stale publications, when any;
+   * why a lineage may show no source.
+   */
+  skipped_stale_relations?: number;
   /** A recorded license permission covers this lineage's outcome and sources. */
   permission_covers: boolean;
 }
