@@ -25,22 +25,25 @@ nemar-process accepts `--source-commit` for every recipe and records it (`cli.py
 2. **A fault reading it defers the run for as long as the fault lasts.**
    When GitHub cannot answer, or the Worker has no credentials or cannot mint a token (`github_unreadable`, `no_github_credentials`, `token_mint_failed`), the run is not dispatched: a `refused` stamp with the word `source_commit_deferred` records the deferral, the dispatch answers `source_commit_deferred` (503) with the fault's word, and the next dispatch pass tries again.
    Unlike the serving index's deferral it never runs out, because a run without its commit could never be keyed.
-   The fault is the same for every dataset, so it stops a run over the queue at the first.
+   A credential fault (`no_github_credentials`, `token_mint_failed`) is the Worker's and the same for every dataset, so it stops a run over the queue at the first and ends the daily tick.
+   `github_unreadable` can be one repository's (a renamed or empty repository, an answer only it gives), so the queue defers that dataset and moves on to the next.
 3. **An absent tag refuses the run.**
    When the repository answers that it has no tag for the version, the dispatch is refused `version_tag_absent` (409) with nothing written, and the Worker logs `version_tag_absent` with the dataset and version.
    A version the data plane serves whose tag is gone is an integrity fault that an administrator mends, by restoring the tag; a retry cannot mend it and a run cannot be keyed without it, so neither a deferral nor an unkeyable run is spent on it.
-   The dataset stays a candidate of the queue, which moves on to the next.
+   The dataset stays a candidate of the queue, which moves on to the next: a run over the queue tries up to ten datasets more than its room (`PIPELINE_RUN_EXTRA_TRIES`), so datasets refused or deferred at the head of the order never fill it.
+   More such datasets than that at once would still hold a run, and each is logged by name.
 4. **The derivative store checks the stated commit against the handed one.**
    When a run's recorded specification hands `--source-commit`, its stamp's digest must be exactly `git:` and that commit; a record that states another, or a specification that hands two, is `digest_mismatch` and is never keyed.
    A specification that hands none (a job from before this decision) is not checked.
 5. **ADR 0141 decision 3 is narrowed accordingly.**
    The serving index's deferral now covers the index's own faults (`index_unreadable`, `index_not_stored`); the GitHub words are decision 2's and never run out, and `tag_absent` refuses instead of running at once.
-   A run past the serving index's 24 hours still has its commit.
+   A run past the serving index's 24 hours still has its commit, and a deferral of its commit in between does not restart those 24 hours.
 
 ## Consequences
 
 - A derivative of every Worker-dispatched run of the archive can be keyed and stored, `nemar-floor`'s included, under ADR 0123's key with the `git:` digest of the commit the dispatcher read, which is also what the record states.
 - Every dispatch of a run of the archive costs one GitHub request before the claim; production has the GitHub App, and a staging or local Worker reads the public repositories without credentials.
+  The daily tick tries at most ten datasets more than it dispatches, so it makes at most 40 GitHub requests.
   A GitHub outage pauses those dispatches, and each deferred pass writes one `refused` stamp, which holds no slot and is left out of the grid.
 - The dry run still reads only D1 and the configuration, so it can answer `would_dispatch` for a version whose tag is absent; the live run refuses it.
 - Runs dispatched before this decision carry no commit and stay unkeyable (`no_input_digest`); nothing is rerun automatically.
