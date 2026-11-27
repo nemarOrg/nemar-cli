@@ -5,7 +5,9 @@
  * and the two languages read JSON differently: Python reads the number `-0` as the integer 0 and a
  * 400-digit integer as an `int` that `float()` refuses, where `JSON.parse` reads negative zero and
  * Infinity, and Python's `True` is an `int`. So a vector file both languages read is not enough: the
- * Python side has to run, for the vectors and for the edge cases below.
+ * Python side has to run, for the vectors and for the edge cases below. It also replays every
+ * `derivative_key` vector, version 1 and the version 2 key of ADR 0140 (`serving_index`), and every
+ * refused one, so the key's cross-language claim is tested and not only stated.
  *
  * One `uv run --no-project --python 3.12 python -I -c HARNESS` call per run. HARNESS is written in
  * this file with only `json`, `struct`, `hashlib`, `math` and `re` and imports no repository code. It
@@ -24,7 +26,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   DerivativeContractError,
+  type DerivativeKeyFields,
   type StoreRowV2,
+  derivativeKey,
+  derivativeKeyText,
   inputDigestV2,
   inputDigestV2Text,
   storeLocationsSha256,
@@ -45,7 +50,14 @@ const FILE = JSON.parse(readFileSync(VECTORS_PATH, "utf8")) as {
     also_with?: Array<{ labels?: unknown; attributes?: unknown }>;
   }>;
   input_digest_v2: Array<{ name: string; rows: unknown; text: string; digest: string }>;
+  derivative_key: Array<{
+    name: string;
+    fields: Record<string, string>;
+    text: string;
+    key: string;
+  }>;
   refused: {
+    derivative_key: Array<{ name: string; fields: Record<string, unknown> }>;
     store_locations: Array<{ name: string; labels: unknown; attributes: unknown }>;
     input_digest_v2: Array<{ name: string; field: string; rows: unknown }>;
   };
@@ -176,6 +188,50 @@ def answer_digest(rows):
         return {"crash": type(error).__name__ + ": " + str(error)}
     return {"text": text, "digest": "sha256:" + sha256_of(text)}
 
+KEY_FIELDS = ["dataset", "version", "recipe", "recipe_version", "engine", "input", "profile", "input_digest"]
+KEY_RULES = {
+    "dataset": r"[a-z]{2}[0-9]{6}",
+    "version": r"[0-9A-Za-z._+-]{1,64}",
+    "recipe": r"[a-z0-9-]{1,64}",
+    "recipe_version": r"[0-9A-Za-z._+-]{1,64}",
+    "engine": r"[0-9A-Za-z._+@-]{1,64}",
+}
+KEY_INPUTS = {"zarr": ("serving", r"sha256:[0-9a-f]{64}"), "bids": ("archive", r"git:[0-9a-f]{40}")}
+
+def key_text(fields):
+    """nemar.derivative-key.v1, or v2 with serving_index (ADR 0140): every rule a full match."""
+    for name in KEY_FIELDS:
+        if not isinstance(fields.get(name), str):
+            raise Refused("not text", name)
+    for name, rule in KEY_RULES.items():
+        if re.fullmatch(rule, fields[name]) is None:
+            raise Refused("outside its rule", name)
+    if fields["input"] not in KEY_INPUTS:
+        raise Refused("input", "input")
+    profile, digest = KEY_INPUTS[fields["input"]]
+    if fields["profile"] != profile:
+        raise Refused("profile", "profile")
+    if re.fullmatch(digest, fields["input_digest"]) is None:
+        raise Refused("input_digest", "input_digest")
+    lines = [f"{name} {fields[name]}" for name in KEY_FIELDS]
+    if "serving_index" in fields:
+        value = fields["serving_index"]
+        if not isinstance(value, str) or re.fullmatch(r"none|sha256:[0-9a-f]{64}", value) is None:
+            raise Refused("serving_index", "serving_index")
+        if fields["input"] != "bids":
+            raise Refused("serving_index on zarr", "serving_index")
+        return "nemar.derivative-key.v2\n" + "".join(l + "\n" for l in lines) + f"serving_index {value}\n"
+    return "nemar.derivative-key.v1\n" + "".join(l + "\n" for l in lines)
+
+def answer_key(fields):
+    try:
+        text = key_text(fields)
+    except Refused:
+        return {"refused": True}
+    except Exception as error:
+        return {"crash": type(error).__name__ + ": " + str(error)}
+    return {"text": text, "key": sha256_of(text)}
+
 with open(sys.argv[1], encoding="utf-8") as handle:
     vectors = json.load(handle)
 extra = json.load(sys.stdin)
@@ -188,6 +244,8 @@ out = {
     "refused_digests": [answer_digest(v["rows"]) for v in vectors["refused"]["input_digest_v2"]],
     "extra_locations": [answer_locations(c) for c in extra["locations"]],
     "extra_digests": [answer_digest(c["rows"]) for c in extra["digests"]],
+    "keys": [answer_key(v["fields"]) for v in vectors["derivative_key"]],
+    "refused_keys": [answer_key(v["fields"]) for v in vectors["refused"]["derivative_key"]],
 }
 json.dump(out, sys.stdout)
 `;
@@ -448,6 +506,20 @@ interface Answers {
   refused_digests: DigestAnswer[];
   extra_locations: LocationsAnswer[];
   extra_digests: DigestAnswer[];
+  keys: KeyAnswer[];
+  refused_keys: KeyAnswer[];
+}
+
+type KeyAnswer = { text: string; key: string } | { refused: true } | { crash: string };
+
+async function moduleKey(fields: unknown): Promise<KeyAnswer> {
+  const given = fields as DerivativeKeyFields;
+  try {
+    return { text: derivativeKeyText(given), key: await derivativeKey(given) };
+  } catch (error) {
+    if (error instanceof DerivativeContractError) return { refused: true };
+    throw error;
+  }
 }
 
 /** The module's answer, in the harness's shape. A refusal is a `DerivativeContractError`, nothing else. */
@@ -520,6 +592,29 @@ describe.skipIf(!uvAvailable)(
         expect(python.digests[index]).toEqual({ text: vector.text, digest: vector.digest });
         expect(python.digests[index]).toEqual(await moduleDigest(vector.rows));
       });
+    });
+
+    FILE.derivative_key.forEach((vector, index) => {
+      test(`derivative key ${vector.name}: Python, the module and the file give one text and key (version 1 and 2, ADR 0140)`, async () => {
+        expect(python.keys[index]).toEqual({ text: vector.text, key: vector.key });
+        expect(await moduleKey(vector.fields)).toEqual({ text: vector.text, key: vector.key });
+      });
+    });
+
+    FILE.refused.derivative_key.forEach((vector, index) => {
+      test(`derivative key refused, ${vector.name}: Python and the module both refuse`, async () => {
+        expect(python.refused_keys[index]).toEqual({ refused: true });
+        expect(await moduleKey(vector.fields)).toEqual({ refused: true });
+      });
+    });
+
+    test("the key vectors are not vacuous: both versions are replayed", () => {
+      expect(FILE.derivative_key.map((v) => v.text.split("\n")[0])).toEqual([
+        "nemar.derivative-key.v1",
+        "nemar.derivative-key.v1",
+        "nemar.derivative-key.v2",
+        "nemar.derivative-key.v2",
+      ]);
     });
 
     FILE.refused.input_digest_v2.forEach((vector, index) => {

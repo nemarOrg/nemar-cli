@@ -1,7 +1,6 @@
 /**
- * Test-layer helper: compile ajv (JSON Schema 2020-12) validators for the
- * vendored neuroschema bundles (epic #896, #898): the `dataset` root and the
- * per-signal-file `record` root.
+ * Test-layer helper: compile an ajv (JSON Schema 2020-12) validator for the
+ * vendored neuroschema dataset bundle (epic #896, #898).
  *
  * Lives under test/ (not shared/contract/) on purpose: ajv is a test-only
  * concern, so the shared contract stays zero-dependency-beyond-zod and
@@ -18,32 +17,49 @@ import { NEUROSCHEMA_VERSION } from "../../shared/contract/index.js";
 
 interface Bundle {
   root: string;
+  roots: { dataset: string; record: string };
   schemas: Array<{ $id: string } & Record<string, unknown>>;
 }
 
-const BUNDLE_DIR = join(import.meta.dir, "../../shared/contract/neuroschema");
+const BUNDLE_PATH = join(import.meta.dir, "../../shared/contract/neuroschema/dataset.bundle.json");
 
-function compileBundle(file: string): ValidateFunction {
-  const bundle = JSON.parse(readFileSync(join(BUNDLE_DIR, file), "utf8")) as Bundle;
+function loadBundleAjv(): { ajv: Ajv2020; bundle: Bundle } {
+  const bundle = JSON.parse(readFileSync(BUNDLE_PATH, "utf8")) as Bundle;
   // strict:false tolerates neuroschema's descriptive keywords; allErrors for
   // readable failures. Each vendored schema carries its own nsc:/ $id, so
   // cross-file $refs (rewritten by build-vendor.mjs) resolve on addSchema.
   const ajv = new Ajv2020({ allErrors: true, strict: false });
   addFormats(ajv);
   for (const schema of bundle.schemas) ajv.addSchema(schema);
-  const validate = ajv.getSchema(bundle.root);
-  if (!validate) throw new Error(`neuroschema root ${bundle.root} not found in ${file}`);
+  return { ajv, bundle };
+}
+
+/**
+ * Compile a validator for any schema in the vendored bundle by its id, with an
+ * optional fragment: `nsc:/extensions/processing.schema.json`,
+ * `nsc:/definitions/checkpointCounts.schema.json`, or
+ * `nsc:/extensions/dataQuality.schema.json#/$defs/datasetRecipeSummary`.
+ */
+export function compileNeuroschemaValidator(id: string): ValidateFunction {
+  return getFrom(loadBundleAjv().ajv, id);
+}
+
+function getFrom(ajv: Ajv2020, id: string): ValidateFunction {
+  const validate = ajv.getSchema(id);
+  if (!validate) throw new Error(`neuroschema schema ${id} not found in bundle`);
   return validate;
 }
 
 /** Compile a validator for the neuroschema dataset root from the vendored bundle. */
 export function compileNeuroschemaDatasetValidator(): ValidateFunction {
-  return compileBundle("dataset.bundle.json");
+  const { ajv, bundle } = loadBundleAjv();
+  return getFrom(ajv, bundle.roots.dataset);
 }
 
-/** Compile a validator for the neuroschema record root (one signal file). */
+/** Compile a validator for the neuroschema record root from the vendored bundle. */
 export function compileNeuroschemaRecordValidator(): ValidateFunction {
-  return compileBundle("record.bundle.json");
+  const { ajv, bundle } = loadBundleAjv();
+  return getFrom(ajv, bundle.roots.record);
 }
 
 /** Format ajv errors compactly for test output. */
@@ -52,19 +68,26 @@ export function formatAjvErrors(validate: ValidateFunction): string {
 }
 
 /**
- * The `schema_version` a LIVE response may carry: the same MAJOR.MINOR as
- * `NEUROSCHEMA_VERSION`, any PATCH.
+ * The `schema_version` a LIVE response may carry: the same MAJOR.MINOR as `NEUROSCHEMA_VERSION`,
+ * any PATCH, plus the MINOR lines in `NEUROSCHEMA_TRANSITION_LINES` while a MINOR release is being
+ * deployed.
  *
  * The live checks run against a deployed backend, and a pull request that bumps
- * `NEUROSCHEMA_VERSION` (a PATCH, since neuroschema 0.x treats additive fields
- * as patches) cannot be deployed before its own CI runs. Pinning the exact
- * string there turns every such release red until the deploy lands, for a
- * difference that is harmless by definition. A different MINOR still fails: that
- * is a breaking change or a new extension namespace, and the live backend must
- * agree on it. The exact
- * version is pinned by the pure tests (`test/contract-schemas.test.ts` and the
- * bundle stamp check in `test/contract-neuroschema.test.ts`).
+ * `NEUROSCHEMA_VERSION` cannot be deployed before its own CI runs. Pinning the exact string there
+ * turns every such release red until the deploy lands, for a difference that is harmless by
+ * definition. A PATCH is always accepted. A MINOR (a breaking change or a new extension namespace)
+ * is accepted only for the previous line named in `NEUROSCHEMA_TRANSITION_LINES`, which exists only
+ * until the backend that serves the new MINOR is deployed: the deployed backend serves 0.4.1, and
+ * epic #2324 moves it to 0.6.0 (ADR 0137; its 0.5.0 step was never deployed), so "0.4" stays there
+ * until that deploy and the follow-up empties it. The exact version is pinned by the pure tests
+ * (`test/contract-schemas.test.ts` and the bundle stamp check in
+ * `test/contract-neuroschema.test.ts`).
  */
-export const NEUROSCHEMA_LINE_RE = new RegExp(
-  `^${NEUROSCHEMA_VERSION.split(".").slice(0, 2).join(".").replace(/\./g, "\\.")}\\.\\d+$`,
-);
+export const NEUROSCHEMA_TRANSITION_LINES: readonly string[] = ["0.4"];
+
+const lineAlternatives = [
+  NEUROSCHEMA_VERSION.split(".").slice(0, 2).join("."),
+  ...NEUROSCHEMA_TRANSITION_LINES,
+].map((line) => line.replace(/\./g, "\\."));
+
+export const NEUROSCHEMA_LINE_RE = new RegExp(`^(?:${lineAlternatives.join("|")})\\.\\d+$`);

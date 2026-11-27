@@ -32,25 +32,37 @@
  *    invocation and the daily tick shares them. The progress is in D1: `copied` is the copy cursor of a row,
  *    a decided stamp leaves the candidate set, and the rows take turns (`last_attempt_at`).
  *  - ISOLATION. The bucket is reached by this binding and by a server-side copy only; no address is ever
- *    signed for it and no route returns an object's bytes. Only `description` (`derivative.json`) is read
- *    back, by an administrator, through the route.
+ *    signed for it. `description` (`derivative.json`) is read back by an administrator through the admin
+ *    route, and ONE route returns an object's bytes: the public quality route (`routes/quality.ts`, ADR
+ *    0137 decision 7), which serves only a file a validated view of a current public derivative declares,
+ *    after the dataset's gate and a fresh digest check.
  *  - NOTHING HERE TOUCHES A DOI, GITHUB OR MAIL. A log line carries ids and fixed words, never a path.
  */
 
 import {
+  COMPUTE_RECIPES,
   RECIPE_PRODUCT_OUTPUT_PREFIX,
+  RECIPE_SERVING_INDEX_FLAG,
   type RecipeInput,
   findRecipe,
+  recipeCheckpointMap,
   recipeImageDigestArg,
+  recipeKeysServingIndex,
+  recipeQualityPlugins,
   recipeRequiredOutputs,
 } from "../../../shared/compute-recipes.js";
-import { resultsLauncherKey, resultsOutputKey } from "../../../shared/contract/compute-launch.js";
+import {
+  SERVING_INDEX_CONTAINER_PATH,
+  resultsLauncherKey,
+  resultsOutputKey,
+} from "../../../shared/contract/compute-launch.js";
 import { LAUNCHER_FILES, ResultManifestSchema } from "../../../shared/contract/compute.js";
 import {
   CANARY_DAYS,
   DerivativeContractError,
   type DerivativeKeyFields,
   type RetentionClass,
+  SERVING_INDEX_NONE,
   SERVING_PROFILE_SENTENCE,
   SUPERSEDED_GRACE_DAYS,
   type StoreRowV2,
@@ -59,6 +71,7 @@ import {
   inputDigestV2,
   validateDerivativeKeyFields,
 } from "../../../shared/contract/derivatives.js";
+import { QUALITY_TABLE_MAX_BYTES } from "../../../shared/contract/quality-route.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { VERSION_DOI_SQL } from "./anonymity.js";
@@ -117,10 +130,14 @@ export const DERIVATIVE_PROMOTE_AUDIT_ACTION = "compute.derivative.promoted";
 export const DERIVATIVE_SYNC_AUDIT_ACTION = "compute.derivatives.sync";
 
 /** The recipe's dataset record is at most 256 KB; the read bound is the stamp sync's own. */
-const RECORD_READ_MAX_BYTES = 512 * 1024;
+export const RECORD_READ_MAX_BYTES = 512 * 1024;
 
-/** The recordings table of a dataset of 25,000 stores is a few megabytes; this is a bound, not a size. */
-const TABLE_READ_MAX_BYTES = 32 * 1024 * 1024;
+/**
+ * The recordings table of a dataset of 25,000 stores is a few megabytes; this is a bound, not a size. It is
+ * the quality route's own (`QUALITY_TABLE_MAX_BYTES`), so every reader of a run's table (reconciliation,
+ * keying, the admin listing and the processing endpoint) takes the same tables.
+ */
+export const TABLE_READ_MAX_BYTES = QUALITY_TABLE_MAX_BYTES;
 
 /** The most JSON the record's `process` block may be for the description to carry it. */
 const PROCESS_BLOCK_MAX_BYTES = 16 * 1024;
@@ -159,6 +176,7 @@ export const UNKEYABLE_WORDS = [
   "derivative_name_taken",
   "recipe_unknown",
   "dataset_gone",
+  "serving_index_unattested",
 ] as const;
 
 export type UnkeyableWord = (typeof UNKEYABLE_WORDS)[number];
@@ -183,6 +201,16 @@ export interface DerivativeRow {
   input: RecipeInput;
   profile: "serving" | "archive";
   input_digest: string;
+  /**
+   * The ninth field of a version 2 key (ADR 0140): `none` or `sha256:<64 hex>` for a recipe that keys the
+   * serving index on the archive input, null for every other row (whose key is version 1).
+   */
+  serving_index: string | null;
+  /**
+   * The plugins the row's recipe version runs at its `quality` checkpoint, as a JSON array, recorded when
+   * the row is made; null for a row made before the column existed (the quality route serves none of it).
+   */
+  quality_plugins: string | null;
   image_digest: string;
   job_id: string;
   stamp_id: number;
@@ -203,7 +231,7 @@ export interface DerivativeRow {
 }
 
 export const DERIVATIVE_COLUMNS = `key, dataset_id, version, recipe, recipe_version, engine, input, profile,
-  input_digest, image_digest, job_id, stamp_id, state, retention, failure, copied, object_count, bytes,
+  input_digest, serving_index, quality_plugins, image_digest, job_id, stamp_id, state, retention, failure, copied, object_count, bytes,
   attempts, last_attempt_at, ended_at, created_at, stored_at, superseded_at, expires_at, doi`;
 
 // --- Availability -------------------------------------------------------------------------------------------
@@ -403,6 +431,29 @@ export async function keyStamp(stores: Stores, stamp: CandidateStamp): Promise<K
     }
     const imageDigest = recipeImageDigestArg(spec.args);
     if (imageDigest === null) return unkeyable("spec_unreadable");
+    // A recipe that keys the serving index on this input (ADR 0140, ADR 0141): the value is what the
+    // dispatcher RECORDED in the specification, never what the record claims. A staged index is keyed by its
+    // digest, and the arguments must hand the run that copy (the flag once, at the path the launcher places
+    // it); a run with none staged is keyed `none`, and must name no index. Anything else names an index the
+    // platform cannot attest (`serving_index_unattested`): it is not keyed, rather than keyed as if it had
+    // none and colliding with one that had.
+    let servingIndex: string | undefined;
+    if (recipeKeysServingIndex(recipe, stamp.input)) {
+      const flagged = argv.filter(
+        (a) => a === RECIPE_SERVING_INDEX_FLAG || a.startsWith(`${RECIPE_SERVING_INDEX_FLAG}=`),
+      ).length;
+      const staged = spec.serving_index;
+      if (staged !== undefined && "sha256" in staged) {
+        const at = spec.args.indexOf(RECIPE_SERVING_INDEX_FLAG);
+        if (flagged !== 1 || at < 0 || spec.args[at + 1] !== SERVING_INDEX_CONTAINER_PATH) {
+          return unkeyable("serving_index_unattested");
+        }
+        servingIndex = `sha256:${staged.sha256}`;
+      } else {
+        if (flagged > 0) return unkeyable("serving_index_unattested");
+        servingIndex = SERVING_INDEX_NONE;
+      }
+    }
 
     // 2. The recordings table, every row: a rerun under the same key could differ on a transient code.
     const wanted = recipeRequiredOutputs(recipe);
@@ -474,6 +525,7 @@ export async function keyStamp(stores: Stores, stamp: CandidateStamp): Promise<K
       input: stamp.input,
       profile: stamp.input === "zarr" ? "serving" : "archive",
       input_digest: stamp.input_digest,
+      ...(servingIndex === undefined ? {} : { serving_index: servingIndex }),
     };
     const checked = validateDerivativeKeyFields(fields);
     if (!checked.ok) return unkeyable("key_invalid", checked.field);
@@ -513,6 +565,28 @@ export async function keyStamp(stores: Stores, stamp: CandidateStamp): Promise<K
   }
 }
 
+/**
+ * The plugins a recipe version runs at its `quality` checkpoint, as the JSON the row keeps, or null when the
+ * registry does not hold that version (the quality route then serves no view of the derivative).
+ */
+export function qualityPluginsOf(recipe: string, recipeVersion: string): string | null {
+  const map = recipeCheckpointMap(recipe, recipeVersion);
+  return map === null ? null : JSON.stringify(recipeQualityPlugins({ checkpoints: map }));
+}
+
+/**
+ * A recipe version's checkpoint map, `[{checkpoint, steps}]` in the registry's order without `stored`, as
+ * the JSON the row keeps (migration 0160), or null when the registry does not hold that version. A
+ * recording's outcomes are read through it (`quality-processing.ts`), so a derivative made by a version the
+ * registry has since moved past is still read with its own version's map.
+ */
+export function checkpointMapOf(recipe: string, recipeVersion: string): string | null {
+  const map = recipeCheckpointMap(recipe, recipeVersion);
+  return map === null
+    ? null
+    : JSON.stringify(map.map((c) => ({ checkpoint: c.checkpoint, steps: [...c.steps] })));
+}
+
 // --- Statements ---------------------------------------------------------------------------------------------------
 
 /**
@@ -538,18 +612,28 @@ export const CANDIDATE_STAMPS_SQL = candidateStampsSql(PIPELINE_ELIGIBLE_SQL);
 /**
  * Make a derivative's row: `?1` key, `?2` dataset, `?3` version, `?4` recipe, `?5` recipe version, `?6` engine,
  * `?7` input, `?8` profile, `?9` input digest, `?10` image digest, `?11` job, `?12` stamp, `?13` file count,
- * `?14` bytes. A second job with the same key adds nothing: the first derivative stands. And nothing is made
+ * `?14` bytes, `?15` the serving index of a version 2 key (null for a version 1 key), `?16` the recipe version's
+ * quality plugins as a JSON array and `?17` its checkpoint map (each null when the registry does not hold that
+ * version). A second job with the same key adds nothing: the first derivative stands. And nothing is made
  * for a dataset that is gone or no longer eligible (a deletion or an unpublish between the scan and the insert): a derivative of a deleted dataset
  * must not outlive the deletion's dating of its rows.
  */
 const insertDerivativeSql = (eligible: string): string => `INSERT INTO compute_derivatives
   (key, dataset_id, version, recipe, recipe_version, engine, input, profile, input_digest, image_digest,
-   job_id, stamp_id, object_count, bytes)
-  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+   job_id, stamp_id, object_count, bytes, serving_index, quality_plugins, checkpoint_map)
+  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
    WHERE EXISTS (SELECT 1 FROM datasets d WHERE d.dataset_id = ?2 AND ${eligible})
   ON CONFLICT(key) DO NOTHING`;
 
 export const INSERT_DERIVATIVE_SQL = insertDerivativeSql(PIPELINE_ELIGIBLE_SQL);
+
+/**
+ * Give the rows of one recipe version that have no checkpoint map (made before migration 0160) that
+ * version's map: `?1` the map as JSON, `?2` the recipe, `?3` its version. Only a NULL map is written; a
+ * recorded one is never replaced.
+ */
+export const FILL_CHECKPOINT_MAP_SQL = `UPDATE compute_derivatives SET checkpoint_map = ?1
+  WHERE checkpoint_map IS NULL AND recipe = ?2 AND recipe_version = ?3`;
 
 /**
  * Remember a stamp decided without a derivative. `?1` the stamp, `?2` the word. Not for a stamp that has a
@@ -864,6 +948,9 @@ async function keyNewStamps(
             stamp.id,
             decision.objectCount,
             decision.bytes,
+            f.serving_index ?? null,
+            qualityPluginsOf(f.recipe, f.recipe_version),
+            checkpointMapOf(f.recipe, f.recipe_version),
           )
           .run();
       } catch (err) {
@@ -1003,6 +1090,7 @@ async function describe(
     input: row.input,
     profile: row.profile,
     input_digest: row.input_digest,
+    ...(row.serving_index === null ? {} : { serving_index: row.serving_index }),
   };
   const citation = `Derived from ${row.dataset_id} version ${row.version}${
     doi === null ? "" : ` (DOI ${doi})`
@@ -1155,6 +1243,25 @@ export async function syncDerivatives(
     await cleanRows(stores, db, budgets.deletes, counts);
   } catch (err) {
     console.error(`[compute-derivatives] expire_failed error=${errorName(err)}`);
+    counts.errored++;
+  }
+
+  // 1b. A row made before migration 0160 has no checkpoint map: one whose recipe version the registry still
+  //     holds gets that version's map, so its recordings' outcomes are read after the registry moves on.
+  try {
+    let filled = 0;
+    for (const recipe of COMPUTE_RECIPES) {
+      const map = checkpointMapOf(recipe.name, recipe.version);
+      if (map === null) continue;
+      const done = await db
+        .prepare(FILL_CHECKPOINT_MAP_SQL)
+        .bind(map, recipe.name, recipe.version)
+        .run();
+      filled += done.meta?.changes ?? 0;
+    }
+    if (filled > 0) console.log(`[compute-derivatives] checkpoint_maps_filled rows=${filled}`);
+  } catch (err) {
+    console.error(`[compute-derivatives] checkpoint_map_fill_failed error=${errorName(err)}`);
     counts.errored++;
   }
 

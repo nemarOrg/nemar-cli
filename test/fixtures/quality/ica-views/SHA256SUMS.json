@@ -1,0 +1,136 @@
+{
+  "format": "nemar.vendored-files.v1",
+  "description": "nemar-ica's product with every view, copied byte for byte from nemarOrg/nemar-process at source_commit (its README says how it is made): each copy's path here, its path in that repository, its size and its SHA-256. The fixture of the backend's quality phases B1 and B2 (ADR 0137, nemar-cli #2341).",
+  "note": "Do not hand-edit; copy again from nemar-process with git show <source_commit>:<source> and update this file.",
+  "source": "https://github.com/nemarOrg/nemar-process",
+  "source_commit": "e4feec7b26f643004b8d61a87e05aff1622c8a1d",
+  "attribution": "Derived from OpenNeuro ds007823 v1.0.1 (NEMAR on007823), CC0 1.0; see nemar-process tests/fixtures/eeg/README.md.",
+  "files": [
+    {
+      "path": "index.json",
+      "source": "tests/fixtures/ica-views/index.json",
+      "size": 607,
+      "sha256": "fb030cb42dbf97a3e76f3bd890991c95e703fd5a42198b9d0d7adda0e6efcf0c"
+    },
+    {
+      "path": "product/desc-nemarica_dataquality.json",
+      "source": "tests/fixtures/ica-views/product/desc-nemarica_dataquality.json",
+      "size": 6585,
+      "sha256": "329f12d212c5ec690a8f8f5ec899f7d6dca48c646ed4e4b1882b60b409afc56e"
+    },
+    {
+      "path": "product/desc-nemarica_recordings.tsv",
+      "source": "tests/fixtures/ica-views/product/desc-nemarica_recordings.tsv",
+      "size": 710,
+      "sha256": "d300c348163f3ef3bf96e3a358a77e046570ffabd4c93a6731ef55952e3621d9"
+    },
+    {
+      "path": "product/desc-nemarica_signalJourney.json",
+      "source": "tests/fixtures/ica-views/product/desc-nemarica_signalJourney.json",
+      "size": 26428,
+      "sha256": "4805ad20f62713371938980ccf9ceede2e60f1df078d432ead5294a9695b6111"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_asr.json",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_asr.json",
+      "size": 18304,
+      "sha256": "b283f72d043fc071c48d8d39bddb3d29b58745a892c75a1807831f0ad551f46f"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_badsegments.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_badsegments.tsv",
+      "size": 4039,
+      "sha256": "90cefa3eeb9413c3eb8aaae05e05a70444093cfcd8eca3b4a89ab5d1ec54dcb4"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_chanlocs.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_chanlocs.tsv",
+      "size": 1008,
+      "sha256": "80b91f4cb77048e7834c2442a551d88805869b73210840862ac47785978a5b6c"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_channels.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_channels.tsv",
+      "size": 750,
+      "sha256": "b3ab512ffefeb98851ab2c8daada8b06c66052a7dc657ebe7dacabe77078dc2e"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_components.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_components.tsv",
+      "size": 1448,
+      "sha256": "471642ab64dce5ab6b81d5cbab65d1ba78ad773b7582c0de1618ad7712d8ba07"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_filters.json",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_filters.json",
+      "size": 648,
+      "sha256": "2137dbc93050cca4949ef9d04204b84a9eeaf29dc3bbe8a108ab264c80bd9ffd"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_ica.json",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_ica.json",
+      "size": 9511,
+      "sha256": "003099ed2ff3671bc1e39fce464581f60cde33f517951e9a5ff3a748dbdb8a51"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_icclasses.json",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_icclasses.json",
+      "size": 353,
+      "sha256": "9c8faaa4efcfaada74273f11dade28a08135b94de3c3d38ec6bb50f97c4b841f"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_mixing.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_mixing.tsv",
+      "size": 6991,
+      "sha256": "346942799b8897e62236dbda8d4c702fc3628c2e99a006391c0a888dd25d5293"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_qc.json",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_qc.json",
+      "size": 3080,
+      "sha256": "090a506aaded8d4c9bca564de261c8a9fb888e4436a23b5d17f081631984266d"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_samplemask.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_samplemask.tsv",
+      "size": 3251,
+      "sha256": "e4e86a51cf887bfb579930b8d9136da5bc755da2c84e5f80ea1d3204fe157c06"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_servingunmixing.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_servingunmixing.tsv",
+      "size": 7539,
+      "sha256": "be8f5dc22f6cd3384547c6994905bae27a6705e2a4ba5a40054fcf01f6c45713"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_signalJourney.json",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_signalJourney.json",
+      "size": 79265,
+      "sha256": "6e65e28ee26fb1b0031fb1dfe0a1bb26c5be553b2a0404909f36716a35910e4d"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_spectrum.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_spectrum.tsv",
+      "size": 76266,
+      "sha256": "452b2488efaafbd59af03a3baae54fb2b7f4fa2404894898dbbbc0f3529a2301"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_sphere.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_sphere.tsv",
+      "size": 7524,
+      "sha256": "2099bf2afd191499205ec5b0f2ad325a6f5bd15fa70b0ebbb61a64a9cc53655c"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_unmixing.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_unmixing.tsv",
+      "size": 7539,
+      "sha256": "ae1185598b20b2e7776996bda8640cb3db956aa28e1d797014217ed5912b081a"
+    },
+    {
+      "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_weights.tsv",
+      "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_weights.tsv",
+      "size": 7377,
+      "sha256": "88a92b3af42e63817fc8e839273df68cdd50374aa398a90dfc9baf81b85fc303"
+    }
+  ]
+}

@@ -1,0 +1,770 @@
+{
+  "level": "record",
+  "recipes": {
+    "nemar-ica": {
+      "recipe_version": "1.0.0-b1",
+      "input_kind": "zarr",
+      "profile": "serving",
+      "record_sha256": "f43c91f5cf7ee5e3b1c6e6e7d479c297e489013e51be550c2b503f8a98e68ab5",
+      "metrics": {
+        "icaRank": {
+          "value": 18,
+          "unit": "count",
+          "description": "Rank of the decomposition: one less than the good channels, for the average reference.",
+          "recipe": {
+            "name": "nemar-ica",
+            "version": "1.0.0-b1"
+          }
+        },
+        "nemar-quality:percentBrainComponents": {
+          "value": 50.0,
+          "unit": "%",
+          "description": "Share of components whose most probable ICLabel class is Brain.",
+          "bounds": {
+            "min": 0,
+            "max": 100
+          },
+          "plugin": {
+            "name": "nemar-quality",
+            "version": "0.1.0"
+          }
+        }
+      },
+      "views": [
+        {
+          "key": "icmaps",
+          "kind": "nemar.ic-maps",
+          "kind_version": 1,
+          "base": "nemar.sensor-field",
+          "base_version": 1,
+          "caption": "Scalp maps of the independent components, each with its share of the variance and its ICLabel probabilities.",
+          "source": {
+            "recipe": {
+              "name": "nemar-ica",
+              "version": "1.0.0-b1"
+            }
+          },
+          "data": [
+            {
+              "role": "values",
+              "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_mixing.tsv",
+              "format": "tsv",
+              "size": 1799,
+              "sha256": "2c154b01fdc257195de2a465a33a5be0fa901e27b2eff63ef27b2227afedc8ee",
+              "columns": [
+                {
+                  "name": "IC001",
+                  "type": "number"
+                },
+                {
+                  "name": "IC002",
+                  "type": "number"
+                },
+                {
+                  "name": "IC003",
+                  "type": "number"
+                },
+                {
+                  "name": "IC004",
+                  "type": "number"
+                },
+                {
+                  "name": "IC005",
+                  "type": "number"
+                },
+                {
+                  "name": "IC006",
+                  "type": "number"
+                },
+                {
+                  "name": "IC007",
+                  "type": "number"
+                },
+                {
+                  "name": "IC008",
+                  "type": "number"
+                },
+                {
+                  "name": "IC009",
+                  "type": "number"
+                },
+                {
+                  "name": "IC010",
+                  "type": "number"
+                },
+                {
+                  "name": "IC011",
+                  "type": "number"
+                },
+                {
+                  "name": "IC012",
+                  "type": "number"
+                },
+                {
+                  "name": "IC013",
+                  "type": "number"
+                },
+                {
+                  "name": "IC014",
+                  "type": "number"
+                },
+                {
+                  "name": "IC015",
+                  "type": "number"
+                },
+                {
+                  "name": "IC016",
+                  "type": "number"
+                },
+                {
+                  "name": "IC017",
+                  "type": "number"
+                },
+                {
+                  "name": "IC018",
+                  "type": "number"
+                }
+              ],
+              "dims": [
+                {
+                  "name": "sensor",
+                  "axis": "rows",
+                  "type": "string",
+                  "coords": {
+                    "role": "layout",
+                    "column": "name"
+                  }
+                },
+                {
+                  "name": "component",
+                  "axis": "columns",
+                  "type": "string",
+                  "coords": {
+                    "header": true
+                  }
+                }
+              ]
+            },
+            {
+              "role": "layout",
+              "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_chanlocs.tsv",
+              "format": "tsv",
+              "size": 357,
+              "sha256": "2fdca00cc2f6c1e83475a84a9b6f50670fe999347d8cf9da51469d8584c7f90a",
+              "columns": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "theta_deg",
+                  "type": "number",
+                  "unit": "deg"
+                },
+                {
+                  "name": "radius",
+                  "type": "number"
+                },
+                {
+                  "name": "sensor_type",
+                  "type": "string"
+                }
+              ],
+              "dims": [
+                {
+                  "name": "sensor",
+                  "axis": "rows",
+                  "type": "string",
+                  "coords": {
+                    "column": "name"
+                  }
+                }
+              ],
+              "coordinate_system": "CapTrak",
+              "position_source": "measured"
+            },
+            {
+              "role": "components",
+              "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_components.tsv",
+              "format": "tsv",
+              "size": 896,
+              "sha256": "43e3f64443d5b7483c86a08ae12d6c0f7e7204815f4d866d7e1bf3d621394685",
+              "columns": [
+                {
+                  "name": "component",
+                  "type": "string"
+                },
+                {
+                  "name": "variance_pct",
+                  "type": "number",
+                  "unit": "%"
+                },
+                {
+                  "name": "brain",
+                  "type": "number"
+                },
+                {
+                  "name": "muscle",
+                  "type": "number"
+                },
+                {
+                  "name": "eye",
+                  "type": "number"
+                },
+                {
+                  "name": "heart",
+                  "type": "number"
+                },
+                {
+                  "name": "line_noise",
+                  "type": "number"
+                },
+                {
+                  "name": "channel_noise",
+                  "type": "number"
+                },
+                {
+                  "name": "other",
+                  "type": "number"
+                }
+              ],
+              "dims": [
+                {
+                  "name": "component",
+                  "axis": "rows",
+                  "type": "string",
+                  "coords": {
+                    "column": "component"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "key": "icactivity",
+          "kind": "nemar.ic-activity",
+          "kind_version": 1,
+          "base": "nemar.lines",
+          "base_version": 1,
+          "caption": "Component activations computed in your browser from the serving copy, with no preprocessing; they approximate the decomposition's input, which was filtered and repaired with artifact subspace reconstruction.",
+          "source": {
+            "recipe": {
+              "name": "nemar-ica",
+              "version": "1.0.0-b1"
+            }
+          },
+          "inputs": [
+            {
+              "role": "unmixing",
+              "file": {
+                "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_servingunmixing.tsv",
+                "sha256": "6fe8ac33c979303849a332bfaca110cb5e2bbcf2e40b9d4ac2d6595d44e00b03",
+                "size": 1749
+              }
+            },
+            {
+              "role": "signal",
+              "store": {
+                "recording": "sub-01/eeg/sub-01_task-rest_eeg.set",
+                "path": "sub-01/eeg/sub-01_task-rest_eeg.zarr",
+                "group": "eeg",
+                "content_sha256": "71ba2dddb2289ba96cb27532ebe00f414f1f1bf068f6c40c8e9000adf75004a4",
+                "profile": "serving"
+              }
+            },
+            {
+              "role": "components",
+              "file": {
+                "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_components.tsv",
+                "sha256": "43e3f64443d5b7483c86a08ae12d6c0f7e7204815f4d866d7e1bf3d621394685",
+                "size": 896
+              }
+            },
+            {
+              "role": "badsegments",
+              "file": {
+                "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_badsegments.tsv",
+                "sha256": "b68fb64a6db637af549087fb5cf77cf44b46f088042c31ea214d6069b2c0502a",
+                "size": 214
+              }
+            }
+          ],
+          "transform": {
+            "name": "nemar.ic-activity.v1",
+            "parameters": {
+              "matrix": "sub-01/eeg/sub-01_task-rest_desc-nemarica_servingunmixing.tsv",
+              "applies_to": "serving_copy channels listed, physical unit",
+              "note": "no preprocessing; activations approximate the decomposition input",
+              "match": "store_row",
+              "rows": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18
+              ],
+              "columns": [
+                "Fp1",
+                "Fp2",
+                "F7",
+                "F3",
+                "Fz",
+                "F4",
+                "F8",
+                "T7",
+                "C3",
+                "Cz",
+                "C4",
+                "T8",
+                "P7",
+                "P3",
+                "Pz",
+                "P4",
+                "P8",
+                "O1",
+                "O2"
+              ],
+              "unit": "µV",
+              "caption": null,
+              "shaded": {
+                "label": "burst",
+                "files": [
+                  "sub-01/eeg/sub-01_task-rest_desc-nemarica_badsegments.tsv"
+                ]
+              }
+            }
+          },
+          "parameters": {
+            "display_filter": {
+              "highpass_hz": 1,
+              "order": 2
+            },
+            "max_window_s": 30,
+            "decomposition_input": {
+              "source": "serving_copy",
+              "preprocessing": [
+                {
+                  "step": "select",
+                  "function": "eegprep.pop_select"
+                },
+                {
+                  "step": "flatline",
+                  "function": "eegprep.clean_flatlines"
+                },
+                {
+                  "step": "drift",
+                  "function": "eegprep.pop_eegfiltnew"
+                },
+                {
+                  "step": "bad_channels",
+                  "function": "eegprep.clean_channels"
+                },
+                {
+                  "step": "asr",
+                  "function": "eegprep.clean_asr"
+                },
+                {
+                  "step": "reref",
+                  "function": "eegprep.pop_reref"
+                }
+              ],
+              "store": {
+                "path": "sub-01/eeg/sub-01_task-rest_eeg.zarr",
+                "group": "eeg",
+                "content_sha256": "71ba2dddb2289ba96cb27532ebe00f414f1f1bf068f6c40c8e9000adf75004a4"
+              },
+              "channels": [
+                "Fp1",
+                "Fp2",
+                "F7",
+                "F3",
+                "Fz",
+                "F4",
+                "F8",
+                "T7",
+                "C3",
+                "Cz",
+                "C4",
+                "T8",
+                "P7",
+                "P3",
+                "Pz",
+                "P4",
+                "P8",
+                "O1",
+                "O2"
+              ],
+              "channel_types": [
+                [
+                  "Fp1",
+                  "EEG"
+                ],
+                [
+                  "Fp2",
+                  "EEG"
+                ],
+                [
+                  "F7",
+                  "EEG"
+                ],
+                [
+                  "F3",
+                  "EEG"
+                ],
+                [
+                  "Fz",
+                  "EEG"
+                ],
+                [
+                  "F4",
+                  "EEG"
+                ],
+                [
+                  "F8",
+                  "EEG"
+                ],
+                [
+                  "T7",
+                  "EEG"
+                ],
+                [
+                  "C3",
+                  "EEG"
+                ],
+                [
+                  "Cz",
+                  "EEG"
+                ],
+                [
+                  "C4",
+                  "EEG"
+                ],
+                [
+                  "T8",
+                  "EEG"
+                ],
+                [
+                  "P7",
+                  "EEG"
+                ],
+                [
+                  "P3",
+                  "EEG"
+                ],
+                [
+                  "Pz",
+                  "EEG"
+                ],
+                [
+                  "P4",
+                  "EEG"
+                ],
+                [
+                  "P8",
+                  "EEG"
+                ],
+                [
+                  "O1",
+                  "EEG"
+                ],
+                [
+                  "O2",
+                  "EEG"
+                ],
+                [
+                  "ECG",
+                  "ECG"
+                ]
+              ],
+              "channel_types_sha256": "6ec1aa54279b4c6676822a6f68b7e4c944ac92f661aa871860a4ea0f51dc6ed3",
+              "reference": "average",
+              "unit": "uV"
+            }
+          }
+        },
+        {
+          "key": "midsegment",
+          "kind": "nemar.signal-window",
+          "kind_version": 1,
+          "base": "nemar.lines",
+          "base_version": 1,
+          "caption": "Two seconds of the recording inside the floor's good samples nearest its middle, as the serving copy holds it, with the floor's bad channels and segments marked.",
+          "source": {
+            "recipe": {
+              "name": "nemar-ica",
+              "version": "1.0.0-b1"
+            }
+          },
+          "inputs": [
+            {
+              "role": "signal",
+              "store": {
+                "recording": "sub-01/eeg/sub-01_task-rest_eeg.set",
+                "path": "sub-01/eeg/sub-01_task-rest_eeg.zarr",
+                "group": "eeg",
+                "content_sha256": "71ba2dddb2289ba96cb27532ebe00f414f1f1bf068f6c40c8e9000adf75004a4",
+                "profile": "serving"
+              }
+            },
+            {
+              "role": "channels",
+              "file": {
+                "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_channels.tsv",
+                "sha256": "a34914b90433dd070014bdf46dab6bde870ebe168c23b5a78308ced0291e110f",
+                "size": 402
+              }
+            },
+            {
+              "role": "badsegments",
+              "file": {
+                "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_badsegments.tsv",
+                "sha256": "b68fb64a6db637af549087fb5cf77cf44b46f088042c31ea214d6069b2c0502a",
+                "size": 214
+              }
+            }
+          ],
+          "parameters": {
+            "start_s": 151.5,
+            "duration_s": 2,
+            "bad_segment_table": true
+          }
+        },
+        {
+          "key": "icclasses",
+          "kind": "nemar.ic-classes",
+          "kind_version": 1,
+          "base": "nemar.histogram",
+          "base_version": 1,
+          "caption": "Components counted by their most probable ICLabel class, with the variance each class accounts for.",
+          "source": {
+            "plugin": {
+              "name": "nemar-quality",
+              "version": "0.1.0"
+            }
+          },
+          "data": [
+            {
+              "role": "histogram",
+              "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_icclasses.json",
+              "format": "json",
+              "size": 346,
+              "sha256": "8bcc3c2a856ab48c31a9d7b8d2a9c892da945eacaaa455155929145cd4452a61"
+            }
+          ]
+        },
+        {
+          "key": "spectrum",
+          "kind": "nemar.spectrum",
+          "kind_version": 1,
+          "base": "nemar.lines",
+          "base_version": 1,
+          "caption": "Power spectral density of each good channel, with scalp maps at chosen frequencies.",
+          "source": {
+            "plugin": {
+              "name": "nemar-spectrum",
+              "version": "0.1.0"
+            }
+          },
+          "parameters": {
+            "method": "welch",
+            "window": "hamming",
+            "window_s": 2,
+            "overlap": 0.5,
+            "unit": "dB",
+            "upper_hz": 125,
+            "initial_maps_hz": [
+              6,
+              10,
+              22,
+              50
+            ]
+          },
+          "data": [
+            {
+              "role": "values",
+              "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_spectrum.tsv",
+              "format": "tsv",
+              "size": 28751,
+              "sha256": "c8dd4ddaa56be273b4695f412217fe8954d1027559389ac6771ad8e00eaeacc6",
+              "columns": [
+                {
+                  "name": "freq_hz",
+                  "type": "number",
+                  "unit": "Hz"
+                },
+                {
+                  "name": "Fp1",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "Fp2",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "F7",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "F3",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "Fz",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "F4",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "F8",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "T7",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "C3",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "Cz",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "C4",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "T8",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "P7",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "P3",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "Pz",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "P4",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "P8",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "O1",
+                  "type": "number",
+                  "unit": "dB"
+                },
+                {
+                  "name": "O2",
+                  "type": "number",
+                  "unit": "dB"
+                }
+              ],
+              "dims": [
+                {
+                  "name": "freq",
+                  "axis": "rows",
+                  "type": "number",
+                  "unit": "Hz",
+                  "coords": {
+                    "column": "freq_hz"
+                  }
+                },
+                {
+                  "name": "sensor",
+                  "axis": "columns",
+                  "type": "string",
+                  "coords": {
+                    "role": "layout",
+                    "column": "name"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "layout",
+              "location": "sub-01/eeg/sub-01_task-rest_desc-nemarica_chanlocs.tsv",
+              "format": "tsv",
+              "size": 357,
+              "sha256": "2fdca00cc2f6c1e83475a84a9b6f50670fe999347d8cf9da51469d8584c7f90a",
+              "columns": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "theta_deg",
+                  "type": "number",
+                  "unit": "deg"
+                },
+                {
+                  "name": "radius",
+                  "type": "number"
+                },
+                {
+                  "name": "sensor_type",
+                  "type": "string"
+                }
+              ],
+              "dims": [
+                {
+                  "name": "sensor",
+                  "axis": "rows",
+                  "type": "string",
+                  "coords": {
+                    "column": "name"
+                  }
+                }
+              ],
+              "coordinate_system": "CapTrak",
+              "position_source": "measured"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -46,6 +46,7 @@
  *    `CopyObject` each, so it is bounded at `PARTNER_FILES_MAX` files whatever the owner's limit.
  */
 
+import { findRecipe } from "../../../shared/compute-recipes.js";
 import { type ComputeState, LIVE_COMPUTE_STATES } from "../../../shared/compute-state.js";
 import {
   COMPUTE_DOT_SEGMENT_RE,
@@ -208,6 +209,19 @@ export function logKey(jobId: string, file: LogFile): string {
   jobIdOrThrow(jobId);
   if (!(LOG_FILES as readonly string[]).includes(file)) throw new RangeError("not a log");
   return `logs/${jobId}/${file}`;
+}
+
+/**
+ * `serving-index/<sha256>.json`: a serving copy's index as the Worker staged it for a pipeline job (ADR 0141),
+ * named by the SHA-256 of its bytes. Content-addressed, so it is written BEFORE the job that names it exists
+ * (a job's specification never names a digest whose bytes are not kept), and the jobs of one index share one
+ * copy. Throws for anything that is not 64 lowercase hex digits.
+ */
+export function servingIndexKey(sha256: string): string {
+  if (typeof sha256 !== "string" || !COMPUTE_SHA256_RE.test(sha256)) {
+    throw new RangeError("not a SHA-256");
+  }
+  return `serving-index/${sha256}.json`;
 }
 
 /** `incoming/<id>/<path>`: an upload in flight, before the job's hold is known to have committed. */
@@ -936,6 +950,42 @@ export async function presignBundleRead(
   return { ok: true, url: signed.url, expires_at: signed.expires_at };
 }
 
+/**
+ * Keep the staged serving index under {@link servingIndexKey}: written once, and a copy already there must
+ * hold the same bytes (`compare`). True when the bytes are kept, false when the key holds other bytes, which
+ * a digest key cannot, so the caller stages nothing. A bucket that throws is the caller's.
+ */
+export async function putServingIndexCopy(
+  env: Pick<Bindings, "COMPUTE_RECORDS">,
+  sha256: string,
+  bytes: Uint8Array,
+): Promise<boolean> {
+  const bucket = env.COMPUTE_RECORDS;
+  if (!bucket) throw new Error("the records bucket is not bound");
+  const key = servingIndexKey(sha256);
+  return (await putOnce(bucket, key, bytes, "application/json", "compare")) !== "conflict";
+}
+
+/**
+ * A 10-minute presigned GET of a staged serving index (ADR 0141), for the serving index route (the launcher,
+ * with its job token). The route hands in what the job's RECORDED specification names (`readRecordedSpec`),
+ * never anything the request carries, so the key is the job's own index. A copy that is not in the bucket, or
+ * whose size is not the one recorded, is `bad_state`.
+ */
+export async function presignServingIndexRead(
+  env: ComputeRecordsEnv,
+  staged: { sha256: string; size: number },
+): Promise<BundleReadResult> {
+  const bucket = env.COMPUTE_RECORDS;
+  const s3 = computeS3(env);
+  if (!bucket || !s3) return { ok: false, code: "compute_disabled" };
+  const key = servingIndexKey(staged.sha256);
+  const head = await bucket.head(key);
+  if (head === null || head.size !== staged.size) return { ok: false, code: "bad_state" };
+  const signed = await presignGet(s3, "records", key, { expiresIn: COMPUTE_BUNDLE_READ_SECONDS });
+  return { ok: true, url: signed.url, expires_at: signed.expires_at };
+}
+
 /** The shortest and longest reason an owner may give for reading a record. */
 export const RECORD_READ_REASON_MIN = 8;
 export const RECORD_READ_REASON_MAX = 200;
@@ -1080,6 +1130,31 @@ const OUTPUTS_BODY_FLOOR_BYTES = 1024 * 1024;
 
 /** What a Worker can read and parse as one JSON body: 64 MiB, under the platform's request limit. */
 export const OUTPUTS_BODY_CEILING_BYTES = 64 * 1024 * 1024;
+
+/** The recipe of the pipeline stamp that names a job, the newest when a hold shares it. */
+export const JOB_PIPELINE_RECIPE_SQL =
+  "SELECT recipe FROM compute_pipeline_stamps WHERE job_id = ?1 ORDER BY id DESC LIMIT 1";
+
+/**
+ * The most outputs a job may list (owner decision of 2026-11-23): a NEMAR pipeline job (source `pipeline`, named
+ * by a pipeline stamp) whose recipe declares its own `resultLimits` may list up to the recipe's `maxFiles`,
+ * which RAISES the limit and never lowers it (an owner's policy above the recipe's value still applies); every
+ * other job, a person's and a partner's included, is held to the owner's policy `maxFiles`. Never above
+ * `COMPUTE_MAX_OUTPUT_FILES`. A database fault throws, so the caller answers as it does for a policy it
+ * cannot read.
+ */
+export async function resultMaxFilesFor(
+  db: D1Database,
+  job: { id: string; source: string },
+  policyMaxFiles: number,
+): Promise<number> {
+  if (job.source !== "pipeline") return policyMaxFiles;
+  const row = await db.prepare(JOB_PIPELINE_RECIPE_SQL).bind(job.id).first<{ recipe: string }>();
+  const own = row ? findRecipe(row.recipe)?.resultLimits?.maxFiles : undefined;
+  return own === undefined
+    ? policyMaxFiles
+    : Math.max(policyMaxFiles, Math.min(own, COMPUTE_MAX_OUTPUT_FILES));
+}
 
 /**
  * The largest body the outputs route reads, derived from the owner's `resultLimits.maxFiles`.

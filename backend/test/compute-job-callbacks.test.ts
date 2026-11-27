@@ -31,10 +31,16 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { Server } from "bun";
+import { findRecipe } from "../../shared/compute-recipes";
 import { LAUNCHER_FILE_NAMES, RESULT_MAX_FILE_BYTES } from "../../shared/contract/compute";
 import { createJob } from "../src/services/compute-jobs";
-import { advanceComputeJob, submitComputeJob } from "../src/services/compute-lifecycle";
-import { finalizeBundle } from "../src/services/compute-records";
+import {
+  advanceComputeJob,
+  launcherDocumentLimit,
+  submitComputeJob,
+} from "../src/services/compute-lifecycle";
+import { outputsBodyCap } from "../src/services/compute-outputs";
+import { finalizeBundle, outputsBodyLimitBytes } from "../src/services/compute-records";
 import { signComputeToken } from "../src/services/compute-tokens";
 import { declaredKey } from "../src/services/compute-verify";
 import type { Bindings } from "../src/types/bindings";
@@ -489,6 +495,124 @@ describe("outputs refuses before it signs anything", () => {
         })
       ).status,
     ).toBe(200);
+  });
+
+  /** A NEMAR pipeline job, account-less as the dispatcher makes it, named by a dispatched `recipe` stamp. */
+  async function pipelineJob(recipe: string | null): Promise<MadeJob> {
+    await fundPlatform(workerEnv.DB, "pipelines", 1_000_000);
+    const made = await makeJob(fx, { env: workerEnv, source: "pipeline" });
+    await workerEnv.DB.prepare("UPDATE compute_jobs SET account_id = NULL WHERE id = ?")
+      .bind(made.job.id)
+      .run();
+    if (recipe !== null) await stampFor(made.job.id, recipe);
+    return made;
+  }
+
+  /** A dispatched pipeline stamp of `recipe` naming the job (state seeded: the stamp's shape is the point). */
+  let stampVersion = 0;
+  async function stampFor(jobId: string, recipe: string): Promise<void> {
+    stampVersion += 1;
+    await workerEnv.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, input, attempt, state, job_id)
+       VALUES ('nm099999', ?1, ?2, '1.0.0-b1', 'eegprep@0.5.0', 'bids', 1, 'dispatched', ?3)`,
+    )
+      .bind(`v1.0.${stampVersion}`, recipe, jobId)
+      .run();
+  }
+
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ path: `f${i}.tsv`, content: "x" }));
+
+  test("a pipeline job of a recipe with its own result limit is held to it; a person's job keeps the policy (owner, 2026-11-23)", async () => {
+    // The policy's default 5,000; nemar-ica declares 25,000 in the registry.
+    await policyOf({ maxFiles: 5000, maxJobBytes: 10_000_000 });
+    const ica = findRecipe("nemar-ica");
+    expect(ica?.resultLimits?.maxFiles).toBe(25_000);
+    const files = many(5001);
+
+    const pipe = await pipelineJob("nemar-ica");
+    const accepted = await call(pipe.job.id, "outputs", {
+      token: await tokenFor(pipe.job.id),
+      body: outputsBody(files),
+    });
+    expect(accepted.status).toBe(200);
+    expect((accepted.body.uploads as unknown[]).length).toBe(5001 + LAUNCHER_FILE_NAMES.length);
+
+    const j = await person();
+    const refused = await call(j.job.id, "outputs", {
+      token: await tokenFor(j.job.id),
+      body: outputsBody(files),
+    });
+    await expectRefused(refused, "too_many_outputs", 413, j.job.id);
+  }, 60_000);
+
+  test("only a pipeline job named by a stamp of a recipe with its own limit leaves the policy", async () => {
+    await policyOf({ maxFiles: 3 });
+    const files = many(4);
+    // a pipeline job no stamp names (a job outside the contract): the policy
+    const bare = await pipelineJob(null);
+    await expectRefused(
+      await call(bare.job.id, "outputs", {
+        token: await tokenFor(bare.job.id),
+        body: outputsBody(files),
+      }),
+      "too_many_outputs",
+      413,
+      bare.job.id,
+    );
+    // a stamp naming a recipe the registry does not know: the policy
+    const unknown = await pipelineJob("no-such-recipe");
+    await expectRefused(
+      await call(unknown.job.id, "outputs", {
+        token: await tokenFor(unknown.job.id),
+        body: outputsBody(files),
+      }),
+      "too_many_outputs",
+      413,
+      unknown.job.id,
+    );
+    // a person's job a stamp row names anyway: still the policy, the source decides
+    const j = await person();
+    await stampFor(j.job.id, "nemar-ica");
+    await expectRefused(
+      await call(j.job.id, "outputs", {
+        token: await tokenFor(j.job.id),
+        body: outputsBody(files),
+      }),
+      "too_many_outputs",
+      413,
+      j.job.id,
+    );
+    // and the stamped pipeline job of nemar-ica: its recipe's own limit
+    const pipe = await pipelineJob("nemar-ica");
+    expect(
+      (
+        await call(pipe.job.id, "outputs", {
+          token: await tokenFor(pipe.job.id),
+          body: outputsBody(files),
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  test("a recipe's own limit raises the policy, never lowers it: a policy above it still applies", async () => {
+    await policyOf({ maxFiles: 30_000 });
+    const pipe = await pipelineJob("nemar-ica");
+    expect(await outputsBodyCap(workerEnv, pipe.job)).toBe(outputsBodyLimitBytes(30_000));
+    expect(await launcherDocumentLimit(workerEnv, pipe.job)).toBe(outputsBodyLimitBytes(30_000));
+  });
+
+  test("the outputs body cap and the launcher document bound follow the limit the job is held to", async () => {
+    await policyOf({ maxFiles: 3 });
+    const pipe = await pipelineJob("nemar-ica");
+    const j = await person();
+    const policyCap = outputsBodyLimitBytes(3);
+    const recipeCap = outputsBodyLimitBytes(25_000);
+    expect(recipeCap).toBeGreaterThan(policyCap);
+    expect(await outputsBodyCap(workerEnv, pipe.job)).toBe(recipeCap);
+    expect(await outputsBodyCap(workerEnv, j.job)).toBe(policyCap);
+    expect(await launcherDocumentLimit(workerEnv, pipe.job)).toBe(recipeCap);
+    expect(await launcherDocumentLimit(workerEnv, j.job)).toBe(policyCap);
   });
 
   test("a file over the 5 GB cap, however the job limit is set (`results_too_large`, 413)", async () => {

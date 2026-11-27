@@ -375,7 +375,7 @@ describe("the recipe registry", () => {
     const r = findRecipe("nemar-floor");
     expect(r).toMatchObject({
       name: "nemar-floor",
-      version: "1.0.0-b1",
+      version: "1.0.0-b2",
       engine: "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
       partition: "shared",
       nodes: 1,

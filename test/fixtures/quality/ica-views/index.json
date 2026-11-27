@@ -1,0 +1,25 @@
+{
+ "format": "nemar-zarr-index",
+ "format_version": 3,
+ "dataset_id": "on007823",
+ "contract_base": "https://zarr.example.org/on007823/zarr/",
+ "data_base": "https://data.example.org/on007823/zarr/",
+ "source_commit": "5555555555555555555555555555555555555555",
+ "engine_version": "3",
+ "store_count": 1,
+ "stores": [
+  {
+   "path": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.edf",
+   "zarr": "sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_eeg.zarr",
+   "groups": [
+    {
+     "name": "eeg_200hz",
+     "modality": "EEG",
+     "rate": 200.0,
+     "n_channels": 22,
+     "n_samples": 56400
+    }
+   ]
+  }
+ ]
+}

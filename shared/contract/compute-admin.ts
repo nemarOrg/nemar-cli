@@ -105,6 +105,8 @@ export const COMPUTE_ADMIN_ERROR_CODES = [
   "target_has_no_pool",
   "owner_not_proven",
   "partner_reservations_open",
+  // ADR 0134 phase 4a (#2326): the pipeline grid's drill-down names a stamp that does not exist.
+  "stamp_not_found",
 ] as const;
 
 export type ComputeAdminErrorCode = (typeof COMPUTE_ADMIN_ERROR_CODES)[number];
@@ -140,6 +142,7 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
   target_has_no_pool: 409,
   owner_not_proven: 409,
   partner_reservations_open: 409,
+  stamp_not_found: 404,
 } as const satisfies Record<ComputeAdminErrorCode, number>;
 
 // --- Requests (plain types: the Worker validates them, the CLI builds them) -------------------
@@ -596,6 +599,13 @@ export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
    * later (DM-06b).
    */
   zarr_source_unverifiable: 503,
+  /**
+   * A run of the archive whose serving index could not be staged for a temporary fault (GitHub or the index
+   * could not be read, or the copy could not be kept; ADR 0141): nothing is dispatched, a `refused` stamp
+   * records the deferral, and a later pass tries again; 24 hours after the run's first deferral it goes ahead
+   * without the index (`runs_without_index_after` says when).
+   */
+  serving_index_deferred: 503,
   /** The runners switch is off (portable compute): the status is the runner protocol's, declared once. */
   runners_disabled: RUNNER_REFUSAL_STATUS.runners_disabled,
   /**
@@ -638,8 +648,13 @@ export const ComputePipelineResultSchema = z
     records_written: z.boolean().optional(),
     code: z.string().optional(),
     blocked_by: z.array(z.string()).optional(),
-    /** A Zarr source refusal's reason: a fixed word (`zarr_source_mismatch`, `zarr_source_unverifiable`). */
+    /**
+     * A Zarr source refusal's reason (`zarr_source_mismatch`, `zarr_source_unverifiable`), or the fault of a
+     * `serving_index_deferred`: a fixed word.
+     */
     reason: z.string().optional(),
+    /** `serving_index_deferred` only: when the run goes ahead without the index, 24 hours after its first deferral. */
+    runs_without_index_after: z.string().optional(),
   })
   .passthrough();
 
@@ -769,6 +784,366 @@ export const ComputePipelineStatusResponseSchema = z
   .passthrough();
 
 export type ComputePipelineStatusResponse = z.infer<typeof ComputePipelineStatusResponseSchema>;
+
+// --- The pipeline grid (ADR 0134 decision 5, epic #2324 phase 4a) ---------------------------------------------
+//
+// Every list and bound below is a literal, so the website's drift tests read them from this file's text
+// (`test/compute-admin-contract.unit.test.ts` ties each to its source of truth). The schemas are open and
+// every word is a string: a word the Worker grows never breaks a released CLI.
+
+/** What a dataset's row shows: `not_started` (no run), or its run's status (`pipelineRunStatus`). */
+export const COMPUTE_PIPELINE_GRID_STATUSES = [
+  "not_started",
+  "waiting",
+  "running",
+  "stalled",
+  "finished",
+  "failed",
+] as const;
+
+/** The mark of a cell (`pipelineCellMark` in shared/compute-checkpoints.ts). */
+export const COMPUTE_PIPELINE_CELL_MARKS = [
+  "not_started",
+  "waiting",
+  "running",
+  "stalled",
+  "pending",
+  "no_counts",
+  "passed",
+  "failed",
+  "skipped",
+] as const;
+
+/** What reconciliation decided for a run that ended (migration 0156's words). */
+export const COMPUTE_PIPELINE_RUN_OUTCOMES = [
+  "reconciled",
+  "table_missing",
+  "table_unreadable",
+  "no_checkpoint_map",
+  "recipe_unknown",
+] as const;
+
+/** Rows of the grid per page, by default and at most. */
+export const COMPUTE_PIPELINE_GRID_PAGE_DEFAULT = 100;
+export const COMPUTE_PIPELINE_GRID_PAGE_MAX = 500;
+
+/** Days of the coverage card's failure trend, by default and at most. */
+export const COMPUTE_PIPELINE_TREND_DAYS_DEFAULT = 30;
+export const COMPUTE_PIPELINE_TREND_DAYS_MAX = 90;
+
+/** A pipeline stamp id: declared in the import-free leaf `compute-stamp.ts`, re-exported here. */
+export { COMPUTE_PIPELINE_STAMP_ID_RE } from "./compute-stamp.js";
+
+/** A recipe version, as the stamps and the registry write it. */
+export const COMPUTE_PIPELINE_RECIPE_VERSION_RE = /^[0-9A-Za-z._+-]{1,64}$/;
+
+/** A cell's counts. */
+export const ComputePipelineCountsSchema = z
+  .object({
+    passed: z.number().int(),
+    failed: z.number().int(),
+    skipped: z.number().int(),
+    total: z.number().int(),
+  })
+  .passthrough();
+
+/**
+ * The run a row shows: its stamp (the newest of the recipe for the dataset), its job and its run row. Times
+ * are D1's own (`YYYY-MM-DD HH:MM:SS`, UTC). No identity: a runner is named by its id and its fixed name.
+ */
+export const ComputePipelineRunViewSchema = z
+  .object({
+    stamp_id: z.number().int(),
+    dataset_id: z.string(),
+    recipe: z.string(),
+    version: z.string(),
+    /** The stamp is at the dataset's newest version. */
+    current_version: z.boolean(),
+    recipe_version: z.string(),
+    engine: z.string(),
+    input: z.string(),
+    attempt: z.number().int(),
+    stamp_state: z.string(),
+    /** The stamp's refusal or failure word, or null. */
+    code: nullableString,
+    job_id: nullableString,
+    job_state: nullableString,
+    executor: nullableString,
+    runner_id: nullableString,
+    runner_name: nullableString,
+    /** The checkpoint of the last report, or null. */
+    checkpoint: nullableString,
+    reported_at: nullableString,
+    reports: z.number().int(),
+    /** The run has an outcome (reconciliation reached it). */
+    reconciled: z.boolean(),
+    /** Reconciliation's word, or null while it has none. */
+    outcome: nullableString,
+    disagreement: z.boolean(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .passthrough();
+
+export type ComputePipelineRunView = z.infer<typeof ComputePipelineRunViewSchema>;
+
+/** One cell: its mark, its counts (null when the run has none there yet) and how many failures it lists. */
+export const ComputePipelineCellSchema = z
+  .object({
+    mark: z.string(),
+    counts: ComputePipelineCountsSchema.nullable(),
+    reconciled: z.boolean(),
+    disagreement: z.boolean(),
+    /** Failures the cell lists (at most ten), out of its failed and skipped recordings. */
+    listed: z.number().int(),
+  })
+  .passthrough();
+
+export type ComputePipelineCell = z.infer<typeof ComputePipelineCellSchema>;
+
+/** One dataset: its newest version, what its run shows and one cell per column. */
+export const ComputePipelineGridRowSchema = z
+  .object({
+    dataset_id: z.string(),
+    newest_version: nullableString,
+    status: z.string(),
+    run: ComputePipelineRunViewSchema.nullable(),
+    /**
+     * One cell per column, keyed by checkpoint; parse each with {@link ComputePipelineCellSchema}. Open
+     * here so a key a newer Worker adds at this level never breaks the page.
+     */
+    cells: z.record(z.object({}).passthrough()),
+  })
+  .passthrough();
+
+export type ComputePipelineGridRow = z.infer<typeof ComputePipelineGridRowSchema>;
+
+/** Counts by grid status, every status present (zero when none); a number per word. */
+const byStatus = z.record(z.unknown());
+
+/**
+ * A recipe's coverage over the eligible datasets: `covered` is a succeeded run at the dataset's newest
+ * version with the registry's current recipe version (any engine, any input); `complete` is covered with
+ * every recording passed at the last declared checkpoint; `covered_any_version` is covered at any recipe
+ * version.
+ */
+export const ComputePipelineRecipeSummarySchema = z
+  .object({
+    recipe: z.string(),
+    recipe_version: z.string(),
+    placeholder: z.boolean(),
+    auto_dispatch: z.boolean(),
+    columns: z.array(z.string()),
+    eligible: z.number().int(),
+    covered: z.number().int(),
+    complete: z.number().int(),
+    covered_any_version: z.number().int(),
+    by_status: byStatus,
+  })
+  .passthrough();
+
+export type ComputePipelineRecipeSummary = z.infer<typeof ComputePipelineRecipeSummarySchema>;
+
+/** `GET /admin/compute/pipeline/grid`: a page of datasets by id; `next_after` continues it. */
+export const ComputePipelineGridResponseSchema = z
+  .object({
+    as_of: z.string(),
+    stalled_after_seconds: z.number().int(),
+    recipe: z.string(),
+    columns: z.array(z.string()),
+    summary: ComputePipelineRecipeSummarySchema,
+    /** Over the whole filtered set, not only this page. */
+    matched: z.object({ total: z.number().int(), by_status: byStatus }).passthrough(),
+    facets: z
+      .object({
+        recipe_versions: z.array(z.string()),
+        runners: z.array(z.object({ id: z.string(), name: z.string() }).passthrough()),
+      })
+      .passthrough(),
+    rows: z.array(ComputePipelineGridRowSchema),
+    next_after: nullableString,
+  })
+  .passthrough();
+
+export type ComputePipelineGridResponse = z.infer<typeof ComputePipelineGridResponseSchema>;
+
+/** One day of the failure trend (UTC): failed runs that ended that day, out of all runs that ended. */
+export const ComputePipelineTrendPointSchema = z
+  .object({ at: z.string(), value: z.number().int(), total: z.number().int() })
+  .passthrough();
+
+/** `GET /admin/compute/pipeline/coverage`: one card per recipe, each with its daily failure trend. */
+export const ComputePipelineCoverageResponseSchema = z
+  .object({
+    as_of: z.string(),
+    days: z.number().int(),
+    recipes: z.array(
+      ComputePipelineRecipeSummarySchema.extend({
+        trend: z.array(ComputePipelineTrendPointSchema),
+      }).passthrough(),
+    ),
+  })
+  .passthrough();
+
+export type ComputePipelineCoverageResponse = z.infer<typeof ComputePipelineCoverageResponseSchema>;
+
+/** `GET /admin/compute/pipeline/runs/:stamp`: a run's checkpoints and the failures each lists. */
+export const ComputePipelineRunDetailResponseSchema = z
+  .object({
+    status: z.string(),
+    newest_version: nullableString,
+    run: ComputePipelineRunViewSchema,
+    checkpoints: z.array(
+      z
+        .object({
+          checkpoint: z.string(),
+          mark: z.string(),
+          counts: ComputePipelineCountsSchema.nullable(),
+          /** The last live report's counts, kept after reconciliation; null when it never reported. */
+          live: ComputePipelineCountsSchema.nullable(),
+          reconciled: z.boolean(),
+          disagreement: z.boolean(),
+          reported_at: nullableString,
+          failures: z.array(
+            z.object({ path: z.string(), code: z.string(), step: nullableString }).passthrough(),
+          ),
+          listed: z.number().int(),
+          /**
+           * Recordings that first stopped at this checkpoint (failed or skipped here, not at an earlier one)
+           * and that the list leaves out; a recording stopped earlier is another checkpoint's to list.
+           */
+          unlisted: z.number().int(),
+          failures_unreadable: z.boolean(),
+        })
+        .passthrough(),
+    ),
+    listed_codes: z.array(
+      z.object({ checkpoint: z.string(), code: z.string(), count: z.number().int() }).passthrough(),
+    ),
+  })
+  .passthrough();
+
+export type ComputePipelineRunDetailResponse = z.infer<
+  typeof ComputePipelineRunDetailResponseSchema
+>;
+
+// --- A run's quality (ADR 0137 decision 7, epic #2324 phase B3) -----------------------------------------------
+//
+// `GET /admin/compute/pipeline/runs/:stamp/quality`: where the run's derivative stands, in one word, and a
+// page of the recordings that succeeded, from the recordings table stored under the derivative's key. The
+// lists and the bound are literals for the website's drift tests, like the grid's.
+
+/**
+ * Where a run's derivative stands, one word, decided in this order:
+ *  - `run_in_progress`: the stamp is `dispatched`: its job has not ended, so there is nothing to key yet;
+ *  - `run_not_succeeded`: the stamp failed or was refused, so no derivative is made of it;
+ *  - `not_keyed`: it succeeded and the derivative store decided to make none (`skip` names why;
+ *    `duplicate_key` means an earlier run with the same inputs holds the derivative under that key);
+ *  - `awaiting_derivative`: it succeeded and the store has not decided yet;
+ *  - `failed`: the copy could not be trusted (`derivative.failure` names why);
+ *  - `expired`: the row expired, or its date has passed (a canary 30 days after it was stored), so its
+ *    files are deleted or about to be;
+ *  - `copying`: its files are being copied;
+ *  - `canary`: stored, and seen by administrators only;
+ *  - `current`: stored, and the row public pages read while the dataset is public (`dataset_public`
+ *    says whether it is now);
+ *  - `superseded`: a stored `catalog` row a later one replaced;
+ *  - `not_current`: stored and of a public class, but another such row of its dataset and recipe is newer,
+ *    so it is not the row public pages read while the dataset is public.
+ */
+export const COMPUTE_RUN_QUALITY_STATES = [
+  "run_in_progress",
+  "run_not_succeeded",
+  "not_keyed",
+  "awaiting_derivative",
+  "failed",
+  "expired",
+  "copying",
+  "canary",
+  "current",
+  "superseded",
+  "not_current",
+] as const;
+
+export type ComputeRunQualityState = (typeof COMPUTE_RUN_QUALITY_STATES)[number];
+
+/**
+ * What the recordings list holds, one word:
+ *  - `listed`: the succeeded recordings, a page at a time;
+ *  - `not_stored`: the derivative's files do not stand whole (no derivative, copying, failed or expired);
+ *  - `store_unavailable`: the derivatives store is not bound, or could not be reached (logged);
+ *  - `table_missing`: the stored derivative has no recordings table;
+ *  - `table_too_large`: the table is over the read bound and was not read;
+ *  - `table_unreadable`: the table does not parse as a recordings table (logged).
+ */
+export const COMPUTE_RUN_QUALITY_RECORDINGS_STATES = [
+  "listed",
+  "not_stored",
+  "store_unavailable",
+  "table_missing",
+  "table_too_large",
+  "table_unreadable",
+] as const;
+
+export type ComputeRunQualityRecordingsState =
+  (typeof COMPUTE_RUN_QUALITY_RECORDINGS_STATES)[number];
+
+/** Succeeded recordings per page. */
+export const COMPUTE_RUN_QUALITY_PAGE_SIZE = 100;
+
+/** `GET /admin/compute/pipeline/runs/:stamp/quality`: the run's derivative and a page of its recordings. */
+export const ComputeRunQualityResponseSchema = z
+  .object({
+    stamp_id: z.number().int(),
+    dataset_id: z.string(),
+    version: z.string(),
+    recipe: z.string(),
+    recipe_version: z.string(),
+    input: z.string(),
+    stamp_state: z.string(),
+    /**
+     * Whether the dataset passes the quality route's gate now (active, public, not concealed, first
+     * published, not withdrawn, not tombstoned): a `current` row is what its public page shows only then.
+     */
+    dataset_public: z.boolean(),
+    /** One of {@link COMPUTE_RUN_QUALITY_STATES}; a string so a word the Worker grows never breaks a CLI. */
+    quality: z.string(),
+    /** The skip log's word when the store decided to make no derivative, or null. */
+    skip: nullableString,
+    derivative: z
+      .object({
+        key: z.string(),
+        state: z.string(),
+        retention: z.string(),
+        failure: nullableString,
+        created_at: z.string(),
+        stored_at: nullableString,
+        expires_at: nullableString,
+        superseded_at: nullableString,
+        serving_index: nullableString,
+      })
+      .passthrough()
+      .nullable(),
+    recordings: z
+      .object({
+        /** One of {@link COMPUTE_RUN_QUALITY_RECORDINGS_STATES}. */
+        state: z.string(),
+        /** Succeeded recordings the table lists, or null when it was not read. */
+        succeeded: z.number().int().nullable(),
+        /**
+         * Succeeded rows left out: a path that is not a recording path the quality route takes. A table that
+         * lists one path twice is refused whole (`table_unreadable`).
+         */
+        unlisted: z.number().int(),
+        items: z.array(z.object({ path: z.string() }).passthrough()),
+        /** The last path of this page when there are more; pass it as `after`. */
+        next_after: nullableString,
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+export type ComputeRunQualityResponse = z.infer<typeof ComputeRunQualityResponseSchema>;
 
 // --- Reporting, holds, the observer and ACCESS reports (epic #2005 phase A7, #2012) ---------------------------
 

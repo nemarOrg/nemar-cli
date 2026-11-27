@@ -422,6 +422,9 @@ export const LAUNCHER_DETAILS = {
     "content_missing",
     "file_not_found",
     "disk_error",
+    // The serving index the Worker staged (ADR 0141) is not the size or SHA-256 the launch specification
+    // names: the platform's copy, so the platform's failure.
+    "serving_index_mismatch",
   ],
   entry_not_found: [],
   runtime_error: [
@@ -492,6 +495,7 @@ export const PLATFORM_LAUNCHER_DETAILS = [
   "manifest_too_large",
   "unsafe_path",
   "file_not_found",
+  "serving_index_mismatch",
   "incomplete_plan",
   "upload_failed",
   "outputs_refused",
@@ -634,6 +638,9 @@ export const COMPUTE_REFUSAL_CODES = [
   // owner's `tenant.maxLiveJobs` less the floors kept for the other classes). Retryable once a job ends;
   // it is not a queue, and it never says which class or whose jobs hold the slots.
   "platform_busy",
+  // ADR 0134 (epic #2324 phase 2): a pipeline job reported its live progress sooner than the floor after
+  // its last accepted report. Retryable after `Retry-After`; nothing was stored.
+  "report_too_soon",
 ] as const;
 
 export type ComputeRefusalCode = (typeof COMPUTE_REFUSAL_CODES)[number];
@@ -689,6 +696,8 @@ export const COMPUTE_REFUSAL_STATUS = {
   upload_expired: 409,
   storage_unavailable: 503,
   platform_busy: 409,
+  // 429: a progress report sooner than the floor after the last accepted one (ADR 0134).
+  report_too_soon: 429,
 } as const satisfies Record<ComputeRefusalCode, number>;
 
 /**
@@ -709,6 +718,10 @@ export const COMPUTE_ROUTE_SENTENCES = {
   results_quota_exceeded: "There is no room left in the results budget for this job.",
   results_incomplete: "An object the job declared is missing or short; upload it and ask again.",
   policy_unavailable: "The platform could not read its limits just now; ask again shortly.",
+  // The job-token progress route (ADR 0134, epic #2324 phase 2).
+  report_too_soon:
+    "A progress report came sooner than the floor after the last one; ask again later.",
+  storage_unavailable: "Compute storage could not be reached just now; ask again shortly.",
 } as const satisfies Partial<Record<ComputeRefusalCode, string>>;
 
 export type ComputeRouteSentenceCode = keyof typeof COMPUTE_ROUTE_SENTENCES;

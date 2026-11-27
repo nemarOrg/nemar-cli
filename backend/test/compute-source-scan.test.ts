@@ -170,10 +170,15 @@ describe("the compute switch is read in one place that gates", () => {
   // The amendment of 2026-11-22 adds `createJob`: the one function that takes a hold refuses with compute
   // off, before it reads or writes anything, for every source (a person, a partner, a pipeline, a runner),
   // so the switch stops new holds as well as submits. It moves no existing job.
-  test("only submitLeased gates the lifecycle on it; createJob refuses new holds, the pipeline dispatch and its route refuse new work, the tenant sweep acts only while it is on, the two reports only report it, and nothing else reads it", () => {
+  // ADR 0134 (epic #2324 phase 2) adds the job-token progress route: with compute off it refuses a NEW
+  // progress report (503 `compute_disabled`), after the token door and before it reads or writes anything.
+  // It is a report, not a lifecycle move: refusing it moves no job, strands nothing on a cluster, and the
+  // run's counts are reconciled from its recordings table when it ends, whatever the switch says.
+  test("only submitLeased gates the lifecycle on it; createJob refuses new holds, the pipeline dispatch and its route refuse new work, the progress route refuses new reports, the tenant sweep acts only while it is on, the two reports only report it, and nothing else reads it", () => {
     expect(switchFindings(real)).toEqual({
       calls: [
         "routes/admin/compute-pipeline.ts:registerComputePipelineAdminRoutes",
+        "routes/callbacks/compute-job-callbacks.ts:registerComputeJobCallbackRoutes",
         "services/compute-jobs.ts:createJob",
         "services/compute-lifecycle.ts:submitLeased",
         "services/compute-pipeline.ts:dispatchPipelineJob",

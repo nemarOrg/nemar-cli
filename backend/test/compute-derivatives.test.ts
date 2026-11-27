@@ -19,7 +19,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Miniflare } from "miniflare";
 import { findRecipe, recipeRequiredOutputs } from "../../shared/compute-recipes";
-import { resultsLauncherKey, resultsOutputKey } from "../../shared/contract/compute-launch";
+import {
+  SERVING_INDEX_CONTAINER_PATH,
+  resultsLauncherKey,
+  resultsOutputKey,
+} from "../../shared/contract/compute-launch";
 import {
   CANARY_DAYS,
   SERVING_PROFILE_SENTENCE,
@@ -626,7 +630,7 @@ describe("a finished Zarr job becomes a stored derivative", () => {
         dataset: made.id,
         version: "v1.0.0",
         recipe: "nemar-floor",
-        recipe_version: "1.0.0-b1",
+        recipe_version: "1.0.0-b2",
         engine: "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
         input: "zarr",
         profile: "serving",
@@ -635,7 +639,7 @@ describe("a finished Zarr job becomes a stored derivative", () => {
     );
     expect(description.GeneratedBy).toMatchObject({
       recipe: "nemar-floor",
-      recipe_version: "1.0.0-b1",
+      recipe_version: "1.0.0-b2",
       image_digest: row.image_digest,
       job_id: made.jobId,
       process: { build: "nemar-process-test", image_tag: "test" },
@@ -646,7 +650,7 @@ describe("a finished Zarr job becomes a stored derivative", () => {
     expect(description.Profile).toBe("serving");
     expect(description.Description).toBe(SERVING_PROFILE_SENTENCE);
     expect(description.Citation).toBe(
-      `Derived from ${made.id} version v1.0.0 (DOI 10.82901/nemar.${made.id}.v1.0.0) by NEMAR's nemar-floor 1.0.0-b1.`,
+      `Derived from ${made.id} version v1.0.0 (DOI 10.82901/nemar.${made.id}.v1.0.0) by NEMAR's nemar-floor 1.0.0-b2.`,
     );
     expect(description.files).toHaveLength(5);
     // It never states an archived recording's rate.
@@ -1340,7 +1344,7 @@ describe("every keying check of the ADR, each failed alone", () => {
     expect(description.Profile).toBe("archive");
     expect(description.Description).toBeUndefined();
     expect(JSON.stringify(description)).not.toContain(SERVING_PROFILE_SENTENCE);
-    expect(description.Citation).toContain("by NEMAR's nemar-floor 1.0.0-b1.");
+    expect(description.Citation).toContain("by NEMAR's nemar-floor 1.0.0-b2.");
   });
 
   test("a row whose content_sha256 has 63 digits is undigestable, not stores_differ or digest_mismatch, and a keyable stamp after it is still stored (MUTATION: remove the catch that turns an inputDigestV2 throw into undigestable)", async () => {
@@ -2202,6 +2206,9 @@ describe("a dataset that is no longer eligible after its job finished", () => {
           second.stampId,
           1,
           1,
+          row.serving_index,
+          row.quality_plugins,
+          row.checkpoint_map,
         )
         .run();
     expect((await insert("a".repeat(64))).meta.changes).toBe(0);
@@ -2262,5 +2269,313 @@ describe("a dataset that is no longer eligible after its job finished", () => {
     expect(skips?.n).toBe(0);
     await publish(made.id);
     expect(await syncAll(env)).toMatchObject({ created: 1 });
+  });
+});
+
+// --- nemar-ica on the archive input: the key names the serving index (ADR 0140) --------------------------------
+
+/**
+ * A run of nemar-ica on the archive input. nemar-ica is a placeholder that no path dispatches, so the floor's
+ * real BIDS job is made, finished and synced, and its stamp and outputs are then named as nemar-ica's: the
+ * stamp's recipe, version and engine, and the record and table at nemar-ica's paths, in the results bucket and
+ * in the launcher's manifest. `servingIndex` adds `--serving-index` to the recorded specification.
+ */
+async function icaBidsJob(
+  o: {
+    servingIndex?: "flag" | "equals";
+    /** What the dispatcher recorded of the serving index (ADR 0141), and the arguments it added. */
+    recorded?: { serving_index: unknown; args: string[] };
+  } = {},
+): Promise<Made> {
+  const made = await bidsJob();
+  const env = envOf();
+  const floor = findRecipe("nemar-floor") as NonNullable<ReturnType<typeof findRecipe>>;
+  const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
+  await sql(
+    env,
+    "UPDATE compute_pipeline_stamps SET recipe = 'nemar-ica', recipe_version = ?1, engine = ?2 WHERE id = ?3",
+    ica.version,
+    ica.engine,
+    made.stampId,
+  );
+  const from = recipeRequiredOutputs(floor);
+  const to = recipeRequiredOutputs(ica);
+  for (const [a, b] of [
+    [from.record, to.record],
+    [from.table, to.table],
+  ] as const) {
+    const object = await fx.harness.results.get(resultsOutputKey(made.jobId, a));
+    await fx.harness.results.put(
+      resultsOutputKey(made.jobId, b),
+      new Uint8Array(await (object as R2ObjectBody).arrayBuffer()),
+    );
+    await fx.harness.results.delete(resultsOutputKey(made.jobId, a));
+  }
+  const manifestKey = resultsLauncherKey(made.jobId, "manifest.json");
+  const manifest = JSON.parse(
+    (await (await fx.harness.results.get(manifestKey))?.text()) as string,
+  );
+  for (const f of manifest.files as { path: string }[]) {
+    if (f.path === from.record) f.path = to.record;
+    if (f.path === from.table) f.path = to.table;
+  }
+  await fx.harness.results.put(manifestKey, enc(JSON.stringify(manifest)));
+  if (o.servingIndex !== undefined || o.recorded !== undefined) {
+    const key = recordKey(made.jobId, "spec.json");
+    const spec = JSON.parse((await (await fx.harness.records.get(key))?.text()) as string);
+    if (o.recorded !== undefined) {
+      spec.serving_index = o.recorded.serving_index;
+      spec.args = [...spec.args, ...o.recorded.args];
+    } else {
+      spec.args =
+        o.servingIndex === "flag"
+          ? [...spec.args, "--serving-index", "/data/serving/index.json"]
+          : [...spec.args, "--serving-index=/data/serving/index.json"];
+    }
+    const bytes = enc(JSON.stringify(spec));
+    await fx.harness.records.put(key, bytes);
+    await sql(
+      env,
+      "UPDATE compute_jobs SET spec_digest = ?1 WHERE id = ?2",
+      await sha256Hex(bytes),
+      made.jobId,
+    );
+  }
+  return made;
+}
+
+describe("nemar-ica on the archive input: the key names the serving index (ADR 0140)", () => {
+  test("a run given no serving index is keyed under version 2 with serving_index none, never the eight-line key, and its quality plugins and checkpoint map recorded (MUTATION: leave serving_index out of the key; record no plugins; record no map)", async () => {
+    const env = envOf();
+    const made = await icaBidsJob();
+    expect(await syncAll(env)).toMatchObject({ created: 1, stored: 1, errored: 0 });
+    const row = (await one(env)) as Der & {
+      serving_index: string | null;
+      quality_plugins: string | null;
+      checkpoint_map: string | null;
+    };
+    expect(row.serving_index).toBe("none");
+    // The recipe version's quality plugins are recorded with the row, for the quality route (review of #2383).
+    expect(JSON.parse(row.quality_plugins as string)).toEqual(["nemar-quality", "nemar-spectrum"]);
+    // Its checkpoint map too, for a recording's outcomes (migration 0160).
+    const ica = findRecipe("nemar-ica");
+    expect(JSON.parse(row.checkpoint_map as string)).toEqual(
+      ica?.checkpoints.map((c) => ({ checkpoint: c.checkpoint, steps: [...c.steps] })),
+    );
+    const eight = await keyOfStamp(env, made.stampId);
+    const stamp = await env.DB.prepare(
+      "SELECT dataset_id, version, recipe_version, engine, input_digest FROM compute_pipeline_stamps WHERE id = ?1",
+    )
+      .bind(made.stampId)
+      .first<Record<string, string>>();
+    const fields = {
+      dataset: stamp?.dataset_id as string,
+      version: stamp?.version as string,
+      recipe: "nemar-ica",
+      recipe_version: stamp?.recipe_version as string,
+      engine: stamp?.engine as string,
+      input: "bids",
+      profile: "archive",
+      input_digest: stamp?.input_digest as string,
+      serving_index: "none",
+    };
+    expect(row.key).toBe(await derivativeKey(fields));
+    expect(row.key).not.toBe(eight);
+    const description = JSON.parse(
+      (await (await derivatives.get(`d/${row.key}/derivative.json`))?.text()) as string,
+    );
+    // The description writes the key's own text again from the row (MUTATION: drop serving_index from describe).
+    expect(description.key_text).toBe(derivativeKeyText(fields));
+    expect(description.key_text.split("\n")[0]).toBe("nemar.derivative-key.v2");
+    expect(description.key_text.endsWith("\nserving_index none\n")).toBe(true);
+  });
+
+  for (const form of ["flag", "equals"] as const) {
+    test(`a run handed a serving index (${form === "flag" ? "--serving-index <path>" : "--serving-index=<path>"}) is not keyed: nothing records the digest of the index it was handed (MUTATION: key it as none)`, async () => {
+      const env = envOf();
+      const made = await icaBidsJob({ servingIndex: form });
+      expect(await syncAll(env)).toMatchObject({ created: 0, errored: 0 });
+      expect(await all(env)).toHaveLength(0);
+      const skip = await env.DB.prepare(
+        "SELECT word FROM compute_derivative_skips WHERE stamp_id = ?1",
+      )
+        .bind(made.stampId)
+        .first<{ word: string }>();
+      expect(skip?.word).toBe("serving_index_unattested");
+      expect(UNKEYABLE_WORDS).toContain("serving_index_unattested");
+    });
+  }
+
+  // ADR 0141: the dispatcher stages the index and records its digest; the key reads the RECORD of that, never
+  // the run's own claim.
+  const STAGED_HEX = "5".repeat(64);
+  const COMMIT40 = "6".repeat(40);
+  const STAGED_ARGS = [
+    "--serving-index",
+    SERVING_INDEX_CONTAINER_PATH,
+    "--source-commit",
+    COMMIT40,
+  ];
+  const skipWord = async (env: Bindings, stampId: number) =>
+    (
+      await env.DB.prepare("SELECT word FROM compute_derivative_skips WHERE stamp_id = ?1")
+        .bind(stampId)
+        .first<{ word: string }>()
+    )?.word;
+
+  test("a run the dispatcher staged an index for is keyed by the recorded digest (MUTATION: key it none; read the digest from anything but the specification)", async () => {
+    const env = envOf();
+    const made = await icaBidsJob({
+      recorded: { serving_index: { sha256: STAGED_HEX, size: 812 }, args: STAGED_ARGS },
+    });
+    expect(await syncAll(env)).toMatchObject({ created: 1, stored: 1, errored: 0 });
+    const row = (await one(env)) as Der & { serving_index: string | null };
+    expect(row.serving_index).toBe(`sha256:${STAGED_HEX}`);
+    const stamp = await env.DB.prepare(
+      "SELECT dataset_id, version, recipe_version, engine, input_digest FROM compute_pipeline_stamps WHERE id = ?1",
+    )
+      .bind(made.stampId)
+      .first<Record<string, string>>();
+    const fields = {
+      dataset: stamp?.dataset_id as string,
+      version: stamp?.version as string,
+      recipe: "nemar-ica",
+      recipe_version: stamp?.recipe_version as string,
+      engine: stamp?.engine as string,
+      input: "bids",
+      profile: "archive",
+      input_digest: stamp?.input_digest as string,
+    };
+    expect(row.key).toBe(await derivativeKey({ ...fields, serving_index: `sha256:${STAGED_HEX}` }));
+    expect(row.key).not.toBe(await derivativeKey({ ...fields, serving_index: "none" }));
+  });
+
+  test("a run recorded with no index staged is keyed none, and the word does not reach the key", async () => {
+    const env = envOf();
+    await icaBidsJob({
+      recorded: { serving_index: { reason: "source_commit_differs" }, args: [] },
+    });
+    expect(await syncAll(env)).toMatchObject({ created: 1, errored: 0 });
+    expect(((await one(env)) as Der & { serving_index: string | null }).serving_index).toBe("none");
+  });
+
+  for (const [label, recorded] of [
+    [
+      "a staged index the arguments never hand the run",
+      { serving_index: { sha256: STAGED_HEX, size: 812 }, args: [] },
+    ],
+    [
+      "a staged index handed at another path",
+      {
+        serving_index: { sha256: STAGED_HEX, size: 812 },
+        args: ["--serving-index", "/data/other/index.json"],
+      },
+    ],
+    [
+      "a staged index handed twice",
+      {
+        serving_index: { sha256: STAGED_HEX, size: 812 },
+        args: [...STAGED_ARGS, `--serving-index=${SERVING_INDEX_CONTAINER_PATH}`],
+      },
+    ],
+    [
+      "an index named although none was staged",
+      {
+        serving_index: { reason: "no_index" },
+        args: ["--serving-index", SERVING_INDEX_CONTAINER_PATH],
+      },
+    ],
+  ] as const) {
+    test(`${label} is not keyed (serving_index_unattested)`, async () => {
+      const env = envOf();
+      const made = await icaBidsJob({
+        recorded: recorded as { serving_index: unknown; args: string[] },
+      });
+      expect(await syncAll(env)).toMatchObject({ created: 0, errored: 0 });
+      expect(await all(env)).toHaveLength(0);
+      expect(await skipWord(env, made.stampId)).toBe("serving_index_unattested");
+    });
+  }
+
+  test("the floor's archive run keeps its version 1 key and no serving_index (MUTATION: key every bids run's serving index)", async () => {
+    const env = envOf();
+    const made = await bidsJob();
+    await syncAll(env);
+    const row = (await one(env)) as Der & {
+      serving_index: string | null;
+      quality_plugins: string | null;
+      checkpoint_map: string | null;
+    };
+    expect(row.serving_index).toBeNull();
+    expect(row.quality_plugins).toBe("[]");
+    expect(
+      JSON.parse(row.checkpoint_map as string).map((c: { checkpoint: string }) => c.checkpoint),
+    ).toEqual(["import", "preprocess", "quality"]);
+    expect(row.key).toBe(await keyOfStamp(env, made.stampId));
+  });
+
+  test("the sync gives a row with no checkpoint map its version's map while the registry holds it, and never replaces a recorded one (MUTATION: drop the fill)", async () => {
+    const env = envOf();
+    await bidsJob();
+    await syncAll(env);
+    const mapOf = async () =>
+      ((await one(env)) as Der & { checkpoint_map: string | null }).checkpoint_map;
+    const registry = await mapOf();
+    expect(registry).not.toBeNull();
+    // A row made before migration 0160, of a version the registry no longer holds: nothing to fill it with.
+    await sql(
+      env,
+      "UPDATE compute_derivatives SET checkpoint_map = NULL, recipe_version = '0.0.1'",
+    );
+    await syncAll(env);
+    expect(await mapOf()).toBeNull();
+    // Of the version the registry holds: that version's map.
+    const floor = findRecipe("nemar-floor");
+    await sql(env, "UPDATE compute_derivatives SET recipe_version = ?1", floor?.version);
+    await syncAll(env);
+    expect(await mapOf()).toBe(registry);
+    // A recorded map is the row's own, never replaced.
+    const own = JSON.stringify([{ checkpoint: "import", steps: ["load"] }]);
+    await sql(env, "UPDATE compute_derivatives SET checkpoint_map = ?1", own);
+    await syncAll(env);
+    expect(await mapOf()).toBe(own);
+  });
+
+  test("the column takes none or a sha256: digest, on the archive input only", async () => {
+    const env = envOf();
+    await bidsJob();
+    await syncAll(env);
+    const row = await one(env);
+    const set = (value: string) =>
+      sql(env, "UPDATE compute_derivatives SET serving_index = ?1 WHERE key = ?2", value, row.key);
+    await set("none");
+    await set(`sha256:${"a".repeat(64)}`);
+    for (const bad of [
+      "null",
+      "",
+      `sha256:${"A".repeat(64)}`,
+      `sha256:${"a".repeat(63)}`,
+      "a".repeat(64),
+    ]) {
+      await expect(set(bad)).rejects.toThrow();
+    }
+    await sql(env, "UPDATE compute_derivatives SET serving_index = NULL WHERE key = ?1", row.key);
+    const plugins = (value: string | null) =>
+      sql(
+        env,
+        "UPDATE compute_derivatives SET quality_plugins = ?1 WHERE key = ?2",
+        value,
+        row.key,
+      );
+    await plugins(null);
+    await plugins('["nemar-quality"]');
+    for (const bad of ["{}", "nemar-quality", "", "[1"])
+      await expect(plugins(bad)).rejects.toThrow();
+    await zarrJob();
+    await syncAll(env);
+    const zarr = await one(env, "input = 'zarr'");
+    await expect(
+      sql(env, "UPDATE compute_derivatives SET serving_index = 'none' WHERE key = ?1", zarr.key),
+    ).rejects.toThrow();
   });
 });

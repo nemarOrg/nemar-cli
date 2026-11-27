@@ -1,0 +1,802 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://api.nemar.org/schemas/compute-results-report-v1.json",
+  "title": "NEMAR results report, nemar.results-report.v1",
+  "description": "The report the launcher's standalone entry writes at <out>/launcher/results-report.json after a job ran on a person's own machine with no NEMAR service involved (ADR 0134 decision 8): what ran, on what, what came out and, when the job wrote a recipe progress file, the checkpoint counts of its recordings by the backend's reconcile rules. Copied byte for byte from nemarOrg/nemar-cli (shared/contract/compute-results-report.schema.json) by nemarOrg/nemar-process (launcher/schema/compute-results-report.v1.json). Paths are relative to the job's output directory; no host path is ever in the report. A problem met while building it is a fixed word inside it, never a change of the job's exit. The root has no constraint; each shape is a member of $defs. CheckpointName, FailureCode, StepId, ProgressPath, Count, CheckpointCounts and ProgressFailure are compute-progress-v1.json's own, CheckpointMap is compute-recipe-progress-v1.json's, and result is the launch specification's $defs/result, value for value.",
+  "$defs": {
+    "CheckpointName": {
+      "description": "A checkpoint a recipe declares (neuroschema processingTypes checkpointName).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}(?![\\s\\S])"
+    },
+    "FailureCode": {
+      "description": "A failure or skip word (neuroschema processingTypes failureCode).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
+    },
+    "StepId": {
+      "description": "A recipe step (neuroschema processingTypes stepId).",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\\s\\S])"
+    },
+    "ProgressPath": {
+      "description": "A recording's relative path: neuroschema relativeLocation narrowed to printable ASCII. No leading or trailing space, no leading slash, no URI scheme, no . or .. segment, no empty segment (no // and no trailing /), and none of \\ % ? #.",
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^(?! )(?![\\s\\S]* (?![\\s\\S]))(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!(?:[\\s\\S]*/)?\\.\\.?(?:/|(?![\\s\\S])))(?![\\s\\S]*//)(?![\\s\\S]*/(?![\\s\\S]))[\\x20-\\x22\\x24\\x26-\\x3E\\x40-\\x5B\\x5D-\\x7E]{1,256}(?![\\s\\S])"
+    },
+    "Count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "CheckpointCounts": {
+      "description": "One checkpoint's counts of recordings: the shape of neuroschema checkpointCounts.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "failed",
+        "skipped",
+        "total"
+      ],
+      "properties": {
+        "passed": {
+          "$ref": "#/$defs/Count"
+        },
+        "failed": {
+          "$ref": "#/$defs/Count"
+        },
+        "skipped": {
+          "$ref": "#/$defs/Count"
+        },
+        "total": {
+          "$ref": "#/$defs/Count"
+        }
+      }
+    },
+    "ProgressFailure": {
+      "description": "One failed or skipped recording: its path, the failure word, the step (null when unknown) and the checkpoint it counts against.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "code",
+        "step",
+        "checkpoint"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/ProgressPath"
+        },
+        "code": {
+          "$ref": "#/$defs/FailureCode"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StepId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/CheckpointName"
+        }
+      }
+    },
+    "CheckpointMap": {
+      "description": "A recipe's checkpoint map: 1 to 8 checkpoints in the order the recipe declares them, each with 1 to 64 steps in order. stored is never declared (the backend sets it). Rules a schema cannot state, the reader's: a checkpoint is named once, and a step is in one checkpoint only.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "checkpoint",
+          "steps"
+        ],
+        "properties": {
+          "checkpoint": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/CheckpointName"
+              },
+              {
+                "not": {
+                  "const": "stored"
+                }
+              }
+            ]
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/$defs/StepId"
+            }
+          }
+        }
+      }
+    },
+    "result": {
+      "description": "launcher/result.json: the one fixed failure code (or null), the exit number the launcher ends with (0, or 10 to 16 as the code gives it) and the entry's own exit code. The first failure wins.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "failure_code",
+        "detail",
+        "exit_number",
+        "entry_exit_code"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "pattern": "^job_[0-9a-f]{24}(?![\\s\\S])"
+        },
+        "failure_code": {
+          "enum": [
+            "code_fetch_failed",
+            "dataset_fetch_failed",
+            "entry_not_found",
+            "runtime_error",
+            "out_of_memory",
+            "time_limit",
+            "result_upload_failed",
+            null
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z0-9_]{1,64}(?![\\s\\S])"
+        },
+        "exit_number": {
+          "enum": [
+            0,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16
+          ]
+        },
+        "entry_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -255,
+          "maximum": 255
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "failure_code"
+            ],
+            "properties": {
+              "failure_code": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_number": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "failure_code"
+            ],
+            "properties": {
+              "failure_code": {
+                "const": "code_fetch_failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_number": {
+                "const": 10
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "failure_code"
+            ],
+            "properties": {
+              "failure_code": {
+                "const": "dataset_fetch_failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_number": {
+                "const": 11
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "failure_code"
+            ],
+            "properties": {
+              "failure_code": {
+                "const": "entry_not_found"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_number": {
+                "const": 12
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "failure_code"
+            ],
+            "properties": {
+              "failure_code": {
+                "const": "runtime_error"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_number": {
+                "const": 13
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "failure_code"
+            ],
+            "properties": {
+              "failure_code": {
+                "const": "out_of_memory"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_number": {
+                "const": 14
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "failure_code"
+            ],
+            "properties": {
+              "failure_code": {
+                "const": "time_limit"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_number": {
+                "const": 15
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "failure_code"
+            ],
+            "properties": {
+              "failure_code": {
+                "const": "result_upload_failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_number": {
+                "const": 16
+              }
+            }
+          }
+        }
+      ]
+    },
+    "OutputPath": {
+      "description": "A path relative to the job's output directory (the launch specification's manifest path).",
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?:[^/\\\\\\u0000-\\u001f\\u007f]+/)*[^/\\\\\\u0000-\\u001f\\u007f]+(?![\\s\\S])",
+      "not": {
+        "pattern": "(?:^|/)\\.\\.?(?:/|$)"
+      }
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "Size": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "ImageDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "Version": {
+      "type": "string",
+      "pattern": "^[0-9A-Za-z.+-]{1,64}(?![\\s\\S])"
+    },
+    "Utc": {
+      "description": "A time in UTC, to the second.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z(?![\\s\\S])"
+    },
+    "Verification": {
+      "description": "How the image was verified when the run pulled it (--pull): by cosign, the container image or the Singularity image file published beside it (which names its manifest and layer digests).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "by",
+        "kind",
+        "cosign_version"
+      ],
+      "properties": {
+        "by": {
+          "enum": [
+            "cosign"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "image",
+            "sif"
+          ]
+        },
+        "cosign_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "sif_manifest": {
+          "$ref": "#/$defs/ImageDigest"
+        },
+        "sif_layer": {
+          "$ref": "#/$defs/ImageDigest"
+        }
+      },
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "sif"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "sif_manifest",
+          "sif_layer"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "sif_manifest"
+              ]
+            },
+            {
+              "required": [
+                "sif_layer"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "Table": {
+      "description": "A recordings table the job wrote (a *_recordings.tsv in the manifest), read by the launcher from outside the container: its digest equals the manifest's, rows by status, and a fixed word when it could not be read.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "size",
+        "rows",
+        "succeeded",
+        "failed",
+        "skipped",
+        "problem"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/OutputPath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "size": {
+          "$ref": "#/$defs/Size"
+        },
+        "rows": {
+          "$ref": "#/$defs/Count"
+        },
+        "succeeded": {
+          "$ref": "#/$defs/Count"
+        },
+        "failed": {
+          "$ref": "#/$defs/Count"
+        },
+        "skipped": {
+          "$ref": "#/$defs/Count"
+        },
+        "problem": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Checkpoints": {
+      "description": "The checkpoint counts of the job's recordings by the backend's reconcile rules: the recipe and its map from the recipe progress file, the table they were counted from, the counts per checkpoint and the first failures per checkpoint. Rules a schema cannot state, the reader's: counts and failures each name exactly the map's checkpoints; each failure's checkpoint is the key it is listed under; no column counts more than its total; every column has the same total; and no checkpoint lists more failures than it counts as failed or skipped (the live progress object's rules).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recipe",
+        "table",
+        "map",
+        "counts",
+        "failures"
+      ],
+      "properties": {
+        "recipe": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "version"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{0,63}(?![\\s\\S])"
+            },
+            "version": {
+              "$ref": "#/$defs/Version"
+            }
+          }
+        },
+        "table": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}/){0,7}[A-Za-z0-9][A-Za-z0-9._-]{0,112}_recordings\\.tsv(?![\\s\\S])"
+        },
+        "map": {
+          "$ref": "#/$defs/CheckpointMap"
+        },
+        "counts": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 8,
+          "propertyNames": {
+            "$ref": "#/$defs/CheckpointName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/CheckpointCounts"
+          }
+        },
+        "failures": {
+          "type": "object",
+          "maxProperties": 8,
+          "propertyNames": {
+            "$ref": "#/$defs/CheckpointName"
+          },
+          "additionalProperties": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/$defs/ProgressFailure"
+            }
+          }
+        }
+      }
+    },
+    "ResultsReport": {
+      "description": "The results report. Closed. Rules a schema cannot state, the reader's: input names and launcher file names are unique; finished_utc is not before started_utc; the @sha256:<hex> image.uri ends with is image.digest; and the rules of $defs/Checkpoints.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "mode",
+        "run_id",
+        "started_utc",
+        "finished_utc",
+        "launcher_version",
+        "specification",
+        "image",
+        "bundle_sha256",
+        "inputs",
+        "result",
+        "launcher_files",
+        "outputs",
+        "tables",
+        "checkpoints",
+        "checkpoints_reason",
+        "records"
+      ],
+      "properties": {
+        "format": {
+          "const": "nemar.results-report.v1"
+        },
+        "mode": {
+          "enum": [
+            "standalone"
+          ]
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
+        },
+        "started_utc": {
+          "$ref": "#/$defs/Utc"
+        },
+        "finished_utc": {
+          "$ref": "#/$defs/Utc"
+        },
+        "launcher_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "specification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sha256"
+          ],
+          "properties": {
+            "sha256": {
+              "$ref": "#/$defs/Sha256"
+            }
+          }
+        },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "uri",
+            "digest",
+            "verification"
+          ],
+          "properties": {
+            "uri": {
+              "description": "A digest-pinned reference, optionally docker://-prefixed and lowercase: no leading '-', no control character. Cross-field rule this schema cannot express (a zod-only rule): the @sha256:<hex> it ends with must equal image.digest.",
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^(?:docker://)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}(?![\\s\\S])"
+            },
+            "digest": {
+              "$ref": "#/$defs/ImageDigest"
+            },
+            "verification": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Verification"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "bundle_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inputs": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "files",
+              "bytes"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+              },
+              "files": {
+                "$ref": "#/$defs/Size"
+              },
+              "bytes": {
+                "$ref": "#/$defs/Size"
+              }
+            }
+          }
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        },
+        "launcher_files": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "sha256",
+              "size"
+            ],
+            "properties": {
+              "name": {
+                "enum": [
+                  "result.json",
+                  "provenance.json",
+                  "manifest.json",
+                  "progress.json"
+                ]
+              },
+              "sha256": {
+                "$ref": "#/$defs/Sha256"
+              },
+              "size": {
+                "$ref": "#/$defs/Size"
+              }
+            }
+          }
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "files",
+            "bytes",
+            "manifest_sha256"
+          ],
+          "properties": {
+            "files": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "bytes": {
+              "$ref": "#/$defs/Size"
+            },
+            "manifest_sha256": {
+              "$ref": "#/$defs/Sha256"
+            }
+          }
+        },
+        "tables": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/Table"
+          }
+        },
+        "checkpoints": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Checkpoints"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoints_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "sha256",
+              "size",
+              "level"
+            ],
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/OutputPath"
+              },
+              "sha256": {
+                "$ref": "#/$defs/Sha256"
+              },
+              "size": {
+                "$ref": "#/$defs/Size"
+              },
+              "level": {
+                "enum": [
+                  "dataset",
+                  "recording"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "checkpoints": {
+              "type": "null"
+            },
+            "checkpoints_reason": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "properties": {
+            "checkpoints": {
+              "type": "object"
+            },
+            "checkpoints_reason": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

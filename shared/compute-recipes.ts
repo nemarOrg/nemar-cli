@@ -148,7 +148,93 @@ export interface ComputeRecipe {
    */
   placeholder?: boolean;
   eligibility: RecipeEligibility;
+  /**
+   * The checkpoints this recipe version declares, in order, each with the steps that map to it (ADR 0134
+   * decision 2). Every step of the recipe's step order maps to exactly one checkpoint; `stored` is never
+   * here, because the backend sets it when the derivatives are copied. `nemar-recipe version` prints
+   * the same map, and a recipe version that changes it changes this entry.
+   */
+  checkpoints: readonly RecipeCheckpoint[];
+  /**
+   * The result limits of this recipe's pipeline jobs (owner decision of 2026-11-23): a NEMAR pipeline job,
+   * the one a pipeline stamp names, is held to these instead of the owner's policy `resultLimits`; a
+   * person's and a partner's job keep the policy. Absent: the policy applies to the recipe's jobs too.
+   * `maxFiles` is never above `COMPUTE_MAX_OUTPUT_FILES` (100,000, the launcher's own `MAX_OUTPUT_FILES`).
+   */
+  resultLimits?: RecipeResultLimits;
 }
+
+/** A recipe's own result limits (see {@link ComputeRecipe.resultLimits}). */
+export interface RecipeResultLimits {
+  /** The most outputs one job of the recipe lists, launcher files apart. */
+  maxFiles: number;
+}
+
+/** A checkpoint a recipe may declare: a standard checkpoint other than `stored`. */
+export type DeclarableCheckpoint = Exclude<(typeof STANDARD_CHECKPOINTS)[number], "stored">;
+
+/** One checkpoint a recipe version declares and the recipe steps that count against it. */
+export interface RecipeCheckpoint {
+  checkpoint: DeclarableCheckpoint;
+  steps: readonly string[];
+}
+
+/**
+ * The step a recipe's recordings table names when writing the recording's own record failed, after the
+ * last step: it counts against the last declared checkpoint (ADR 0134, owner decision of 2026-11-22).
+ */
+export const RECORD_STEP = "record";
+
+/**
+ * The standard checkpoints, in the order a recipe declares the ones it has (ADR 0134 decision 2), and
+ * `stored`, which only the backend sets. There is no `figures` checkpoint: views are written at `quality`
+ * (ADR 0137 decision 1).
+ */
+export const STANDARD_CHECKPOINTS = [
+  "import",
+  "preprocess",
+  "ica",
+  "iclabel",
+  "quality",
+  "stored",
+] as const;
+
+/** The checkpoint the backend sets when a run's derivatives are copied (ADR 0123). */
+export const STORED_CHECKPOINT = "stored";
+
+/**
+ * Step ids a recipe's recordings table can name that are not steps of its record: a measurement or a
+ * check made early, under its own id so a recording it refuses counts where it stopped and not at a
+ * later checkpoint that never ran (ADR 0134). Each counts at `preprocess`. nemar-process declares the
+ * same ids as `PRE_CHECKS` beside `STEP_ORDER` in each recipe's `steps.py`.
+ */
+export const RECIPE_PRE_CHECKS = ["qc_amplitude", "ica_eligibility", "iclabel_locations"] as const;
+
+/**
+ * The quality plugins a recipe runs (ADR 0134 decisions 6 and 7, ADR 0137 decisions 4 and 5): each is a step of
+ * the recipe's record and of its recordings table, named by the plugin, at the checkpoint its manifest declares,
+ * which is always `quality` (metrics and views alike). Only `nemar-ica` runs plugins today (owner decision of
+ * 2026-11-23): `nemar-quality` (metrics and the ICLabel class view) and `nemar-spectrum` (the spectrum view).
+ * nemar-process declares the same names, with their pinned versions, as `PLUGINS` beside `STEP_ORDER` in the
+ * recipe's `steps.py`; `STEP_ORDER` does not list them. A plugin that fails is recorded as skipped in the record and the
+ * recording still succeeds (owner decision of 2026-11-23), so a table row names a plugin step only if the
+ * recording failed in it in a way the plugin runner does not absorb.
+ */
+export const RECIPE_PLUGIN_STEPS = ["nemar-quality", "nemar-spectrum"] as const;
+
+const FLOOR_PREPROCESS_STEPS = Object.freeze([
+  "flatline",
+  "drift",
+  "line_noise_measure",
+  "line_noise_50",
+  "line_noise_60",
+  "qc_amplitude",
+  "bad_channels",
+  "bad_windows",
+] as const);
+
+const checkpoint = (name: DeclarableCheckpoint, steps: readonly string[]): RecipeCheckpoint =>
+  Object.freeze({ checkpoint: name, steps: Object.freeze([...steps]) });
 
 /**
  * The engine every recipe reports: `eegprep@<version>+<commit>`, the version and the resolved git commit of
@@ -178,7 +264,7 @@ const RECIPE_ENGINE = "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8";
 export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
   Object.freeze({
     name: "nemar-floor",
-    version: "1.0.0-b1",
+    version: "1.0.0-b2",
     appId: "nemar-launch",
     appVersion: "1.0.0",
     engine: RECIPE_ENGINE,
@@ -192,10 +278,19 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     executors: Object.freeze(["tapis", "runner"] as const),
     autoDispatch: true,
     eligibility: "eeg",
+    checkpoints: Object.freeze([
+      checkpoint("import", ["load", "signal_channels"]),
+      checkpoint("preprocess", FLOOR_PREPROCESS_STEPS),
+      checkpoint("quality", ["qc"]),
+    ]),
+    // Six files per recording (record, channels, bad segments, sample mask, filters, qc) and three for the
+    // dataset: the policy's 5,000 stops at about 830 recordings, and an auto-dispatched dataset can hold more.
+    // 25,000 admits about 4,160.
+    resultLimits: Object.freeze({ maxFiles: 25_000 }),
   }),
   Object.freeze({
     name: "nemar-ica",
-    version: "1.0.0-b1",
+    version: "1.0.0-b2",
     appId: "nemar-launch",
     appVersion: "1.0.0",
     engine: RECIPE_ENGINE,
@@ -209,6 +304,27 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     autoDispatch: false,
     placeholder: true,
     eligibility: "eeg",
+    // The floor steps it re-runs as preparation map as in the floor, except its re-run `qc` (ADR 0134); its
+    // quality plugins follow the decomposition at `quality` (ADR 0137).
+    checkpoints: Object.freeze([
+      checkpoint("import", ["load", "signal_channels"]),
+      checkpoint("preprocess", [
+        ...FLOOR_PREPROCESS_STEPS,
+        "qc",
+        "ica_eligibility",
+        "iclabel_locations",
+        "asr",
+        "reref",
+      ]),
+      checkpoint("ica", ["ica"]),
+      checkpoint("iclabel", ["iclabel"]),
+      checkpoint("quality", ["nemar-quality", "nemar-spectrum"]),
+    ]),
+    // 17 files per recording with its views, the record included (the floor's five, the recipe's nine, the
+    // two plugin views `_icclasses.json` and `_spectrum.tsv`, and the record; ADR 0137, nemar-process P7),
+    // plus the dataset's three: the policy's 5,000 stops at about 294 recordings; 25,000 admits about
+    // 1,470, headroom over a 1,000-recording dataset.
+    resultLimits: Object.freeze({ maxFiles: 25_000 }),
   }),
 ]) as readonly ComputeRecipe[];
 
@@ -216,6 +332,40 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
 export function findRecipe(name: unknown): ComputeRecipe | null {
   if (typeof name !== "string") return null;
   return COMPUTE_RECIPES.find((r) => r.name === name) ?? null;
+}
+
+/**
+ * The checkpoints a recipe declares, in order, followed by `stored`: the columns of its progress rows
+ * and the `declared_checkpoints` of its neuroschema `processing` entry.
+ */
+export function declaredCheckpoints(recipe: Pick<ComputeRecipe, "checkpoints">): string[] {
+  return [...recipe.checkpoints.map((c) => c.checkpoint), STORED_CHECKPOINT];
+}
+
+/**
+ * The checkpoint a step of a recipe counts against, or null for a step the recipe does not declare. The
+ * step `record` counts against the last declared checkpoint.
+ */
+export function checkpointOfStep(
+  recipe: Pick<ComputeRecipe, "checkpoints">,
+  step: string,
+): DeclarableCheckpoint | null {
+  if (step === RECORD_STEP)
+    return recipe.checkpoints[recipe.checkpoints.length - 1]?.checkpoint ?? null;
+  return recipe.checkpoints.find((c) => c.steps.includes(step))?.checkpoint ?? null;
+}
+
+/**
+ * The checkpoint map of a recipe at a version, or null when the recipe is unknown or the version is not
+ * the registry entry's (the map belongs to the version the registry names).
+ */
+export function recipeCheckpointMap(
+  name: unknown,
+  version: unknown,
+): readonly RecipeCheckpoint[] | null {
+  const recipe = findRecipe(name);
+  if (!recipe || recipe.version !== version) return null;
+  return recipe.checkpoints;
 }
 
 /** The label a recipe puts in its product file names: its name without hyphens (`nemarfloor`). */
@@ -237,6 +387,44 @@ export function recipeRequiredOutputs(recipe: Pick<ComputeRecipe, "name">): {
     record: `${RECIPE_PRODUCT_OUTPUT_PREFIX}desc-${label}_signalJourney.json`,
     table: `${RECIPE_PRODUCT_OUTPUT_PREFIX}desc-${label}_recordings.tsv`,
   };
+}
+
+/**
+ * Where a finished run of the recipe writes its dataset `dataQuality` summary, relative to the job's
+ * outputs directory: beside its dataset record, at most 65,536 bytes (ADR 0137 decision 8, nemar-process
+ * `common/dataquality.py`). Not a required output: a run of a recipe that predates it has none.
+ */
+export function recipeQualityDocumentPath(recipe: Pick<ComputeRecipe, "name">): string {
+  return `${RECIPE_PRODUCT_OUTPUT_PREFIX}desc-${recipeLabel(recipe)}_dataquality.json`;
+}
+
+/**
+ * The quality plugins a recipe version runs: the steps of its `quality` checkpoint that are plugins
+ * ({@link RECIPE_PLUGIN_STEPS}), in order. A plugin's metrics are named `<plugin>:<name>`, so these are the
+ * only prefixes a run's metrics may carry; a recipe without plugins reports bare names only.
+ */
+export function recipeQualityPlugins(recipe: Pick<ComputeRecipe, "checkpoints">): string[] {
+  const plugins: readonly string[] = RECIPE_PLUGIN_STEPS;
+  const quality = recipe.checkpoints.find((c) => c.checkpoint === "quality");
+  return (quality?.steps ?? []).filter((s) => plugins.includes(s));
+}
+
+/**
+ * The recipes whose run of the archive (`bids`) input can be handed the serving copy's index
+ * (`--serving-index`, nemar-process P7) to declare the views of the serving copy: their derivative key on
+ * that input names the index (ADR 0140, owner ruling of 2026-11-25, nemar-cli #2341).
+ */
+export const RECIPES_KEYING_SERVING_INDEX: readonly string[] = Object.freeze(["nemar-ica"]);
+
+/** The flag a run of the archive is handed the serving index with (nemar-process `nemar_ica/options.py`). */
+export const RECIPE_SERVING_INDEX_FLAG = "--serving-index";
+
+/** Whether a recipe's derivative key on this input carries `serving_index` (a version 2 key, ADR 0140). */
+export function recipeKeysServingIndex(
+  recipe: Pick<ComputeRecipe, "name">,
+  input: RecipeInput,
+): boolean {
+  return input === "bids" && RECIPES_KEYING_SERVING_INDEX.includes(recipe.name);
 }
 
 /**
@@ -408,6 +596,26 @@ export function recipeZarrArguments(input: {
     "--zarr-base",
     input.zarrBase,
   ];
+}
+
+/**
+ * The arguments a run of the archive adds when the Worker staged the serving index for it (ADR 0141): the
+ * index's path inside the container (the launch contract's `SERVING_INDEX_CONTAINER_PATH`, handed in because
+ * this file imports nothing) and the commit the index was built from, which is the tag's (`--source-commit`).
+ * They follow {@link recipeArguments}, which already names `--dataset-id`. A path that is not absolute or a
+ * commit that is not 40 lowercase hex digits is a programming error, never passed on.
+ */
+export function recipeServingIndexArguments(input: {
+  path: string;
+  sourceCommit: string;
+}): string[] {
+  if (typeof input.path !== "string" || !input.path.startsWith("/")) {
+    throw new RangeError("the serving index path is absolute");
+  }
+  if (!isSourceCommit(input.sourceCommit)) {
+    throw new RangeError("a source commit is 40 lowercase hex digits");
+  }
+  return [RECIPE_SERVING_INDEX_FLAG, input.path, RECIPE_SOURCE_COMMIT_FLAG, input.sourceCommit];
 }
 
 /**

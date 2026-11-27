@@ -679,6 +679,47 @@ function refuseBadInclude(pattern: string, ctx: z.RefinementCtx): void {
 
 const bundleRefSchema = z.object({ size: safeInt(1), sha256: sha256Schema }).strict();
 
+/**
+ * The most bytes of a serving index the Worker stages for a job (ADR 0141): the recipe's own bound
+ * (nemar-process `zarr_input.MAX_INDEX_BYTES`, 64 MiB). The launch specification states the same bound.
+ */
+export const COMPUTE_SERVING_INDEX_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Why the Worker staged no serving index for a job of a recipe that keys one (ADR 0141), recorded in the
+ * job's specification: a fixed word, never a path or a message. `source_commit_differs` is an index built
+ * from another commit than the version's tag (a later conversion, or a commit that differs by metadata only,
+ * which the Zarr input's `metadata_only` allows and this never does); `index_unusable` is an index the recipe
+ * would refuse (not strict JSON, or not the shape it reads); the others say the index or the tag could not
+ * be read, or the copy could not be kept.
+ */
+export const SERVING_INDEX_ABSENT_REASONS = [
+  "no_index",
+  "index_unreadable",
+  "index_too_large",
+  "index_commit_unusable",
+  "index_unusable",
+  "source_commit_differs",
+  "tag_absent",
+  "github_unreadable",
+  "no_github_credentials",
+  "token_mint_failed",
+  "index_not_stored",
+] as const;
+
+export type ServingIndexAbsentReason = (typeof SERVING_INDEX_ABSENT_REASONS)[number];
+
+/**
+ * What a recipe job's specification records of the serving index (ADR 0141): the SHA-256 and size of the
+ * bytes the Worker staged, or the word for why it staged none. Only a recipe job carries it (a person's
+ * job is refused it); it is the platform's statement of what the run was handed, which the derivative key
+ * reads (ADR 0140).
+ */
+const servingIndexRefSchema = z.union([
+  z.object({ sha256: sha256Schema, size: safeInt(1, COMPUTE_SERVING_INDEX_MAX_BYTES) }).strict(),
+  z.object({ reason: z.enum(SERVING_INDEX_ABSENT_REASONS) }).strict(),
+]);
+
 const datasetRefSchema = z
   .object({
     id: z.string().regex(COMPUTE_DATASET_ID_RE),
@@ -809,6 +850,7 @@ export const JobSpecSchema = z
       .describe(COMPUTE_COMMAND_DESCRIPTION),
     args: z.array(argSchema).max(64).default([]).describe(COMPUTE_ARGS_DESCRIPTION),
     bundle: bundleRefSchema.optional(),
+    serving_index: servingIndexRefSchema.optional(),
     datasets: z.array(datasetRefSchema).max(20).default([]),
     partition: z.enum(PARTITION_NAMES),
     nodes: safeInt(1, 64).default(1),
@@ -839,6 +881,9 @@ export const JobSpecSchema = z
     }
     if (spec.entry !== undefined && spec.bundle === undefined) {
       refuse("bundle", "an entry needs the bundle that holds it");
+    }
+    if (spec.serving_index !== undefined && spec.recipe === undefined) {
+      refuse("serving_index", "only a recipe job is handed a serving index");
     }
     if (launchVariableBytes(spec) > LAUNCH_VARIABLE_BYTES_MAX) {
       ctx.addIssue({

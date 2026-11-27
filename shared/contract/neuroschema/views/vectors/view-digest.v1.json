@@ -1,0 +1,440 @@
+{
+  "format": "nemar.view-digest.v1",
+  "spec": "docs/views/view-digest.md",
+  "description": "Cases every implementation of nemar.view-digest.v1 reproduces. Parse each case's declaration with a standard JSON parser, canonicalize it (RFC 8785), and compare the UTF-8 bytes with canonical and their SHA-256 with sha256. Parse each refusal's json text the same way, refusing a duplicate member name however it is escaped, a lone surrogate or a noncharacter in a string, and nesting deeper than 64: it has no digest.",
+  "cases": [
+    {
+      "name": "table_view",
+      "covers": "A table view as a recipe writes it.",
+      "declaration": {
+        "key": "channels",
+        "kind": "nemar.table",
+        "kind_version": 1,
+        "caption": "Channels of the recording and the floor's bad-channel decisions.",
+        "source": {
+          "recipe": {
+            "name": "nemar-floor",
+            "version": "1.0.0-b1"
+          }
+        },
+        "data": [
+          {
+            "role": "table",
+            "location": "sub-013/eeg/sub-013_task-FaceRecognition_desc-nemarfloor_channels.tsv",
+            "format": "tsv",
+            "size": 2214,
+            "sha256": "bc9fc20021eb36877de1bc72931fe9b0684c1e386c11fa812c050637f08d3ac1",
+            "columns": [
+              {
+                "name": "name",
+                "type": "string"
+              },
+              {
+                "name": "type",
+                "type": "string"
+              },
+              {
+                "name": "status",
+                "type": "string"
+              },
+              {
+                "name": "status_description",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "canonical": "{\"caption\":\"Channels of the recording and the floor's bad-channel decisions.\",\"data\":[{\"columns\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"type\",\"type\":\"string\"},{\"name\":\"status\",\"type\":\"string\"},{\"name\":\"status_description\",\"type\":\"string\"}],\"format\":\"tsv\",\"location\":\"sub-013/eeg/sub-013_task-FaceRecognition_desc-nemarfloor_channels.tsv\",\"role\":\"table\",\"sha256\":\"bc9fc20021eb36877de1bc72931fe9b0684c1e386c11fa812c050637f08d3ac1\",\"size\":2214}],\"key\":\"channels\",\"kind\":\"nemar.table\",\"kind_version\":1,\"source\":{\"recipe\":{\"name\":\"nemar-floor\",\"version\":\"1.0.0-b1\"}}}",
+      "sha256": "4fbda8cc5a8b4938eb27cec1e76e82495524e77b0e90aa28e4d442eb8d045c9c"
+    },
+    {
+      "name": "computed_view",
+      "covers": "A computed view with a null store digest and float parameters.",
+      "declaration": {
+        "key": "activity",
+        "kind": "example.computed",
+        "kind_version": 1,
+        "caption": "A view computed in the browser from two inputs.",
+        "source": {
+          "plugin": {
+            "name": "example-plugin",
+            "version": "0.1.0"
+          }
+        },
+        "parameters": {
+          "window_s": 30.0,
+          "highpass_hz": 1.0,
+          "order": 2
+        },
+        "inputs": [
+          {
+            "role": "unmixing",
+            "file": {
+              "location": "sub-013/eeg/sub-013_task-FaceRecognition_desc-nemarica_unmixing.tsv",
+              "sha256": "459a343127afbf5a77569aabac46aeb6020eca0350a075f5b8a736ed9858646c",
+              "size": 81920
+            }
+          },
+          {
+            "role": "signal",
+            "store": {
+              "recording": "sub-013/eeg/sub-013_task-FaceRecognition_eeg.set",
+              "group": "eeg",
+              "content_sha256": null,
+              "profile": "archive"
+            }
+          }
+        ],
+        "transform": {
+          "name": "example.computed.v1",
+          "parameters": {
+            "input_unit": "uV",
+            "max_window_s": 30
+          }
+        }
+      },
+      "canonical": "{\"caption\":\"A view computed in the browser from two inputs.\",\"inputs\":[{\"file\":{\"location\":\"sub-013/eeg/sub-013_task-FaceRecognition_desc-nemarica_unmixing.tsv\",\"sha256\":\"459a343127afbf5a77569aabac46aeb6020eca0350a075f5b8a736ed9858646c\",\"size\":81920},\"role\":\"unmixing\"},{\"role\":\"signal\",\"store\":{\"content_sha256\":null,\"group\":\"eeg\",\"profile\":\"archive\",\"recording\":\"sub-013/eeg/sub-013_task-FaceRecognition_eeg.set\"}}],\"key\":\"activity\",\"kind\":\"example.computed\",\"kind_version\":1,\"parameters\":{\"highpass_hz\":1,\"order\":2,\"window_s\":30},\"source\":{\"plugin\":{\"name\":\"example-plugin\",\"version\":\"0.1.0\"}},\"transform\":{\"name\":\"example.computed.v1\",\"parameters\":{\"input_unit\":\"uV\",\"max_window_s\":30}}}",
+      "sha256": "f8fdef4ebc37a1df99d5950c49453244ac2e41c9b974aecc49bfcb228da6d381"
+    },
+    {
+      "name": "key_order",
+      "covers": "Members sorted at every depth; uppercase and underscore before lowercase; a prefix first.",
+      "declaration": {
+        "source": {
+          "recipe": {
+            "version": "1",
+            "name": "x"
+          }
+        },
+        "kind": "k.v",
+        "b": [
+          {
+            "z": 1,
+            "y": 2
+          }
+        ],
+        "aa": 3,
+        "a": 4,
+        "_": 2,
+        "A": 1
+      },
+      "canonical": "{\"A\":1,\"_\":2,\"a\":4,\"aa\":3,\"b\":[{\"y\":2,\"z\":1}],\"kind\":\"k.v\",\"source\":{\"recipe\":{\"name\":\"x\",\"version\":\"1\"}}}",
+      "sha256": "1d883478d5df7e14513da6e82b5160fa26e0b027befc92ee3b59d5c349418bbc"
+    },
+    {
+      "name": "key_order_utf16",
+      "covers": "Sorted by UTF-16 code units: U+1F600 (D83D DE00) before U+FF61, which code point order reverses.",
+      "declaration": {
+        "\uff61": 4,
+        "\ud83d\ude00": 3,
+        "\u00e9": 2,
+        "\u0080": 5,
+        "z": 1
+      },
+      "canonical": "{\"z\":1,\"\u0080\":5,\"\u00e9\":2,\"\ud83d\ude00\":3,\"\uff61\":4}",
+      "sha256": "7026c262205639fac0bfeb86d45135605bded53afa257189acb5b799575fdafe"
+    },
+    {
+      "name": "numbers",
+      "covers": "ECMAScript number printing: no trailing .0, exponent from 1e21 and below 1e-6, shortest round trip, -0 as 0.",
+      "declaration": {
+        "n": [
+          0,
+          -0.0,
+          1,
+          -1,
+          100.0,
+          0.1,
+          -2.5,
+          0.30000000000000004,
+          1e+16,
+          1e+21,
+          1e-07,
+          1e-06,
+          1.2345678901234568e+20,
+          2.9514790517935283e+20,
+          5e-324,
+          -5e-324,
+          1.7976931348623157e+308,
+          9.999999999999997e+22,
+          1e+23,
+          1.0000000000000001e+23,
+          333333333.33333325,
+          9.999999999999997e-07,
+          -3.3333333333333333e-06,
+          1424953923781206.2
+        ]
+      },
+      "canonical": "{\"n\":[0,0,1,-1,100,0.1,-2.5,0.30000000000000004,10000000000000000,1e+21,1e-7,0.000001,123456789012345680000,295147905179352830000,5e-324,-5e-324,1.7976931348623157e+308,9.999999999999997e+22,1e+23,1.0000000000000001e+23,333333333.33333325,9.999999999999997e-7,-0.0000033333333333333333,1424953923781206.2]}",
+      "sha256": "b83b9e2ca19c41ea5061652abfb091305adea8702c22349c7406caef3ebc2276"
+    },
+    {
+      "name": "integers_beyond_binary64",
+      "covers": "An integer outside binary64 precision is the nearest binary64, as a JSON parser reads it.",
+      "declaration": {
+        "n": [
+          9007199254740992,
+          9007199254740993,
+          -9007199254740993,
+          12345678901234567890
+        ]
+      },
+      "canonical": "{\"n\":[9007199254740992,9007199254740992,-9007199254740992,12345678901234567000]}",
+      "sha256": "b42a94c47ddb8ff600ee49a38f87e22261dee18b930b6254a23738a957b39063"
+    },
+    {
+      "name": "escapes",
+      "covers": "Only quote, backslash and U+0000 to U+001F are escaped, short forms where JSON has them; '/', U+007F, U+2028 and non-ASCII are written as UTF-8.",
+      "declaration": {
+        "s": "q\" b\\ s/ t\t n\n r\r b\b f\f nul\u0000 us\u001f del\u007f ls\u2028 e\u00e9 smile\ud83d\ude00",
+        "tab\tkey": "\u00b5V"
+      },
+      "canonical": "{\"s\":\"q\\\" b\\\\ s/ t\\t n\\n r\\r b\\b f\\f nul\\u0000 us\\u001f del\u007f ls\u2028 e\u00e9 smile\ud83d\ude00\",\"tab\\tkey\":\"\u00b5V\"}",
+      "sha256": "a00413f708a72885ce5ab00179bb119ccdc7620987f8b09dcfbe93d22ab817e7"
+    },
+    {
+      "name": "literals_and_nesting",
+      "covers": "true, false, null, empty containers and nested arrays keep their order.",
+      "declaration": {
+        "e": {},
+        "a": [
+          true,
+          false,
+          null,
+          [],
+          {},
+          [
+            1,
+            [
+              2,
+              {
+                "d": "c",
+                "c": "d"
+              }
+            ]
+          ]
+        ]
+      },
+      "canonical": "{\"a\":[true,false,null,[],{},[1,[2,{\"c\":\"d\",\"d\":\"c\"}]]],\"e\":{}}",
+      "sha256": "6321dd46247ec04b5cea4b18e455393aa63d57c3deee800ea036072d83ac6f0b"
+    },
+    {
+      "name": "nested_64",
+      "covers": "A declaration nested exactly 64 deep, the most a reader accepts.",
+      "declaration": {
+        "key": "nested",
+        "kind": "example.nested",
+        "kind_version": 1,
+        "caption": "Nested parameters.",
+        "source": {
+          "plugin": {
+            "name": "example-plugin",
+            "version": "1.0.0"
+          }
+        },
+        "parameters": {
+          "x": [
+            [
+              [
+                [
+                  [
+                    [
+                      [
+                        [
+                          [
+                            [
+                              [
+                                [
+                                  [
+                                    [
+                                      [
+                                        [
+                                          [
+                                            [
+                                              [
+                                                [
+                                                  [
+                                                    [
+                                                      [
+                                                        [
+                                                          [
+                                                            [
+                                                              [
+                                                                [
+                                                                  [
+                                                                    [
+                                                                      [
+                                                                        [
+                                                                          [
+                                                                            [
+                                                                              [
+                                                                                [
+                                                                                  [
+                                                                                    [
+                                                                                      [
+                                                                                        [
+                                                                                          [
+                                                                                            [
+                                                                                              [
+                                                                                                [
+                                                                                                  [
+                                                                                                    [
+                                                                                                      [
+                                                                                                        [
+                                                                                                          [
+                                                                                                            [
+                                                                                                              [
+                                                                                                                [
+                                                                                                                  [
+                                                                                                                    [
+                                                                                                                      [
+                                                                                                                        [
+                                                                                                                          [
+                                                                                                                            [
+                                                                                                                              [
+                                                                                                                                [
+                                                                                                                                  [
+                                                                                                                                    [
+                                                                                                                                      7
+                                                                                                                                    ]
+                                                                                                                                  ]
+                                                                                                                                ]
+                                                                                                                              ]
+                                                                                                                            ]
+                                                                                                                          ]
+                                                                                                                        ]
+                                                                                                                      ]
+                                                                                                                    ]
+                                                                                                                  ]
+                                                                                                                ]
+                                                                                                              ]
+                                                                                                            ]
+                                                                                                          ]
+                                                                                                        ]
+                                                                                                      ]
+                                                                                                    ]
+                                                                                                  ]
+                                                                                                ]
+                                                                                              ]
+                                                                                            ]
+                                                                                          ]
+                                                                                        ]
+                                                                                      ]
+                                                                                    ]
+                                                                                  ]
+                                                                                ]
+                                                                              ]
+                                                                            ]
+                                                                          ]
+                                                                        ]
+                                                                      ]
+                                                                    ]
+                                                                  ]
+                                                                ]
+                                                              ]
+                                                            ]
+                                                          ]
+                                                        ]
+                                                      ]
+                                                    ]
+                                                  ]
+                                                ]
+                                              ]
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        }
+      },
+      "canonical": "{\"caption\":\"Nested parameters.\",\"key\":\"nested\",\"kind\":\"example.nested\",\"kind_version\":1,\"parameters\":{\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[7]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]},\"source\":{\"plugin\":{\"name\":\"example-plugin\",\"version\":\"1.0.0\"}}}",
+      "sha256": "f382c27707957eb2f8f650766e3f349edbbf15ad1e3a03ed38df4fe24ca6d259"
+    }
+  ],
+  "refusals": [
+    {
+      "name": "lone_surrogate",
+      "covers": "A string holding a lone surrogate.",
+      "json": "{\"caption\":\"\\ud800\"}"
+    },
+    {
+      "name": "lone_surrogate_in_key",
+      "covers": "A member name holding a lone surrogate.",
+      "json": "{\"\\udc00\":1}"
+    },
+    {
+      "name": "not_finite",
+      "covers": "A number outside binary64 range, which a parser reads as infinite.",
+      "json": "{\"n\":1e400}"
+    },
+    {
+      "name": "integer_beyond_binary64",
+      "covers": "An integer literal of 401 digits, outside binary64 range: JSON.parse reads Infinity, and Python reads it exactly but cannot make it a binary64.",
+      "json": "{\"n\":10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000}"
+    },
+    {
+      "name": "not_an_object",
+      "covers": "A declaration is a JSON object.",
+      "json": "[1,2]"
+    },
+    {
+      "name": "duplicate_member_name",
+      "covers": "Two members with one name, inside a nested object; a parser that keeps the last member would hide it.",
+      "json": "{\"key\":\"channels\",\"source\":{\"recipe\":{\"name\":\"nemar-floor\",\"name\":\"nemar-ica\",\"version\":\"1.0.0\"}}}"
+    },
+    {
+      "name": "nan_literal",
+      "covers": "NaN is not JSON, though Python's json.loads accepts it.",
+      "json": "{\"parameters\":{\"x\":NaN}}"
+    },
+    {
+      "name": "noncharacter",
+      "covers": "A string holding the noncharacter U+FDD0, which I-JSON forbids.",
+      "json": "{\"caption\":\"\\ufdd0\"}"
+    },
+    {
+      "name": "noncharacter_in_key",
+      "covers": "A member name holding the noncharacter U+FFFF.",
+      "json": "{\"\\uffff\":1}"
+    },
+    {
+      "name": "noncharacter_astral",
+      "covers": "A string holding U+10FFFE, a noncharacter written as a surrogate pair.",
+      "json": "{\"caption\":\"x\\udbff\\udffe\"}"
+    },
+    {
+      "name": "noncharacter_raw",
+      "covers": "A string holding the noncharacter U+FFFE as itself, not escaped.",
+      "json": "{\"caption\":\"x\ufffe\"}"
+    },
+    {
+      "name": "escaped_duplicate_member_name",
+      "covers": "Two members with one name, the second written with an escape (key and \\u006bey are one name).",
+      "json": "{\"key\":\"a\",\"\\u006bey\":\"b\"}"
+    },
+    {
+      "name": "escaped_duplicate_nested",
+      "covers": "An escaped duplicate inside a nested object (version and \\u0076ersion).",
+      "json": "{\"source\":{\"recipe\":{\"name\":\"nemar-ica\",\"version\":\"1.0.0\",\"\\u0076ersion\":\"2.0.0\"}}}"
+    },
+    {
+      "name": "nested_65",
+      "covers": "Arrays and objects nested 65 deep, one more than a reader accepts.",
+      "json": "{\"key\":\"nested\",\"parameters\":{\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[7]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}"
+    }
+  ]
+}

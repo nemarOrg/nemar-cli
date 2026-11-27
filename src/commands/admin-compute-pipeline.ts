@@ -1,10 +1,13 @@
 /**
  * `nemar admin compute pipeline`: an administrator runs NEMAR's own processing recipes through the compute
- * gateway and reads the stamps they leave (epic #2005 phase A6, #2011; ADR 0118; design section 10).
+ * gateway and reads their progress grid, failures and stamps (epic #2005 phase A6, #2011; ADR 0118; design section 10).
  *
  *   nemar admin compute pipeline run <recipe> --dataset <id>[@version] [--executor tapis|runner] [--input bids|zarr] [--dry-run]
  *   nemar admin compute pipeline run <recipe> --eligible [--limit <n>] [--dry-run]
- *   nemar admin compute pipeline status [--recipe <name>] [--dataset <id>] [--state <state>] [--limit <n>]
+ *   nemar admin compute pipeline status [--recipe <name>] [--status <word>] [--dataset <id>] [--limit <n>] [--no-sync]
+ *   nemar admin compute pipeline failures <stamp-id>
+ *   nemar admin compute pipeline quality <stamp-id> [--after <recording path>]
+ *   nemar admin compute pipeline stamps [--recipe <name>] [--dataset <id>] [--state <state>] [--limit <n>]
  *
  * A run names a recipe and then ONE dataset (with an optional version) or the queue of eligible datasets
  * with a limit. Every run, whoever asks, is bounded by the owner's live and daily caps and by
@@ -17,28 +20,47 @@
  */
 
 import { Command } from "commander";
-import { RECIPE_INPUTS } from "../../shared/compute-recipes.js";
+import { PIPELINE_STALLED_SECONDS } from "../../shared/compute-checkpoints.js";
+import { COMPUTE_RECIPES, RECIPE_INPUTS } from "../../shared/compute-recipes.js";
 import {
+  COMPUTE_PIPELINE_GRID_PAGE_DEFAULT,
+  COMPUTE_PIPELINE_GRID_PAGE_MAX,
+  COMPUTE_PIPELINE_GRID_STATUSES,
+  COMPUTE_PIPELINE_RECIPE_VERSION_RE,
   COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT,
   COMPUTE_PIPELINE_RUN_LIMIT_MAX,
   COMPUTE_PIPELINE_RUN_PER_INVOCATION,
+  COMPUTE_PIPELINE_STAMP_ID_RE,
   COMPUTE_PIPELINE_STAMP_STATES,
   COMPUTE_PIPELINE_STATUS_PAGE_MAX,
+  COMPUTE_RUN_QUALITY_PAGE_SIZE,
+  type ComputePipelineCell,
+  ComputePipelineCellSchema,
+  type ComputePipelineGridResponse,
+  type ComputePipelineGridRow,
   type ComputePipelineResult,
   type ComputePipelineRoom,
+  type ComputePipelineRunDetailResponse,
   type ComputePipelineRunRequest,
   type ComputePipelineRunResponse,
   type ComputePipelineStampView,
+  type ComputeRunQualityResponse,
 } from "../../shared/contract/compute-admin.js";
+import { PROGRESS_MAX_FAILURES } from "../../shared/contract/compute-progress.js";
+import { RUNNER_ID_RE } from "../../shared/contract/compute-runner.js";
 import {
   COMPUTE_DATASET_ID_RE,
   COMPUTE_DATASET_VERSION_RE,
   formatSu,
 } from "../../shared/contract/compute.js";
+import { QUALITY_RECORDING_PATH_MAX } from "../../shared/contract/quality-route.js";
 import { failMessage, failWith, requireSignedIn } from "../lib/admin-command.js";
 import {
   computeRefusalCode,
+  getComputePipelineGrid,
+  getComputePipelineRun,
   getComputePipelineStatus,
+  getComputeRunQuality,
   runComputePipeline,
 } from "../lib/api/compute.js";
 import { plain } from "../lib/terminal-text.js";
@@ -231,7 +253,7 @@ Exit codes:
   0  the run was made, or the dry run answered (a queue run that dispatched nothing is still 0).
   1  the arguments are wrong, the dataset was refused, or the Worker refused or could not be reached.`;
 
-const STATUS_HELP = `
+const STAMPS_HELP = `
 Lists the stamps NEMAR's pipelines leave, newest first: one per dataset version, recipe, recipe version and
 engine, with the attempt, the state (dispatched, succeeded, failed, refused), the job, and a fixed word for
 a failure or a refusal. The Worker brings the open stamps up to date with their jobs before it answers.
@@ -243,7 +265,7 @@ Exit codes:
   1  an option is wrong, or the Worker refused or could not be reached.`;
 
 export const pipelineCommand = new Command("pipeline").description(
-  "Run NEMAR's own processing recipes and read their stamps (admin)",
+  "Run NEMAR's recipes and show their progress grid, failures and stamps (admin)",
 );
 
 pipelineCommand
@@ -350,8 +372,8 @@ pipelineCommand
   );
 
 pipelineCommand
-  .command("status")
-  .description("List the stamps of the pipeline runs")
+  .command("stamps")
+  .description("List the stamps of the pipeline runs, newest first")
   .option("--recipe <name>", "Only this recipe")
   .option("--dataset <id>", "Only this dataset")
   .option("--state <state>", `Only this state (${COMPUTE_PIPELINE_STAMP_STATES.join(", ")})`)
@@ -361,7 +383,7 @@ pipelineCommand
   )
   .option("--before <id>", "Continue after the page that ended at this stamp id")
   .option("--json", "Print the Worker's answer as JSON")
-  .addHelpText("after", STATUS_HELP)
+  .addHelpText("after", STAMPS_HELP)
   .action(
     async (o: {
       recipe?: string;
@@ -426,3 +448,401 @@ pipelineCommand
       }
     },
   );
+
+// --- The grid (ADR 0134 decision 5, epic #2324 phase 4a) ----------------------------------------------------
+
+/** The recipe `status` shows when none is named: the first the Worker runs automatically. */
+const DEFAULT_GRID_RECIPE = COMPUTE_RECIPES.find((r) => r.autoDispatch)?.name ?? "nemar-floor";
+
+/** A cell's mark as one or two characters after its counts. */
+const MARK_SUFFIX: Record<string, string> = {
+  passed: "",
+  skipped: "x",
+  running: "R",
+  stalled: "S",
+  waiting: "W",
+  pending: "P",
+  no_counts: "?",
+  not_started: "-",
+};
+
+/** A cell as the table prints it: `passed/total` and its mark (`F<n>` for n failed). */
+export function cellText(raw: unknown): string {
+  const parsed = ComputePipelineCellSchema.safeParse(raw);
+  if (!parsed.success) return "?";
+  const cell: ComputePipelineCell = parsed.data;
+  const counts = cell.counts ? `${cell.counts.passed}/${cell.counts.total}` : "";
+  const mark =
+    cell.mark === "failed"
+      ? `F${cell.counts?.failed ?? 0}`
+      : Object.hasOwn(MARK_SUFFIX, cell.mark)
+        ? (MARK_SUFFIX[cell.mark] as string)
+        : word(cell.mark);
+  if (counts === "") return mark === "" ? "-" : mark;
+  return mark === "" ? counts : `${counts} ${mark}`;
+}
+
+const percent = (part: number, whole: number) =>
+  whole === 0 ? "0%" : `${((100 * part) / whole).toFixed(1).replace(/\.0$/, "")}%`;
+
+function printGrid(res: ComputePipelineGridResponse): void {
+  const s = res.summary;
+  const counts = (by: Record<string, unknown>) =>
+    COMPUTE_PIPELINE_GRID_STATUSES.map((w) => `${w.replace("_", " ")} ${Number(by[w] ?? 0)}`).join(
+      ", ",
+    );
+  say(
+    `${word(res.recipe)} ${word(s.recipe_version)}: covered ${s.covered} of ${s.eligible} eligible (${percent(s.covered, s.eligible)}), complete ${s.complete}, at any recipe version ${s.covered_any_version}`,
+  );
+  say(`  all runs: ${counts(s.by_status)}`);
+  if (res.matched.total !== s.eligible) {
+    say(`  matching: ${res.matched.total} (${counts(res.matched.by_status)})`);
+  }
+  say(
+    "  cells: passed/total; F<n> n failed, x the rest skipped, R running, S stalled, W waiting, P pending, ? no counts, - not started",
+  );
+  if (res.rows.length === 0) {
+    say("no datasets");
+    return;
+  }
+  const header = ["dataset", "version", "run", "exec", "status", ...res.columns.map(word)];
+  const lines = res.rows.map((r: ComputePipelineGridRow) => {
+    const run = r.run;
+    const version = run ? word(run.version) : r.newest_version ? word(r.newest_version) : "-";
+    const exec = run ? word(run.runner_name ?? run.executor ?? "-") : "-";
+    return [
+      word(r.dataset_id),
+      version,
+      run ? `#${run.stamp_id}` : "-",
+      exec,
+      word(r.status),
+      ...res.columns.map((c) => cellText(r.cells[c])),
+    ];
+  });
+  const widths = header.map((h, i) => Math.max(h.length, ...lines.map((l) => (l[i] ?? "").length)));
+  const pad = (cols: string[]) =>
+    cols
+      .map((c, i) => c.padEnd(widths[i] ?? 0))
+      .join("  ")
+      .trimEnd();
+  say(pad(header));
+  for (const l of lines) say(pad(l));
+  if (res.next_after !== null) say(`more: --after ${word(res.next_after)}`);
+}
+
+const GRID_HELP = `
+Shows one recipe's runs over the eligible datasets, like the legacy pipeline status table: a row per
+dataset, a column per checkpoint the recipe declares (then stored, set when the derivatives are copied).
+
+A row shows the dataset's newest run of the recipe (any of its versions; never a refusal or a hold) and
+what it shows: not_started (no run), waiting (dispatched, not started, no report yet), running, stalled
+(its last report is more than ${PIPELINE_STALLED_SECONDS / 60} minutes old while the job is submitted, queued or running,
+or the job's state is unreported; a submitted, queued or running job that never sent a progress report
+is never stalled), finished or failed. A cell is
+passed/total with a mark: F<n> n recordings failed there, x the rest were skipped (they failed
+earlier), R running, S stalled, W waiting, P pending (the run ended and its counts, or the stored
+checkpoint, are not reconciled yet), ? no counts (the run ended without a readable recordings table,
+its job never reported, or it ended with no job), - not started.
+
+The first line is the recipe's coverage: datasets whose newest version has a succeeded run of the
+registry's current recipe version, out of the eligible ones; complete is covered with every recording
+passed at the recipe's last checkpoint before stored; "at any recipe version" counts older recipe
+versions too. Coverage counts a finished run once a sync has recorded its end.
+
+  --recipe <name>          the recipe (default ${DEFAULT_GRID_RECIPE})
+  --status <word>          only rows that show this (${COMPUTE_PIPELINE_GRID_STATUSES.join(", ")})
+  --recipe-version <v>     only the newest run of this recipe version; datasets without one are left out
+  --executor <who>         only runs on tapis or on a runner; --runner <id> only one runner's runs
+  --dataset <id>           one dataset
+  --limit <n>, --after <id>  a page of n rows (default ${COMPUTE_PIPELINE_GRID_PAGE_DEFAULT}, at most ${COMPUTE_PIPELINE_GRID_PAGE_MAX}), after a dataset id
+  --no-sync                read only: do not bring the open stamps up to date with their jobs first.
+                           Without it the Worker syncs before it answers. A run's status is right
+                           either way; without a sync, ended runs are not reconciled yet and the
+                           coverage line can lag until a sync records them. Also works while the
+                           Worker is in read-only maintenance mode
+
+The stamp list this command used to print is "pipeline stamps"; one run's failures are "pipeline failures".
+
+Admin or owner. --json prints the Worker's answer as it is.
+
+Exit codes:
+  0  the page was printed.
+  1  an option is wrong, or the Worker refused or could not be reached.`;
+
+pipelineCommand
+  .command("status")
+  .description("Show a recipe's runs as datasets by checkpoints, with its coverage")
+  .option("--recipe <name>", `The recipe (default ${DEFAULT_GRID_RECIPE})`)
+  .option("--status <word>", "Only rows that show this")
+  .option("--recipe-version <v>", "Only runs of this recipe version")
+  .option("--executor <who>", "Only runs on tapis or on a runner")
+  .option("--runner <id>", "Only this runner's runs")
+  .option("--dataset <id>", "Only this dataset")
+  .option(
+    "--limit <n>",
+    `How many rows (default ${COMPUTE_PIPELINE_GRID_PAGE_DEFAULT}, at most ${COMPUTE_PIPELINE_GRID_PAGE_MAX})`,
+  )
+  .option("--after <id>", "Continue after this dataset id")
+  .option("--no-sync", "Do not bring the open stamps up to date first")
+  .option("--state <state>", "Not here: the stamp list is pipeline stamps")
+  .option("--before <id>", "Not here: the stamp list is pipeline stamps")
+  .option("--json", "Print the Worker's answer as JSON")
+  .addHelpText("after", GRID_HELP)
+  .action(
+    async (o: {
+      recipe?: string;
+      status?: string;
+      recipeVersion?: string;
+      executor?: string;
+      runner?: string;
+      dataset?: string;
+      limit?: string;
+      after?: string;
+      sync?: boolean;
+      state?: string;
+      before?: string;
+      json?: boolean;
+    }) => {
+      const json = o.json === true;
+      if (!requireSignedIn(json)) return;
+      const refuse = (message: string) => failMessage(message, { json, answered: true });
+      if (o.state !== undefined || o.before !== undefined) {
+        refuse(
+          "--state and --before belong to the stamp list: run nemar admin compute pipeline stamps.",
+        );
+        return;
+      }
+      const recipe = o.recipe ?? DEFAULT_GRID_RECIPE;
+      if (!RECIPE_RE.test(recipe)) {
+        refuse(`"${recipe}" is not a recipe name.`);
+        return;
+      }
+      if (
+        o.status !== undefined &&
+        !(COMPUTE_PIPELINE_GRID_STATUSES as readonly string[]).includes(o.status)
+      ) {
+        refuse(`--status is one of ${COMPUTE_PIPELINE_GRID_STATUSES.join(", ")}.`);
+        return;
+      }
+      if (
+        o.recipeVersion !== undefined &&
+        !COMPUTE_PIPELINE_RECIPE_VERSION_RE.test(o.recipeVersion)
+      ) {
+        refuse(`"${o.recipeVersion}" is not a recipe version.`);
+        return;
+      }
+      if (o.executor !== undefined && o.executor !== "tapis" && o.executor !== "runner") {
+        refuse("--executor is tapis or runner.");
+        return;
+      }
+      if (o.runner !== undefined) {
+        if (!RUNNER_ID_RE.test(o.runner)) {
+          refuse(`"${o.runner}" is not a runner id (rnr_ and 24 hex digits).`);
+          return;
+        }
+        if (o.executor === "tapis") {
+          refuse("A runner's jobs are not Tapis jobs: drop --executor tapis or --runner.");
+          return;
+        }
+      }
+      for (const [name, value] of [
+        ["--dataset", o.dataset],
+        ["--after", o.after],
+      ] as const) {
+        if (value !== undefined && !COMPUTE_DATASET_ID_RE.test(value)) {
+          refuse(`${name}: "${value}" is not a dataset id (like nm000104).`);
+          return;
+        }
+      }
+      let limit: number | undefined;
+      if (o.limit !== undefined) {
+        const n = wholeNumber(o.limit, "--limit", 1, COMPUTE_PIPELINE_GRID_PAGE_MAX, json);
+        if (n === null) return;
+        limit = n;
+      }
+      try {
+        const res = await getComputePipelineGrid({
+          recipe,
+          recipeVersion: o.recipeVersion,
+          executor: o.executor,
+          runner: o.runner,
+          status: o.status,
+          dataset: o.dataset,
+          after: o.after,
+          limit,
+          sync: o.sync !== false,
+        });
+        if (json) {
+          console.log(JSON.stringify(res, null, 2));
+          return;
+        }
+        printGrid(res);
+      } catch (err) {
+        failWith(err, null, "Could not read the pipeline grid.", undefined, { json });
+      }
+    },
+  );
+
+function printRunDetail(res: ComputePipelineRunDetailResponse): void {
+  const run = res.run;
+  say(
+    `stamp ${run.stamp_id}: ${word(run.dataset_id)} ${word(run.version)} ${word(run.recipe)} ${word(run.recipe_version)} ${word(run.input)}, ${word(res.status)}${run.outcome ? ` (${word(run.outcome)})` : ""}`,
+  );
+  if (run.job_id) {
+    say(
+      `  job ${word(run.job_id)} ${word(run.job_state ?? "?")} on ${word(run.runner_name ?? run.executor ?? "?")}; ${run.reports} reports, the last ${word(run.reported_at ?? "never")}`,
+    );
+  }
+  for (const c of res.checkpoints) {
+    const counts = c.counts
+      ? `${c.counts.passed} passed, ${c.counts.failed} failed, ${c.counts.skipped} skipped of ${c.counts.total}`
+      : "no counts";
+    say(
+      `  ${word(c.checkpoint)}: ${word(c.mark)}, ${counts}${c.disagreement ? " (the live counts ran ahead)" : ""}`,
+    );
+    if (c.failures_unreadable) say("    the failure list cannot be read");
+    for (const f of c.failures) {
+      say(`    ${word(f.path)}  ${word(f.code)}${f.step ? ` at ${word(f.step)}` : ""}`);
+    }
+    if (c.unlisted > 0) {
+      say(`    and ${c.unlisted} more recordings that stopped here are not listed`);
+    }
+  }
+}
+
+const FAILURES_HELP = `
+Shows one pipeline run (by its stamp id, the run column of "pipeline status"): each checkpoint's counts
+and mark, and the failed recordings it lists with their codes and steps. A checkpoint lists at most
+${PROGRESS_MAX_FAILURES} (the first ones of the recordings table once the run is reconciled, the most recent ones while it
+reports); "more" says how many of the recordings that stopped at that checkpoint (failed or skipped
+there, not earlier) are not listed. Read only.
+
+Admin or owner. --json prints the Worker's answer as it is.
+
+Exit codes:
+  0  the run was printed.
+  1  the stamp id is wrong or there is no such stamp, or the Worker refused or could not be reached.`;
+
+pipelineCommand
+  .command("failures <stamp-id>")
+  .description("Show one pipeline run's checkpoints and the failures each lists")
+  .option("--json", "Print the Worker's answer as JSON")
+  .addHelpText("after", FAILURES_HELP)
+  .action(async (stamp: string, o: { json?: boolean }) => {
+    const json = o.json === true;
+    if (!requireSignedIn(json)) return;
+    // The route's own bound: a whole number of up to 16 digits that is a safe integer.
+    const id = COMPUTE_PIPELINE_STAMP_ID_RE.test(stamp) ? Number(stamp) : Number.NaN;
+    if (!Number.isSafeInteger(id)) {
+      failMessage("<stamp-id> is a whole number from 1 (the run column of pipeline status).", {
+        json,
+        answered: true,
+      });
+      return;
+    }
+    try {
+      const res = await getComputePipelineRun(id);
+      if (json) {
+        console.log(JSON.stringify(res, null, 2));
+        return;
+      }
+      printRunDetail(res);
+    } catch (err) {
+      failWith(err, null, "Could not read the pipeline run.", undefined, { json });
+    }
+  });
+
+/** What each derivative word means, for the line under the stamp (a word this CLI does not know is shown as it is). */
+const QUALITY_MEANING: Record<string, string> = {
+  run_in_progress: "the run has not ended yet, so there is nothing to key",
+  run_not_succeeded: "the run failed or was refused, so no derivative is made of it",
+  not_keyed: "the derivative store made no derivative of it",
+  awaiting_derivative: "the derivative store has not decided yet",
+  failed: "its copy could not be trusted",
+  expired: "its files are deleted, or about to be",
+  copying: "its files are being copied",
+  canary: "stored; administrators only",
+  current: "stored; the row public pages read while the dataset is public",
+  superseded: "stored; a later catalog derivative replaced it",
+  not_current: "stored; a newer row is the one public pages read while the dataset is public",
+};
+
+function printRunQuality(res: ComputeRunQualityResponse): void {
+  say(
+    `stamp ${res.stamp_id}: ${word(res.dataset_id)} ${word(res.version)} ${word(res.recipe)} ${word(res.recipe_version)} ${word(res.input)}, ${word(res.quality)}${res.skip ? ` (${word(res.skip)})` : ""}`,
+  );
+  const meaning = QUALITY_MEANING[res.quality];
+  if (meaning) say(`  ${meaning}`);
+  if (res.skip === "duplicate_key") {
+    say("  an earlier run with the same inputs holds the derivative (duplicate_key)");
+  }
+  if (res.dataset_public === false)
+    say("  the dataset is not public now, so no public page shows it");
+  const d = res.derivative;
+  if (d) {
+    say(
+      `  derivative ${word(d.key.slice(0, 12))} ${word(d.state)} ${word(d.retention)}${d.failure ? ` (${word(d.failure)})` : ""}; stored ${word(d.stored_at ?? "never")}, expires ${word(d.expires_at ?? "never")}${d.superseded_at ? `, superseded ${word(d.superseded_at)}` : ""}`,
+    );
+  }
+  const r = res.recordings;
+  if (r.state !== "listed") {
+    say(`  recordings: ${word(r.state)}`);
+    return;
+  }
+  say(
+    `  ${r.succeeded ?? 0} succeeded recordings${r.unlisted > 0 ? ` (${r.unlisted} more with a path the quality route does not take)` : ""}`,
+  );
+  for (const item of r.items) say(`    ${word(item.path)}`);
+  if (r.next_after) say(`  more: --after ${word(r.next_after)}`);
+}
+
+const QUALITY_HELP = `
+Shows where one pipeline run's derivative stands (by its stamp id, the run column of "pipeline status"),
+in one word: run_in_progress, run_not_succeeded, not_keyed (with the store's word; duplicate_key means an
+earlier run with the same inputs holds the derivative), awaiting_derivative, failed, expired (a canary 30
+days after it was stored), copying, canary, current (the row public pages read while the dataset is
+public), superseded or not_current; with its retention, its dates and whether the dataset is public now. When its files stand, it lists the recordings that
+succeeded, ${COMPUTE_RUN_QUALITY_PAGE_SIZE} a page in path order; --after <path> (the "more" line) shows the next page. Read only.
+
+Admin or owner. --json prints the Worker's answer as it is.
+
+Exit codes:
+  0  the run was printed, whatever its word.
+  1  the stamp id or the cursor is wrong or there is no such stamp, or the Worker refused or could not be
+     reached.`;
+
+pipelineCommand
+  .command("quality <stamp-id>")
+  .description("Show where one pipeline run's derivative stands and its succeeded recordings")
+  .option("--after <path>", "The page after this recording path (the last line's more)")
+  .option("--json", "Print the Worker's answer as JSON")
+  .addHelpText("after", QUALITY_HELP)
+  .action(async (stamp: string, o: { after?: string; json?: boolean }) => {
+    const json = o.json === true;
+    if (!requireSignedIn(json)) return;
+    const id = COMPUTE_PIPELINE_STAMP_ID_RE.test(stamp) ? Number(stamp) : Number.NaN;
+    if (!Number.isSafeInteger(id)) {
+      failMessage("<stamp-id> is a whole number from 1 (the run column of pipeline status).", {
+        json,
+        answered: true,
+      });
+      return;
+    }
+    if (o.after !== undefined && (o.after === "" || o.after.length > QUALITY_RECORDING_PATH_MAX)) {
+      failMessage("--after is a recording path, the one a page's more line names.", {
+        json,
+        answered: true,
+      });
+      return;
+    }
+    try {
+      const res = await getComputeRunQuality(id, o.after);
+      if (json) {
+        console.log(JSON.stringify(res, null, 2));
+        return;
+      }
+      printRunQuality(res);
+    } catch (err) {
+      failWith(err, null, "Could not read the pipeline run's quality.", undefined, { json });
+    }
+  });

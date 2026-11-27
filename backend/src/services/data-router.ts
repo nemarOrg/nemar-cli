@@ -635,13 +635,13 @@ export function toHttpDate(value: string): string {
 // ===========================================================================
 // metadata.json builders
 //
-// Composes a neuroschema v0.4.1 `dataset` document from the catalog row in
+// Composes a neuroschema v0.6.0 `dataset` document from the catalog row in
 // D1, the parsed nemar_metadata.json enrichment payload, the dataset_versions
 // list, and (optionally) the latest version's S3 manifest. All pure: no D1,
 // S3, or network access happens here; callers in routes/data.ts wire the I/O.
 //
 // The wire format mirrors `~/Documents/git/nemar/neuroschema/schema/core/dataset.schema.json`
-// (v0.4.1). NEMAR-specific aggregates that aren't part of the FAIR core
+// (v0.6.0). NEMAR-specific aggregates that aren't part of the FAIR core
 // (version DOI list, derived BIDS subjects/sessions/tasks/runs tree) sit in
 // `extensions.nemar` per `schema/extensions/nemar.schema.json` which already
 // declares `additionalProperties: true`.
@@ -895,7 +895,53 @@ export interface NeuroschemaDataset {
   signal_defaults: DatasetSignalDefaults | null;
   provenance: DatasetProvenance;
   external_links: DatasetExternalLinks;
-  extensions: { nemar: NemarExtensionBlock };
+  extensions: {
+    nemar: NemarExtensionBlock;
+    /**
+     * neuroschema `processing`, dataset level (ADR 0134 decision 9 as amended 2026-11-26): the reconciled
+     * counts of each recipe's promoted run (its current public derivative).
+     */
+    processing?: { level: "dataset"; recipes: Record<string, unknown> };
+    /** neuroschema `signalJourney`: a link to the dataset record of each recipe's promoted run. */
+    signalJourney?: { recipes: Record<string, unknown> };
+    /**
+     * neuroschema `dataQuality`, dataset level (ADR 0137 decision 8): the quality summary of each recipe's
+     * current public derivative.
+     */
+    dataQuality?: { level: "dataset"; recipes: Record<string, unknown> };
+  };
+}
+
+/** The pipeline's namespaces of a dataset document's `extensions`. */
+export interface PipelineExtensions {
+  processing?: { level: "dataset"; recipes: Record<string, unknown> };
+  signalJourney?: { recipes: Record<string, unknown> };
+  dataQuality?: { level: "dataset"; recipes: Record<string, unknown> };
+}
+
+/**
+ * The neuroschema `processing`, `signalJourney` and `dataQuality` extensions of a dataset (ADR 0134 decision
+ * 9 as amended 2026-11-26, ADR 0137 decision 8, epic #2324), from the entries of each recipe's PROMOTED run
+ * (its current public derivative), already built and parsed: the reconciled counts, the link of its dataset
+ * record and its quality summary. Each namespace is present only when it has an entry.
+ */
+export function pipelineExtensions(entries: {
+  processing: Readonly<Record<string, unknown>>;
+  signalJourney: Readonly<Record<string, unknown>>;
+  dataQuality: Readonly<Record<string, unknown>>;
+}): PipelineExtensions {
+  const { processing, signalJourney, dataQuality } = entries;
+  return {
+    ...(Object.keys(processing).length > 0
+      ? { processing: { level: "dataset" as const, recipes: { ...processing } } }
+      : {}),
+    ...(Object.keys(signalJourney).length > 0
+      ? { signalJourney: { recipes: { ...signalJourney } } }
+      : {}),
+    ...(Object.keys(dataQuality).length > 0
+      ? { dataQuality: { level: "dataset" as const, recipes: { ...dataQuality } } }
+      : {}),
+  };
 }
 
 /**

@@ -6,7 +6,8 @@
  * THE ORDER IS THE POINT. No upload address is issued before every check has passed:
  *  1. the request is a valid `OutputsRequest` (closed, the contract's own path predicate, each launcher
  *     file named once, no path twice);
- *  2. the number of outputs is within the policy's `resultLimits.maxFiles` (`too_many_outputs`);
+ *  2. the number of outputs is within the policy's `resultLimits.maxFiles`, or a pipeline job's recipe's own
+ *     (`resultMaxFilesFor`) (`too_many_outputs`);
  *  3. no file is over `RESULT_MAX_FILE_BYTES` (5 GB, until presigned multipart is verified on R2) and
  *     the whole is within the job limit `resultLimits.maxJobBytes` (`results_too_large`);
  *  4. the bytes are CLAIMED in ONE conditional UPDATE of `results_bytes` whose WHERE holds the person's
@@ -57,7 +58,7 @@ import {
 import type { Bindings } from "../types/bindings.js";
 import { type ComputeJobRow, TERMINAL_STATES_SQL, getJob } from "./compute-jobs.js";
 import { getPolicy } from "./compute-policy.js";
-import { outputsBodyLimitBytes } from "./compute-records.js";
+import { outputsBodyLimitBytes, resultMaxFilesFor } from "./compute-records.js";
 import { COMPUTE_UPLOAD_SECONDS, computeS3, objectKeyProblem, presignPut } from "./compute-s3.js";
 import { declaredKey, declaredText, firstIncomplete, readDeclared } from "./compute-verify.js";
 
@@ -205,8 +206,10 @@ export async function handleOutputs(
   const bucket = env.COMPUTE_RESULTS;
   if (!bucket || !computeS3(env)) return refuse("compute_disabled");
   let policy: Awaited<ReturnType<typeof getPolicy>>["policy"];
+  let maxFiles: number;
   try {
     policy = (await getPolicy(env.DB)).policy;
+    maxFiles = await resultMaxFilesFor(env.DB, job, policy.resultLimits.maxFiles);
   } catch {
     return refuse("compute_disabled");
   }
@@ -242,14 +245,14 @@ export async function handleOutputs(
   // files and is accepted; a request that names outputs is refused again with the recorded word.
   if (recorded !== null && outputs.length > 0) return refuseAndRecord(env, job, recorded);
 
-  if (outputs.length > policy.resultLimits.maxFiles) {
+  if (outputs.length > maxFiles) {
     return refuseAndRecord(env, job, "too_many_outputs");
   }
   const sizes = [...outputs.map((o) => o.size), ...launcher.map((f) => f.size)];
   const total = sizes.reduce((sum, n) => sum + n, 0);
   if (
     sizes.some((n) => n > RESULT_MAX_FILE_BYTES) ||
-    launcher.some((f) => f.size > launcherFileCap(f.name, policy.resultLimits.maxFiles)) ||
+    launcher.some((f) => f.size > launcherFileCap(f.name, maxFiles)) ||
     total > policy.resultLimits.maxJobBytes
   ) {
     return refuseAndRecord(env, job, "results_too_large");
@@ -355,8 +358,14 @@ export async function handleComplete(env: Bindings, job: ComputeJobRow): Promise
   return { ok: false, status: COMPUTE_REFUSAL_STATUS.bad_state, code: "bad_state" };
 }
 
-/** The body cap of the outputs route for the owner's current policy: derived from `maxFiles`, never under 1 MiB. */
-export async function outputsBodyCap(env: Bindings): Promise<number> {
+/**
+ * The body cap of the outputs route for a job: derived from the `maxFiles` it is held to (the owner's policy,
+ * or its pipeline recipe's own, `resultMaxFilesFor`), never under 1 MiB.
+ */
+export async function outputsBodyCap(
+  env: Bindings,
+  job: { id: string; source: string },
+): Promise<number> {
   const { policy } = await getPolicy(env.DB);
-  return outputsBodyLimitBytes(policy.resultLimits.maxFiles);
+  return outputsBodyLimitBytes(await resultMaxFilesFor(env.DB, job, policy.resultLimits.maxFiles));
 }

@@ -1279,6 +1279,37 @@ export async function getZarrIndex(
 }
 
 /**
+ * The response of a signed GET of `<id>/zarr/index.json`, unread, for a caller that needs the exact
+ * bytes (the serving index a pipeline job is handed, ADR 0141): null on 404 (the index is absent),
+ * `"forbidden"` on 403, the response on 200, and a throw for any other status. Unlike {@link getZarrIndex},
+ * whose sweep must converge and so reads a 403 as absent, a 403 here is handed back as it is: the Worker's
+ * credentials lack `s3:ListBucket`, so a missing object answers 403 too, and only the caller can tell the
+ * two apart (the dataset row's copy). The caller bounds the read and the wait; this never reads the body.
+ */
+export async function getZarrIndexResponse(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  signal?: AbortSignal,
+): Promise<Response | null | "forbidden"> {
+  const { bucket, region } = options;
+  const key = `${datasetId}/zarr/index.json`;
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+  const aws = createS3Client(options);
+  const signed = await aws.sign(url, { method: "GET" });
+  const response = await fetch(signed, signal === undefined ? undefined : { signal });
+  if (response.status === 404 || response.status === 403) {
+    await response.body?.cancel().catch(() => {});
+    return response.status === 404 ? null : "forbidden";
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`getZarrIndexResponse ${response.status} (infra failure)`);
+  }
+  return response;
+}
+
+/**
  * Apply S3 Object Lock (Governance mode) to all objects under a dataset's
  * objects/ prefix. Uses a 100-year retention period to effectively make
  * data blobs immutable. Manifests (version/) and archives (archives/) are
