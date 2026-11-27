@@ -436,6 +436,17 @@ describe("approveEvidenceLines", () => {
     expect(approveEvidenceLines(review(e), "nm000480")).toEqual([shownLine(e), POINTER]);
   });
 
+  test("a version-3 review says what LICENSE was identified as, not only that it was not sent", () => {
+    const e = parsePublicationReviewReport(
+      v3PublicationReport({
+        documents: { ...(evidenceFor().documents as object), license: "absent" },
+      }),
+    ).evidence;
+    const lines = approveEvidenceLines(review(e), "nm000480");
+    expect(lines).toEqual([shownLine(e), "LICENSE: matches CC-BY-4.0", POINTER]);
+    expect(lines[1]).toBe(licenseFileLine(e));
+  });
+
   test("no review, or a review with no evidence yet, has nothing to show", () => {
     expect(approveEvidenceLines(null, "nm000480")).toEqual([]);
     expect(approveEvidenceLines(undefined, "nm000480")).toEqual([]);

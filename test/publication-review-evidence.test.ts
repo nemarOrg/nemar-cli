@@ -607,11 +607,18 @@ describe("the model receives cleared prose and numbers, and nothing else", () =>
     expect(Object.keys(facts).sort()).toEqual([
       "description_keys_not_shown",
       "documents",
+      "license_field",
+      "license_file",
+      "license_matcher",
       "metadata",
       "name_length",
       "release",
       "structure",
     ]);
+    // No scan: the LICENSE is not identified and is sent as the file; the field is normalized.
+    expect(facts.license_file).toEqual({ state: "not_identified", spdx: null, text: "file" });
+    expect(facts.license_matcher).toBe("unavailable");
+    expect(facts.license_field).toBe("cc0-1.0");
     expect(Object.keys(facts.structure).sort()).toEqual([
       "channel_counts",
       "datatypes",
@@ -1433,27 +1440,33 @@ describe("runPublicationReview: the job around the model call", () => {
 // Reading from the job's real clone: shallow, blob-less, and read with no network at all
 // ---------------------------------------------------------------------------------------------
 
-describe("LICENSE's identification (ADR 0142) changes nothing the model sees in this phase", () => {
-  const FIXTURE = join(import.meta.dir, "fixtures", "license-scan", "cc-by-4.0");
-  const LICENSE_TEXT = readFileSync(join(FIXTURE, "LICENSE"), "utf8");
-  const RESULT = readFileSync(join(FIXTURE, "result.json"), "utf8");
+describe("LICENSE's identification (ADR 0142) decides what the model is sent", () => {
+  const FIXTURES = join(import.meta.dir, "fixtures", "license-scan");
   const UID = process.getuid?.() ?? 0;
+  const fixture = (name: string) => ({
+    license: readFileSync(join(FIXTURES, name, "LICENSE"), "utf8"),
+    result: readFileSync(join(FIXTURES, name, "result.json"), "utf8"),
+    field: (
+      JSON.parse(readFileSync(join(FIXTURES, name, "case.json"), "utf8")) as { field: string }
+    ).field,
+  });
 
-  function licensed(name: string): Dataset {
+  function licensed(name: string, fixtureName = "cc-by-4.0"): Dataset {
+    const f = fixture(fixtureName);
     return newDataset(name, {
-      LICENSE: LICENSE_TEXT,
-      "dataset_description.json": JSON.stringify({ ...DESCRIPTION, License: "CC-BY-4.0" }),
+      LICENSE: f.license,
+      "dataset_description.json": JSON.stringify({ ...DESCRIPTION, License: f.field }),
     });
   }
 
   /** The scan directory the workflow leaves, over this dataset's LICENSE blob. */
-  function scanDirFor(ds: Dataset): string {
+  function scanDirFor(ds: Dataset, fixtureName = "cc-by-4.0"): string {
     const dir = join(root, `scan-${++fileSeq}`);
     mkdirSync(join(dir, "out"), { recursive: true });
     writeFileSync(join(dir, "matcher"), "ok\n");
     writeFileSync(join(dir, "status"), "ok\n");
     writeFileSync(join(dir, "oid"), `${git(ds.dir, "rev-parse", "HEAD:LICENSE")}\n`);
-    writeFileSync(join(dir, "out", "result.json"), RESULT);
+    writeFileSync(join(dir, "out", "result.json"), fixture(fixtureName).result);
     for (const f of ["matcher", "status", "oid", "out/result.json"]) chmodSync(join(dir, f), 0o644);
     return dir;
   }
@@ -1463,34 +1476,69 @@ describe("LICENSE's identification (ADR 0142) changes nothing the model sees in 
     const lines: string[] = [];
     const res = await runPublicationReview({ ...args(ds), ...extra, log: (l) => lines.push(l) });
     if (res.outcome !== "reported") throw new Error(`not reported: ${res.error}`);
-    const { raw } = theRequest();
-    return { res, lines, raw: raw.replace(/[0-9a-f]{32}/g, "NONCE") };
+    const { raw, user } = theRequest();
+    const facts = JSON.parse(/<facts-[0-9a-f]{32}>\n([\s\S]*?)\n<\/facts-/.exec(user)?.[1] ?? "{}");
+    const license = /<untrusted-[0-9a-f]{32} kind="license">\n([\s\S]*?)\n<\/untrusted-/.exec(
+      user,
+    )?.[1];
+    // The report as the Worker's callback route parses it.
+    const parsed = parsePublicationCallbackOutcome(
+      JSON.parse(JSON.stringify({ outcome: "reported", report: res.report })),
+    );
+    if (parsed.kind !== "reported") throw new Error("the Worker refused the report");
+    return {
+      res,
+      report: parsed.report,
+      lines,
+      facts,
+      license,
+      raw: raw.replace(/[0-9a-f]{32}/g, "NONCE"),
+    };
   }
 
-  test("the request and the digest are byte for byte the same with and without a scan", async () => {
-    const ds = licensed("license-scan-same");
+  test("a conclusive match with nothing added sends no LICENSE text, and the facts say why", async () => {
+    const ds = licensed("license-scan-none");
     const without = await run(ds, {});
     const withScan = await run(ds, {
       licenseScanDir: scanDirFor(ds),
       scanOptions: { resultOwnerUid: UID },
     });
-    expect(withScan.raw).toBe(without.raw);
-    // And the report the job posts, byte for byte.
-    expect(withScan.res.outcome).toBe("reported");
-    expect(JSON.stringify(withScan.res.outcome === "reported" ? withScan.res.report : null)).toBe(
-      JSON.stringify(without.res.outcome === "reported" ? without.res.report : null),
-    );
-    expect(withScan.res.outcome === "reported" && withScan.res.report.record?.input_digest).toBe(
-      without.res.outcome === "reported" && without.res.report.record?.input_digest,
-    );
-    expect(without.lines).toEqual(["license_file unreadable; matcher unavailable"]);
-    expect(withScan.lines).toEqual(["license_file matches; matcher scancode-32.5.0+spdx-3.27"]);
-    expect(withScan.res.licenseFile?.fact).toEqual({
+    expect(withScan.license).toBeUndefined();
+    expect(withScan.facts.documents.license).toBe("identified");
+    expect(withScan.facts.license_file).toEqual({
+      state: "matches",
+      spdx: "CC-BY-4.0",
+      text: "none",
+    });
+    expect(withScan.facts.license_field).toBe("cc-by-4.0");
+    expect(withScan.facts.license_matcher).toBe("scancode-32.5.0+spdx-3.27");
+    expect(withScan.raw).not.toContain("Attribution 4.0 International");
+    // The report the Worker stores carries the fact and the matcher, and the digest differs.
+    expect(withScan.report.v).toBe(3);
+    expect(withScan.report.evidence.documents.license).toBe("absent");
+    expect(withScan.report.evidence.license_file).toEqual({
       state: "matches",
       spdx: "CC-BY-4.0",
       additions: false,
       expression: null,
     });
+    expect(withScan.report.record?.license_matcher).toBe("scancode-32.5.0+spdx-3.27");
+    expect(withScan.report.record?.prompt_version).toBe("publication-review-prompt/3");
+    expect(withScan.report.record?.input_digest).not.toBe(without.report.record?.input_digest);
+    // The cut LICENSE no longer makes authors_and_license unknown.
+    expect(answersOf(withScan.report).notes.map((n) => n.question)).not.toContain(
+      "authors_and_license",
+    );
+    expect(answersOf(without.report).notes.map((n) => n.question)).toContain("authors_and_license");
+    // Without a scan, the file is sent as ADR 0102 sends it, cut at its cap.
+    expect(without.facts.documents.license).toBe("shown_cut");
+    expect(without.facts.license_file).toEqual({
+      state: "not_identified",
+      spdx: null,
+      text: "file",
+    });
+    expect(without.lines).toEqual(["license_file unreadable; matcher unavailable"]);
+    expect(withScan.lines).toEqual(["license_file matches; matcher scancode-32.5.0+spdx-3.27"]);
     // The identifier and the license text never reach the log.
     for (const line of withScan.lines) {
       expect(line).not.toContain("CC-BY");
@@ -1498,12 +1546,68 @@ describe("LICENSE's identification (ADR 0142) changes nothing the model sees in 
     }
   });
 
+  test("added text is sent alone, as the license document, and nothing of the license", async () => {
+    const ds = licensed("license-scan-rider", "rider-middle");
+    const { license, facts, report, res } = await run(ds, {
+      licenseScanDir: scanDirFor(ds, "rider-middle"),
+      scanOptions: { resultOwnerUid: UID },
+    });
+    expect(res.licenseFile?.partial).toBe(false);
+    expect(facts.license_file).toEqual({
+      state: "matches",
+      spdx: "CC-BY-4.0",
+      text: "additions_only",
+    });
+    expect(facts.documents.license).toBe("shown");
+    expect(license).toContain("non-commercial purposes only");
+    expect(license).not.toContain("Attribution 4.0 International");
+    expect(license?.length ?? 0).toBeLessThan(400);
+    expect(license).toBe(res.licenseFile?.leftover.join("\n"));
+    expect(report.evidence.license_file?.additions).toBe(true);
+    expect(report.evidence.documents.license).toBe("sent");
+  });
+
+  test("a match that covers less than its whole license sends the whole file", async () => {
+    const ds = licensed("license-scan-partial", "clause-deleted");
+    const { license, facts, report, res } = await run(ds, {
+      licenseScanDir: scanDirFor(ds, "clause-deleted"),
+      scanOptions: { resultOwnerUid: UID },
+    });
+    expect(res.licenseFile?.partial).toBe(true);
+    expect(facts.license_file).toEqual({ state: "matches", spdx: "CC-BY-4.0", text: "file" });
+    expect(license?.startsWith(fixture("clause-deleted").license.slice(0, 200))).toBe(true);
+    expect(report.evidence.documents.license).toBe("sent_cut");
+    expect(report.evidence.license_file?.additions).toBe(true);
+  });
+
+  test("another license than the field's sends no text, and lowers authors_and_license", async () => {
+    const ds = licensed("license-scan-other", "sibling-differs");
+    const { license, facts, report } = await run(ds, {
+      licenseScanDir: scanDirFor(ds, "sibling-differs"),
+      scanOptions: { resultOwnerUid: UID },
+    });
+    expect(license).toBeUndefined();
+    expect(facts.license_file).toEqual({
+      state: "matches_other",
+      spdx: "CC-BY-NC-4.0",
+      text: "none",
+    });
+    expect(report.evidence.license_file?.state).toBe("matches_other");
+    expect(answersOf(report).notes).toContainEqual(
+      expect.objectContaining({ question: "authors_and_license", fact: "license_file_differs" }),
+    );
+  });
+
   test("a scan of another blob is not this LICENSE's: unreadable, matcher unavailable", async () => {
     const ds = licensed("license-scan-other-blob");
     const dir = scanDirFor(ds);
     writeFileSync(join(dir, "oid"), `${"c".repeat(40)}\n`);
-    const { lines } = await run(ds, { licenseScanDir: dir, scanOptions: { resultOwnerUid: UID } });
+    const { lines, report } = await run(ds, {
+      licenseScanDir: dir,
+      scanOptions: { resultOwnerUid: UID },
+    });
     expect(lines).toEqual(["license_file unreadable; matcher unavailable"]);
+    expect(report.record?.license_matcher).toBe("unavailable");
   });
 
   test("an annexed LICENSE is never read from the scan directory", async () => {
@@ -1516,8 +1620,9 @@ describe("LICENSE's identification (ADR 0142) changes nothing the model sees in 
     mkdirSync(dir);
     writeFileSync(join(dir, "matcher"), "ok\n");
     chmodSync(join(dir, "matcher"), 0o644);
-    const { lines } = await run(annexed, { licenseScanDir: dir });
+    const { lines, report } = await run(annexed, { licenseScanDir: dir });
     expect(lines).toEqual(["license_file annexed; matcher scancode-32.5.0+spdx-3.27"]);
+    expect(report.record?.license_matcher).toBe("scancode-32.5.0+spdx-3.27");
   });
 
   test("the job's own owner rule: a result.json this user wrote is not the scan user's", async () => {
@@ -1528,6 +1633,68 @@ describe("LICENSE's identification (ADR 0142) changes nothing the model sees in 
         ? "license_file matches; matcher scancode-32.5.0+spdx-3.27"
         : "license_file unreadable; matcher unavailable",
     ]);
+  });
+});
+
+describe("before the scan step is deployed: every report the job posts parses (ADR 0142, deploy 2)", () => {
+  /** Run the job with no scan directory, as production does until deploy 3. */
+  async function production(ds: Dataset, inputs?: unknown) {
+    modelRequests.length = 0;
+    const res = await runPublicationReview({ ...args(ds, { inputs }), log: () => {} });
+    if (res.outcome !== "reported") throw new Error(`not reported: ${res.error} ${res.diag}`);
+    const parsed = parsePublicationCallbackOutcome(
+      JSON.parse(JSON.stringify({ outcome: "reported", report: res.report })),
+    );
+    if (parsed.kind !== "reported") throw new Error("the Worker refused the report");
+    return parsed.report;
+  }
+
+  test("no LICENSE: absent, matcher unavailable", async () => {
+    const report = await production(newDataset("deploy2-absent", { LICENSE: null }));
+    expect(report.v).toBe(3);
+    expect(report.evidence.license_file?.state).toBe("absent");
+    expect(report.evidence.documents.license).toBe("absent");
+    expect(report.record?.license_matcher).toBe("unavailable");
+  });
+
+  test("an annexed LICENSE: annexed, matcher unavailable", async () => {
+    const ds = newDataset("deploy2-annexed", { LICENSE: null });
+    symlinkSync(".git/annex/objects/x/y/SHA256E-s1--k/SHA256E-s1--k", join(ds.dir, "LICENSE"));
+    git(ds.dir, "add", "-A");
+    git(ds.dir, "commit", "-q", "-m", "annexed");
+    const report = await production({ dir: ds.dir, head: git(ds.dir, "rev-parse", "HEAD") });
+    expect(report.evidence.license_file?.state).toBe("annexed");
+    expect(report.evidence.documents.license).toBe("withheld_annexed");
+    expect(report.record?.license_matcher).toBe("unavailable");
+  });
+
+  test.each([
+    ["a short notice", "This dataset is licensed under CC0.\n"],
+    ["a full license text, cut at the cap", "Creative Commons Legal Code\n".repeat(400)],
+    ["bytes that are not UTF-8", Buffer.from([0xff, 0xfe, 0x00, 0x41])],
+  ])("%s: unreadable, matcher unavailable, and sent as ADR 0102 sends it", async (_n, text) => {
+    const report = await production(newDataset(`deploy2-${++fileSeq}`, { LICENSE: text }));
+    expect(report.evidence.license_file).toEqual({
+      state: "unreadable",
+      spdx: null,
+      additions: false,
+      expression: null,
+    });
+    expect(report.record?.license_matcher).toBe("unavailable");
+    expect(["sent", "sent_cut", "withheld_not_utf8"]).toContain(report.evidence.documents.license);
+  });
+
+  test("the lineage's resolved_at and the names of the keys not shown are in the evidence", async () => {
+    const inputs = emptyInputs();
+    const resolvedAt = "2026-11-27 12:00:00";
+    const report = await production(newDataset("deploy2-lineage"), {
+      ...inputs,
+      lineage: { ...inputs.lineage, resolved_at: resolvedAt },
+    });
+    expect(report.evidence.lineage?.resolved_at).toBe(resolvedAt);
+    // DESCRIPTION's Version is the one key not shown.
+    expect(report.evidence.description_keys_not_shown).toBe(1);
+    expect(report.evidence.description_keys_not_shown_names).toEqual(["Version"]);
   });
 });
 

@@ -262,7 +262,8 @@ function readsAsEvidence(e: unknown): e is PublicationReviewEvidence {
 
 /**
  * What `approve` adds to the review it prints, so an administrator is not asked to `--force` over a
- * reason such as `text_withheld` blind: what the model was shown, what was withheld for findings,
+ * reason such as `text_withheld` blind: what the model was shown, the LICENSE identification of a
+ * version-3 review, what was withheld for findings,
  * and a pointer to `show` for the rest. The same two lines `show` prints, from the same helpers;
  * the model's own summary and notes stay in `show`, under their labels. Empty for a request with no
  * review in force, one whose review has no evidence yet, and evidence of a shape this CLI does not
@@ -275,8 +276,12 @@ export function approveEvidenceLines(
   const evidence = review?.evidence;
   if (!readsAsEvidence(evidence)) return [];
   const withheld = withheldLine(evidence);
+  // A version-3 LICENSE identified with nothing added is `absent` in the shown line, because no
+  // text was sent: the identification says what the file is.
+  const licenseFile = licenseFileLine(evidence);
   return [
     shownLine(evidence),
+    ...(licenseFile === null ? [] : [licenseFile]),
     ...(withheld === null ? [] : [withheld]),
     `The whole review, with the model's questions and findings: nemar admin dataset publish show ${plain(datasetId)}`,
   ];
@@ -388,23 +393,35 @@ export function resubmissionNoteLines(d: PublicationReviewDetail): string[] {
 }
 
 /**
+ * Which request `show` is about: the dataset, the request, its status and its release kind, and
+ * the non-production note when the Worker is not production's. Printed first, before the decision
+ * card, so the release kind is said up front. Pure.
+ */
+export function reviewHeaderLines(d: PublicationReviewDetail): string[] {
+  const kind = d.anonymous ? chalk.yellow("ANONYMOUS RELEASE") : "named publication";
+  const status =
+    d.block_reason === null || d.block_reason === undefined
+      ? plain(d.request_status)
+      : `${plain(d.request_status)} (${plain(d.block_reason)})`;
+  const out = [
+    `${chalk.bold(plain(d.dataset_id))}  request ${plain(String(d.request_id))}, ${status}, ${kind}`,
+  ];
+  if (d.environment !== "production") out.push(`  ${chalk.yellow(NON_PRODUCTION_NOTE)}`);
+  return out;
+}
+
+/**
  * `GET /admin/publish/:id/review` as the lines `show` prints: the request, the screen, then the
  * review in the Worker's words (its headline, the gate, every reason with what clears it), the
  * model's answers, the platform facts that lowered one, the model's findings and summary under
  * their labels, the evidence, what the model was shown, an override on record, the standing line
  * and the next command, then the history. Pure.
  */
-export function reviewDetailLines(d: PublicationReviewDetail): string[] {
-  const out: string[] = [];
-  const kind = d.anonymous ? chalk.yellow("ANONYMOUS RELEASE") : "named publication";
-  const status =
-    d.block_reason === null || d.block_reason === undefined
-      ? plain(d.request_status)
-      : `${plain(d.request_status)} (${plain(d.block_reason)})`;
-  out.push(
-    `${chalk.bold(plain(d.dataset_id))}  request ${plain(String(d.request_id))}, ${status}, ${kind}`,
-  );
-  if (d.environment !== "production") out.push(`  ${chalk.yellow(NON_PRODUCTION_NOTE)}`);
+export function reviewDetailLines(
+  d: PublicationReviewDetail,
+  o: { header?: boolean } = {},
+): string[] {
+  const out: string[] = o.header === false ? [] : reviewHeaderLines(d);
 
   const noteLines = resubmissionNoteLines(d);
   if (noteLines.length > 0) out.push("", ...noteLines);
