@@ -20,6 +20,12 @@ earlier releases are described only by their generated notes.
 **Release note.**
 The identifier screen now reads EEG, fNIRS and MATLAB formats beyond EDF and BDF, so far fewer datasets end with recordings that were not screened.
 The Worker accepts screen report version 2 in the same release that starts emitting it; a request screened in the deploy window is re-screened with `nemar admin dataset publish screen-batch`.
+A new CLI that sends a version 2 upload preflight to an older Worker gets a refusal: the CLI prints a warning that the preflight was not recorded (`warnUnrecordedPreflight` in `src/lib/upload/transfer.ts`), and the upload continues.
+
+Owner steps after the release:
+
+- **O2, the quiet re-screen of the queue.** Run `nemar admin dataset publish screen-batch --all-active` as a dry run and read the count, then `nemar admin dataset publish screen-batch --all-active --per-minute 4 --apply`. Wait for the digest, then compare it with the counts in `.context/plans/publication-queue/plan.md`.
+- **O5, SNIRF birth dates in queued conversions.** 29 of 296 public SNIRF files carry a day-precision `DateOfBirth` (ds004514, ds004541, ds005963), so queued conversions that carry one will block. Tell the depositor to scrub it, and consider notifying OpenNeuro.
 
 - **Coverage contract and reader registry (#2374).** Each recording format has a bounded reader (`shared/identifier-readers.ts`) with its own read, byte and time limits over a page-cached range source. Every read ends complete, partial (with a reason), failed, or not read, and one shared builder serves the fleet scan, the CI screen and the upload preflight.
 - **Screen report version 2.** It adds counts per reader (`read_by_format`), missing companions and reader versions. `clean` and `dates-only` now require every recording format to have a reader and every file to be read completely. `partially-screened` replaces `clean-edf-only-others-unscreened` in new reports; both gate to acknowledgment, and `--acknowledge-identifier-preflight` still accepts the old word. Version 1 reports render as before.
