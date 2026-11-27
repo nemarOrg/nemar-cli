@@ -77,6 +77,14 @@ let beforeRequest:
 
 const adminApp = makeComputeApp();
 
+/** Every CLI child `start` spawned that has not exited yet; `afterEach` kills the survivors. */
+const children = new Set<Subprocess<"ignore", "pipe", "pipe">>();
+/**
+ * Aborted when a test ends, however it ends (a timeout included), so a driver still playing the
+ * cluster stops before it can touch the stand-in or the database of the next test.
+ */
+let testScope = new AbortController();
+
 beforeAll(async () => {
   w = await startWorld();
   const routes = serveRoutes(w.handle, () => workerEnv);
@@ -111,9 +119,16 @@ beforeEach(async () => {
   configDir = mkdtempSync(join(tmpdir(), "nemar-compute-e2e-cfg-"));
   work = mkdtempSync(join(tmpdir(), "nemar-compute-e2e-work-"));
   w.fx.harness.standin.log.length = 0;
+  testScope = new AbortController();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  testScope.abort(new Error("the test ended"));
+  // A test that timed out (or failed before it waited) leaves its CLI running, a `--wait` for ever.
+  const survivors = [...children];
+  for (const proc of survivors) proc.kill("SIGKILL");
+  await Promise.all(survivors.map((proc) => proc.exited));
+  children.clear();
   rmSync(configDir, { recursive: true, force: true });
   rmSync(work, { recursive: true, force: true });
 });
@@ -174,6 +189,8 @@ function start(
     stdout: "pipe",
     stderr: "pipe",
   });
+  children.add(proc);
+  void proc.exited.then(() => children.delete(proc));
   return proc;
 }
 
@@ -188,19 +205,33 @@ async function finish(proc: Subprocess<"ignore", "pipe", "pipe">): Promise<Ran> 
 const cli = async (who: Person | null, ...args: string[]): Promise<Ran> => finish(start(who, args));
 
 /**
- * Wait for a CLI run and for the test's own part of the world (`driver`) together. A driver that fails
- * fails THIS test at once and stops the CLI: left floating, its rejection was reported between tests
- * and failed whichever test ran next (#2402), while the CLI it was meant to drive waited on.
+ * Wait for a CLI run and for the test's own part of the world (`drive`) together. A driver that fails
+ * fails THIS test at once, stops the CLI and says how the CLI ended: left floating, its rejection was
+ * reported between tests and failed whichever test ran next (#2402), while the CLI it was meant to
+ * drive waited on. A CLI side that fails first stops the driver through its signal (as the end of the
+ * test does, `testScope`).
  */
 async function finishWith<T>(
   proc: Subprocess<"ignore", "pipe", "pipe">,
-  driver: Promise<T>,
+  drive: (signal: AbortSignal) => Promise<T>,
 ): Promise<[Ran, T]> {
-  const owned = driver.catch((err) => {
-    proc.kill();
+  const local = new AbortController();
+  const ran = finish(proc).catch((err) => {
+    local.abort(err);
     throw err;
   });
-  return Promise.all([finish(proc), owned]);
+  const owned = drive(AbortSignal.any([local.signal, testScope.signal])).catch(async (err) => {
+    proc.kill();
+    const cli = await ran.catch(() => null);
+    const stderr = cli?.stderr.trim() ?? "";
+    const tail = stderr === "" ? "(empty)" : stderr.split("\n").slice(-5).join("\n");
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `${message}\n  the CLI was stopped: exit ${cli?.exitCode ?? "unknown"}, stderr ends:\n${tail}`,
+      { cause: err },
+    );
+  });
+  return Promise.all([ran, owned]);
 }
 
 function jsonOf(r: Ran): Record<string, any> {
@@ -257,9 +288,15 @@ async function grantedPerson(grantMilli = 100_000): Promise<Person> {
 
 // --- The cluster and the launcher ----------------------------------------------------------------------------
 
-async function waitFor<T>(what: string, read: () => T | undefined | null, ms = 60_000): Promise<T> {
+async function waitFor<T>(
+  what: string,
+  read: () => T | undefined | null,
+  ms = 60_000,
+  signal: AbortSignal = testScope.signal,
+): Promise<T> {
   const stop = Date.now() + ms;
   for (;;) {
+    signal.throwIfAborted();
     const got = read();
     if (got !== undefined && got !== null) return got;
     if (Date.now() > stop) throw new Error(`timed out waiting for ${what}`);
@@ -277,19 +314,29 @@ async function waitFor<T>(what: string, read: () => T | undefined | null, ms = 6
 async function submittedJob(
   accountId: number,
   ignore: readonly string[] = [],
+  signal: AbortSignal = testScope.signal,
 ): Promise<{ id: string; uuid: string }> {
-  const bound = await waitFor("a job at Tapis", () => {
-    const rows = w.fx.harness.db
-      .query(
-        "SELECT id, tapis_uuid FROM compute_jobs WHERE account_id = ? AND tapis_uuid IS NOT NULL",
-      )
-      .all(accountId) as Array<{ id: string; tapis_uuid: string }>;
-    const fresh = rows.filter((r) => !ignore.includes(r.id));
-    const only = fresh[0];
-    return fresh.length === 1 && only ? { id: only.id, uuid: only.tapis_uuid } : null;
-  });
-  await waitFor("the Worker's webhook subscription", () =>
-    w.fx.tapis.subscriptions.some((s) => s.jobUuid === bound.uuid) ? true : null,
+  const bound = await waitFor(
+    "a job at Tapis",
+    () => {
+      const rows = w.fx.harness.db
+        .query(
+          "SELECT id, tapis_uuid FROM compute_jobs WHERE account_id = ? AND tapis_uuid IS NOT NULL",
+        )
+        .all(accountId) as Array<{ id: string; tapis_uuid: string }>;
+      const fresh = rows.filter((r) => !ignore.includes(r.id));
+      const only = fresh[0];
+      return fresh.length === 1 && only ? { id: only.id, uuid: only.tapis_uuid } : null;
+    },
+    60_000,
+    signal,
+  );
+  // Bounded well inside every test's own limit, so a subscription that never comes says so.
+  await waitFor(
+    "the Worker's webhook subscription",
+    () => (w.fx.tapis.subscriptions.some((s) => s.jobUuid === bound.uuid) ? true : null),
+    10_000,
+    signal,
   );
   return bound;
 }
@@ -304,18 +351,23 @@ async function runToFinished(
   accountId: number,
   outputs: Array<{ path: string; content: string }>,
   ignore: readonly string[] = [],
+  signal: AbortSignal = testScope.signal,
 ): Promise<string> {
-  const { id, uuid } = await submittedJob(accountId, ignore);
+  const { id, uuid } = await submittedJob(accountId, ignore, signal);
   for (const status of ["QUEUED", "RUNNING", "ARCHIVING"]) {
+    signal.throwIfAborted();
     w.fx.tapis.advance(uuid, status);
     await w.fx.tapis.fireWebhook(uuid);
   }
+  signal.throwIfAborted();
   const spec = await specOf(id);
   const job = await readJob(id);
+  signal.throwIfAborted();
   await playLauncher(w.fx, workerEnv, job as never, uuid, {
     outputs,
     bundleDigest: spec.bundle?.sha256 ?? null,
   });
+  signal.throwIfAborted();
   w.fx.tapis.advance(uuid, "FINISHED");
   setTapisTimes(w.fx, uuid, 30 * MINUTE, 0);
   (w.fx.tapis.jobs.get(uuid)?.record as Record<string, unknown>).remoteResultInfo = "0";
@@ -366,12 +418,16 @@ describe("the whole story", () => {
     script("analysis.py", HEADER);
 
     const proc = start(p, ["submit", "analysis.py", "--wait"]);
-    const [done, firstId] = await finishWith(
-      proc,
-      runToFinished(p.id, [
-        { path: "report.txt", content: "the report\n" },
-        { path: "deep/table.csv", content: "a,b\n1,2\n" },
-      ]),
+    const [done, firstId] = await finishWith(proc, (signal) =>
+      runToFinished(
+        p.id,
+        [
+          { path: "report.txt", content: "the report\n" },
+          { path: "deep/table.csv", content: "a,b\n1,2\n" },
+        ],
+        [],
+        signal,
+      ),
     );
     expect(done.exitCode).toBe(0);
     expect(done.stdout).toContain("Submitted job_");
@@ -586,9 +642,8 @@ describe("a webhook subscription still on the wire when the job is bound (#2402)
     // milliseconds (where CI hit it now and then) to one that every run is in.
     w.fx.tapis.delay("POST /v3/jobs/subscribe/:uuid", 1_500);
     const proc = start(p, ["submit", "analysis.py", "--wait"]);
-    const [done, id] = await finishWith(
-      proc,
-      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }]),
+    const [done, id] = await finishWith(proc, (signal) =>
+      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }], [], signal),
     );
     expect(done.exitCode).toBe(0);
     expect(done.stdout).toContain(`Job ${id} finished.`);
@@ -597,14 +652,35 @@ describe("a webhook subscription still on the wire when the job is bound (#2402)
   }, 120_000);
 });
 
+describe("a test that ends while its CLI still waits leaves no CLI behind", () => {
+  // The two run in order: the first ends with a `submit --wait` still waiting (as a test that times out
+  // or fails before its wait does), the second sees that the end of the first killed it.
+  let leftPid = 0;
+  test("a submit --wait is left waiting when the test ends", async () => {
+    const p = await grantedPerson();
+    script("analysis.py", HEADER);
+    const proc = start(p, ["submit", "analysis.py", "--wait"]);
+    await submittedJob(p.id);
+    leftPid = proc.pid;
+    expect(proc.exitCode).toBeNull();
+    expect(children.has(proc)).toBe(true);
+  }, 60_000);
+
+  test("the end of that test killed it", () => {
+    expect(leftPid).toBeGreaterThan(0);
+    expect(children.size).toBe(0);
+    // Signal 0 checks for the process without touching it; ESRCH means there is none.
+    expect(() => process.kill(leftPid, 0)).toThrow();
+  });
+});
+
 describe("a download whose bytes changed", () => {
   test("is deleted and reported, and the command exits 1", async () => {
     const p = await grantedPerson();
     script("analysis.py", HEADER);
     const proc = start(p, ["submit", "analysis.py", "--wait"]);
-    const [, id] = await finishWith(
-      proc,
-      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }]),
+    const [, id] = await finishWith(proc, (signal) =>
+      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }], [], signal),
     );
     await w.fx.harness.results.put(
       resultsOutputKey(id, "report.txt"),
@@ -650,7 +726,9 @@ describe("logs and cancel of a job that ended", () => {
     const p = await grantedPerson();
     script("analysis.py", HEADER);
     const proc = start(p, ["submit", "analysis.py", "--wait"]);
-    const [, id] = await finishWith(proc, runToFinished(p.id, [{ path: "r.txt", content: "r" }]));
+    const [, id] = await finishWith(proc, (signal) =>
+      runToFinished(p.id, [{ path: "r.txt", content: "r" }], [], signal),
+    );
     const r = await cli(p, "cancel", id, "--yes");
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("had already ended");
@@ -703,9 +781,8 @@ describe("--json is only the Worker's answer", () => {
 
     // a finished job: results --json carries the Worker's document, links included
     const second = start(p, ["submit", "analysis.py", "--wait", "--json"]);
-    const [waited, id] = await finishWith(
-      second,
-      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }], [doc.job_id]),
+    const [waited, id] = await finishWith(second, (signal) =>
+      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }], [doc.job_id], signal),
     );
     expect(waited.exitCode).toBe(0);
     expect(jsonOf(waited)).toMatchObject({ job: { id, state: "finished" } });
@@ -727,9 +804,8 @@ describe("a bearer link never reaches the debug log", () => {
     const p = await grantedPerson();
     script("analysis.py", HEADER);
     const proc = start(p, ["submit", "analysis.py", "--wait"]);
-    const [, id] = await finishWith(
-      proc,
-      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }]),
+    const [, id] = await finishWith(proc, (signal) =>
+      runToFinished(p.id, [{ path: "report.txt", content: "the report\n" }], [], signal),
     );
     const r = await finish(start(p, ["results", id], {}, ["--debug"]));
     expect(r.exitCode).toBe(0);
