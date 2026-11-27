@@ -190,6 +190,8 @@ export interface ServedLineage {
   declared_licenses: string[];
   /** README DOIs dropped as cut short (license-lineage/4 and /5); absent on older snapshots. */
   dropped_doi_candidates?: number;
+  /** Enrichment relations skipped as stale publications (license-lineage/6); absent when none. */
+  skipped_stale_relations?: number;
 }
 
 /** A lineage result as the card keeps it. */
@@ -210,6 +212,9 @@ export function cardLineageOf(result: LineageResult): ServedLineage {
     declared_licenses: declared,
     ...((result.dropped_doi_candidates ?? 0) > 0
       ? { dropped_doi_candidates: result.dropped_doi_candidates }
+      : {}),
+    ...((result.skipped_stale_relations ?? 0) > 0
+      ? { skipped_stale_relations: result.skipped_stale_relations }
       : {}),
   };
 }
@@ -299,12 +304,17 @@ function readLineage(v: unknown): ServedLineage | null | undefined {
   if (dropped !== undefined && !(Number.isInteger(dropped) && (dropped as number) >= 0)) {
     return undefined;
   }
+  const skipped = v.skipped_stale_relations;
+  if (skipped !== undefined && !(Number.isInteger(skipped) && (skipped as number) >= 0)) {
+    return undefined;
+  }
   return {
     outcome: v.outcome as LineageOutcome,
     credited: v.credited,
     resolved_at: v.resolved_at,
     declared_licenses: declared,
     ...(typeof dropped === "number" && dropped > 0 ? { dropped_doi_candidates: dropped } : {}),
+    ...(typeof skipped === "number" && skipped > 0 ? { skipped_stale_relations: skipped } : {}),
   };
 }
 
@@ -816,6 +826,9 @@ function reviewLineageOf(
     ...(snapshot?.lineage?.dropped_doi_candidates
       ? { dropped_doi_candidates: snapshot.lineage.dropped_doi_candidates }
       : {}),
+    ...(snapshot?.lineage?.skipped_stale_relations
+      ? { skipped_stale_relations: snapshot.lineage.skipped_stale_relations }
+      : {}),
   };
 }
 
@@ -841,6 +854,7 @@ function labeledLineage(l: ServedLineage, covered: boolean): CardLineage {
     resolved_at: l.resolved_at,
     declared_licenses: { label: REGISTRY_TEXT_LABEL, licenses: l.declared_licenses },
     ...(l.dropped_doi_candidates ? { dropped_doi_candidates: l.dropped_doi_candidates } : {}),
+    ...(l.skipped_stale_relations ? { skipped_stale_relations: l.skipped_stale_relations } : {}),
     permission_covers: covered,
   };
 }

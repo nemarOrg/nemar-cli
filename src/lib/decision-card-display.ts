@@ -77,6 +77,10 @@ function lineageLine(which: string, l: CardLineage | null | undefined): string[]
   if (typeof dropped === "number" && Number.isInteger(dropped) && dropped > 0) {
     out.push(`      ${dropped} README DOI${dropped === 1 ? "" : "s"} dropped as cut short`);
   }
+  const skipped = l.skipped_stale_relations;
+  if (typeof skipped === "number" && Number.isInteger(skipped) && skipped > 0) {
+    out.push(`      ${skipped} stale publication relation(s) skipped`);
+  }
   return out;
 }
 

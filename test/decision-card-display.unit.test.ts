@@ -13,6 +13,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import chalk from "chalk";
+import { cardLineageOf } from "../backend/src/services/decision-card";
 import { buildDecisionCard } from "../backend/src/services/decision-card";
 import { decisionCardLines } from "../src/lib/decision-card-display";
 import { GATE_CLEAR, ID, SNAPSHOT, detailOf, reasonView } from "./helpers/decision-card-fixtures";
@@ -151,6 +152,36 @@ describe("the decision card in show", () => {
     expect(decisionCardLines(card)).toContain("      2 README DOIs dropped as cut short");
     card.license.lineage = { ...card.license.lineage, dropped_doi_candidates: 0 };
     expect(decisionCardLines(card).join("\n")).not.toContain("dropped as cut short");
+  });
+
+  test("a lineage with stale publication relations skipped says how many", () => {
+    const card = fixtureCard() as unknown as { license: { lineage: Record<string, unknown> } };
+    card.license.lineage = { ...card.license.lineage, skipped_stale_relations: 1 };
+    expect(decisionCardLines(card)).toContain("      1 stale publication relation(s) skipped");
+    card.license.lineage = { ...card.license.lineage, skipped_stale_relations: 0 };
+    expect(decisionCardLines(card).join("\n")).not.toContain("stale publication");
+  });
+
+  test("the card keeps the resolver's count of skipped stale relations", () => {
+    const base = {
+      outcome: "unresolved" as const,
+      inputs: {
+        dataset_description: "read" as const,
+        nemar_metadata: "read" as const,
+        readme: "missing" as const,
+      },
+      target_license: "cc-by" as const,
+      target_license_raw: "CC-BY-4.0",
+      sources: [],
+      dropped_doi_candidates: 0,
+      resolver_version: "license-lineage/6",
+      resolved_at: "2026-11-27T19:00:00.000Z",
+      fetched_at: "2026-11-27T19:00:00.000Z",
+    };
+    expect(cardLineageOf({ ...base, skipped_stale_relations: 2 }).skipped_stale_relations).toBe(2);
+    expect(cardLineageOf({ ...base, skipped_stale_relations: 0 })).not.toHaveProperty(
+      "skipped_stale_relations",
+    );
   });
 
   test("hostile text in the dataset's fields is printed plain", () => {

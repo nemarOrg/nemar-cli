@@ -286,3 +286,8 @@ Decision 4 is extended by the rulings of phase 4's review (pull request #2479).
 Decision 4's amber list also holds `license_file_not_identified`, for a review made before report v3, which recorded no identification.
 Until deploy 3 every review records the matcher `unavailable`; its amber line is listed last, after every reason an administrator can act on, and a LICENSE that was read whole but not scanned is not called unreadable.
 The card shows how many README DOIs the resolver dropped as cut short, which explains a lineage that names no source.
+
+## Amendment 2026-11-27 (owner, third lineage fix): which declared sources decision 3 reads
+
+Decision 3's sources gain two rules (ADR 0139's amendment of the same day, resolver `license-lineage/6`): a figshare article URL maps to the figshare record, not to "no DOI", and an enrichment relation that is a publication SourceDatasets does not name is skipped and counted, not a source.
+
