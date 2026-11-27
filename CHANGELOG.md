@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.52 - 2026-11-27
+
 ### Fixed
 
 - **License lineage reads data containers and ellipsis-cut README DOIs (resolver version 5; ADR 0139 decision 7 and ADR 0142 decision 3, amendments of 2026-11-27).**
