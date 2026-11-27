@@ -63,10 +63,16 @@ function lineageLine(which: string, l: CardLineage | null | undefined): string[]
   if (!isRecord(l)) return [];
   const when = typeof l.resolved_at === "string" ? `, resolved ${plain(l.resolved_at)}` : "";
   const out = [
-    `    Lineage (${which}${when}): ${plain(l.outcome)}${l.credited ? ", source credited" : ""}`,
+    `    Lineage (${which}${when}): ${plain(l.outcome)}${l.credited ? ", source credited" : ""}${
+      l.permission_covers === true ? ", covered by the recorded permission" : ""
+    }`,
   ];
-  const declared = joined(l.declared_licenses);
-  if (declared !== "") out.push(`      Declared (${REGISTRY_TEXT_LABEL}): ${declared}`);
+  const d = isRecord(l.declared_licenses) ? l.declared_licenses : null;
+  const declared = joined(d?.licenses);
+  if (declared !== "") {
+    const label = typeof d?.label === "string" ? plain(d.label) : REGISTRY_TEXT_LABEL;
+    out.push(`      Declared (${label}): ${declared}`);
+  }
   return out;
 }
 
@@ -85,7 +91,9 @@ export function decisionCardLines(card: unknown): string[] {
   const lic = card.license;
   const cue = plain(lic.cue);
   out.push(`  License: ${(CUE[cue] ?? chalk.yellow)(cue.toUpperCase())}  ${plain(lic.reason)}`);
-  const fieldLine = field("Field", lic.field ?? "(none)");
+  const fieldText =
+    isRecord(lic.field) && typeof lic.field.text === "string" ? lic.field.text : null;
+  const fieldLine = field("Field", fieldText ?? "(none)");
   if (fieldLine !== null) out.push(fieldLine);
   if (isRecord(lic.license_file)) {
     const f = lic.license_file;
@@ -174,6 +182,8 @@ export function decisionCardLines(card: unknown): string[] {
   }
 
   out.push(`  Identifier screen: ${plain(card.identifier_screen.headline)}`);
+  const headLine = card.identifier_screen.head_line;
+  if (typeof headLine === "string") out.push(`    ${chalk.yellow(plain(headLine))}`);
   if (isRecord(card.auto_deny)) out.push(`  Automatic denial: ${plain(card.auto_deny.line)}`);
   return out;
 }

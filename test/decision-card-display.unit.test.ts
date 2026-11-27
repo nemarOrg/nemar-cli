@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import chalk from "chalk";
 import { buildDecisionCard } from "../backend/src/services/decision-card";
 import { decisionCardLines } from "../src/lib/decision-card-display";
-import { ID, SNAPSHOT, detailOf, reasonView } from "./helpers/decision-card-fixtures";
+import { GATE_CLEAR, ID, SNAPSHOT, detailOf, reasonView } from "./helpers/decision-card-fixtures";
 
 const ESC = String.fromCharCode(0x1b);
 /** The right-to-left override, spelled by code point so the source holds no bidirectional character. */
@@ -74,6 +74,8 @@ function fixtureCard() {
   );
   return buildDecisionCard({
     detail,
+    freshCovered: false,
+    gate: GATE_CLEAR,
     autoDenyState: "disagreed",
     snapshot: SNAPSHOT,
     current: null,
@@ -127,6 +129,8 @@ describe("the decision card in show", () => {
   test("a card that is not as reviewed says so under the heading", () => {
     const card = buildDecisionCard({
       detail: detailOf({ review: null, screen_gate: "clear" }),
+      freshCovered: false,
+      gate: GATE_CLEAR,
       autoDenyState: null,
       snapshot: null,
       current: null,
