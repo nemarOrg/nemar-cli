@@ -483,18 +483,22 @@ With the check required, a pull request in that state could not merge without an
 ## Amendment 2026-11-27 (owner): a Name that follows its upstream dataset keeps the upstream's author-year
 
 The owner's rule: name drift is grounds for rejection, or a request for an update;
-a dataset derived from an upstream dataset has the upstream's name, an author-year may follow it, and the start at least is the same.
-Section 3a refuses an author-year anywhere in a dataset name; this carves out a Name that follows an upstream dataset source's title.
+a dataset derived from an upstream dataset has the upstream's name, virtually identical, and an author-year may follow it.
+Section 3a refuses an author-year anywhere in a dataset name; this carves out a Name that follows a declared upstream dataset source's title.
 
-- **What a Name that follows its upstream is.**
-  Its `Name` starts with the title of one upstream dataset source (as that source's registry gives it, through the license-lineage resolver), compared after Unicode NFKC, case folding, apostrophes removed and other punctuation as spaces, with a leading "The" or "A" kept as part of the title.
-  What follows is nothing, or a suffix of one closed grammar (`shared/name-follows-upstream.ts`): `, Surname YYYY`, ` (Surname YYYY)`, ` - Surname et al. YYYY` or ` Surname & Surname YYYY`, then optionally the submission standards' final `(service:key)`.
-  The service key is kept deliberately: the submission standards (docs.nemar.org/policies/submission-standards) already allow a final `(service:key)` after a descriptive name, so a Name that obeys them is never called drifted.
-  A bare-space suffix takes only the `et al.` and `&` shapes, so an ordinary title word before a year (`Motor 2019`) is never read as an author.
+- **What a Name that follows its upstream is** (owner rulings of 2026-11-27).
+  The Name is virtually identical to the title of one declared upstream dataset source (SourceDatasets, the enrichment's relations or the attestation; never a README candidate), as that source's registry gives it through the license-lineage resolver.
+  Both are compared word by word after Unicode NFKC, with apostrophes inside a word dropped and other punctuation separating words, and each word folded: accents and diacritics dropped (NFKD without combining marks), lower case, `&` read as `and`, and British spelling read as American by one closed list (`SPELLING_FOLDS`: -our/-or, -isation/-ization, -ise/-ize, -yse/-yze, -tre/-ter, -ogue/-og, and -ence/-ense for licence, defence, offence and pretence).
+  A trailing version marker (`v2`, `v2.0`, `2.0`, `version 2`) compares equal on either side; a bare year is not one. A leading "The" or "A" is part of the title.
+- **The closed suffix grammar** (`NAME_SUFFIX`, `shared/name-follows-upstream.ts`): after the title, optionally a version marker, then optionally an author-year, then optionally a service key.
+  The author-year is one, two (`&` or `and`) or `et al.` surnames, an optional comma, and a year from 1900 to 2099, opened by a comma, a dash (an en or em dash with or without spaces, a hyphen with spaces), a parenthesis that closes after the year, or a bare space for `et al.` or two surnames only:
+  `, Lee 2019`, `, Lee et al., 2019`, ` (Lee et al., 2019)`, ` (Lee and Kim 2019)`, ` (Lee & Kim, 2019)`, `—Lee et al. 2019`, ` Lee & Kim 2019`.
+  Every surname must name one of the dataset's Authors or one of the matched upstream record's creators, compared after the same folding, so `EEG (Replication 2021)` and `EEG, Motor 2019` are not author-years.
+  The service key, ` (service:key)`, is kept deliberately: the submission standards (docs.nemar.org/policies/submission-standards) already allow it after a descriptive name, so a Name that obeys them is never called drifted; the service must be one the resolver reads (`NAME_SERVICES`: openneuro, physionet, zenodo, figshare, osf, dandi, dryad, dataverse), so `(eeg:motor)` is not one.
 - **What is carved out.**
   The author-year inside the upstream title (nm000781's upstream title begins `Defenderfer 2019;`) and the author-year of the suffix are not a breach of the naming rule for such a Name.
   Every other Name, and every pull request title, stays under section 3a.
 - **Where it holds today.**
   The publication review applies the rule (ADR 0102's amendment of this date).
-  On a pull request, every suffix shape puts a space before the year, which section 3a's key never reads, so a suffix is never refused there (`test/name-follows-upstream.unit.test.ts` pins that).
+  On a pull request, every suffix shape puts a space or a comma before the year, which section 3a's key never reads, so a suffix is never refused there (`test/name-follows-upstream.unit.test.ts` pins that).
   A glued key inside an upstream title (`BNCI2014_001 ...`) is still refused when a pull request changes the Name to that title, because the pull-request review resolves no lineage; until nemarOrg/nemar-cli#2493 is built, an administrator decides such a pull request.

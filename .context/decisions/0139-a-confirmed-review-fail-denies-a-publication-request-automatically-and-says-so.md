@@ -234,8 +234,8 @@ So decision 1 gains two conditions:
 - **`name_differs_from_upstream` is eligible only in a run whose model itself failed `name_adequate`** (its own answer, which the fact does not lower).
   A denial on it is therefore confirmed by a second model that also failed the name, and `denied_reason` names it as its own code; it may be shown to the next review as a previous denial's reason (`PREVIOUS_DENIAL_SENDABLE`).
   A fail on the fact alone goes to an administrator, whose card asks the depositor to change the Name (ADR 0142's amendment of this date).
-- **`name_not_descriptive` stays eligible, unless the Name follows its upstream's title** (`name_upstream` is `matches`): the name then came from the upstream, not from the depositor, and an administrator decides.
+- **`name_not_descriptive` stays eligible, unless the Name follows a declared upstream's title** (`name_upstream` is `matches`, which only a declared source can give, never a README candidate): the name then came from the upstream, not from the depositor, and an administrator decides.
   Any other eligible finding beside it still counts.
 
-`name_upstream_unconfirmed` never denies and mails nobody: it is NEMAR's failure to read a record, as `unresolved` is in decision 7.
+`name_upstream_unconfirmed` never denies and mails nobody: it is NEMAR's failure to read a record, or an upstream renamed since the copy, which only a person can judge, as `unresolved` is in decision 7.
 The depositor's copy (`AUTO_DENY_CODE_COPY.name_differs_from_upstream`) names the rule and the suffix shapes; its docs anchor, `#automatic-denial-name-differs-from-upstream`, is added to the submission standards page with the website's next release.

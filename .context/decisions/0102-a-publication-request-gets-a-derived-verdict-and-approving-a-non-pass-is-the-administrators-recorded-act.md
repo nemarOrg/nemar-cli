@@ -1195,13 +1195,13 @@ ADR 0142 is the later text.
 The owner's rule (ADR 0107's amendment of this date): a dataset derived from an upstream dataset keeps the upstream's name, and an author-year may follow it.
 Section 5's reasons gain two, both platform facts the model never decides:
 
-- **`name_differs_from_upstream`** (fail class, cleared by an override): every declared upstream source was read, at least one is a dataset with a title, and the `Name` follows none of them.
+- **`name_differs_from_upstream`** (fail class, cleared by an override): every declared upstream source was read, at least one is a dataset with a title, none was resolved to a later version than the one declared, and the `Name` follows none of them (ADR 0107's amendment of this date says what follows: virtually identical after folding, and the closed suffix).
   It fails the request whatever the model answered.
-- **`name_upstream_unconfirmed`** (unknown class, cleared by an override): what decides it could not be read (the Name, or a declared source whose record or title was not read, or whose lineage is `unresolved`), and the Name follows no source that was read.
+- **`name_upstream_unconfirmed`** (unknown class, cleared by an override): what decides it could not be read (the Name, or a declared source whose record or title was not read, or whose lineage is `unresolved`), or the Name differs from a source the resolver read at its latest version rather than the version declared (a version-less OpenNeuro, figshare or PhysioNet reference: the upstream may have been renamed since the copy; the lineage marks such a source `resolved_latest`).
   An administrator decides, and nobody is mailed: never a guess in either direction.
 
 The evidence carries the closed word as `name_upstream` (`matches`, `differs`, `not_applicable`, `unknown`), an optional key of a version-3 block that has a lineage; a block written before it reads as it was written and derives neither reason.
-The job computes it with `nameFollowsUpstream` from the whole raw `Name` at the reviewed commit and the sources the Worker served it, as it computes `credited` from the same sources, so the Worker's inputs body is unchanged.
+The job computes it with `nameFollowsUpstream` from the whole raw `Name` and the `Authors` at the reviewed commit and the sources the Worker served it (with their creators and the `resolved_latest` flag, which an older job ignores), as it computes `credited` from the same sources, so the Worker's inputs body is unchanged.
 As with ADR 0142's version 3, the Worker accepts the key one release before the job emits it: the release carrying the parser, the reasons and the card comes first (#2495), and the job's one line that passes the sources comes in a later release; until then every report reads as today.
 It is never sent to the model and never lowers `name_adequate`, so the model's answer about the name stays its own (ADR 0139's amendment of this date depends on that).
-Publications and README-only candidates are not upstream datasets: a README source can make a `matches`, never a `differs` or an `unknown`; no declared dataset with a title is `not_applicable`.
+Publications and README candidates are not upstream datasets: only a declared source (SourceDatasets, the enrichment's relations, the attestation) can make a `matches`, a `differs` or an `unknown`, and a Name that follows only a README candidate is `not_applicable`.

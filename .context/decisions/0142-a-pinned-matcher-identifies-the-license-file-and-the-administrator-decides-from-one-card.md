@@ -294,9 +294,9 @@ Decision 3's sources gain two rules (ADR 0139's amendment of the same day, resol
 
 ## Amendment 2026-11-27 (owner): the card shows the name rule
 
-Decision 4's card gains a panel, `upstream_name`: the review's closed word (null for a review made before the rule), a cue (red for `differs`, amber for `unknown` or no word, green otherwise), NEMAR's line for it, and the upstream dataset titles under the registry label.
+Decision 4's card gains a panel, `upstream_name`: the review's closed word (null for a review made before the rule), a cue (red for `differs`, amber for `unknown` or no word, green otherwise), NEMAR's line for it, and the declared upstream dataset titles under the registry label.
 The served snapshot keeps those titles (`upstream_titles`, absent from a snapshot written before the rule, which still reads).
 The next action gains three rules, each below a running screen or review and above the lineage:
-`name_differs_from_upstream` asks the depositor, in a sentence that names the rule ("it should start with the upstream dataset's title, as its registry gives it, and an author and year may follow it"), unless a review fail or an agreed denial already says deny;
+`name_differs_from_upstream` asks the depositor, in a sentence that names the rule ("it should be the upstream dataset's title, as its registry gives it, and a version and an author-year naming the dataset's authors may follow it"), unless a review fail or an agreed denial already says deny;
 `name_upstream_unconfirmed` is `administrator_reads`;
-and a fail of `name_adequate` alone on a Name that follows its upstream's title is set aside: the card says `administrator_reads`, not deny, unless something else decides.
+and a fail of `name_adequate` alone on a Name that follows a declared upstream's title is set aside: the card says `administrator_reads`, not deny, unless something else decides.
