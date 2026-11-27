@@ -370,6 +370,46 @@ describe("the depositor's notice", () => {
     expect(d.body.outcome).toBe("action_required");
   });
 
+  test("an unresolved review claims no notice, so a later needs_permission on the request mails once", async () => {
+    await accounts();
+    await withFakeResend(async (calls) => {
+      const { requestId, reviewId } = await reviewed(basisOf([SOURCE], "unresolved"));
+      expect(noticesTo(calls)).toHaveLength(0);
+      expect(
+        h.db
+          .query("SELECT COUNT(*) AS n FROM license_permission_notices WHERE request_id = ?")
+          .get(requestId),
+      ).toEqual({ n: 0 });
+
+      // The registry answers on the next review of the same request: the lineage needs permission.
+      h.db.run("UPDATE publication_reviews SET head_sha = ? WHERE id = ?", [
+        "f".repeat(40),
+        reviewId,
+      ]);
+      const second = seedPublicationReview(h.db, {
+        requestId,
+        datasetId: PROD_DATASET,
+        state: "dispatched",
+        claimed: true,
+      });
+      h.db.run("UPDATE publication_reviews SET lineage_basis = ? WHERE id = ?", [
+        JSON.stringify(basisOf([SOURCE])),
+        second,
+      ]);
+      const res = await h.result(second, {
+        outcome: "reported",
+        report: reportBody("needs_permission"),
+      });
+      expect(res.status).toBe(200);
+      expect(noticesTo(calls)).toHaveLength(1);
+      expect(
+        h.db
+          .query("SELECT outcome, mail_state FROM license_permission_notices WHERE request_id = ?")
+          .all(requestId),
+      ).toEqual([{ outcome: "needs_permission", mail_state: "sent" }]);
+    });
+  });
+
   test("a publication named as the source gets its own message, naming the declared license", async () => {
     await accounts();
     const article = "10.1371/journal.pone.0211710";
