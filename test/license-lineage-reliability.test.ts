@@ -20,10 +20,12 @@ import {
   NO_RETRY,
   RESOLVER_VERSION,
   type ResolveOptions,
+  componentParentDoi,
   dataciteLicenses,
   declaredLicenseWords,
   extractSources,
   isCutDoiCandidate,
+  isOsfProject,
   isValidCachedRecord,
   lineageLines,
   mapCache,
@@ -70,8 +72,8 @@ const ZENODO_BY_KEY = "datacite /dois/10.5281/zenodo.24539621";
 const count = (part: string) => standIn.requests.filter((k) => k.includes(part)).length;
 
 describe("resolver version", () => {
-  test("is 4, since outcomes change", () => {
-    expect(RESOLVER_VERSION).toBe("license-lineage/4");
+  test("is 5, since outcomes change", () => {
+    expect(RESOLVER_VERSION).toBe("license-lineage/5");
   });
 });
 
@@ -289,7 +291,19 @@ describe("osf.io URLs map to their DataCite DOI", () => {
     expect(standIn.misses).toEqual([]);
   });
 
-  test("an OSF DOI DataCite holds with rights: DataCite's answer, OSF not asked", async () => {
+  test("an OSF DOI DataCite holds with rights, not as a project: DataCite's answer, OSF not asked", async () => {
+    // wpkrz is registered as a Project (read from OSF since resolver version 5); the same record
+    // with another resourceType is DataCite's answer alone.
+    const rec = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/25-datacite-osf-cc-by.json`,
+      ).text(),
+    );
+    rec.data.attributes.types.resourceType = "Data";
+    standIn.override("datacite /dois/10.17605/osf.io/wpkrz", {
+      status: 200,
+      body: JSON.stringify(rec),
+    });
     const r = await run(inputs("CC0", [{ DOI: "10.17605/OSF.IO/WPKRZ" }]));
     expect(r.sources[0]).toMatchObject({ resolver: "datacite", license: "cc-by" });
     expect(count("osf /v2")).toBe(0);
@@ -432,7 +446,8 @@ describe("a DOI cut out of a README is not a source", () => {
     expect(r.dropped_doi_candidates).toBe(0);
     expect(r.sources.map((s) => [s.id, s.status, s.license])).toEqual([
       ["10.7910/dvn/29379", "resolved", "cc0"],
-      ["10.6084/m9.figshare.c.3307977", "publication", "cc-by"],
+      // A figshare collection is judged by its members, each CC0 (DataCite says CC BY 3.0 US).
+      ["10.6084/m9.figshare.c.3307977", "resolved", "cc0"],
       ["10.5061/dryad.8pm4nv0/1", "publication", "cc0"],
     ]);
     expect(standIn.misses).toEqual([]);
@@ -594,6 +609,517 @@ describe("a README DOI that prefixes a declared DOI is that DOI cut short", () =
       expect(standIn.requests).toHaveLength(1);
     },
   );
+});
+
+describe("a README DOI cut by an ellipsis", () => {
+  // The exact shapes of nm000746 and nm000843 (2026-11-27): a truncated README table cell.
+  const NM000746_README =
+    "| Field | Value |\n| --- | --- |\n| Notes | ...ReferencesAndLinks https://doi.org/10.5281/zenodo.2231 [...]; N: 30 participants |\n";
+  const NM000843_README =
+    "| Notes | ...ReferencesAndLinks https://doi.org/10.5281/zenodo.236 [...]; N: 30 participants |\n";
+  const sourcesOf = (declared: string | null, readme: string) =>
+    extractSources({
+      datasetDescription: declared === null ? {} : { SourceDatasets: [{ DOI: declared }] },
+      relatedIdentifiers: null,
+      attestationUpstreamSource: null,
+      readme,
+    });
+  const ids = (found: ReturnType<typeof extractSources>) =>
+    found.refs.map((r) => (r.kind === "doi" ? `${r.origin} ${r.doi}` : r.kind));
+
+  test.each([
+    ["10.5281/zenodo.22314785", NM000746_README],
+    ["10.5281/zenodo.23610719", NM000843_README],
+  ])("declared %s: the README's ellipsis-cut copy is dropped and counted", (doi, readme) => {
+    const found = sourcesOf(doi, readme);
+    expect(ids(found)).toEqual([`source_datasets ${doi}`]);
+    expect(found.dropped).toBe(1);
+  });
+
+  test.each([
+    ["10.5281/zenodo.236 [...]"],
+    ["10.5281/zenodo.236[…]"],
+    ["10.5281/zenodo.236 ..."],
+    ["10.5281/zenodo.236 …"],
+  ])("each ellipsis marker: %s", (text) => {
+    const found = sourcesOf("10.5281/zenodo.23610719", `Notes: ${text}; N: 30\n`);
+    expect(ids(found)).toEqual(["source_datasets 10.5281/zenodo.23610719"]);
+    expect(found.dropped).toBe(1);
+  });
+
+  test("a short DOI written once on its own as well as cut is a source", () => {
+    const readme = `${NM000843_README}\nAn earlier deposit: https://doi.org/10.5281/zenodo.236.\n`;
+    const found = sourcesOf("10.5281/zenodo.23610719", readme);
+    expect(ids(found)).toEqual([
+      "source_datasets 10.5281/zenodo.23610719",
+      "readme 10.5281/zenodo.236",
+    ]);
+    expect(found.dropped).toBe(0);
+    // Wrapped once and on its own once: also a source.
+    const wrapped = sourcesOf(
+      "10.5281/zenodo.22314785",
+      "Cite https://doi.org/10.5281/zenodo.2231\n4785. Old: 10.5281/zenodo.2231\n",
+    );
+    expect(ids(wrapped)).toEqual([
+      "source_datasets 10.5281/zenodo.22314785",
+      "readme 10.5281/zenodo.2231",
+    ]);
+    // Every occurrence cut (one wrapped, one ellipsis), beside the whole DOI: dropped.
+    const all = sourcesOf(
+      "10.5281/zenodo.22314785",
+      "Data 10.5281/zenodo.22314785; cite 10.5281/zenodo.2231\n4785; notes 10.5281/zenodo.2231 [...]\n",
+    );
+    expect(ids(all)).toEqual(["source_datasets 10.5281/zenodo.22314785"]);
+    // Each cut candidate is counted, as every dropped candidate is.
+    expect(all.dropped).toBe(2);
+  });
+
+  test("distinct records are kept: no ellipsis, an ellipsis elsewhere, nothing longer declared", () => {
+    const both = sourcesOf(
+      null,
+      "Data: 10.5281/zenodo.1234567 and 10.5281/zenodo.12345678 [...]; see also ...\n",
+    );
+    expect(ids(both)).toEqual(["readme 10.5281/zenodo.1234567", "readme 10.5281/zenodo.12345678"]);
+    expect(both.dropped).toBe(0);
+    // An ellipsis after a DOI that prefixes nothing declared: the README's own source stays.
+    const alone = sourcesOf(null, NM000843_README);
+    expect(ids(alone)).toEqual(["readme 10.5281/zenodo.236"]);
+    // An ellipsis that does not follow the short DOI does not drop it.
+    const apart = sourcesOf("10.5281/zenodo.23610719", "Old: 10.5281/zenodo.236, notes [...]\n");
+    expect(ids(apart)).toEqual([
+      "source_datasets 10.5281/zenodo.23610719",
+      "readme 10.5281/zenodo.236",
+    ]);
+  });
+
+  test.each([
+    ["10.5281/zenodo.22314785", NM000746_README],
+    ["10.5281/zenodo.23610719", NM000843_README],
+  ])("the lineage of %s is compatible, and the cut copy is never fetched", async (doi, readme) => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: doi }], readme));
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(r.dropped_doi_candidates).toBe(1);
+    expect(r.sources.map((x) => x.id)).toEqual([doi]);
+    expect(standIn.misses).toEqual([]);
+  });
+});
+
+describe("data containers are data; publications stay publications", () => {
+  test.each([
+    // nm000812: OSF registers a project as Text / Project; OSF's node says CC BY 4.0, no children.
+    ["10.17605/osf.io/f8sq3", "osf", "Text"],
+    // nm000808: a PLOS supplementary file, a Crossref component, licensed through its article.
+    ["10.1371/journal.pone.0303144.s001", "crossref", "component"],
+  ])("%s (%s %s) reads its rights: compatible_attribution", async (doi, resolver, type) => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: doi }]));
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(r.sources[0]).toMatchObject({
+      resolver,
+      resource_type: type,
+      status: "resolved",
+      license: "cc-by",
+      license_version: "4.0",
+    });
+    expect(standIn.misses).toEqual([]);
+  });
+
+  test("nm000832's figshare collection is judged by its member (CC0), never by DataCite's CC BY", async () => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.6084/m9.figshare.c.6979581.v1" }]));
+    expect(r.outcome).toBe("compatible");
+    expect(r.sources[0]).toMatchObject({
+      resolver: "figshare",
+      resource_type: "Collection",
+      status: "resolved",
+      license: "cc0",
+    });
+    expect(r.sources[0].declared_licenses).toEqual([
+      { text: "CC0", url: "https://creativecommons.org/publicdomain/zero/1.0/" },
+    ]);
+    expect(standIn.misses).toEqual([]);
+  });
+
+  test("the most restrictive member wins; an unreadable member, no member or too many: unresolved", async () => {
+    const DOI = { DOI: "10.6084/m9.figshare.c.6979581.v1" };
+    const member = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/44-figshare-article-24803499.json`,
+      ).text(),
+    );
+    member.license = {
+      value: 4,
+      name: "CC BY-NC 4.0",
+      url: "https://creativecommons.org/licenses/by-nc/4.0/",
+    };
+    standIn.override("figshare /v2/articles/24803499", {
+      status: 200,
+      body: JSON.stringify(member),
+    });
+    expect((await run(inputs("CC-BY-4.0", [DOI]))).outcome).toBe("needs_permission");
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("figshare /v2/articles/24803499", {
+      status: 200,
+      body: JSON.stringify({ id: 1 }),
+    });
+    const noLicense = await run(inputs("CC-BY-4.0", [DOI]));
+    expect(noLicense.outcome).toBe("unresolved");
+    expect(noLicense.sources[0].license).toBeNull();
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("figshare /v2/articles/24803499", { status: 503 });
+    const failed = await run(inputs("CC-BY-4.0", [DOI]), { retry: NO_RETRY });
+    expect(failed.sources[0].status).toBe("fetch_failed");
+    expect(failed.outcome).toBe("unresolved");
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("figshare /v2/collections/6979581/articles", { status: 200, body: "[]" });
+    expect((await run(inputs("CC-BY-4.0", [DOI]))).outcome).toBe("unresolved");
+    standIn.stop();
+    standIn = startStandIn();
+    const many = JSON.stringify(Array.from({ length: 11 }, (_, i) => ({ id: 100 + i })));
+    standIn.override("figshare /v2/collections/6979581/articles", { status: 200, body: many });
+    expect((await run(inputs("CC-BY-4.0", [DOI]))).outcome).toBe("unresolved");
+    expect(standIn.requests.some((k) => k.includes("/v2/articles/100"))).toBe(false);
+  });
+
+  test("each member is judged on its own: share-alike beside NonCommercial is never compatible_nc", async () => {
+    const DOI = { DOI: "10.6084/m9.figshare.c.3307977" };
+    const fixture = (id: number) =>
+      Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/${id === 3563031 ? "60" : "61"}-figshare-article-${id}.json`,
+      ).json();
+    const set = async (id: number, name: string, url: string) => {
+      const member = await fixture(id);
+      member.license = { value: 9, name, url };
+      standIn.override(`figshare /v2/articles/${id}`, {
+        status: 200,
+        body: JSON.stringify(member),
+      });
+    };
+    // Members CC0, CC BY-SA 4.0 and CC BY-NC 4.0, target CC BY-NC 4.0: the share-alike member
+    // cannot be NonCommercial, and the two conflict. One merged rank (NC) would say compatible_nc.
+    await set(3563031, "CC BY-SA 4.0", "https://creativecommons.org/licenses/by-sa/4.0/");
+    await set(3563028, "CC BY-NC 4.0", "https://creativecommons.org/licenses/by-nc/4.0/");
+    const saNc = await run(inputs("CC-BY-NC-4.0", [DOI]));
+    expect(saNc.outcome).not.toBe("compatible_nc");
+    expect(saNc.outcome).toBe("needs_permission");
+    expect(saNc.sources[0].outcome).toBe("needs_permission");
+    standIn.stop();
+    standIn = startStandIn();
+    // ODbL beside NonCommercial keeps the share-alike duty: never compatible_nc.
+    await set(3563031, "ODbL", "https://opendatacommons.org/licenses/odbl/1-0/");
+    await set(3563028, "CC BY-NC 4.0", "https://creativecommons.org/licenses/by-nc/4.0/");
+    const odbl = await run(inputs("CC-BY-NC-4.0", [DOI]));
+    expect(odbl.outcome).not.toBe("compatible_nc");
+    // ODbL and NonCommercial conflict, as two separate sources would.
+    expect(odbl.outcome).toBe("needs_permission");
+    standIn.stop();
+    standIn = startStandIn();
+    // Members CC BY-SA 3.0 and 4.0 under a 3.0 target: the 4.0 member is a mismatch.
+    await set(3563031, "CC BY-SA 3.0", "https://creativecommons.org/licenses/by-sa/3.0/");
+    await set(3563028, "CC BY-SA 4.0", "https://creativecommons.org/licenses/by-sa/4.0/");
+    expect((await run(inputs("CC-BY-SA-3.0", [DOI]))).outcome).toBe("share_alike_mismatch");
+  });
+
+  test("among several members the most restrictive wins; a member with an empty license is unresolved", async () => {
+    // c.3307977 has three CC0 members; make the second NonCommercial.
+    const member = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/60-figshare-article-3563031.json`,
+      ).text(),
+    );
+    member.license = {
+      value: 4,
+      name: "CC BY-NC 4.0",
+      url: "https://creativecommons.org/licenses/by-nc/4.0/",
+    };
+    standIn.override("figshare /v2/articles/3563031", {
+      status: 200,
+      body: JSON.stringify(member),
+    });
+    const DOI = { DOI: "10.6084/m9.figshare.c.3307977" };
+    const r = await run(inputs("CC-BY-4.0", [DOI]));
+    expect(r.sources[0].license).toBe("cc-by-nc");
+    expect(r.outcome).toBe("needs_permission");
+    standIn.stop();
+    standIn = startStandIn();
+    member.license = { value: 0, name: "", url: "" };
+    standIn.override("figshare /v2/articles/3563031", {
+      status: 200,
+      body: JSON.stringify(member),
+    });
+    const empty = await run(inputs("CC-BY-4.0", [DOI]));
+    expect(empty.outcome).toBe("unresolved");
+    expect(empty.sources[0].license).toBeNull();
+  });
+
+  test("a Collection that is not figshare's is unresolved, whatever DataCite's rights say", async () => {
+    const collection = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/37-datacite-figshare-collection-v1.json`,
+      ).text(),
+    );
+    standIn.override("datacite /dois/10.5281/zenodo.24539621", {
+      status: 200,
+      body: JSON.stringify(collection),
+    });
+    const r = await run(inputs("CC-BY-4.0", [ZENODO_BY]));
+    expect(r.outcome).toBe("unresolved");
+    expect(r.sources[0]).toMatchObject({ resource_type: "Collection", license: null });
+    expect(count("figshare")).toBe(0);
+  });
+
+  test("an OSF project with no DataCite rights is read from OSF with its children, never a publication", async () => {
+    // c5zbq: Text / Project, empty rightsList, no node license, seven children (one CC BY-NC).
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.17605/osf.io/c5zbq" }]));
+    expect(r.sources[0]).toMatchObject({
+      resolver: "osf",
+      resource_type: "Text",
+      status: "resolved",
+    });
+    expect(r.outcome).toBe("needs_permission");
+    expect(standIn.misses).toEqual([]);
+  });
+
+  /** A synthetic OSF child: a license (name and URL), or none, and how many children it has. */
+  const osfChild = (
+    id: string,
+    license: { name: string; url: string } | null,
+    children: number | null = 0,
+  ) => ({
+    id,
+    relationships: {
+      license: license === null ? null : { data: { id: "x", type: "licenses" } },
+      children: {
+        links: { related: { meta: children === null ? {} : { count: children } } },
+      },
+    },
+    ...(license === null ? {} : { embeds: { license: { data: { attributes: license } } } }),
+  });
+  const childrenOf = (data: unknown[]) => JSON.stringify({ data, links: { next: null } });
+  const SA3 = { name: "CC BY-SA 3.0", url: "https://creativecommons.org/licenses/by-sa/3.0/" };
+  const SA4 = { name: "CC BY-SA 4.0", url: "https://creativecommons.org/licenses/by-sa/4.0/" };
+  const NC4 = { name: "CC BY-NC 4.0", url: "https://creativecommons.org/licenses/by-nc/4.0/" };
+  const ND4 = { name: "CC BY-ND 4.0", url: "https://creativecommons.org/licenses/by-nd/4.0/" };
+  const F8 = [{ DOI: "10.17605/osf.io/f8sq3" }];
+
+  test("an OSF child with children of its own leaves no verdict; the tree is not walked", async () => {
+    // yb3pq (recorded): three of its nine children have children of their own.
+    const r = await run(inputs("CC-BY-NC-SA-4.0", [{ DOI: "10.17605/osf.io/yb3pq" }]));
+    expect(r.outcome).toBe("unresolved");
+    expect(r.sources[0]).toMatchObject({ resolver: "osf", license: null });
+    expect(standIn.misses).toEqual([]);
+    expect(count("/v2/nodes/sp3ck")).toBe(0);
+    // A child whose count is not given is not shown to have none.
+    standIn.override("osf /v2/nodes/f8sq3/children/", {
+      status: 200,
+      body: childrenOf([osfChild("abcde", SA4, null)]),
+    });
+    expect((await run(inputs("CC-BY-SA-4.0", F8))).outcome).toBe("unresolved");
+  });
+
+  test("each child is judged on its own: a stricter child decides, and two share-alike versions do not merge", async () => {
+    standIn.override("osf /v2/nodes/f8sq3/children/", {
+      status: 200,
+      body: childrenOf([osfChild("abcde", ND4)]),
+    });
+    const nd = await run(inputs("CC-BY-4.0", F8));
+    expect(nd.sources[0].license).toBe("cc-by-nd");
+    expect(nd.outcome).toBe("needs_permission");
+    standIn.stop();
+    standIn = startStandIn();
+    // Node CC BY 4.0, children CC BY-SA 3.0 and 4.0, target CC BY-SA 3.0: the 4.0 child cannot
+    // be relicensed under 3.0.
+    standIn.override("osf /v2/nodes/f8sq3/children/", {
+      status: 200,
+      body: childrenOf([osfChild("abcde", SA3), osfChild("fghij", SA4)]),
+    });
+    const sa = await run(inputs("CC-BY-SA-3.0", F8));
+    expect(sa.outcome).toBe("share_alike_mismatch");
+    expect(sa.sources[0].parts?.map((p) => `${p.license} ${p.version}`)).toEqual([
+      "cc-by 4.0",
+      "cc-by-sa 3.0",
+      "cc-by-sa 4.0",
+    ]);
+  });
+
+  test("an OSF children list that fails, cannot be parsed, or has more pages leaves no verdict", async () => {
+    standIn.override("osf /v2/nodes/f8sq3/children/", { status: 503 });
+    const failed = await run(inputs("CC-BY-4.0", F8), { retry: NO_RETRY });
+    expect(failed.sources[0].status).toBe("fetch_failed");
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("osf /v2/nodes/f8sq3/children/", {
+      status: 200,
+      body: JSON.stringify({
+        data: [
+          {
+            id: "abcde",
+            relationships: {
+              license: { data: {} },
+              children: { links: { related: { meta: { count: 0 } } } },
+            },
+          },
+        ],
+        links: { next: null },
+      }),
+    });
+    expect((await run(inputs("CC-BY-4.0", F8))).sources[0].status).toBe("unparseable");
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("osf /v2/nodes/f8sq3/children/", {
+      status: 200,
+      body: JSON.stringify({
+        data: [],
+        links: { next: "https://api.osf.io/v2/nodes/f8sq3/children/?page=2" },
+      }),
+    });
+    const paged = await run(inputs("CC-BY-4.0", F8));
+    expect(paged.outcome).toBe("unresolved");
+    expect(paged.sources[0].license).toBeNull();
+  });
+
+  test("an OSF Dataset with DataCite rights but registered as a Project is read from OSF too", async () => {
+    // wpkrz: Dataset / Project with CC BY 4.0 on DataCite; OSF agrees and lists no children.
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.17605/osf.io/wpkrz" }]));
+    expect(r.sources[0]).toMatchObject({
+      resolver: "osf",
+      resource_type: "Dataset",
+      license: "cc-by",
+    });
+    expect(count("/v2/nodes/wpkrz/children/")).toBe(1);
+  });
+
+  test("a component of any publisher but PLOS is unresolved, even with a parent or its own license", async () => {
+    const comp = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/39-crossref-plos-component.json`,
+      ).text(),
+    );
+    comp.message.license = [
+      { "content-version": "vor", URL: "https://creativecommons.org/publicdomain/zero/1.0/" },
+    ];
+    comp.message.relation = {
+      "is-component-of": [
+        { "id-type": "doi", id: "10.1038/s41597-019-0027-4", "asserted-by": "object" },
+      ],
+    };
+    standIn.override("datacite /dois/10.1038/s41597-019-0027-4", { status: 404 });
+    standIn.override("crossref /works/10.1038/s41597-019-0027-4", {
+      status: 200,
+      body: JSON.stringify(comp),
+    });
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.1038/s41597-019-0027-4" }]));
+    expect(r.outcome).toBe("unresolved");
+    expect(r.sources[0]).toMatchObject({ resource_type: "component", license: null });
+  });
+
+  test("the component's license is its article's version of record, and the evidence says so", async () => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]));
+    expect(r.sources[0].evidence_url).toEndWith("/works/10.1371%2Fjournal.pone.0303144");
+    expect(r.sources[0].declared_licenses).toEqual([
+      { text: null, url: "http://creativecommons.org/licenses/by/4.0/" },
+    ]);
+    // A CC0 target is allowed; the attribution duty persists.
+    expect((await run(inputs("CC0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]))).outcome).toBe(
+      "compatible_attribution",
+    );
+  });
+
+  test("a component's own license wins over its article's", async () => {
+    const own = JSON.parse(
+      await Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/39-crossref-plos-component.json`,
+      ).text(),
+    );
+    own.message.license = [
+      { "content-version": "vor", URL: "https://creativecommons.org/publicdomain/zero/1.0/" },
+    ];
+    standIn.override("crossref /works/10.1371/journal.pone.0303144.s001", {
+      status: 200,
+      body: JSON.stringify(own),
+    });
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]));
+    expect(r.outcome).toBe("compatible");
+    expect(r.sources[0]).toMatchObject({ license: "cc0", resource_type: "component" });
+    expect(count("/works/10.1371/journal.pone.0303144?")).toBe(0);
+  });
+
+  test("a component with no license of its own or its article's is unresolved, and never cached", async () => {
+    standIn.override("crossref /works/10.1371/journal.pone.0303144?", {
+      status: 200,
+      body: JSON.stringify({ status: "ok", message: { type: "journal-article", license: [] } }),
+    });
+    const cache = mapCache();
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]), {
+      cache,
+    });
+    expect(r.outcome).toBe("unresolved");
+    expect(r.sources[0]).toMatchObject({ status: "resolved", license: null });
+    const again = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]), {
+      cache,
+    });
+    expect(again.outcome).toBe("unresolved");
+    expect(count("/works/10.1371/journal.pone.0303144.s001")).toBe(2);
+  });
+
+  test("a component whose article is not in Crossref is unresolved; one that fails is fetch_failed", async () => {
+    standIn.override("crossref /works/10.1371/journal.pone.0303144?", { status: 404 });
+    const absent = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]));
+    expect(absent.outcome).toBe("unresolved");
+    expect(absent.sources[0].license).toBeNull();
+    standIn.stop();
+    standIn = startStandIn();
+    standIn.override("crossref /works/10.1371/journal.pone.0303144?", { status: 503 });
+    const failed = await run(inputs("CC-BY-4.0", [{ DOI: "10.1371/journal.pone.0303144.s001" }]), {
+      retry: NO_RETRY,
+    });
+    expect(failed.outcome).toBe("unresolved");
+    expect(failed.sources[0].status).toBe("fetch_failed");
+  });
+
+  test.each([
+    // nm000661: a journal article deposited on Zenodo.
+    ["10.5281/zenodo.6529724"],
+    ["10.6084/m9.figshare.28309157"],
+  ])("%s, a JournalArticle, stays source_is_publication", async (doi) => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: doi }]));
+    expect(r.outcome).toBe("source_is_publication");
+    expect(r.sources[0]).toMatchObject({
+      resolver: "datacite",
+      resource_type: "JournalArticle",
+      status: "publication",
+    });
+    expect(standIn.misses).toEqual([]);
+  });
+
+  test("only an OSF DOI registered as a Project is a project; only PLOS components have a parent", () => {
+    expect(isOsfProject("10.17605/osf.io/f8sq3", "Project")).toBe(true);
+    expect(isOsfProject("10.5281/zenodo.1", "Project")).toBe(false);
+    expect(isOsfProject("10.17605/osf.io/f8sq3", "Preprint")).toBe(false);
+    expect(componentParentDoi("10.1371/journal.pone.0303144.s001", {})).toBe(
+      "10.1371/journal.pone.0303144",
+    );
+    expect(
+      componentParentDoi("10.1371/x.s001", {
+        relation: { "is-component-of": [{ "id-type": "doi", id: "10.1371/Parent" }] },
+      }),
+    ).toBe("10.1371/parent");
+    // Another publisher's component inherits nothing, by stem or by relation.
+    expect(componentParentDoi("10.9999/x.s001", {})).toBeNull();
+    expect(
+      componentParentDoi("10.9999/x.s001", {
+        relation: { "is-component-of": [{ "id-type": "doi", id: "10.9999/Parent" }] },
+      }),
+    ).toBeNull();
+    expect(componentParentDoi("10.1371/no-suffix", {})).toBeNull();
+    // A PLOS component whose relation names another publisher's work inherits nothing.
+    expect(
+      componentParentDoi("10.1371/x.s001", {
+        relation: { "is-component-of": [{ "id-type": "doi", id: "10.9999/Parent" }] },
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("DANDI's license spellings", () => {

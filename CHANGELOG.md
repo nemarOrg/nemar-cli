@@ -15,6 +15,12 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Fixed
+
+- **License lineage reads data containers and ellipsis-cut README DOIs (resolver version 5; ADR 0139 decision 7 and ADR 0142 decision 3, amendments of 2026-11-27).**
+  A README DOI that prefixes a declared DOI and is followed by an ellipsis (`[...]`, `[…]`, `...`, `…`) is dropped and counted, so nm000746 and nm000843 resolve compatible.
+  Data containers are read as data, not publications, from what they contain: a figshare collection by its members' licenses (any other DataCite `Collection` is `unresolved`), an OSF project by its node and direct child components (a child with children of its own is `unresolved`), each member or child judged on its own and combined as separate sources are, and a PLOS supplementary file (Crossref `component`) by its own license, else its article's (any other publisher's component is `unresolved`). Journal articles stay `source_is_publication`.
+
 ## 0.10.51 - 2026-11-27
 
 ### Fixed
