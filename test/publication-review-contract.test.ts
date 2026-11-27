@@ -608,6 +608,7 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "screen_not_ready",
       "running",
       "has_result",
+      "auto_deny_active",
       "platform_limit",
     ]);
     expect([...START_NOT_HANDED_OVER_REASONS]).toEqual([
@@ -623,6 +624,7 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
     expect(START_REASONS as readonly string[]).not.toContain("depositor_limit");
     expect([...PUBLICATION_REVIEW_ERROR_CODES]).toEqual([
       "bad_dataset",
+      "invalid_body",
       "not_found",
       "origin_not_allowed",
       "review_disabled",
@@ -632,6 +634,7 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "screen_not_ready",
       "running",
       "has_result",
+      "auto_deny_active",
       "platform_limit",
       "dispatch_failed",
       "dispatch_unconfigured",

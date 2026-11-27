@@ -412,7 +412,12 @@ describe("a request that cannot be started", () => {
   test("every refusal the route can make is exercised, and each is a closed code of the contract", () => {
     // The route's own table, not a list typed here: a refusal added to it without a case above (or
     // in the platform's cap, which writes a declined row and so has its own test below) fails here.
-    const exercised = new Set<string>([...refusals.map(([code]) => code), "platform_limit"]);
+    const exercised = new Set<string>([
+      ...refusals.map(([code]) => code),
+      "platform_limit",
+      // Only an administrator's re-review can meet it: the tests of `again` below.
+      "auto_deny_active",
+    ]);
     expect([...exercised].sort()).toEqual(Object.keys(START_REFUSALS).sort());
     expect(Object.keys(START_REFUSALS).sort()).toEqual([...START_REFUSED_REASONS].sort());
     for (const [reason, refusal] of Object.entries(START_REFUSALS)) {
@@ -1061,5 +1066,114 @@ describe("the list's start_offered is what this route would do", () => {
       });
       expect((await bodyOf<ErrorBody>(res)).code).toBe(over ? "not_found" : "review_disabled");
     }
+  });
+});
+
+// ============================================================================
+
+describe("again: an administrator's re-review of a reported review", () => {
+  /** A start with a JSON body, or with the raw text of one. */
+  function startAgain(datasetId: string, body: unknown, raw = false) {
+    return admin.request(
+      `/admin/publish/${datasetId}/review/start`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: raw ? (body as string) : JSON.stringify(body),
+      },
+      h.env(),
+    );
+  }
+
+  function reported() {
+    const { requestId } = request();
+    const oldId = seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      state: "reported",
+      report: failingReport(),
+      claimed: true,
+    });
+    return { requestId, oldId };
+  }
+
+  test("{again: true} replaces the review that reported: 202 names the review it replaced", async () => {
+    const { oldId } = reported();
+    const res = await startAgain(PROD_DATASET, { again: true });
+    expect(res.status).toBe(202);
+    const rows = h.reviews();
+    expect(rows).toHaveLength(2);
+    expect(await bodyOf<StartPublicationReviewResponse>(res)).toEqual({
+      environment: "production",
+      started: true,
+      reason: "dispatched",
+      review_id: rows[1].id as number,
+      superseded_review_id: oldId,
+    });
+    expect(rows[0]).toMatchObject({ superseded_by: rows[1].id });
+    expect(rows[1]).toMatchObject({ state: "dispatched", started_by: adminId });
+    expect(h.dispatches()).toHaveLength(1);
+    // The audit row says it was a re-review, and of what.
+    const [audit] = auditRows();
+    expect(JSON.parse(audit.details as string)).toMatchObject({
+      review_id: rows[1].id,
+      again: true,
+      superseded_review_id: oldId,
+    });
+  });
+
+  test("a start with no body, or {again: false}, still answers has_result", async () => {
+    reported();
+    for (const res of [
+      await start(PROD_DATASET),
+      await startAgain(PROD_DATASET, { again: false }),
+    ]) {
+      expect(res.status).toBe(409);
+      expect((await bodyOf<ErrorBody>(res)).code).toBe("has_result");
+    }
+    expect(h.reviews()).toHaveLength(1);
+    expect(h.dispatches()).toHaveLength(0);
+  });
+
+  for (const [why, body, raw] of [
+    ["a string", { again: "true" }, false],
+    ["a number", { again: 1 }, false],
+    ["null", { again: null }, false],
+    ["a body that is not an object", [true], false],
+    ["text that is not JSON", "again=true", true],
+  ] as const) {
+    test(`${why} is refused 400 invalid_body, and nothing is written`, async () => {
+      reported();
+      const res = await startAgain(PROD_DATASET, body, raw);
+      expect(res.status).toBe(400);
+      expect((await bodyOf<ErrorBody>(res)).code).toBe("invalid_body");
+      expect(h.reviews()).toHaveLength(1);
+      expect(h.dispatches()).toHaveLength(0);
+      expect(auditRows()).toHaveLength(0);
+    });
+  }
+
+  test("409 auto_deny_active while the automatic denial confirms or has acted", async () => {
+    const { oldId } = reported();
+    h.db.run(
+      "UPDATE publication_reviews SET auto_deny_state = 'denied', auto_deny_at = datetime('now') WHERE id = ?",
+      [oldId],
+    );
+    const res = await startAgain(PROD_DATASET, { again: true });
+    expect(res.status).toBe(409);
+    const body = await bodyOf<ErrorBody>(res);
+    expect(body).toEqual(START_REFUSALS.auto_deny_active);
+    expect(PUBLICATION_REVIEW_ERROR_CODES).toContain(body.code);
+    expect(h.reviews()).toHaveLength(1);
+    expect(auditRows()).toHaveLength(0);
+  });
+
+  test("a second {again: true} while the new review runs answers running", async () => {
+    reported();
+    expect((await startAgain(PROD_DATASET, { again: true })).status).toBe(202);
+    const res = await startAgain(PROD_DATASET, { again: true });
+    expect(res.status).toBe(409);
+    expect((await bodyOf<ErrorBody>(res)).code).toBe("running");
+    expect(h.reviews()).toHaveLength(2);
   });
 });
