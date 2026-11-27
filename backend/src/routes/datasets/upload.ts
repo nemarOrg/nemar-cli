@@ -34,6 +34,10 @@ import { preflightRecording, takePreflight } from "../../services/identifier-pre
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { generateDatasetUploadUrls, getBucketPolicy, markDatasetPrivate } from "../../services/s3";
 import {
+  notifyIfPolicyNearCap,
+  notifyStoragePolicyAlert,
+} from "../../services/storage-policy-alert";
+import {
   generateDownloadPolicy,
   generateUploadPolicy,
   getFederationToken,
@@ -243,21 +247,28 @@ async function generateUploadUrlsForFiles(
   }
 }
 
+/** Stable log tag for a create rollback that left something behind. */
+const ROLLBACK_INCOMPLETE_TAG = "[datasets:rollback-incomplete]";
+
 /**
  * Undo a create that failed after its id was claimed and its repository was
  * created (#2497). The owner's S3 permission is always removed (its prefix
- * was never secured). The repository is deleted, and only then the claimed
- * `datasets` row: if the repository cannot be deleted, the row is kept and
- * records the repository's name, so the leftover stays findable by its id.
- * Returns the names of what could not be removed (empty when complete).
+ * was never secured). The repository is deleted with `deleteRepository` and
+ * the `getDatasetsToken` token, exactly as the admin dataset delete does
+ * (`services/deletion.ts`), and only then the claimed `datasets` row: if the
+ * repository cannot be deleted, the row is kept and records the repository's
+ * name, so the leftover stays findable by its id. Anything left behind is
+ * logged with `ROLLBACK_INCOMPLETE_TAG` and mailed to the admins. Returns the
+ * names of what could not be removed (empty when complete).
  */
 async function rollBackNewDataset(
-  db: D1Database,
+  env: Bindings,
   datasetId: string,
   userId: number,
   repoFullName: string,
   pat: string,
 ): Promise<string[]> {
+  const db = env.DB;
   const leftovers: string[] = [];
   try {
     await db
@@ -289,6 +300,12 @@ async function rollBackNewDataset(
   } catch (err) {
     console.error(`[datasets] rollback: could not settle dataset row ${datasetId}:`, err);
     leftovers.push("dataset_row");
+  }
+  if (leftovers.length > 0) {
+    console.error(
+      `${ROLLBACK_INCOMPLETE_TAG} ${datasetId} (${repoFullName}) left behind: ${leftovers.join(", ")}`,
+    );
+    await notifyStoragePolicyAlert(env, { condition: "rollback_incomplete", datasetId, leftovers });
   }
   return leftovers;
 }
@@ -527,7 +544,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         // re-issuing upload URLs (idempotent; covers rows created before this
         // invariant existed or whose carve-out was lost). Fail closed.
         try {
-          await markDatasetPrivate(
+          const written = await markDatasetPrivate(
             {
               bucket: c.env.S3_BUCKET,
               region: c.env.AWS_REGION,
@@ -536,6 +553,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
             },
             datasetId,
           );
+          await notifyIfPolicyNearCap(c.env, written);
         } catch (s3Error) {
           const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
           console.error(`Failed to mark resumed dataset ${datasetId} private:`, s3Msg);
@@ -592,9 +610,10 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       // failed at the carve-out, leaving both behind. Refusing here leaves
       // nothing behind.
       //
-      // A policy that cannot be READ is not a refusal here: the check is
-      // inconclusive, and the create goes on to the carve-out write, which
-      // fails closed and rolls the create back (below). Storage is never
+      // The check is ADVISORY (lead decision on #2500, ADR 0145): a policy
+      // that cannot be READ is not a refusal here. The check is inconclusive,
+      // and the create goes on to the carve-out write, which fails closed and
+      // rolls the create back (below). Storage is never
       // left unsecured on either path; this check only saves the round trip
       // through GitHub when the answer is already known.
       const createS3Options = {
@@ -621,6 +640,11 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               `one more carve-out would make the bucket policy ${headroom.bytes} of ` +
               `${MAX_BUCKET_POLICY_BYTES} bytes (#2497)`,
           );
+          await notifyStoragePolicyAlert(c.env, {
+            condition: "full",
+            bytes: headroom.bytes,
+            capBytes: MAX_BUCKET_POLICY_BYTES,
+          });
           return c.json(
             {
               error: "Storage policy full, administrators notified",
@@ -770,12 +794,23 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
             .run();
         } catch (error) {
           console.error("Failed to record S3 permission for dataset:", datasetId, error);
+          // Roll back like a failed carve-out (#2497): no orphan row or repo.
+          const leftovers = await rollBackNewDataset(
+            c.env,
+            datasetId,
+            user.id,
+            githubRepo.full_name,
+            pat,
+          );
           return c.json(
             {
               error: "Failed to configure S3 access for dataset",
               dataset_id: datasetId,
-              github_repo: githubRepo.full_name,
-              note: "GitHub repository was created but S3 upload permissions could not be configured. Contact an administrator.",
+              rolled_back: leftovers.length === 0,
+              note:
+                leftovers.length === 0
+                  ? "S3 upload permissions could not be configured, so the dataset was not created. Retry `nemar dataset upload`."
+                  : `S3 upload permissions could not be configured, and the rollback could not remove: ${leftovers.join(", ")}. Administrators have been notified.`,
             },
             500,
           );
@@ -794,12 +829,12 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       // S3 permission and the claimed row, so a refused create leaves no
       // orphan. No upload URL is ever issued on this path.
       try {
-        await markDatasetPrivate(createS3Options, datasetId);
+        await notifyIfPolicyNearCap(c.env, await markDatasetPrivate(createS3Options, datasetId));
       } catch (s3Error) {
         const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
         console.error(`Failed to mark new dataset ${datasetId} private:`, s3Msg);
         const leftovers = await rollBackNewDataset(
-          db,
+          c.env,
           datasetId,
           user.id,
           githubRepo.full_name,
@@ -813,7 +848,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
             note:
               leftovers.length === 0
                 ? "The dataset's S3 storage could not be marked private, so the dataset was not created and nothing was uploaded. Retry `nemar dataset upload`; an administrator should check the bucket policy if this persists."
-                : `The dataset's S3 storage could not be marked private, so nothing was uploaded, and the rollback could not remove: ${leftovers.join(", ")}. Contact an administrator.`,
+                : `The dataset's S3 storage could not be marked private, so nothing was uploaded, and the rollback could not remove: ${leftovers.join(", ")}. Administrators have been notified.`,
           },
           500,
         );

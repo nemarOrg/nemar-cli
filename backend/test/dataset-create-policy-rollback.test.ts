@@ -37,11 +37,13 @@ import {
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { type CapturedEmail, sendsTo, withFakeResend } from "./helpers/resend";
 import { type S3ManifestStandin, startS3ManifestStandin } from "./helpers/s3-manifest-standin";
 
 const BUCKET = "nemar";
 const API_KEY = "policyrollback-key-0123456789abcdef0123456789abcd";
 const PAT = "ghp_standin_only_never_real";
+const ADMIN_EMAIL = "policy-admin@example.org";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
@@ -94,6 +96,11 @@ async function seedUser(): Promise<void> {
     .get();
   if (!row) throw new Error("seed failed");
   userId = row.id;
+  db.run(
+    `INSERT INTO users (username, email, password_hash, status, role, email_verified)
+     VALUES ('policyadmin', ?, 'x', 'approved', 'admin', 1)`,
+    [ADMIN_EMAIL],
+  );
   db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
     row.id,
     await hashApiKey(API_KEY),
@@ -101,8 +108,20 @@ async function seedUser(): Promise<void> {
   );
 }
 
+/** Admin mail is opted in only inside `withFakeResend`, so nothing can reach Resend. */
+let notify = false;
+
 function env(): Bindings {
+  const mail = notify
+    ? {
+        DEV_ADMIN_NOTIFICATIONS: "1",
+        DEV_EMAIL_ALLOWLIST: ADMIN_EMAIL,
+        RESEND_API_KEY: "re_test",
+        FROM_EMAIL: "NEMAR <noreply@nemar.org>",
+      }
+    : {};
   return {
+    ...mail,
     DB: realD1(db),
     ENVIRONMENT: "test",
     SANDBOX_ID_FLOOR: "90001",
@@ -172,6 +191,7 @@ beforeEach(async () => {
   s3 = startS3ManifestStandin();
   githubLog = [];
   githubDeleteStatus = 204;
+  notify = false;
   github = startGithubStandin();
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
     `http://127.0.0.1:${github.port}`;
@@ -253,5 +273,118 @@ describe("POST /datasets: a failed carve-out rolls the create back (#2497)", () 
     expect(githubLog.some((r) => r.method === "DELETE")).toBe(false);
     expect(datasetRows()).toBe(1);
     expect(permissionRows()).toBe(1);
+  });
+});
+
+/** Run `fn` with admin mail opted in and captured by the local Resend stand-in. */
+async function withAdminMail(fn: (calls: CapturedEmail[]) => Promise<void>): Promise<void> {
+  notify = true;
+  try {
+    await withFakeResend(fn);
+  } finally {
+    notify = false;
+  }
+}
+
+function adminSubjects(calls: CapturedEmail[]): string[] {
+  return sendsTo(calls, ADMIN_EMAIL).map((m) => m.subject);
+}
+
+describe("POST /datasets: a failed S3 permission rolls the create back (#2497)", () => {
+  test("repository deleted and row removed when the permission INSERT fails", async () => {
+    s3.setBucketPolicy(buildPublicAccessPolicy(BUCKET, ["nm000111"]));
+    // Real engine fault: the permission INSERT itself aborts.
+    db.run(
+      "CREATE TRIGGER fail_perm BEFORE INSERT ON user_s3_permissions BEGIN SELECT RAISE(ABORT, 'injected'); END",
+    );
+    const res = await create();
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as {
+      error?: string;
+      dataset_id?: string;
+      rolled_back?: boolean;
+      upload_urls?: unknown;
+    };
+    expect(body.error).toBe("Failed to configure S3 access for dataset");
+    expect(body.rolled_back).toBe(true);
+    expect(body.upload_urls).toBeUndefined();
+    expect(githubLog).toContainEqual({
+      method: "DELETE",
+      path: `/repos/nemarDatasets/${body.dataset_id}`,
+    });
+    expect(datasetRows()).toBe(0);
+    expect(s3.log.some((r) => r.method === "PUT")).toBe(false);
+  });
+});
+
+describe("POST /datasets: admin alerts (#2497)", () => {
+  test("a full policy mails the admins once a day, however many creates are refused", async () => {
+    s3.setBucketPolicy(policyAtCap());
+    await withAdminMail(async (calls) => {
+      expect((await create()).status).toBe(503);
+      expect((await create()).status).toBe(503);
+      expect(adminSubjects(calls)).toEqual([
+        "[NEMAR] ALERT: bucket policy full, dataset creation refused",
+      ]);
+    });
+    const stamps = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'storage_policy_alert' AND resource_id = 'full'",
+      )
+      .get();
+    expect(stamps?.n).toBe(1);
+  });
+
+  test("an incomplete rollback logs its tag and mails the admins, naming what was left", async () => {
+    s3.setBucketPolicy(buildPublicAccessPolicy(BUCKET, ["nm000111"]));
+    s3.setPolicyPutStatus(500);
+    githubDeleteStatus = 403;
+    const errors: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+      realError(...args);
+    };
+    try {
+      await withAdminMail(async (calls) => {
+        const res = await create();
+        const body = (await res.json()) as { dataset_id?: string; rolled_back?: boolean };
+        expect(body.rolled_back).toBe(false);
+        const mails = sendsTo(calls, ADMIN_EMAIL);
+        expect(mails.map((m) => m.subject)).toEqual([
+          `[NEMAR] ALERT: incomplete rollback of ${body.dataset_id}`,
+        ]);
+        expect(mails[0]?.html).toContain("github_repository");
+        expect(
+          errors.some(
+            (e) =>
+              e.startsWith("[datasets:rollback-incomplete]") &&
+              e.includes(body.dataset_id as string),
+          ),
+        ).toBe(true);
+      });
+    } finally {
+      console.error = realError;
+    }
+  });
+
+  test("a carve-out written above 80% of the cap mails the near-cap alert", async () => {
+    // Just above 80%, with room for more.
+    let n = 1;
+    while (JSON.stringify(sparsePolicy(n)).length <= MAX_BUCKET_POLICY_BYTES * 0.81) n++;
+    s3.setBucketPolicy(sparsePolicy(n));
+    await withAdminMail(async (calls) => {
+      const res = await create();
+      expect(res.status).toBeLessThan(300);
+      expect(adminSubjects(calls)).toEqual(["[NEMAR] Bucket policy above 80% of its size cap"]);
+    });
+  });
+
+  test("below 80% nothing is mailed", async () => {
+    s3.setBucketPolicy(buildPublicAccessPolicy(BUCKET, ["nm000111"]));
+    await withAdminMail(async (calls) => {
+      expect((await create()).status).toBeLessThan(300);
+      expect(adminSubjects(calls)).toEqual([]);
+    });
   });
 });
