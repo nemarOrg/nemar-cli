@@ -843,6 +843,7 @@
     "test/migration-prefixes.unit.test.ts": 200,
     "test/moved-commands-changelog.unit.test.ts": 74,
     "test/moved-commands.unit.test.ts": 179943,
+    "test/name-follows-upstream.unit.test.ts": 17,
     "test/naming-rule.unit.test.ts": 136,
     "test/neurobagel-canonical-json.unit.test.ts": 2,
     "test/neurobagel-curation-transform.unit.test.ts": 642,
