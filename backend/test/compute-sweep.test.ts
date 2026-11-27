@@ -911,20 +911,6 @@ describe("what the sweep will not do", () => {
     expect(total("compute_jobs")).toBe(0);
   });
 
-  test("with Tapis unconfigured and a live Tapis job it says so, at error level, and does nothing", async () => {
-    await makeJob(fx);
-    const requests = fx.tapis.log.length;
-    for (const mode of ["live", "week"] as const) {
-      const result = await sweepTenantJobs(env({ TAPIS_AUTH_STRATEGY: undefined }), mode);
-      expect(result?.errors).toEqual(["unconfigured"]);
-      expect(result && "tapisUnconfigured" in result).toBe(false);
-      const log = result ? tenantLogLine(result) : null;
-      expect(log?.level).toBe("error");
-      expect(log?.line).toContain("errors=unconfigured");
-    }
-    expect(fx.tapis.log.length).toBe(requests);
-  });
-
   test("more unbound jobs than a run handles are deferred, loudly, and taken next run", async () => {
     for (let i = 0; i < TENANT_NEW_PER_RUN + 2; i++) await foreign();
     const first = await sweepTenantJobs(env(), "live");
@@ -982,6 +968,20 @@ describe("Tapis unconfigured in a Worker that runs runner jobs only (ADR 0118 am
     });
     expect(fx.tapis.log.length).toBe(requests);
   }
+
+  test("a live Tapis job is a gap: `unconfigured` at error level in both passes, and nothing is asked of Tapis", async () => {
+    await makeJob(fx);
+    const requests = fx.tapis.log.length;
+    for (const mode of ["live", "week"] as const) {
+      const result = await sweepTenantJobs(unconfigured(), mode);
+      expect(result?.errors).toEqual(["unconfigured"]);
+      expect(result && "tapisUnconfigured" in result).toBe(false);
+      const log = result ? tenantLogLine(result) : null;
+      expect(log?.level).toBe("error");
+      expect(log?.line).toContain("errors=unconfigured");
+    }
+    expect(fx.tapis.log.length).toBe(requests);
+  });
 
   test("with no Tapis job at all it writes no error: nothing in `live`, one information line in `week`", async () => {
     await expectQuiet();
