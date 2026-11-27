@@ -33,7 +33,7 @@ import {
   qualityFileHeaders,
 } from "../../../shared/contract/quality-route.js";
 import { sha256HexOfBytes } from "../../../shared/contract/view-digest.js";
-import { DERIVATIVE_OBJECT_PREFIX } from "./compute-derivatives.js";
+import { DERIVATIVE_OBJECT_PREFIX } from "./compute-derivative-constants.js";
 import { recordingViews } from "./quality-views.js";
 
 /** The derivative row a route has decided may be read: the fields the steps read. */

@@ -50,8 +50,14 @@
  * allowance of 1,000 that the other daily jobs share. The cap is a ceiling and not a rate, and the pilot of
  * twenty datasets takes two days. Raising the bound needs a measurement first.
  *
- * NO MAIL, NO GITHUB. Nothing here imports a mail service or reaches GitHub; the only network is Tapis,
- * through the gateway's own submit.
+ * GITHUB (ADR 0143). Every run of the archive reads the commit of its version's tag before its claim: one
+ * request, two for a tag without its leading `v`. A run over the queue may try `PIPELINE_RUN_EXTRA_TRIES` (10)
+ * datasets more than it dispatches, passing over ones refused or deferred at that read, so a tick makes at most
+ * 40 GitHub requests and about 80 more statements than the bound above counts, which is as UNVERIFIED as the rest.
+ * A credential fault (no GitHub App configuration, or a token that cannot be minted) stops the queue at the
+ * first dataset and ends the tick; one repository GitHub cannot answer defers that dataset alone.
+ *
+ * NO MAIL. Nothing here imports a mail service; the other network is Tapis, through the gateway's own submit.
  */
 
 import { COMPUTE_RECIPES, type ComputeRecipe } from "../../../shared/compute-recipes.js";
@@ -86,6 +92,8 @@ export const ENDS_THE_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusa
   "tapis_unconfigured",
   // The tenant ceiling does not depend on the pool or the recipe: no other recipe would be admitted.
   "platform_busy",
+  // A run over the queue stops at it only for the Worker's GitHub credentials, the same for every recipe (ADR 0143).
+  "source_commit_deferred",
 ]);
 
 export type RecipeSkip =

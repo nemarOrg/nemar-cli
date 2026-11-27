@@ -10,6 +10,8 @@ Completed by nemarOrg/nemar-process#98 on nemar-process `dev` (the launcher's pa
 Refines [ADR 0140](0140-a-run-handed-the-serving-index-names-it-in-its-derivative-key.md) decision 3 and [ADR 0118](0118-the-compute-gateway-records-every-tenant-job-and-keeps-the-ledger-in-expanse-service-units.md) where it fixes the launch specification `nemar.launch-spec.v1`.
 Every key ADR 0140 defines keeps its bytes.
 
+Refined by [ADR 0143](0143-every-worker-dispatched-run-of-the-archive-is-handed-its-tags-commit-or-waits-for-it.md) (2026-11-27), which also supersedes the last clause of ADR 0121 decision 10: every Worker-dispatched run of the archive is handed its tag's commit, staged index or not, and the tag is read before the index; a GitHub fault reading it defers the run without end and an absent tag refuses it, so decision 3's deferral covers the index's own faults only.
+
 ## Context
 
 A run of nemar-ica on the archive copy (`--input bids`) declares the views of the serving copy only when it is handed the serving copy's index as a file (`--serving-index`), together with `--dataset-id` and `--source-commit`, and it uses a row of the index only when the index's `source_commit` is exactly the run's `--source-commit` (nemarOrg/nemar-process#95).

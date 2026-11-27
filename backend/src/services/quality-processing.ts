@@ -55,7 +55,7 @@ import {
 } from "../../../shared/contract/quality-route.js";
 import { SchemaSet, schemasReachableFrom } from "../../../shared/contract/schema-check.js";
 import { readIJson, sha256HexOfBytes } from "../../../shared/contract/view-digest.js";
-import { DERIVATIVE_OBJECT_PREFIX } from "./compute-derivatives.js";
+import { DERIVATIVE_OBJECT_PREFIX } from "./compute-derivative-constants.js";
 import { type Served, type ServedDerivative, readBounded } from "./quality-serve.js";
 
 /** The derivative row the processing endpoint reads: the served fields and the map the row recorded. */
