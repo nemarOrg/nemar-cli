@@ -596,6 +596,72 @@ describe("a README DOI that prefixes a declared DOI is that DOI cut short", () =
   );
 });
 
+describe("a README DOI cut by an ellipsis", () => {
+  // The exact shapes of nm000746 and nm000843 (2026-11-27): a truncated README table cell.
+  const NM000746_README =
+    "| Field | Value |\n| --- | --- |\n| Notes | ...ReferencesAndLinks https://doi.org/10.5281/zenodo.2231 [...]; N: 30 participants |\n";
+  const NM000843_README =
+    "| Notes | ...ReferencesAndLinks https://doi.org/10.5281/zenodo.236 [...]; N: 30 participants |\n";
+  const sourcesOf = (declared: string | null, readme: string) =>
+    extractSources({
+      datasetDescription: declared === null ? {} : { SourceDatasets: [{ DOI: declared }] },
+      relatedIdentifiers: null,
+      attestationUpstreamSource: null,
+      readme,
+    });
+  const ids = (found: ReturnType<typeof extractSources>) =>
+    found.refs.map((r) => (r.kind === "doi" ? `${r.origin} ${r.doi}` : r.kind));
+
+  test.each([
+    ["10.5281/zenodo.22314785", NM000746_README],
+    ["10.5281/zenodo.23610719", NM000843_README],
+  ])("declared %s: the README's ellipsis-cut copy is dropped and counted", (doi, readme) => {
+    const found = sourcesOf(doi, readme);
+    expect(ids(found)).toEqual([`source_datasets ${doi}`]);
+    expect(found.dropped).toBe(1);
+  });
+
+  test.each([
+    ["10.5281/zenodo.236 [...]"],
+    ["10.5281/zenodo.236[…]"],
+    ["10.5281/zenodo.236 ..."],
+    ["10.5281/zenodo.236 …"],
+  ])("each ellipsis marker: %s", (text) => {
+    const found = sourcesOf("10.5281/zenodo.23610719", `Notes: ${text}; N: 30\n`);
+    expect(ids(found)).toEqual(["source_datasets 10.5281/zenodo.23610719"]);
+    expect(found.dropped).toBe(1);
+  });
+
+  test("distinct records are kept: no ellipsis, an ellipsis elsewhere, nothing longer declared", () => {
+    const both = sourcesOf(
+      null,
+      "Data: 10.5281/zenodo.1234567 and 10.5281/zenodo.12345678 [...]; see also ...\n",
+    );
+    expect(ids(both)).toEqual(["readme 10.5281/zenodo.1234567", "readme 10.5281/zenodo.12345678"]);
+    expect(both.dropped).toBe(0);
+    // An ellipsis after a DOI that prefixes nothing declared: the README's own source stays.
+    const alone = sourcesOf(null, NM000843_README);
+    expect(ids(alone)).toEqual(["readme 10.5281/zenodo.236"]);
+    // An ellipsis that does not follow the short DOI does not drop it.
+    const apart = sourcesOf("10.5281/zenodo.23610719", "Old: 10.5281/zenodo.236, notes [...]\n");
+    expect(ids(apart)).toEqual([
+      "source_datasets 10.5281/zenodo.23610719",
+      "readme 10.5281/zenodo.236",
+    ]);
+  });
+
+  test.each([
+    ["10.5281/zenodo.22314785", NM000746_README],
+    ["10.5281/zenodo.23610719", NM000843_README],
+  ])("the lineage of %s is compatible, and the cut copy is never fetched", async (doi, readme) => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: doi }], readme));
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(r.dropped_doi_candidates).toBe(1);
+    expect(r.sources.map((x) => x.id)).toEqual([doi]);
+    expect(standIn.misses).toEqual([]);
+  });
+});
+
 describe("DANDI's license spellings", () => {
   test.each([
     ["cc_by_40", "cc-by", "4.0"],
