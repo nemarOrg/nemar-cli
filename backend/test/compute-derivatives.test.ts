@@ -18,7 +18,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Miniflare } from "miniflare";
-import { findRecipe, recipeRequiredOutputs } from "../../shared/compute-recipes";
+import {
+  RECIPE_SOURCE_COMMIT_FLAG,
+  findRecipe,
+  recipeArguments,
+  recipeRequiredOutputs,
+} from "../../shared/compute-recipes";
 import {
   SERVING_INDEX_CONTAINER_PATH,
   resultsLauncherKey,
@@ -46,7 +51,12 @@ import {
   runComputeDerivativesCron,
   syncDerivatives,
 } from "../src/services/compute-derivatives";
-import { dispatchPipelineJob, syncPipelineStamps } from "../src/services/compute-pipeline";
+import {
+  dispatchPipelineJob,
+  recipeJobSpec,
+  servingIndexForRun,
+  syncPipelineStamps,
+} from "../src/services/compute-pipeline";
 import { recordKey, sha256Hex } from "../src/services/compute-records";
 import {
   ComputeS3Error,
@@ -64,7 +74,12 @@ import {
   seedComputeUsers,
 } from "./helpers/compute-app";
 import { HARNESS_BUCKETS } from "./helpers/compute-harness";
-import { type LifecycleFixture, startLifecycleFixture } from "./helpers/compute-lifecycle-fixture";
+import {
+  type LifecycleFixture,
+  RUNTIME_IMAGE,
+  RUNTIME_IMAGE_DIGEST,
+  startLifecycleFixture,
+} from "./helpers/compute-lifecycle-fixture";
 import {
   fundPipelines,
   recipeRecord,
@@ -430,16 +445,25 @@ async function zarrJob(o: ZarrJobOptions = {}): Promise<Made> {
   return { id, jobId: r.jobId, stampId: r.stampId, version, files };
 }
 
-/** A BIDS run (Tapis) of `nemar-floor`, finished the same way. */
-async function bidsJob(over: { sourceCommit?: string; stampDigest?: string } = {}): Promise<Made> {
+/**
+ * A BIDS run (Tapis) of `nemar-floor`, finished the same way. `sourceCommit` is the commit the record states
+ * (`SOURCE` by default; null is a run handed no `--source-commit`, whose record states none).
+ */
+async function bidsJob(
+  over: { id?: string; sourceCommit?: string | null; stampDigest?: string } = {},
+): Promise<Made> {
   const env = envOf();
   await seedPipelinesAccount(env, { reuse: true });
   await fundPipelines(env);
-  const id = await dataset();
+  const id = over.id ?? (await dataset());
   const r = await dispatch(env, id);
   if (!r.ok) throw new Error(`not dispatched: ${r.code}`);
   const record = recipeRecord({
-    dataset: { id, version: r.version, source_commit: over.sourceCommit ?? SOURCE },
+    dataset: {
+      id,
+      version: r.version,
+      source_commit: over.sourceCommit === undefined ? SOURCE : over.sourceCommit,
+    },
   });
   const files = await finishJob(env, r.jobId, id, record, tableOf(), 1);
   const sync = await syncPipelineStamps(env);
@@ -2285,9 +2309,12 @@ async function icaBidsJob(
     servingIndex?: "flag" | "equals";
     /** What the dispatcher recorded of the serving index (ADR 0141), and the arguments it added. */
     recorded?: { serving_index: unknown; args: string[] };
+    /** The dataset, when the case made it; and the commit the record states (see `bidsJob`). */
+    id?: string;
+    sourceCommit?: string | null;
   } = {},
 ): Promise<Made> {
-  const made = await bidsJob();
+  const made = await bidsJob({ id: o.id, sourceCommit: o.sourceCommit });
   const env = envOf();
   const floor = findRecipe("nemar-floor") as NonNullable<ReturnType<typeof findRecipe>>;
   const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
@@ -2448,6 +2475,69 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     };
     expect(row.key).toBe(await derivativeKey({ ...fields, serving_index: `sha256:${STAGED_HEX}` }));
     expect(row.key).not.toBe(await derivativeKey({ ...fields, serving_index: "none" }));
+  });
+
+  test("a run the dispatcher staged no index for is handed the tag's commit, so its stamp keys none and is stored (on007823 in the local run of 2026-11-27; MUTATION: hand --source-commit only with a staged index)", async () => {
+    const env = envOf();
+    const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
+    const id = await dataset();
+    // The serving index was built from another commit than the tag's: the dispatcher stages none.
+    github.index(id, { source_commit: SOURCE, store_count: 0, stores: [] });
+    const decided = await servingIndexForRun(env, ica, "bids", id, "v1.0.0");
+    if (decided.kind !== "run") throw new Error(`not run: ${decided.kind}`);
+    expect(decided.servingIndex).toMatchObject({ staged: false, reason: "source_commit_differs" });
+    const image = { ref: RUNTIME_IMAGE, digest: RUNTIME_IMAGE_DIGEST };
+    const spec = recipeJobSpec(ica, {
+      datasetId: id,
+      tag: "v1.0.0",
+      input: "bids",
+      image,
+      env: { ENVIRONMENT: "development" },
+      servingIndex: decided.servingIndex,
+    });
+    const base = recipeArguments({ datasetId: id, tag: "v1.0.0", imageDigest: image.digest });
+    expect(spec.args.slice(0, base.length)).toEqual(base);
+    const added = spec.args.slice(base.length);
+    // The recipe records the commit it is handed (nemar-process `identity.source_commit`), and none without one.
+    const at = added.indexOf(RECIPE_SOURCE_COMMIT_FLAG);
+    const handed = at < 0 ? null : (added[at + 1] ?? null);
+    expect(handed).toBe(COMMIT);
+    const made = await icaBidsJob({
+      id,
+      sourceCommit: handed,
+      recorded: { serving_index: spec.serving_index, args: added },
+    });
+    expect(await syncAll(env)).toMatchObject({
+      created: 1,
+      stored: 1,
+      derivative_unkeyable: {},
+      errored: 0,
+    });
+    const row = (await one(env)) as Der & { serving_index: string | null };
+    expect([row.serving_index, row.input_digest, row.state]).toEqual([
+      "none",
+      `git:${COMMIT}`,
+      "stored",
+    ]);
+    const stamp = await env.DB.prepare(
+      "SELECT version, recipe_version, engine FROM compute_pipeline_stamps WHERE id = ?1",
+    )
+      .bind(made.stampId)
+      .first<Record<string, string>>();
+    expect(row.key).toBe(
+      await derivativeKey({
+        dataset: id,
+        version: stamp?.version as string,
+        recipe: "nemar-ica",
+        recipe_version: stamp?.recipe_version as string,
+        engine: stamp?.engine as string,
+        input: "bids",
+        profile: "archive",
+        input_digest: `git:${COMMIT}`,
+        serving_index: "none",
+      }),
+    );
+    expect(await skipWord(env, made.stampId)).toBeUndefined();
   });
 
   test("a run recorded with no index staged is keyed none, and the word does not reach the key", async () => {

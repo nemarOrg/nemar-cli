@@ -22,6 +22,12 @@
  * `none`. The index's shape is checked here as the recipe checks it (`servingIndexShapeOk`), so a run is never
  * handed an index it would refuse.
  *
+ * A RUN WITHOUT AN INDEX STILL GETS THE TAG'S COMMIT (ADR 0141 amendment of 2026-11-27). The tag's commit is read
+ * whatever becomes of the index, and an answer that stages nothing carries it (`tagCommit`, null only when
+ * GitHub could not be read or answered no such tag), so the run is handed `--source-commit` and its record states
+ * the commit its files were read at: that commit is the `git:` input digest a BIDS derivative is keyed by
+ * (ADR 0123 decision 3), and a run whose record states none can never be stored (`no_input_digest`).
+ *
  * THE BOUNDS are `checkZarrSource`'s: one GitHub tag lookup (two requests at most, the second only after a 404
  * or 422 without the leading `v`), one index read abandoned after `ZARR_SOURCE_INDEX_TIMEOUT_MS` and read to at
  * most `COMPUTE_SERVING_INDEX_MAX_BYTES` (the recipe's own bound), and one create-only write. The test seam
@@ -54,12 +60,21 @@ export type StagedServingIndex =
       /** The index's `source_commit`, which is the tag's commit: the run's `--source-commit`. */
       sourceCommit: string;
     }
-  | { staged: false; reason: ServingIndexAbsentReason };
+  | {
+      staged: false;
+      reason: ServingIndexAbsentReason;
+      /**
+       * The commit of the version's tag when it was read, which is every word but the ones GitHub or its
+       * credentials gave (`tag_absent`, `github_unreadable`, `token_mint_failed`, `no_github_credentials`) and a
+       * staging that threw before the tag was read; null otherwise. The run's `--source-commit` when not null.
+       */
+      tagCommit: string | null;
+    };
 
-const absent = (reason: ServingIndexAbsentReason): StagedServingIndex => ({
-  staged: false,
-  reason,
-});
+const absent = (
+  reason: ServingIndexAbsentReason,
+  tagCommit: string | null,
+): StagedServingIndex => ({ staged: false, reason, tagCommit });
 
 type IndexRead =
   | { ok: true; bytes: Uint8Array }
@@ -312,36 +327,39 @@ export async function stageServingIndex(
   datasetId: string,
   tag: string,
 ): Promise<StagedServingIndex> {
+  // The tag's commit once GitHub has answered it: every later answer carries it, a throw included.
+  let read: string | null = null;
   try {
     const access = await githubAccess(env);
-    if (!access.ok) return absent(access.reason);
+    if (!access.ok) return absent(access.reason, null);
     const [index, tagged] = await Promise.all([
       readIndexBytes(env, datasetId),
       tagCommit(datasetId, tag, access),
     ]);
-    if (!tagged.ok) return absent(tagged.reason);
-    if (!index.ok) return absent(index.reason);
+    if (!tagged.ok) return absent(tagged.reason, null);
+    read = tagged.commit;
+    if (!index.ok) return absent(index.reason, read);
     const source = indexSourceCommit(index.bytes);
-    if (!source.ok) return absent(source.reason);
+    if (!source.ok) return absent(source.reason, read);
     // Exactly the tag's commit: never a metadata-only difference (ADR 0141).
-    if (source.commit !== tagged.commit) return absent("source_commit_differs");
+    if (source.commit !== read) return absent("source_commit_differs", read);
     const sha256 = await sha256Hex(index.bytes);
     let kept: boolean;
     try {
       kept = await putServingIndexCopy(env, sha256, index.bytes);
     } catch (err) {
       console.error(`[serving-index] copy_put_failed error=${errorName(err)}`);
-      return absent("index_not_stored");
+      return absent("index_not_stored", read);
     }
     if (!kept) {
       // Other bytes under a content address: never overwritten, and an administrator looks.
       console.error(`[serving-index] copy_conflict sha256=${sha256}`);
-      return absent("index_not_stored");
+      return absent("index_not_stored", read);
     }
     return { staged: true, sha256, size: index.bytes.byteLength, sourceCommit: source.commit };
   } catch (err) {
     // A throw here is a defect, not a service: the error's name (never its message) is for the operator.
     console.error(`[serving-index] stage_threw error=${errorName(err)}`);
-    return absent("index_unreadable");
+    return absent("index_unreadable", read);
   }
 }

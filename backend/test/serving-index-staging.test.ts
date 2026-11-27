@@ -169,6 +169,7 @@ describe("the index is staged only when it was built from the tag's own commit",
     expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
       staged: false,
       reason: "source_commit_differs",
+      tagCommit: T,
     });
     expect(await servingCopies()).toEqual([]);
   });
@@ -186,6 +187,7 @@ describe("the index is staged only when it was built from the tag's own commit",
     expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
       staged: false,
       reason: "source_commit_differs",
+      tagCommit: T,
     });
     expect(compareRequests()).toEqual([]);
     expect(await servingCopies()).toEqual([]);
@@ -200,9 +202,9 @@ describe("the index is staged only when it was built from the tag's own commit",
 
 // --- (c): every other failure is a word ------------------------------------------------------------------
 
-describe("anything else stages nothing, with a word, and never throws", () => {
-  const cases: Array<[string, () => void, string]> = [
-    ["no index", () => github.tag(ID, TAG, T), "no_index"],
+describe("anything else stages nothing, with a word and the tag's commit when it was read, and never throws", () => {
+  const cases: Array<[string, () => void, string, string | null]> = [
+    ["no index", () => github.tag(ID, TAG, T), "no_index", T],
     [
       "an index the copy cannot serve",
       () => {
@@ -210,6 +212,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
         github.index(ID, { http: 500 });
       },
       "index_unreadable",
+      T,
     ],
     [
       "an index that is not JSON",
@@ -218,6 +221,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
         github.index(ID, "{not json");
       },
       "index_unusable",
+      T,
     ],
     [
       "an index that is a JSON array",
@@ -226,6 +230,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
         github.index(ID, "[]");
       },
       "index_unusable",
+      T,
     ],
     [
       "an index without a commit",
@@ -234,6 +239,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
         github.index(ID, indexText(null));
       },
       "index_commit_unusable",
+      T,
     ],
     [
       "an index with an abbreviated commit",
@@ -242,8 +248,9 @@ describe("anything else stages nothing, with a word, and never throws", () => {
         github.index(ID, indexText(T.slice(0, 12)));
       },
       "index_commit_unusable",
+      T,
     ],
-    ["a tag GitHub does not have", () => github.index(ID, indexText(T)), "tag_absent"],
+    ["a tag GitHub does not have", () => github.index(ID, indexText(T)), "tag_absent", null],
     [
       "a tag GitHub cannot answer",
       () => {
@@ -251,12 +258,17 @@ describe("anything else stages nothing, with a word, and never throws", () => {
         github.index(ID, indexText(T));
       },
       "github_unreadable",
+      null,
     ],
   ];
-  for (const [label, arrange, reason] of cases) {
-    test(`${label}: ${reason}`, async () => {
+  for (const [label, arrange, reason, tagCommit] of cases) {
+    test(`${label}: ${reason} (MUTATION: drop the tag's commit from the word)`, async () => {
       arrange();
-      expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({ staged: false, reason });
+      expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
+        staged: false,
+        reason,
+        tagCommit,
+      });
       expect(await servingCopies()).toEqual([]);
     });
   }
@@ -267,6 +279,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
     expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
       staged: false,
       reason: "index_too_large",
+      tagCommit: T,
     });
   });
 
@@ -276,6 +289,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
     expect(await stageServingIndex(fx.env(), ID, TAG)).toEqual({
       staged: false,
       reason: "no_github_credentials",
+      tagCommit: null,
     });
     expect(github.log).toEqual([]);
   });
@@ -289,7 +303,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
     const lines = await logged(async () => {
       staged = await stageServingIndex(devEnv(), ID, TAG);
     });
-    expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
+    expect(staged).toEqual({ staged: false, reason: "index_not_stored", tagCommit: T });
     // Its own line, with the digest, never the generic one (MUTATION: share the put failure's line).
     expect(lines.filter((l) => l.startsWith("[serving-index]"))).toEqual([
       `[serving-index] copy_conflict sha256=${sha(text)}`,
@@ -319,7 +333,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
         TAG,
       );
     });
-    expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
+    expect(staged).toEqual({ staged: false, reason: "index_not_stored", tagCommit: T });
     // The store's throw is logged by the error's class name alone (MUTATION: log the conflict line).
     expect(lines.filter((l) => l.startsWith("[serving-index]"))).toEqual([
       "[serving-index] copy_put_failed error=Error",
@@ -342,7 +356,7 @@ describe("anything else stages nothing, with a word, and never throws", () => {
     const lines = await logged(async () => {
       staged = await stageServingIndex({ ...env, COMPUTE_RECORDS: broken }, ID, TAG);
     });
-    expect(staged).toEqual({ staged: false, reason: "index_not_stored" });
+    expect(staged).toEqual({ staged: false, reason: "index_not_stored", tagCommit: T });
     expect(lines.filter((l) => l.startsWith("[serving-index]"))).toEqual([
       "[serving-index] copy_put_failed error=TypeError",
     ]);
@@ -393,6 +407,7 @@ describe("an index the recipe cannot use is index_unusable, and the run goes ahe
       expect(await stageServingIndex(devEnv(), ID, TAG)).toEqual({
         staged: false,
         reason: "index_unusable",
+        tagCommit: T,
       });
       expect(await servingCopies()).toEqual([]);
       expect(isServingIndexFault("index_unusable")).toBe(false);
@@ -485,9 +500,9 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
     ).run();
     expect(await run(env)).toEqual({
       kind: "run",
-      servingIndex: { staged: false, reason: "github_unreadable" },
+      servingIndex: { staged: false, reason: "github_unreadable", tagCommit: null },
     });
-    const spec = icaSpec({ staged: false, reason: "github_unreadable" });
+    const spec = icaSpec({ staged: false, reason: "github_unreadable", tagCommit: null });
     expect(spec.serving_index).toEqual({ reason: "github_unreadable" });
   });
 
@@ -516,8 +531,8 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
     expect((await run(env)).kind).toBe("deferred");
   });
 
-  for (const [label, arrange, reason] of [
-    ["no index", () => github.tag(ID, TAG, T), "no_index"],
+  for (const [label, arrange, reason, tagCommit] of [
+    ["no index", () => github.tag(ID, TAG, T), "no_index", T],
     [
       "an index of another commit",
       () => {
@@ -525,8 +540,9 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
         github.index(ID, indexText(S));
       },
       "source_commit_differs",
+      T,
     ],
-    ["a tag GitHub does not have", () => github.index(ID, indexText(T)), "tag_absent"],
+    ["a tag GitHub does not have", () => github.index(ID, indexText(T)), "tag_absent", null],
     [
       "an index the recipe cannot use",
       () => {
@@ -534,13 +550,17 @@ describe("a fault defers the run; after 24 hours, or for an absent index, it run
         github.index(ID, indexText(T, { stores: {} }));
       },
       "index_unusable",
+      T,
     ],
-  ] as Array<[string, () => void, string]>) {
+  ] as Array<[string, () => void, string, string | null]>) {
     test(`${label}: runs at once without the index, and no stamp is written (MUTATION: defer every word)`, async () => {
       const env = devEnv();
       await seedEegDataset(env, ID);
       arrange();
-      expect(await run(env)).toEqual({ kind: "run", servingIndex: { staged: false, reason } });
+      expect(await run(env)).toEqual({
+        kind: "run",
+        servingIndex: { staged: false, reason, tagCommit },
+      });
       expect(await deferredStamps(env)).toEqual([]);
     });
   }
@@ -684,7 +704,7 @@ describe("a 403 is read with the dataset row: an absent index runs at once, a re
         if (expected === "no_index") {
           expect(decided).toEqual({
             kind: "run",
-            servingIndex: { staged: false, reason: "no_index" },
+            servingIndex: { staged: false, reason: "no_index", tagCommit: T },
           });
         } else {
           expect(decided).toMatchObject({ kind: "deferred", reason: "index_unreadable" });
@@ -759,10 +779,33 @@ describe("nemar-ica's archive job names what was staged", () => {
     expect(spec.serving_index).toEqual({ sha256: HEX, size: 812 });
   });
 
-  test("none staged: the arguments are the archive's own, and the word is recorded (MUTATION: hand the flag anyway)", () => {
-    const spec = icaSpec({ staged: false, reason: "source_commit_differs" });
-    expect(spec.args).toEqual(base);
-    expect(spec.serving_index).toEqual({ reason: "source_commit_differs" });
+  test("none staged, the tag's commit read: the arguments hand the run that commit and no index, and the word is recorded (MUTATION: hand the flag anyway; hand the commit only with a staged index)", () => {
+    for (const reason of [
+      "source_commit_differs",
+      "no_index",
+      "index_unusable",
+      "index_too_large",
+      "index_unreadable",
+    ] as const) {
+      const spec = icaSpec({ staged: false, reason, tagCommit: T });
+      expect(spec.args).toEqual([...base, RECIPE_SOURCE_COMMIT_FLAG, T]);
+      expect(spec.args).not.toContain(RECIPE_SERVING_INDEX_FLAG);
+      expect(spec.serving_index).toEqual({ reason });
+    }
+  });
+
+  test("none staged and the tag's commit never read: the arguments are the archive's own (MUTATION: hand a commit that was not read)", () => {
+    for (const reason of ["github_unreadable", "tag_absent", "no_github_credentials"] as const) {
+      const spec = icaSpec({ staged: false, reason, tagCommit: null });
+      expect(spec.args).toEqual(base);
+      expect(spec.serving_index).toEqual({ reason });
+    }
+  });
+
+  test("a tag commit that is not a full commit is a programming error, never an argument", () => {
+    expect(() => icaSpec({ staged: false, reason: "no_index", tagCommit: T.slice(0, 12) })).toThrow(
+      RangeError,
+    );
   });
 
   test("a recipe that keys the index cannot be specified without what was staged", () => {
@@ -831,6 +874,32 @@ const tokenOf = async (env: Bindings, jobId: string) =>
     CALLBACK_SECRET,
   );
 
+describe("an index built from another commit than the tag's (on007823 in the local run of 2026-11-27)", () => {
+  test("the run is dispatched at once with the tag's commit and no index, and the launch carries both (MUTATION: hand --source-commit only with a staged index)", async () => {
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    const decided = await servingIndexForRun(env, ica, "bids", ID, TAG);
+    if (decided.kind !== "run") throw new Error(`not run: ${decided.kind}`);
+    expect(decided.servingIndex).toEqual({
+      staged: false,
+      reason: "source_commit_differs",
+      tagCommit: T,
+    });
+    const job = await icaJob(env, decided.servingIndex);
+    const launch = await launchOf(env, job.id);
+    const args = launch.args as string[];
+    // The commit the recipe records as extensions.nemar.dataset.source_commit: the TAG's, never the index's.
+    expect(args.slice(-2)).toEqual([RECIPE_SOURCE_COMMIT_FLAG, T]);
+    expect(args.filter((a) => a === RECIPE_SOURCE_COMMIT_FLAG)).toHaveLength(1);
+    expect(args).not.toContain(S);
+    expect(args).not.toContain(RECIPE_SERVING_INDEX_FLAG);
+    expect("serving_index" in launch).toBe(false);
+    expect(await servingCopies()).toEqual([]);
+  });
+});
+
 describe("the launch specification and the serving index route", () => {
   test("a staged index is in the launch specification, and the route signs exactly that copy for ten minutes", async () => {
     const env = devEnv();
@@ -857,7 +926,7 @@ describe("the launch specification and the serving index route", () => {
 
   test("none staged: nothing of it is in the launch, and the route gives the door's one refusal (MUTATION: put the word in the launch; sign without a recorded digest)", async () => {
     const env = devEnv();
-    const job = await icaJob(env, { staged: false, reason: "no_index" });
+    const job = await icaJob(env, { staged: false, reason: "no_index", tagCommit: T });
     const launch = await launchOf(env, job.id);
     expect("serving_index" in launch).toBe(false);
     const wrong = await callRoute(env, job.id, "0".repeat(64));

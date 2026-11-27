@@ -61,6 +61,7 @@ import {
   recipeRunsInput,
   recipeRunsOn,
   recipeServingIndexArguments,
+  recipeSourceCommitArguments,
   recipeZarrArguments,
   recipeZarrBase,
   stampInputFields,
@@ -494,13 +495,19 @@ export function recipeJobSpec(
             tag: input.tag,
             imageDigest: input.image.digest,
           }),
-          // The staged index's file and the commit it was built from, the tag's (ADR 0141).
-          ...(staged?.staged === true
-            ? recipeServingIndexArguments({
-                path: SERVING_INDEX_CONTAINER_PATH,
-                sourceCommit: staged.sourceCommit,
-              })
-            : []),
+          // The staged index's file and the commit it was built from, the tag's (ADR 0141); with no index staged,
+          // the tag's commit alone whenever it was read (the amendment of 2026-11-27), which the record states as
+          // the `git:` input digest a BIDS derivative is keyed by. Without it the run can never be stored.
+          ...(staged === null
+            ? []
+            : staged.staged
+              ? recipeServingIndexArguments({
+                  path: SERVING_INDEX_CONTAINER_PATH,
+                  sourceCommit: staged.sourceCommit,
+                })
+              : staged.tagCommit === null
+                ? []
+                : recipeSourceCommitArguments(staged.tagCommit)),
         ],
     ...(staged === null
       ? {}
@@ -889,8 +896,8 @@ export async function dispatchPipelineJob(
   if (accountId === null) return fail("pipelines_account_missing", datasetId, { version: tag });
 
   // A run of the archive by a recipe that keys the serving index is handed the index built from the tag's
-  // commit, or none with the word for why; a fault defers it (ADR 0141, amended). Before the claim, like the
-  // specification.
+  // commit, or none with the word for why, and the tag's commit either way once it was read; a fault defers it
+  // (ADR 0141, amended). Before the claim, like the specification.
   let servingIndex: StagedServingIndex | undefined;
   if (recipeKeysServingIndex(recipe, recipeInput)) {
     const decided = await servingIndexForRun(env, recipe, recipeInput, datasetId, tag);
