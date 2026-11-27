@@ -2,7 +2,8 @@
  * The derivative store (portable compute, card V1b; ADR 0123 as amended 2026-11-16; plan D14): a finished
  * pipeline job's product becomes a keyed, retained derivative in a private bucket of its own.
  *
- *   `syncDerivatives`        one bounded pass: free what is due, key the stamps that have no derivative, and copy
+ *   `syncDerivatives`        one bounded pass: free what is due, key the stamps that have no derivative, copy,
+ *                            and resolve the decided runs' `stored` checkpoint (`resolveDecidedStored`)
  *   `runComputeDerivativesCron`  the daily call: production only, one `syncDerivatives`
  *   `promoteDerivative`      `canary` to `catalog` (an administrator), `catalog` to `published` (the owner only)
  *   `listDerivatives`, `getDerivativeView`   what an administrator reads
@@ -1210,8 +1211,9 @@ const bounded = (requested: number | undefined, fallback: number, most: number):
 
 /**
  * One bounded pass over the store: mark what is due `expired` and delete the objects of failed and expired rows,
- * decide the stamps that have no derivative (a row for each keyable one), and copy. Nothing here throws for a
- * stamp or a row: each is handled in its own try and counted. With the store dark it answers
+ * decide the stamps that have no derivative (a row for each keyable one), copy, and resolve the `stored`
+ * checkpoint of the runs whose derivative is decided. Nothing here throws for a stamp or a row: each is handled
+ * in its own try and counted. With the store dark it answers
  * `{ available: false }` and writes nothing.
  */
 export async function syncDerivatives(
@@ -1297,6 +1299,22 @@ export async function syncDerivatives(
     }
   } catch (err) {
     console.error(`[compute-derivatives] copy_scan_failed error=${errorName(err)}`);
+    counts.errored++;
+  }
+
+  // 4. Each run whose derivative is now decided (a skip logged, a row stored, failed or expired) has its `stored`
+  //    checkpoint resolved now, as many as this pass can have decided, so the grid, the coverage and a run's
+  //    detail (which never sync) read the decision at once; the stamp sync resolves any left over. The progress
+  //    module imports this one, so it is imported when called, never at the top.
+  try {
+    const { resolveDecidedStored } = await import("./compute-pipeline-progress.js");
+    const stored = await resolveDecidedStored(
+      db,
+      DERIVATIVE_STAMPS_PER_CALL + DERIVATIVE_ROWS_PER_CLEANUP,
+    );
+    counts.errored += stored.errored;
+  } catch (err) {
+    console.error(`[compute-derivatives] stored_resolve_failed error=${errorName(err)}`);
     counts.errored++;
   }
   return { available: true, ...counts };

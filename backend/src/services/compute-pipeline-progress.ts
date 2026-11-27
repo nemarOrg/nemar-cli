@@ -639,22 +639,41 @@ export async function reconcilePipelineProgress(
       result.errored++;
     }
   }
+  const stored = await resolveDecidedStored(db, limit);
+  result.reconciled += stored.resolved;
+  result.errored += stored.errored;
+  return result;
+}
+
+/**
+ * Resolve the pending `stored` rows whose derivative the store has decided (stored, failed, expired, or a skip
+ * logged), at most `limit`, each in its own try/catch. The stamp sync's reconciliation calls it, and so does the
+ * derivative store's pass right after it decides (`syncDerivatives`), so the grid, the coverage and a run's
+ * detail, which never sync, read the store's decision as soon as it is made: a derivative skipped for good reads
+ * `stored: skipped` everywhere, not pending until the next stamp sync. Idempotent: a resolved row is never
+ * claimed again.
+ */
+export async function resolveDecidedStored(
+  db: D1Database,
+  limit: number = RECONCILE_RUNS_PER_CALL,
+): Promise<{ resolved: number; errored: number }> {
+  const out = { resolved: 0, errored: 0 };
   let pending: StoredPending[] = [];
   try {
     pending = (await db.prepare(STORED_PENDING_SQL).bind(limit).all<StoredPending>()).results;
   } catch (err) {
     console.error(`${LOG} stored_read_failed class=${errClass(err)}`);
-    result.errored++;
+    out.errored++;
   }
   for (const p of pending) {
     try {
-      if (await resolveStored(db, p)) result.reconciled++;
+      if (await resolveStored(db, p)) out.resolved++;
     } catch (err) {
       console.error(`${LOG} stored_failed stamp=${p.stamp_id} class=${errClass(err)}`);
-      result.errored++;
+      out.errored++;
     }
   }
-  return result;
+  return out;
 }
 
 /**

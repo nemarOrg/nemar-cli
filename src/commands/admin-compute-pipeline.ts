@@ -546,8 +546,10 @@ its job never reported, or it ended with no job), - not started.
 
 The first line is the recipe's coverage: datasets whose newest version has a succeeded run of the
 registry's current recipe version, out of the eligible ones; complete is covered with every recording
-passed at the recipe's last checkpoint before stored; "at any recipe version" counts older recipe
-versions too. Coverage counts a finished run once a sync has recorded its end.
+passed at the recipe's last checkpoint before stored and, once the derivative store has decided the run,
+every recording stored (a derivative the store skipped for good, such as no_input_digest, or lost is not
+complete, and its stored cell reads x or F); "at any recipe version" counts older recipe versions too.
+Coverage counts a finished run once a sync has recorded its end.
 
   --recipe <name>          the recipe (default ${DEFAULT_GRID_RECIPE})
   --status <word>          only rows that show this (${COMPUTE_PIPELINE_GRID_STATUSES.join(", ")})

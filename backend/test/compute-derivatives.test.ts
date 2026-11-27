@@ -2173,6 +2173,61 @@ describe("what an administrator reads and sends", () => {
   });
 });
 
+describe("a derivative the store decided not to keep reads the same in the grid, the coverage and the run", () => {
+  /** What the three read-only views say of one dataset's floor run, with no stamp sync before them. */
+  async function views(env: Bindings, id: string, stampId: number) {
+    const path = `/compute/pipeline/grid?recipe=nemar-floor&dataset=${id}`;
+    const grid = await call("GET", path, "admin", undefined, env);
+    const coverage = await call("GET", "/compute/pipeline/coverage", "admin", undefined, env);
+    const run = await call("GET", `/compute/pipeline/runs/${stampId}`, "admin", undefined, env);
+    expect([grid.status, coverage.status, run.status]).toEqual([200, 200, 200]);
+    const row = (grid.body.rows as Record<string, unknown>[])[0] as {
+      cells: Record<string, { mark: string; counts: unknown; reconciled: boolean }>;
+    };
+    const card = (coverage.body.recipes as Record<string, unknown>[]).find(
+      (r) => r.recipe === "nemar-floor",
+    ) as { covered: number; complete: number };
+    const stored = (run.body.checkpoints as Record<string, unknown>[]).find(
+      (c) => c.checkpoint === "stored",
+    ) as { mark: string; counts: unknown; reconciled: boolean };
+    const cell = row.cells.stored as { mark: string; counts: unknown; reconciled: boolean };
+    return { cell, stored, covered: card.covered, complete: card.complete };
+  }
+
+  test("a run skipped for good (no_input_digest) reads stored skipped in the grid and the run, and is not complete, right after the store's pass (MUTATION: leave the stored row to the next stamp sync; count complete from the last checkpoint alone)", async () => {
+    const env = envOf();
+    // The floor's run of the archive is handed no source commit, so its record states none.
+    const made = await bidsJob({ sourceCommit: null });
+    const before = await views(env, made.id, made.stampId);
+    expect([before.cell.mark, before.stored.mark]).toEqual(["pending", "pending"]);
+    // Undecided, the run is complete by its last checkpoint: the store may still keep it.
+    expect([before.covered, before.complete]).toEqual([1, 1]);
+
+    expect(await syncAll(env)).toMatchObject({
+      derivative_unkeyable: { no_input_digest: 1 },
+      created: 0,
+      errored: 0,
+    });
+    // No stamp sync between the store's pass and the reads: every view reads the decision.
+    const after = await views(env, made.id, made.stampId);
+    const skipped = { passed: 0, failed: 0, skipped: 2, total: 2 };
+    expect(after.cell).toMatchObject({ mark: "skipped", counts: skipped, reconciled: true });
+    expect(after.stored).toMatchObject({ mark: "skipped", counts: skipped, reconciled: true });
+    expect([after.covered, after.complete]).toEqual([1, 0]);
+  });
+
+  test("a run whose derivative is stored stays complete, and its stored cell reads passed at once", async () => {
+    const env = envOf();
+    const made = await bidsJob();
+    expect(await syncAll(env)).toMatchObject({ created: 1, stored: 1, errored: 0 });
+    const after = await views(env, made.id, made.stampId);
+    const kept = { passed: 2, failed: 0, skipped: 0, total: 2 };
+    expect(after.cell).toMatchObject({ mark: "passed", counts: kept, reconciled: true });
+    expect(after.stored).toMatchObject({ mark: "passed", counts: kept, reconciled: true });
+    expect([after.covered, after.complete]).toEqual([1, 1]);
+  });
+});
+
 describe("an anonymous dataset has no derivative", () => {
   test("an anonymous dataset is never keyed, so no description can carry a version identifier that does not resolve (MUTATION: drop the eligibility term of the scan)", async () => {
     const env = envOf();

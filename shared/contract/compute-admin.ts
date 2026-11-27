@@ -924,8 +924,9 @@ const byStatus = z.record(z.unknown());
 /**
  * A recipe's coverage over the eligible datasets: `covered` is a succeeded run at the dataset's newest
  * version with the registry's current recipe version (any engine, any input); `complete` is covered with
- * every recording passed at the last declared checkpoint; `covered_any_version` is covered at any recipe
- * version.
+ * every recording passed at the last declared checkpoint and, once the derivative store has decided the run,
+ * every recording stored (a derivative it skipped for good or lost is not complete); `covered_any_version` is
+ * covered at any recipe version.
  */
 export const ComputePipelineRecipeSummarySchema = z
   .object({
