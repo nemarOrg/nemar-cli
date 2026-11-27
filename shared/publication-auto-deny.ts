@@ -171,10 +171,26 @@ export function licenseFileDiffers(report: PublicationReviewReport): boolean {
   return report.evidence.license_file?.state === "matches_other";
 }
 
+/** The finding codes about the license itself, which the differing file decides whatever question carries them. */
+const LICENSE_FINDING_CODES: readonly PublicationFindingCode[] = [
+  "license_missing",
+  "license_inconsistent",
+];
+
+/**
+ * A finding about the license, under any question: one of {@link LICENSE_FINDING_CODES}, or any
+ * finding about the LICENSE document. While {@link licenseFileDiffers}, none is eligible, or a
+ * model could carry the same blocker to another question and deny through it.
+ */
+function isAboutTheLicense(f: PublicationReviewReport["findings"][number]): boolean {
+  return f.document === "license" || LICENSE_FINDING_CODES.includes(f.code);
+}
+
 /**
  * The eligible codes a report gives by itself: `steering_attempt` when it steered, and every
- * blocker finding of {@link AUTO_DENY_FINDING_CODES} against a question it failed, except one
- * against `authors_and_license` while {@link licenseFileDiffers}. Empty when its derived verdict
+ * blocker finding of {@link AUTO_DENY_FINDING_CODES} against a question it failed, except, while
+ * {@link licenseFileDiffers}, one against `authors_and_license` or one about the license under any
+ * question ({@link isAboutTheLicense}). Empty when its derived verdict
  * is not `fail`.
  */
 export function eligibleCodesOf(report: PublicationReviewReport): {
@@ -192,8 +208,10 @@ export function eligibleCodesOf(report: PublicationReviewReport): {
   const failed = new Set(
     reasons.filter((r) => r.code === "question_failed").map((r) => r.detail ?? ""),
   );
-  if (licenseFileDiffers(report)) failed.delete("authors_and_license" satisfies Question);
+  const differs = licenseFileDiffers(report);
+  if (differs) failed.delete("authors_and_license" satisfies Question);
   for (const f of report.findings) {
+    if (differs && isAboutTheLicense(f)) continue;
     if (
       f.severity === "blocker" &&
       failed.has(f.question) &&

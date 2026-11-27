@@ -269,7 +269,7 @@ describe("what may deny", () => {
     /** A version-3 report whose `failed` questions each carry one blocker of `code`, beside `state`. */
     const v3 = (
       state: LicenseFileState,
-      failed: Array<[string, string]>,
+      failed: Array<[string, string, string?]>,
       model: "claude-haiku-5-5" | "claude-sonnet-5-5" = "claude-haiku-5-5",
     ): PublicationReviewReport => {
       const conclusive = state === "matches" || state === "matches_other";
@@ -296,11 +296,11 @@ describe("what may deny", () => {
         },
         {
           questions,
-          findings: failed.map(([question, code]) => ({
+          findings: failed.map(([question, code, document]) => ({
             question,
             severity: "blocker",
             code,
-            document: "license",
+            document: document ?? (question === "authors_and_license" ? "license" : "readme"),
             note: "n",
           })),
         },
@@ -346,6 +346,37 @@ describe("what may deny", () => {
       expect(autoDenyEligibility(input({ report: r }))).toEqual({
         eligible: true,
         codes: ["readme_missing_or_stub"],
+        reasons: ["question_failed"],
+      });
+    });
+
+    test("a license finding carried to another failed question is not eligible either", () => {
+      for (const failed of [
+        [["complete_and_honest", "license_inconsistent"]],
+        [["meets_standards", "license_missing"]],
+        // Any finding about the LICENSE document, whatever its code.
+        [["complete_and_honest", "description_incomplete", "license"]],
+        [
+          ["authors_and_license", "license_inconsistent"],
+          ["name_adequate", "license_inconsistent", "dataset_description"],
+        ],
+      ] as Array<Array<[string, string, string?]>>) {
+        const r = v3("matches_other", failed);
+        expect({ failed, e: eligibleCodesOf(r) }).toEqual({
+          failed,
+          e: { codes: [], reasons: [] },
+        });
+        // The same findings without the differing file are eligible, as before.
+        const m = v3("matches", failed);
+        expect({ failed, e: eligibleCodesOf(m).codes.length > 0 }).toEqual({ failed, e: true });
+      }
+      // A finding about another document, under another question, keeps its eligibility.
+      const r = v3("matches_other", [
+        ["complete_and_honest", "license_inconsistent"],
+        ["meets_standards", "description_incomplete", "dataset_description"],
+      ]);
+      expect(eligibleCodesOf(r)).toEqual({
+        codes: ["description_incomplete"],
         reasons: ["question_failed"],
       });
     });
