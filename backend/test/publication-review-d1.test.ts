@@ -113,17 +113,16 @@ async function nonceOf(d1: D1Database, id: number): Promise<string> {
 
 /** A counted call by another depositor: an errored row whose run claimed, so it reached a model. */
 async function spend(d1: D1Database, n: number, requestedBy: number, from = 1000) {
-  for (let i = 0; i < n; i++) {
-    await d1
-      .prepare(
-        `INSERT INTO publication_reviews (request_id, dataset_id, head_sha, anonymous, requested_by,
-                                          state, detail, claimed_at, decided_at)
-         VALUES (?, 'nm000491', ?, 0, ?, 'errored', 'model_unavailable', datetime('now'),
-                 datetime('now'))`,
-      )
-      .bind(from + i, SCREENED_HEAD, requestedBy)
-      .run();
-  }
+  // One D1 batch, not one round trip per row: at the platform cap of 500 a row-by-row fill took
+  // longer than the test's timeout on a loaded runner.
+  const insert = d1.prepare(
+    `INSERT INTO publication_reviews (request_id, dataset_id, head_sha, anonymous, requested_by,
+                                      state, detail, claimed_at, decided_at)
+     VALUES (?, 'nm000491', ?, 0, ?, 'errored', 'model_unavailable', datetime('now'),
+             datetime('now'))`,
+  );
+  const rows = Array.from({ length: n }, (_, i) => insert.bind(from + i, SCREENED_HEAD, requestedBy));
+  for (let i = 0; i < rows.length; i += 100) await d1.batch(rows.slice(i, i + 100));
 }
 
 beforeAll(() => {
