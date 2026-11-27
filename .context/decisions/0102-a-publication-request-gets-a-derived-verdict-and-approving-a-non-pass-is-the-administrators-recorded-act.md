@@ -1186,6 +1186,6 @@ ADR 0142 partially supersedes section 3's LICENSE bullet and section 5's lowerin
 The review job identifies the root LICENSE with a pinned ScanCode toolkit release; for a conclusive identification the model receives only the text left over after the matched license, under the same pre-send rules and cap,
 and a LICENSE that matches the `License` field no longer lowers `authors_and_license` to `unknown`.
 Every other LICENSE state keeps the rule above.
-Section 7's "Bounds, in one place" gains two: the ScanCode install (about 153 MB of hashed wheels, fresh on every run, inside the job's 20 minutes)
+Section 7's "Bounds, in one place" gains two: the ScanCode install (about 153 MB of hashed wheels, fresh on every run, inside the job's limit, which rises from 20 to 28 minutes when the step deploys)
 and the scan (`--timeout 120` for the file, under a step timeout of 5 minutes); a bound that is hit gives `unreadable` and this section's rule, never a failed review.
 ADR 0142 is the later text.

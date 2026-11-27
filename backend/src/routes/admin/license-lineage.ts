@@ -49,7 +49,7 @@ function upstreamSourceOf(attestation: string | null): string | null {
  * A dataset's lineage from its repository files at `ref` (default `main`) and its attestation, by
  * the one shared resolver. `ok: false` when a repository read failed: a lineage is never computed
  * from inputs that could not be read. Also used by the batch acknowledgment (card D3), which reads
- * at the screened commit, and by the decision card (epic #2449), which resolves the lineage again
+ * at the screened commit, and, once phase P4 of epic #2449 builds it, by the decision card, which will resolve the lineage again
  * with its own `resolved_at` (ADR 0142 decision 3).
  */
 export async function readDatasetLineage(

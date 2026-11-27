@@ -4,7 +4,7 @@
  * answer is kept for `CACHE_TTL_SECONDS`; a failed fetch and a `not_found` are never cached, so an
  * `unresolved` source is never served from it (the resolver's rule, ADR 0142 decision 3).
  * One module for the readers: the admin lineage route, the publication review's inputs, and the
- * decision card, which all resolve through {@link resolveWorkerLineage}.
+ * decision card (phase P4 of epic #2449, not yet built), which all resolve through {@link resolveWorkerLineage}.
  */
 
 import {
