@@ -1108,7 +1108,7 @@ describe("the record entry mirror agrees with Ajv (identity, metrics, views skip
     [
       "a skipped view with a nemar-process word",
       (e) => {
-        e.views_skipped = [{ key: "spectrum", kind: "nemar.spectrum", reason: "frame_rotated" }];
+        e.views_skipped = [{ key: "spectrum", kind: "nemar.spectrum", reason: "no_good_window" }];
       },
     ],
     [
