@@ -15,6 +15,12 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Added
+
+- **The administrator's decision card (ADR 0142, decision 4).**
+  `GET /admin/publish/:id/review` carries `decision_card`, built once by the Worker, and `nemar admin dataset publish show` prints it first (and in `--json`): the suggested next action from a closed list that never says approve while a gate withholds approval, a license panel with a green, amber or red cue and its reason (the License field, the LICENSE identification, the lineage, the source's declared licenses, `resolved_at`), the enrichment's title, description, license, creators, keywords and funding beside `dataset_description.json`'s Name, License and Authors, the authors with placeholders flagged, each question's strongest finding, the identifier screen and any automatic denial.
+  An unresolved review lineage is resolved again for the card and shown beside the review's own. Migration 0163 adds `publication_reviews.served_metadata`, the snapshot of what the review was served; a review from before it shows the fields NEMAR holds now, marked not as reviewed.
+
 ## 0.10.50 - 2026-11-27
 
 ### Changed
