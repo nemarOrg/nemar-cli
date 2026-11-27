@@ -387,6 +387,13 @@ export const ADMIN_ALERT_CATEGORIES = [
    * existed receives it.
    */
   "compute_requests",
+  /**
+   * The shared S3 bucket policy is near its size cap, is full and refused a dataset creation, or a
+   * refused creation could not be rolled back (#2497, ADR 0145). Its own category because it is an
+   * operational alert about the archive itself, not about any request an admin reviews. Opted in by
+   * default, so a stored row from before it existed receives it.
+   */
+  "storage_alerts",
 ] as const;
 
 export type AdminAlertCategory = (typeof ADMIN_ALERT_CATEGORIES)[number];
@@ -408,6 +415,7 @@ export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   identifier_sweep: true,
   support_tickets: true,
   compute_requests: true,
+  storage_alerts: true,
   news: true,
   rfcs: true,
   maintenance: true,

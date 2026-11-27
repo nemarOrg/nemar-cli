@@ -119,6 +119,7 @@ describe("nemar admin users email-preferences and the identifier sweep", () => {
           identifier_sweep: false,
           support_tickets: false,
           compute_requests: false,
+          storage_alerts: false,
         },
       ]);
       expect(`${r.stdout}${r.stderr}`).toMatch(/Identifier sweep:\s+disabled/);

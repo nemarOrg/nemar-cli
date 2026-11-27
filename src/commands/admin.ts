@@ -8325,6 +8325,7 @@ const ADMIN_ALERT_ROWS: Array<{ key: keyof AdminAlertPreferences; label: string 
   { key: "identifier_sweep", label: "Identifier sweep weekly report" },
   { key: "support_tickets", label: "Support tickets assigned to you" },
   { key: "compute_requests", label: "Compute access requests" },
+  { key: "storage_alerts", label: "Storage policy alerts" },
 ];
 
 emailPrefsCommand
@@ -8392,6 +8393,7 @@ emailPrefsCommand
   .option("--identifier-sweep <bool>", "Enable/disable the identifier sweep weekly report")
   .option("--support-tickets <bool>", "Enable/disable support ticket notifications")
   .option("--compute-requests <bool>", "Enable/disable compute access request notifications")
+  .option("--storage-alerts <bool>", "Enable/disable storage policy alerts")
   .option("--all <bool>", "Enable/disable all notifications (recalls are always on)")
   .option(
     "--user <username>",
@@ -8409,6 +8411,7 @@ emailPrefsCommand
       identifierSweep?: string;
       supportTickets?: string;
       computeRequests?: string;
+      storageAlerts?: string;
       all?: string;
       user?: string;
     }) => {
@@ -8447,6 +8450,7 @@ emailPrefsCommand
         updates.identifier_sweep = val;
         updates.support_tickets = val;
         updates.compute_requests = val;
+        updates.storage_alerts = val;
         for (const category of COMMUNITY_MAIL_CATEGORIES) updates[category] = val;
       } else {
         const chosen: Partial<EmailPreferences> = {
@@ -8459,6 +8463,7 @@ emailPrefsCommand
           identifier_sweep: parseBool(options.identifierSweep),
           support_tickets: parseBool(options.supportTickets),
           compute_requests: parseBool(options.computeRequests),
+          storage_alerts: parseBool(options.storageAlerts),
         };
 
         if (Object.values(chosen).every((value) => value === undefined)) {
@@ -8472,6 +8477,7 @@ emailPrefsCommand
           console.log("  --identifier-sweep <bool>      Identifier sweep weekly report");
           console.log("  --support-tickets <bool>       Support ticket notifications");
           console.log("  --compute-requests <bool>      Compute access request notifications");
+          console.log("  --storage-alerts <bool>        Storage policy alerts");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -8496,6 +8502,7 @@ emailPrefsCommand
           identifier_sweep: "Identifier sweep:     ",
           support_tickets: "Support tickets:      ",
           compute_requests: "Compute requests:     ",
+          storage_alerts: "Storage alerts:       ",
         };
         for (const row of ADMIN_ALERT_ROWS) {
           const enabled = result[row.key];
