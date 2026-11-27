@@ -61,6 +61,7 @@ const FINDING_SET: ReadonlySet<string> = new Set(FINDING_STATUSES);
 /** Verdicts of a screen that ran but cannot parse some of the recordings' formats. */
 const PARTIAL_COVERAGE: ReadonlySet<string> = new Set([
   "not-screened",
+  "partially-screened",
   "clean-edf-only-others-unscreened",
 ]);
 

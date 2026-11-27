@@ -3,6 +3,7 @@
  *
  * Commands:
  * - nemar dataset validate        - Validate BIDS dataset locally
+ * - nemar dataset screen          - Screen a dataset for identifying information, on this machine
  * - nemar dataset upload          - Upload dataset to NEMAR
  * - nemar dataset download        - Download dataset from NEMAR
  * - nemar dataset status          - Check dataset status
@@ -152,6 +153,7 @@ import {
   updateLastUpload,
   writeLocalConfig,
 } from "../lib/dataset-config.js";
+import { markLocalOnly, runDatasetScreen } from "../lib/dataset-screen.js";
 import { markReportedExit, markUsageExit } from "../lib/debug-log.js";
 import {
   FacetEnumCliError,
@@ -297,6 +299,7 @@ import {
 import { deployCiStep, printUploadSuccess, pushMetadata } from "../lib/upload/finalize.js";
 import {
   ACKNOWLEDGE_FLAG,
+  ACKNOWLEDGE_WORDS,
   collectAcknowledgment,
   identifierPreflightStep,
   recheckIdentifierPreflight,
@@ -692,7 +695,7 @@ export function createUploadCommand(): Command {
     .addOption(
       new Option(
         `${ACKNOWLEDGE_FLAG} <verdicts>`,
-        `Upload despite what the identifier preflight found, naming every condition it reports (non-interactive; recorded; repeatable or comma-separated: ${PREFLIGHT_ACKNOWLEDGEABLE.join(", ")}). Direct identifiers cannot be acknowledged`,
+        `Upload despite what the identifier preflight found, naming every condition it reports (non-interactive; recorded; repeatable or comma-separated: ${ACKNOWLEDGE_WORDS.join(", ")}). Direct identifiers cannot be acknowledged`,
       ).argParser(collectAcknowledgment),
     )
     .addHelpText(
@@ -965,6 +968,66 @@ Examples:
 }
 
 datasetCommand.addCommand(createUploadCommand());
+
+// Screen: the publication screen's report for this copy of a dataset. It reads files on this machine
+// and sends nothing: no login, no request, no write (card A9).
+markLocalOnly(
+  datasetCommand
+    .command("screen")
+    .summary("Screen a dataset for identifying information on this machine (changes nothing)")
+    .description(
+      [
+        "Screen a dataset for identifying information with the same scan NEMAR runs when publication is requested, and print the same report. Sends nothing and changes nothing.",
+        "Read: the files in the directory (--committed: the tree of HEAD), plus the git history when this is a repository.",
+        "Not read: the server's own copy, the contents of sidecars and tables in earlier commits, and annexed content that is not on this machine, in the tree or in earlier commits (reported as 'content-absent': the screen is then incomplete, never clean).",
+      ].join("\n\n"),
+    )
+    .argument("[path]", "Path to the dataset directory", ".")
+    .option(
+      "--committed",
+      "Read the committed tree (HEAD), which is what the server screens, instead of the files as they are now",
+    )
+    .option("--json", "Print the report (version 2) as JSON, for scripting")
+    .addHelpText(
+      "after",
+      `
+Description:
+  Runs the identifier screen that NEMAR runs when publication is requested,
+  on your own copy of the dataset, and prints the same report: the status,
+  the recordings read per format, each finding kind with what to do about it
+  and a link to the docs, and the scanner and reader versions. Nothing is
+  sent, no login is needed, and no file or git state is changed.
+
+What is read:
+  The files in the directory as they are now (--committed: the tree of HEAD,
+  which is what the server screens). In a git repository the history is
+  walked too: every path that ever existed goes through the path rules, and a
+  recording an earlier commit held is read when its content is on this
+  machine. An annexed file whose content is not here is reported as not read
+  ('content-absent'); fetch it with 'nemar dataset get' and run again.
+
+What is not read:
+  The server's own copy (its storage and version manifest) and the contents of
+  sidecars and tables in earlier commits. A recording whose content is not on
+  this machine, in the tree or in an earlier commit, is not read either: the
+  screen is then incomplete ('content-absent'), never clean. The report says so
+  under the verdict.
+
+Exit status:
+  0  clean, dates-only or no-recordings
+  3  direct identifiers were found
+  2  anything else (a finding to review, or something was not read), or the
+     screen could not be made
+
+Examples:
+  $ nemar dataset screen                          # Screen the current directory
+  $ nemar dataset screen ./my-dataset --committed # What the server would screen
+  $ nemar dataset screen ./my-dataset --json      # The report as JSON`,
+    )
+    .action(async (path: string, options: { committed?: boolean; json?: boolean }) => {
+      await runDatasetScreen(path, options);
+    }),
+);
 
 function formatProgressBar(
   filesDown: number,

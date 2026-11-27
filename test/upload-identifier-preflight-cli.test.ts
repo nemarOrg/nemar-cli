@@ -244,10 +244,10 @@ function namedDataset(): void {
   );
 }
 
-function brainVisionDataset(): void {
+/** Neuroscan `.cnt`: a recording format no registered reader parses. */
+function neuroscanDataset(): void {
   write("dataset_description.json", JSON.stringify({ Name: "Fixture", BIDSVersion: "1.9.0" }));
-  write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
-  write("sub-01/eeg/sub-01_task-rest_eeg.eeg", new Uint8Array(64));
+  write("sub-01/eeg/sub-01_task-rest_eeg.cnt", "Version 3.0\n");
 }
 
 /**
@@ -414,7 +414,7 @@ describe("nemar dataset upload: direct identifiers", () => {
 
 describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
   test("the flag naming it lets the run past the preflight, and nothing is sent by it", async () => {
-    brainVisionDataset();
+    neuroscanDataset();
     const server = startServer();
     try {
       // No tools on PATH: past the preflight, the run stops at the required-tools check.
@@ -435,7 +435,7 @@ describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
   });
 
   test("a comma-separated flag naming more than was found is not an acknowledgment", async () => {
-    brainVisionDataset();
+    neuroscanDataset();
     const server = startServer();
     try {
       const r = await upload(
@@ -453,14 +453,14 @@ describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
   });
 
   test("--yes does not acknowledge it; without a terminal or the flag, the upload stops", async () => {
-    brainVisionDataset();
+    neuroscanDataset();
     const server = startServer();
     try {
       const r = await upload(["--yes"], server.url);
       expect(r.exitCode).toBe(1);
       expect(r.output).toContain("Identifier preflight: recordings NOT screened");
       // The walk is sorted, so the order is the same on APFS and ext4.
-      expect(r.output).toContain("Not screened (format x files): .eeg x1, .vhdr x1.");
+      expect(r.output).toContain("Not screened (format x files): .cnt x1.");
       expect(r.output).toContain("--yes does not acknowledge a finding");
       expect(r.output).toContain("--acknowledge-identifier-preflight not-screened");
       expectNothingSent(server.requests);
@@ -470,7 +470,7 @@ describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
   });
 
   test("a flag naming another verdict does not acknowledge this one", async () => {
-    brainVisionDataset();
+    neuroscanDataset();
     const server = startServer();
     try {
       const r = await upload(["--yes", "--acknowledge-identifier-preflight", "review"], server.url);
@@ -483,7 +483,7 @@ describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
   });
 
   test("--no declines it", async () => {
-    brainVisionDataset();
+    neuroscanDataset();
     const server = startServer();
     try {
       const r = await upload(["--no"], server.url);
@@ -617,30 +617,30 @@ describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
   test("dates beside a condition that needs an acknowledgment add no condition to it", async () => {
     datedDataset();
     // A recording format the scanner cannot read: the verdict is its own, and dates are not part of it.
-    write("sub-03/eeg/sub-03_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    write("sub-03/eeg/sub-03_task-rest_eeg.cnt", "Version 3.0\n");
     const server = startServer();
     try {
       const stopped = await upload(["--yes"], server.url);
       expect(stopped.exitCode).toBe(1);
       expect(stopped.output).toContain(
-        "Identifier preflight: EDF/BDF clean, other recordings NOT screened",
+        "Identifier preflight: partially screened, other recordings NOT screened",
       );
       expectWarningCarriesOnlyItsCount(stopped.output, 1);
       expectNoNormalizationLine(stopped.output);
-      expect(stopped.output).toContain(
-        "--acknowledge-identifier-preflight clean-edf-only-others-unscreened",
-      );
+      expect(stopped.output).toContain("--acknowledge-identifier-preflight partially-screened");
       expect(stopped.output).not.toContain("dates-only");
       expectNothingSent(server.requests);
 
-      // The flag that names exactly that one condition is accepted, with the warning printed.
+      // The flag that names exactly that one condition is accepted, with the warning printed. The
+      // condition's old name is an alias of the new one, so a pipeline written before the rename
+      // keeps working.
       const named = await upload(
         ["--yes", "--acknowledge-identifier-preflight", "clean-edf-only-others-unscreened"],
         server.url,
         { gitOnly: true },
       );
       expect(named.output).toContain(
-        "Acknowledged with --acknowledge-identifier-preflight clean-edf-only-others-unscreened",
+        "Acknowledged with --acknowledge-identifier-preflight partially-screened",
       );
       expectWarningCarriesOnlyItsCount(named.output, 1);
       expect(named.output).toContain("Missing required tools");
@@ -693,7 +693,7 @@ describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
 
 describe.skipIf(PYTHON === null)("nemar dataset upload at a terminal: the prompt", () => {
   test("Enter takes the default, which is no", async () => {
-    brainVisionDataset();
+    neuroscanDataset();
     const server = startServer();
     try {
       const r = await uploadAtTerminal("\\r", server.url);
@@ -708,7 +708,7 @@ describe.skipIf(PYTHON === null)("nemar dataset upload at a terminal: the prompt
   }, 120_000);
 
   test("y acknowledges, and the run goes past the preflight", async () => {
-    brainVisionDataset();
+    neuroscanDataset();
     const server = startServer();
     try {
       const r = await uploadAtTerminal("y\\r", server.url);
@@ -722,7 +722,7 @@ describe.skipIf(PYTHON === null)("nemar dataset upload at a terminal: the prompt
   }, 120_000);
 
   test("Ctrl+C is not an acknowledgment", async () => {
-    brainVisionDataset();
+    neuroscanDataset();
     const server = startServer();
     try {
       const r = await uploadAtTerminal("\\x03", server.url);

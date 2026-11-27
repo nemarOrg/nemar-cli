@@ -229,6 +229,10 @@ jobs:
               - 'README.md'
               - '.rules/**'
               - 'test/docs-links.unit.test.ts'
+              # The generator of the identifier-screen reference and its anchor test (card A10):
+              # a change to either must run the test that checks the page against the tables.
+              - 'scripts/docs/**'
+              - 'test/docs-anchors.unit.test.ts'
               - '.github/workflows/test.yml'
             # The repository's own workflows and the dataset-side workflows it deploys.
             # `test/workflow-gh-calls.test.ts` parses every one of them and fails on a `gh`

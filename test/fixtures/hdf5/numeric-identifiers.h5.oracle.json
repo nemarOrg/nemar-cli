@@ -1,0 +1,8 @@
+[
+{"dtype":null,"kind":"group","name":"","path":"/","shape":null,"value":null},
+{"dtype":null,"kind":"group","name":"meta","path":"/meta","shape":null,"value":null},
+{"dtype":"int32","kind":"dataset","name":"BirthDate","path":"/meta/BirthDate","shape":[],"storage":{"address":2444,"layout":"contiguous","size":4},"value":[1971]},
+{"dtype":"int64","kind":"dataset","name":"MRN","path":"/meta/MRN","shape":[],"storage":{"address":2432,"layout":"contiguous","size":8},"value":[48213907]},
+{"dtype":"int32","kind":"dataset","name":"dob","path":"/meta/dob","shape":[],"storage":{"address":2440,"layout":"contiguous","size":4},"value":[19710423]},
+{"dtype":"float64","kind":"dataset","name":"signal","path":"/meta/signal","shape":[1000],"skipped":"size","storage":{"address":6528,"layout":"contiguous","size":8000},"value":null}
+]

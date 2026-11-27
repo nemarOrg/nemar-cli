@@ -55,10 +55,12 @@ import { extractRepoName } from "./repo-metadata.js";
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The part of a stored screen report this module reads, of either version. Version 2 (the
- * evidence lane's `read_by_format` and `readers`) is not declared on this branch; this narrow
- * shape is the whole of what is read from it, and the epic's merge replaces it with the shared
- * type. Anything that does not match reads as no counts, never as a guess.
+ * The part of a stored screen report this module reads, of either version. The shape is narrow
+ * on purpose: the review needs counts and reader versions only, and a narrow reading cannot carry
+ * a finding kind or a value into the inputs. It is pinned to the report A1's builder writes by a
+ * drift test (`backend/test/publication-review-inputs.test.ts`, "the narrow reader agrees with
+ * A1's report"), which builds a real version-2 report and reads it back here. Anything that does
+ * not match reads as no counts, never as a guess.
  */
 interface NarrowScreenReport {
   version: number;

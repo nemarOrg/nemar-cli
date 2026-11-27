@@ -1,0 +1,4568 @@
+[
+ {
+  "fields": [
+   "EEG",
+   "setname"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   13
+  ],
+  "value": [
+   "S1_Rest_Clean"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "filename"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   25
+  ],
+  "value": [
+   "sub-001_task-Rest_eeg.set"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "filepath"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   152
+  ],
+  "value": [
+   "D:\\recover3\\#Root\\Documents\\SUT M.Sc\\Research\\Matlab codes\\dedicated to my thesis\\auditory chirp in Ziaeeyan - article\\BIDS_EXPORT_340 clean\\sub-001\\eeg"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "subject"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   "1"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "group"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "condition"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "session"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "comments"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "nbchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   19.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "trials"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   1.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "pnts"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   15000.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "srate"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   250.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "xmin"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "xmax"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   59.996
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "times"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   15000
+  ],
+  "skipped": "size"
+ },
+ {
+  "fields": [
+   "EEG",
+   "data"
+  ],
+  "class": "double",
+  "dims": [
+   19,
+   15000
+  ],
+  "skipped": "size"
+ },
+ {
+  "fields": [
+   "EEG",
+   "icaact"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "icawinv"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "icasphere"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "icaweights"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "icachansind"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -18.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.51111
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   3
+  ],
+  "value": [
+   "Fp1"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   18.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -1.9997999999999916
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.9504772742161438
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.30882878721459023
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.03489600817019907
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   1.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   18.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.51111
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   3
+  ],
+  "value": [
+   "Fp2"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -18.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -1.9997999999999916
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.9504772742161438
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.30882878721459023
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.03489600817019907
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   2.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -54.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.51111
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "F7"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   54.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -1.9997999999999916
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.587427260999931
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.8085242616322064
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.03489600817019907
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   3.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -39.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.33333
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "F3"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   39.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   30.0006
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.6730240759065773
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.545004150624971
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.5000090689694053
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   4.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.25556
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "Fz"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   43.9992
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.7193494995291242
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.6946483265129187
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   5.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   39.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.33333
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "F4"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -39.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   30.0006
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.6730240759065773
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.545004150624971
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.5000090689694053
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   6.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   54.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.51111
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "F8"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -54.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -1.9997999999999916
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.587427260999931
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.8085242616322064
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.03489600817019907
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   7.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.51111
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "T7"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -1.9997999999999916
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   6.119504632939516e-17
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.999390948835232
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.03489600817019907
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   8.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.25556
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "C3"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   43.9992
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   4.404745310332962e-17
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.7193494995291242
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.6946483265129187
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   9.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "Cz"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   3.749399456654644e-33
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -6.123233995736766e-17
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   1.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   10.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.25556
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "C4"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   43.9992
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   4.404745310332962e-17
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.7193494995291242
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.6946483265129187
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   11.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.51111
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "T8"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -90.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -1.9997999999999916
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   6.119504632939516e-17
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.999390948835232
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.03489600817019907
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   12.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -126.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.51111
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "P7"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   126.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -1.9997999999999916
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.5874272609999309
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.8085242616322064
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.03489600817019907
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   13.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -141.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.33333
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "P3"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   141.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   30.0006
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.6730240759065774
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.5450041506249709
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.5000090689694053
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   14.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   180.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.25556
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "Pz"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -180.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   43.9992
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.7193494995291242
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -8.809490620665924e-17
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.6946483265129187
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   15.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   141.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.33333
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "P4"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -141.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   30.0006
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.6730240759065774
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.5450041506249709
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.5000090689694053
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   16.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   126.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.51111
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "P8"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -126.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -1.9997999999999916
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.5874272609999309
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.8085242616322064
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.03489600817019907
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   17.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -162.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.51111
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "O1"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   162.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -1.9997999999999916
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.9504772742161438
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.30882878721459034
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.03489600817019907
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   18.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   162.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   0.51111
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "labels"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "O2"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_theta"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -162.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_phi"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -1.9997999999999916
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "X"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.9504772742161438
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Y"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.30882878721459034
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "Z"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   -0.03489600817019907
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "sph_radius"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "type"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chanlocs",
+   "urchan"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   19.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "urchanlocs"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chaninfo",
+   "filename"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   95
+  ],
+  "value": [
+   "F:\\\\Documents\\\\SUT M.Sc\\\\Research\\\\Matlab codes\\\\eeglab2019_0\\\\sample_locs\\\\my-10-20-Cap19.locs"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chaninfo",
+   "filecontent"
+  ],
+  "class": "char",
+  "dims": [
+   19,
+   29
+  ],
+  "value": [
+   "1\t     -18\t 0.51111\t      Fp1",
+   "2\t      18\t 0.51111\t      Fp2",
+   "3\t     -54\t 0.51111\t      F7 ",
+   "4\t     -39\t 0.33333\t      F3 ",
+   "5\t       0\t 0.25556\t      Fz ",
+   "6\t      39\t 0.33333\t      F4 ",
+   "7\t      54\t 0.51111\t      F8 ",
+   "8\t     -90\t 0.51111\t      T7 ",
+   "9\t     -90\t 0.25556\t      C3 ",
+   "10\t      90\t       0\t      Cz",
+   "11\t      90\t 0.25556\t      C4",
+   "12\t      90\t 0.51111\t      T8",
+   "13\t    -126\t 0.51111\t      P7",
+   "14\t    -141\t 0.33333\t      P3",
+   "15\t     180\t 0.25556\t      Pz",
+   "16\t     141\t 0.33333\t      P4",
+   "17\t     126\t 0.51111\t      P8",
+   "18\t    -162\t 0.51111\t      O1",
+   "19\t     162\t 0.51111\t      O2"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chaninfo",
+   "plotrad"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chaninfo",
+   "shrink"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chaninfo",
+   "nosedir"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   2
+  ],
+  "value": [
+   "+X"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "chaninfo",
+   "nodatchans"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "chaninfo",
+   "icachansind"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "ref"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   6
+  ],
+  "value": [
+   "common"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "event"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "urevent"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "epoch"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejjpE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejjp"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejkurtE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejkurt"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejmanualE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejmanual"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejthreshE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejthresh"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejconstE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejconst"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejfreqE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejfreq"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejjpE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejjp"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejkurtE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejkurt"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejmanualE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejmanual"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejthreshE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejthresh"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejconstE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejconst"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejfreqE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "icarejfreq"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejglobal"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejglobalE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejmanualcol"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   3
+  ],
+  "value": [
+   1.0,
+   1.0,
+   0.783
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejthreshcol"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   3
+  ],
+  "value": [
+   0.8487,
+   1.0,
+   0.5008
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejconstcol"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   3
+  ],
+  "value": [
+   0.694,
+   1.0,
+   0.7008
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejjpcol"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   3
+  ],
+  "value": [
+   1.0,
+   0.6991,
+   0.7537
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejkurtcol"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   3
+  ],
+  "value": [
+   0.688,
+   0.7042,
+   1.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "rejfreqcol"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   3
+  ],
+  "value": [
+   0.9596,
+   0.7193,
+   1.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "threshold"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   3
+  ],
+  "value": [
+   0.8,
+   0.8,
+   0.8
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "threshentropy"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   600.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "threshkurtact"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   600.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "threshkurtdist"
+  ],
+  "class": "double",
+  "dims": [
+   1,
+   1
+  ],
+  "value": [
+   600.0
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "reject",
+   "gcompreject"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "jp"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "jpE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "icajp"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "icajpE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "kurt"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "kurtE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "icakurt"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "icakurtE"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "compenta"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "compentr"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "compkurta"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "compkurtr"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "stats",
+   "compkurtdist"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "specdata"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "specicaact"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "splinefile"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "icasplinefile"
+  ],
+  "class": "char",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "dipfit"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "history"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   102
+  ],
+  "value": [
+   "\nEEG.etc.eeglabvers = '2020.0'; % this tracks which version of EEGLAB is being used, you may ignore it"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "saved"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   3
+  ],
+  "value": [
+   "yes"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "etc",
+   "eeglabvers"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   6
+  ],
+  "value": [
+   "2020.0"
+  ]
+ },
+ {
+  "fields": [
+   "EEG",
+   "run"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ },
+ {
+  "fields": [
+   "EEG",
+   "datfile"
+  ],
+  "class": "double",
+  "dims": [
+   0,
+   0
+  ],
+  "value": []
+ }
+]

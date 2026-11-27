@@ -14,10 +14,11 @@
  * digits `9`, printable ASCII punctuation stays, and every other character (symbols, marks,
  * control characters) becomes `?`, so a report cannot repeat a participant's name.
  *
- * **Screening is a best effort and says what it did not read.** `formatCoverage` counts
- * recording data in formats this module cannot parse, including archives and any raw file under `sourcedata/` it does not recognize, so a caller can tell "nothing found"
- * from "nothing looked at"; a caller must not call a dataset clean while that count is
- * non-zero. Only the EDF/BDF identification fields are parsed here: the patient
+ * **Screening is a best effort and says what it did not read.** `formatCoverage`
+ * (`identifier-readers.ts`) counts recording data no registered reader parses, including
+ * archives and any raw file under `sourcedata/` it does not recognize, so a caller can tell
+ * "nothing found" from "nothing looked at"; a caller must not call a dataset clean while that
+ * count is non-zero. Only the EDF/BDF identification fields are parsed here: the patient
  * identification, the recording identification and the start date and time of the 256-byte
  * header. Signal-header fields (transducer, prefilter), reserved bytes and EDF+ annotation
  * channels are not read.
@@ -53,7 +54,29 @@ export type FindingKind =
   | "acq-time-dated"
   | "image-or-document-file"
   | "tooling-debris"
-  | "local-user-path";
+  | "local-user-path"
+  | "snirf-subject-name"
+  | "snirf-subject-freetext"
+  | "snirf-measurement-date"
+  | "hdf5-freetext"
+  | "hdf5-freetext-name"
+  | "hdf5-identifier-field"
+  | "brainvision-comment-name"
+  | "brainvision-segment-date"
+  | "nirx-subject-name"
+  | "nirx-subject-freetext"
+  | "nirx-demographics"
+  | "nirx-header-date"
+  | "nirx-freetext"
+  | "brainvision-marker-text"
+  | "eeglab-subject-name"
+  | "eeglab-subject-freetext"
+  | "eeglab-event-name"
+  | "eeglab-history-name"
+  | "eeglab-setname-name"
+  | "mat-freetext"
+  | "mat-freetext-name"
+  | "mat-identifier-field";
 
 /**
  * Finding kinds that name a person or a clinical record: what must not stay public. A finding
@@ -70,6 +93,14 @@ export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-recording-freetext",
   "json-identifier-key",
   "participants-identifier-column",
+  "snirf-subject-name",
+  "hdf5-freetext-name",
+  "hdf5-identifier-field",
+  "nirx-subject-name",
+  "nirx-demographics",
+  "eeglab-subject-name",
+  "mat-freetext-name",
+  "mat-identifier-field",
 ]);
 
 /**
@@ -81,6 +112,9 @@ export const DATE_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-startdate",
   "edf-recording-startdate",
   "acq-time-dated",
+  "snirf-measurement-date",
+  "brainvision-segment-date",
+  "nirx-header-date",
 ]);
 
 /** The shape of some text: produced only by {@link shapeOf}, so a raw value cannot be assigned to it. */
@@ -93,6 +127,13 @@ export interface Finding {
   field: string;
   /** Letters, digits and length only; never the value. */
   shape: Shape;
+  /**
+   * Reader-internal: how many hits this one finding stands for, when a reader folds repeats into
+   * one (the ZIP reader, one per kind per archive; the MATLAB readers, one per kind and field per
+   * file). A count only, never a name or a value. It is not reported: every count of findings
+   * counts this finding once.
+   */
+  count?: number;
 }
 
 /** Size of the fixed EDF/BDF header, which holds the identification fields this module reads. */
@@ -385,8 +426,13 @@ function isNameLikePart(part: string, strict: boolean): boolean {
   return runs.some((run) => run.length >= 4 && !exempt(run));
 }
 
-/** A whitespace token that could be a name, after splitting on delimiters such as `^ , / = :`. */
-function isNameLike(token: string, strict = false): boolean {
+/**
+ * A whitespace token that could be a name, after splitting on delimiters such as `^ , / = :`.
+ * `strict` is the rule for a slot that should hold a code: only placeholders and study-group words
+ * are exempt, not the neutral vocabulary.
+ * Exported for the text-header readers (`shared/readers/`), so every format asks the same question.
+ */
+export function isNameLike(token: string, strict = false): boolean {
   if (token === "" || isCodeLike(token)) return false;
   return token.split(PART_SPLIT).some((part) => isNameLikePart(part, strict));
 }
@@ -550,6 +596,29 @@ function findDates(text: string): DateMatch[] {
           d.index + d.text.length <= o.index + o.text.length,
       ),
   );
+}
+
+/**
+ * True when the text holds a calendar date finer than the year (any date that is not 1 January
+ * under every reading), by the same layouts {@link scanEdfHeader} reads. For the text-header
+ * readers (`shared/readers/`).
+ */
+export function hasDateFinerThanYear(text: string): boolean {
+  return findDates(text).some((d) => !isYearOnly(d.candidates));
+}
+
+/**
+ * The finest date in some text: `day` for a calendar date that is not 1 January, `month` for a
+ * year and month, `year` for a year-only date (1 January, or a bare four-digit year), or null
+ * when the scanner reads no date in it. For the text-header readers' birth-date rule.
+ */
+export function datePrecision(text: string): "day" | "month" | "year" | null {
+  const dates = findDates(text);
+  const fine = dates.filter((d) => !isYearOnly(d.candidates));
+  if (fine.some((d) => d.candidates.some((c) => c.day > 0))) return "day";
+  if (fine.length > 0) return "month";
+  if (dates.length > 0 || /(?<!\d)(19|20)\d{2}(?!\d)/.test(text)) return "year";
+  return null;
 }
 
 /** The text with every date found in it replaced by a space, so month names are not read as names. */
@@ -1011,6 +1080,25 @@ const IDENTIFIER_KEYS = new Set([
 /** Keys that may be an author's public contact or a participant's: a person decides. */
 const REVIEW_KEYS = new Set(["address", "contact", "phone", "telephone", "email", "national"]);
 
+/** Canonical key names that hold a birth date. */
+export const BIRTH_KEYS: ReadonlySet<string> = new Set([
+  "patientbirthdate",
+  "birthdate",
+  "dateofbirth",
+  "dob",
+]);
+
+/**
+ * The severity a key or field name carries by itself, from its canonical spelling: `identifier`
+ * for a name, a birth date or a record number, `review` for a contact, null for anything else.
+ * The JSON key rule and the HDF5 field rule share it.
+ */
+export function identifierKeySeverity(canonicalName: string): Severity | null {
+  if (IDENTIFIER_KEYS.has(canonicalName)) return "identifier";
+  if (REVIEW_KEYS.has(canonicalName)) return "review";
+  return null;
+}
+
 /** True when a JSON value holds anything at all, at any depth. */
 export function hasContent(value: unknown): boolean {
   if (value === null || value === undefined) return false;
@@ -1036,11 +1124,7 @@ export function scanJsonKeys(doc: unknown): Finding[] {
   if (doc === null || typeof doc !== "object") return out;
   for (const [key, value] of Object.entries(doc as Record<string, unknown>)) {
     const name = canonical(key);
-    const severity: Severity | null = IDENTIFIER_KEYS.has(name)
-      ? "identifier"
-      : REVIEW_KEYS.has(name)
-        ? "review"
-        : null;
+    const severity = identifierKeySeverity(name);
     if (severity && hasContent(value)) {
       const sample = Array.isArray(value) ? "[]" : typeof value === "object" ? "{}" : String(value);
       out.push({ kind: "json-identifier-key", severity, field: name, shape: shapeOf(sample) });
@@ -1135,23 +1219,15 @@ export function scanTextForLocalPaths(text: string): Finding[] {
   return [];
 }
 
-export interface FormatCoverage {
-  /** EDF and BDF files, whose header this module parses. */
-  screened: number;
-  /**
-   * Recording data this module cannot parse, counted by format: `.set`, `.hdf5`, `.edf.gz`,
-   * and directory formats as `.ds/`, `.mff/`, `.mefd/`, `.zarr/` (one per directory).
-   */
-  unscreened: Record<string, number>;
-}
-
 /** Directory formats: the recording is a folder, and a manifest lists the files inside it. */
 export const DIRECTORY_FORMATS: readonly string[] = [".ds", ".mff", ".mefd", ".zarr"];
-/** A BIDS data file: `..._<suffix>.<extension>`, with a one- or two-part extension. */
-const BIDS_DATA_FILE = /_(eeg|ieeg|meg|emg|nirs|physio|motion)\.([a-z0-9+]+(?:\.[a-z0-9]+)?)$/;
-/** Formats counted as recording or signal data wherever they sit, named or not by BIDS. */
+/**
+ * Formats counted as recording or signal data wherever they sit, named or not by BIDS, when no
+ * registered reader reads them. An extension stays here after a reader is registered for it: the
+ * report's closed list of format names (`KNOWN_FORMATS`) is built from this list, and stored
+ * reports, and formats inside a ZIP, still name it.
+ */
 export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
-  ".vhdr",
   ".set",
   ".fdt",
   ".fif",
@@ -1185,7 +1261,8 @@ export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
   ".dat",
   ".npy",
   ".parquet",
-  // Archives hold raw files of any format that nobody opened.
+  // Archives hold raw files of any format that nobody opened. `.zip` has a reader (its entries
+  // are counted as `zip:<ext>`); it stays here for the report's closed list of format names.
   ".zip",
   ".tar",
   ".tar.gz",
@@ -1193,124 +1270,6 @@ export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
   ".7z",
   ".rar",
 ];
-
-/**
- * Under `sourcedata/` anything that is not one of these is raw material of unknown format and is
- * counted as unscreened. Text, tables, code and documents are read by other rules or carry no signal.
- */
-const SOURCEDATA_HARMLESS = new Set([
-  "json",
-  "tsv",
-  "csv",
-  "txt",
-  "md",
-  "yml",
-  "yaml",
-  "xml",
-  "iml",
-  "py",
-  "pyc",
-  "m",
-  "r",
-  "rmd",
-  "ipynb",
-  "gitignore",
-  "jpg",
-  "jpeg",
-  "png",
-  "gif",
-  "pdf",
-  "svg",
-  "tex",
-  "bib",
-  "rst",
-  "cfg",
-  "ini",
-  "toml",
-  "docx",
-  "doc",
-  "xlsx",
-  "xls",
-  "pptx",
-  "ppt",
-  "odt",
-  "ods",
-  "rtf",
-  "html",
-  "htm",
-  "log",
-  "sh",
-  "bat",
-  "ps1",
-  "js",
-  "ts",
-  "css",
-  "lock",
-  "gitkeep",
-  "ds_store",
-]);
-
-/** Base names that are documentation or housekeeping, with or without an extension. */
-const HARMLESS_BASENAME =
-  /^(readme|license|licence|changes|citation|authors|notice|thumbs\.db|\.ds_store|\.gitkeep)/;
-
-/**
- * Count recording data by whether this module can read it. The question it answers is "what is
- * here that nobody looked at", so it counts by what a file IS (a BIDS data file in any format
- * but EDF, BDF, JSON or TSV; a directory format; a known signal extension) rather than by a
- * short list of formats someone remembered.
- */
-export function formatCoverage(paths: string[]): FormatCoverage {
-  const unscreened: Record<string, number> = {};
-  const directories = new Set<string>();
-  let screened = 0;
-  const count = (key: string) => {
-    unscreened[key] = (unscreened[key] ?? 0) + 1;
-  };
-  for (const raw of paths) {
-    const path = raw.toLowerCase();
-    if (path.endsWith(".edf") || path.endsWith(".bdf")) {
-      screened++;
-      continue;
-    }
-    const segments = path.split("/");
-    const dirIndex = segments.findIndex(
-      (s, i) => i < segments.length - 1 && DIRECTORY_FORMATS.some((e) => s.endsWith(e)),
-    );
-    if (dirIndex >= 0) {
-      const dir = segments.slice(0, dirIndex + 1).join("/");
-      if (!directories.has(dir)) {
-        directories.add(dir);
-        const ext = DIRECTORY_FORMATS.find((e) => (segments[dirIndex] as string).endsWith(e));
-        count(`${ext}/`);
-      }
-      continue;
-    }
-    const bids = BIDS_DATA_FILE.exec(path);
-    if (bids) {
-      const ext = bids[2] as string;
-      if (ext !== "json" && ext !== "tsv") count(`.${ext}`);
-      continue;
-    }
-    const hit = OTHER_RECORDING_EXTENSIONS.filter((e) => path.endsWith(e)).sort(
-      (a, b) => b.length - a.length,
-    )[0];
-    if (hit) {
-      count(hit);
-      continue;
-    }
-    // Raw material under sourcedata/ in a format not listed above is still unread.
-    if (path.startsWith("sourcedata/")) {
-      const base = segments[segments.length - 1] as string;
-      const dot = base.lastIndexOf(".");
-      const ext = dot > 0 ? base.slice(dot + 1) : dot === 0 ? base.slice(1) : "";
-      if (!SOURCEDATA_HARMLESS.has(ext) && !HARMLESS_BASENAME.test(base)) {
-        count(ext === "" ? "(no extension)" : `.${ext}`);
-      }
-    }
-  }
-  return { screened, unscreened };
-}
 
 /** Count findings by kind. Values never enter a summary, only counts. */
 export function countByKind(findings: Finding[]): Partial<Record<FindingKind, number>> {

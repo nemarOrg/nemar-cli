@@ -1,0 +1,588 @@
+/**
+ * The identifier screen's report, built once for every surface: the publication screen's
+ * workflow, the uploader preflight, the fleet scan and local reproduction (A9) all read their
+ * recordings and reach their verdict here.
+ *
+ * {@link readRecordings} reads each recording through the reader the registry names for it, from
+ * a {@link RangeSource} the caller opens (a git blob, an S3 object, a local file, a buffer), under
+ * that reader's limits. Every file ends one of four ways and is counted so: read completely, read
+ * only partly (with a reason), failed, or not read at all (sampled out). {@link classifyDataset}
+ * turns the counts into the verdict, and {@link coverageFields} into the report's version-2
+ * fields. A thrown error is a failed read, never a clean one; a limit or a timer is a partial
+ * read, never a clean one (ADR 0053: unknown is never healthy).
+ *
+ * Pure of I/O: the caller supplies the sources, the clock and the failure classes.
+ */
+
+import {
+  type FormatReader,
+  LimitExceeded,
+  READERS,
+  READER_IDS,
+  READER_INCOMPLETE_REASONS,
+  type RangeSource,
+  type ReaderId,
+  type ReaderResult,
+  cachedSource,
+  companionsOf,
+  limitsFor,
+  loweredPaths,
+  namedCompanionsMissing,
+  readerFor,
+  readerMatch,
+} from "./identifier-readers";
+import {
+  DATE_KINDS,
+  DIRECT_KINDS,
+  EDF_HEADER_BYTES,
+  type Finding,
+  type FindingKind,
+  edfIdentificationText,
+} from "./identifier-scan";
+import type { DatasetStatus, IncompleteReason, ReaderTally } from "./identifier-screen-report";
+
+// ---------------------------------------------------------------------------------------
+// The verdict
+// ---------------------------------------------------------------------------------------
+
+/** An identifier-severity finding of a kind that names a person or a clinical record. */
+export const isDirectFinding = (f: Finding): boolean =>
+  f.severity === "identifier" && DIRECT_KINDS.has(f.kind);
+
+/**
+ * A calendar date finer than year in a header. Acceptable when nothing links the recording to a
+ * person (policy 2026-10-04), so it is reported but never changes whether a dataset is clean.
+ */
+export const isDateFinding = (f: Finding): boolean => DATE_KINDS.has(f.kind);
+
+export interface ClassifyInput {
+  findings: readonly Finding[];
+  /** Recording files a registered reader parses, whether or not they were all read. */
+  recordings: number;
+  /** Recording files read completely. */
+  recordingsRead: number;
+  /** Recording files in formats no registered reader parses. */
+  unscreenedCount: number;
+  /** Reasons the scan did not cover everything it could have. */
+  incompleteReasons: readonly string[];
+}
+
+/**
+ * Complete means every recording a reader parses was read completely, every side read succeeded
+ * and no sampling cap was hit. It is computed from counts, never inferred from the absence of a
+ * recorded failure.
+ */
+export function isComplete(input: ClassifyInput): boolean {
+  return input.recordingsRead === input.recordings && input.incompleteReasons.length === 0;
+}
+
+/**
+ * The dataset's verdict. A finding already made is never hidden by incompleteness; only a
+ * dataset with no finding can be `unchecked`, and `clean` needs a complete read of every
+ * recording AND no recording in a format no reader parses.
+ */
+export function classifyDataset(input: ClassifyInput): DatasetStatus {
+  if (input.findings.some(isDirectFinding)) return "direct-identifiers";
+  // Any finding that is not just an acceptable date needs a person to look.
+  if (input.findings.some((f) => !isDateFinding(f))) return "review";
+  if (!isComplete(input)) return "unchecked";
+  if (input.recordings > 0 && input.unscreenedCount > 0) return "partially-screened";
+  if (input.recordings === 0) return input.unscreenedCount > 0 ? "not-screened" : "no-recordings";
+  // Complete, every recording read: clean, noting acceptable dates when there are any.
+  return input.findings.length > 0 ? "dates-only" : "clean";
+}
+
+// ---------------------------------------------------------------------------------------
+// Reading the recordings
+// ---------------------------------------------------------------------------------------
+
+/** The subject a path belongs to, for sampling and the distinct-subject count. */
+export const subjectOf = (path: string): string => /sub-([^/_]+)/.exec(path)?.[1] ?? "?";
+
+/** What {@link readRecordings} needs to know about one entry. */
+export interface RecordingEntry {
+  path: string;
+  size: number | null;
+  /** The reader the storage key names (an annex key's extension), when it says one. */
+  reader?: ReaderId;
+  /** The storage key says EDF/BDF (kept for entries written before `reader`). */
+  edf?: boolean;
+}
+
+/**
+ * The reader for an entry: the one its storage key names, else the one its path names. Only a
+ * registered reader counts.
+ */
+export function readerForEntry(
+  entry: RecordingEntry,
+  readers: readonly FormatReader[] = READERS,
+): FormatReader | null {
+  const byKey = entry.reader ?? (entry.edf === true ? "edf" : undefined);
+  const keyed = byKey ? readers.find((r) => r.id === byKey) : undefined;
+  return keyed ?? readerFor(entry.path, readers);
+}
+
+export interface RecordingReadOptions<E extends RecordingEntry> {
+  /** The tree's entries; only those a reader parses are read. */
+  entries: readonly E[];
+  /** Recordings an earlier commit held that the tree no longer does (ADR 0086). */
+  superseded?: readonly E[];
+  /** Every path the scan sees, for companion pairing. Defaults to the entries' paths. */
+  paths?: readonly string[];
+  readers?: readonly FormatReader[];
+  /** Opens the bytes of an entry. Reads may throw; a throw is a failed read of that file. */
+  open: (entry: E) => RangeSource;
+  concurrency: number;
+  now: () => number;
+  /** Past this, every file not yet started is `partial` with reason `time`. */
+  datasetTimeMs: number;
+  /** The fixed class of a failed read, for `read_failures`. */
+  failureClass: (error: unknown) => string;
+  /** An error that ends the whole scan rather than one read (a tripped breaker). */
+  isFatal?: (error: unknown) => boolean;
+  /** A superseded recording whose object is gone: not counted, and not a failure. */
+  isAbsent?: (error: unknown) => boolean;
+  /** Which of a reader's files to read; the rest stay unread (counted). Default: all. */
+  select?: (reader: FormatReader, entries: readonly E[]) => E[];
+  /**
+   * Classes of readers whose files share a tighter bound than `concurrency`: at most
+   * `concurrency` files of a class are read at once, while files of no class keep the pool's
+   * full width. Absent, every file shares `concurrency` alone.
+   */
+  readerClassLimits?: readonly ReaderClassLimit[];
+}
+
+/** At most `concurrency` files read by any of `readers` at once (see {@link LOCAL_READER_CLASS_LIMITS}). */
+export interface ReaderClassLimit {
+  readers: readonly ReaderId[];
+  concurrency: number;
+}
+
+/**
+ * The readers that hold a whole decoded structure in memory: the MAT v5 walker (EEGLAB `.set`,
+ * Homer `.nirs`, `.mat`; up to 256 MiB inflated per file, and about 1 GB of peak RSS measured on
+ * a large `.set`), the HDF5 walker (SNIRF, NWB and other HDF5) and the ZIP reader.
+ */
+export const HEAVY_READERS: readonly ReaderId[] = [
+  "eeglab",
+  "homer-nirs",
+  "mat",
+  "snirf",
+  "hdf5",
+  "zip",
+];
+
+/**
+ * The bound for scans on the depositor's own machine (`nemar dataset screen` and the upload
+ * preflight, risk R15): at most 2 heavy files at once, so 16 concurrent `.set` reads cannot add
+ * up to many gigabytes on a laptop. Other files keep the full concurrency. The CI screen and the
+ * fleet scan pass no class limits and are unchanged: they run on runners sized for the job.
+ */
+export const LOCAL_READER_CLASS_LIMITS: readonly ReaderClassLimit[] = [
+  { readers: HEAVY_READERS, concurrency: 2 },
+];
+
+export interface RecordingsOutcome {
+  findings: Finding[];
+  /**
+   * Per reader, every id in {@link READER_IDS}: files (absent superseded ones excluded), and how
+   * each read ended. A reader with no file has zeros; `present` says which had any.
+   */
+  tallies: Record<ReaderId, ReaderTally>;
+  /** Readers that had at least one file, superseded ones included. */
+  present: Set<ReaderId>;
+  /** Per reader: files selected for reading. */
+  selected: Record<ReaderId, number>;
+  failures: Record<string, number>;
+  reasons: Set<IncompleteReason>;
+  companionMissing: number;
+  /** Files whose header names a companion other than its own base name (a note; never gating). */
+  companionNameMismatch: number;
+  /**
+   * Files a reader found not to be its format (`not-applicable`), by the extension it matched,
+   * and recording data inside a file that its reader did not read (an archive's `zip:<ext>`
+   * entries): the caller counts them as unscreened. A not-applicable file is in no tally.
+   */
+  notApplicable: Record<string, number>;
+  /** EDF/BDF only: the statistics the fleet scan has always kept. */
+  edf: {
+    flaggedFiles: number;
+    flaggedKinds: Partial<Record<FindingKind, number>>;
+    patientValues: Set<string>;
+    flaggedPatientValues: Set<string>;
+    codeValues: Set<string>;
+    nameValues: Set<string>;
+    birthValues: Set<string>;
+    subjects: Set<string>;
+  };
+}
+
+/** A read ran out of its reader's time. */
+export class ReadTimedOut extends Error {
+  constructor() {
+    super("time");
+    this.name = "ReadTimedOut";
+  }
+}
+
+function withTimer<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ReadTimedOut()), ms);
+  });
+  // A read still running when its time is up is abandoned: its result is never committed.
+  work.catch(() => undefined);
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Run `fn` over `items`, at most `size` at once, and at most a class's own limit at once for the
+ * items `classOf` puts in a class. A worker takes the earliest item it may start, so a class at
+ * its limit never holds up an item outside it. Every worker finishes before a throw is rethrown.
+ */
+async function pool<T>(
+  items: readonly T[],
+  size: number,
+  fn: (item: T) => Promise<void>,
+  classOf: (item: T) => number = () => -1,
+  classLimits: readonly number[] = [],
+) {
+  // One queue of item indexes per class, plus the unclassed (-1, the last queue).
+  const queues: number[][] = Array.from({ length: classLimits.length + 1 }, () => []);
+  items.forEach((item, i) => {
+    const c = classOf(item);
+    (queues[c < 0 ? classLimits.length : c] as number[]).push(i);
+  });
+  const heads = queues.map(() => 0);
+  const running = classLimits.map(() => 0);
+  let remaining = items.length;
+  let wake: (() => void)[] = [];
+  // The earliest item at the head of a queue that may start, or null when none may.
+  const take = (): number | null => {
+    let best = -1;
+    let bestIndex = Number.POSITIVE_INFINITY;
+    for (let q = 0; q < queues.length; q++) {
+      const head = (queues[q] as number[])[heads[q] as number];
+      if (head === undefined) continue;
+      if (q < classLimits.length && (running[q] as number) >= (classLimits[q] as number)) continue;
+      if (head < bestIndex) {
+        best = q;
+        bestIndex = head;
+      }
+    }
+    if (best < 0) return null;
+    if (best < classLimits.length) running[best] = (running[best] as number) + 1;
+    heads[best] = (heads[best] as number) + 1;
+    remaining--;
+    return bestIndex;
+  };
+  const workers = Array.from({ length: Math.min(Math.max(1, size), items.length) }, async () => {
+    while (remaining > 0) {
+      const index = take();
+      if (index === null) {
+        // Every item left is in a class at its limit: wait for one of that class to finish.
+        await new Promise<void>((resolve) => wake.push(resolve));
+        continue;
+      }
+      const item = items[index] as T;
+      try {
+        await fn(item);
+      } finally {
+        const c = classOf(item);
+        if (c >= 0) running[c] = (running[c] as number) - 1;
+        const waiting = wake;
+        wake = [];
+        for (const resolve of waiting) resolve();
+      }
+    }
+  });
+  const settled = await Promise.allSettled(workers);
+  const failed = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (failed) throw failed.reason;
+}
+
+const COVERAGES: ReadonlySet<unknown> = new Set(["complete", "partial", "not-applicable"]);
+const READER_REASONS: ReadonlySet<unknown> = new Set(READER_INCOMPLETE_REASONS);
+
+/**
+ * A reader's result has the shape the commit below reads. A reader is code in this repository,
+ * but a bug in one (a missing `findings`, a `null` finding, a reason outside the closed words)
+ * must fail that one file, never the whole screen or the report's door.
+ */
+function isReaderResult(result: unknown): result is ReaderResult {
+  if (typeof result !== "object" || result === null) return false;
+  const r = result as Record<string, unknown>;
+  if (!COVERAGES.has(r.coverage)) return false;
+  if (!Array.isArray(r.findings)) return false;
+  for (const f of r.findings as unknown[]) {
+    if (typeof f !== "object" || f === null) return false;
+    const finding = f as Record<string, unknown>;
+    if (typeof finding.kind !== "string" || typeof finding.severity !== "string") return false;
+  }
+  if (r.incomplete !== undefined && !READER_REASONS.has(r.incomplete)) return false;
+  if (r.notes !== undefined && !Array.isArray(r.notes)) return false;
+  if (r.needs !== undefined) {
+    if (!Array.isArray(r.needs) || r.needs.some((n) => typeof n !== "string")) return false;
+  }
+  if (r.unscreened !== undefined) {
+    if (typeof r.unscreened !== "object" || r.unscreened === null) return false;
+    for (const n of Object.values(r.unscreened)) {
+      if (!Number.isSafeInteger(n) || (n as number) < 0) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Read every recording a registered reader parses, and count how each read ended.
+ *
+ * - `complete`: the reader said so, from a source that never refused a read, with every
+ *   companion present.
+ * - `partial`: the reader returned `partial` (its findings are kept, with its reason); or it
+ *   returned `complete` although its source refused a read past the limits (reason `limit`, its
+ *   findings kept); or a companion is missing (`companion-missing`); or it threw
+ *   {@link LimitExceeded} or ran out of its time (`limit`, `time`), which keeps no finding; or
+ *   the dataset's time was spent before it started (`time`).
+ * - `failed`: any other throw, including the source's read failures. Never a clean read.
+ * - `not-applicable`: the reader found the file is not its format. It leaves the tallies and is
+ *   counted in `notApplicable` by extension, for the caller to count as unscreened.
+ *
+ * Superseded recordings are read as headers only: their companions are checked against the
+ * current tree alone, by design (history keeps headers, and a companion's absence there is not a
+ * recording the tree publishes).
+ */
+export async function readRecordings<E extends RecordingEntry>(
+  options: RecordingReadOptions<E>,
+): Promise<RecordingsOutcome> {
+  const readers = options.readers ?? READERS;
+  const superseded = new Set<E>(options.superseded ?? []);
+  const all = [...options.entries, ...superseded];
+  const allPaths = options.paths ?? options.entries.map((e) => e.path);
+  const { missing } = companionsOf(allPaths, readers);
+  const pathSet: ReadonlySet<string> = new Set(allPaths);
+  // Lowercased once for the whole dataset, for the case-insensitive companion match.
+  const lowered = loweredPaths(pathSet);
+
+  // One entry per reader id, written out: a `Record` literal, so an id added to the union and
+  // missing here fails the typecheck.
+  const zeros = <T>(make: () => T): Record<ReaderId, T> => ({
+    edf: make(),
+    brainvision: make(),
+    nirx: make(),
+    snirf: make(),
+    hdf5: make(),
+    eeglab: make(),
+    "homer-nirs": make(),
+    mat: make(),
+    zip: make(),
+  });
+  const out: RecordingsOutcome = {
+    findings: [],
+    tallies: zeros(() => ({ files: 0, read: 0, partial: 0, failed: 0 })),
+    present: new Set(),
+    selected: zeros(() => 0),
+    failures: {},
+    reasons: new Set(),
+    companionMissing: 0,
+    companionNameMismatch: 0,
+    notApplicable: {},
+    edf: {
+      flaggedFiles: 0,
+      flaggedKinds: {},
+      patientValues: new Set(),
+      flaggedPatientValues: new Set(),
+      codeValues: new Set(),
+      nameValues: new Set(),
+      birthValues: new Set(),
+      subjects: new Set(),
+    },
+  };
+  const byReader = new Map<FormatReader, E[]>();
+  for (const entry of all) {
+    const reader = readerForEntry(entry, readers);
+    if (!reader) continue;
+    byReader.set(reader, [...(byReader.get(reader) ?? []), entry]);
+  }
+  const work: { entry: E; reader: FormatReader }[] = [];
+  for (const [reader, entries] of byReader) {
+    const chosen = options.select ? options.select(reader, entries) : entries;
+    out.tallies[reader.id].files = entries.length;
+    out.present.add(reader.id);
+    out.selected[reader.id] = chosen.length;
+    for (const entry of chosen) work.push({ entry, reader });
+  }
+  const fail = (key: string) => {
+    out.failures[key] = (out.failures[key] ?? 0) + 1;
+  };
+  const started = options.now();
+  const classLimits = options.readerClassLimits ?? [];
+  const classOfReader = new Map<ReaderId, number>();
+  classLimits.forEach((limit, c) => {
+    for (const id of limit.readers) if (!classOfReader.has(id)) classOfReader.set(id, c);
+  });
+
+  const readOne = async ({ entry, reader }: { entry: E; reader: FormatReader }) => {
+    const t = out.tallies[reader.id];
+    if (options.now() - started >= options.datasetTimeMs) {
+      t.partial++;
+      out.reasons.add("time");
+      return;
+    }
+    // History keeps headers only: a superseded recording's companions are not looked for.
+    const pairedLacking = superseded.has(entry) ? 0 : (missing.get(entry.path) ?? 0);
+    let source: ReturnType<typeof cachedSource>;
+    let result: unknown;
+    // EDF/BDF statistics, from the header the reader already read (a cache hit, no new read).
+    let patient: string | null = null;
+    const limits = limitsFor(reader, entry.path);
+    try {
+      source = cachedSource(options.open(entry), limits);
+      result = await withTimer(reader.scan(source, entry.path, limits), limits.timeMs);
+      if (
+        reader.id === "edf" &&
+        isReaderResult(result) &&
+        result.coverage === "complete" &&
+        !source.limited
+      ) {
+        const head = await source.read(0, EDF_HEADER_BYTES);
+        if (head.length >= EDF_HEADER_BYTES) patient = edfIdentificationText(head).patient;
+      }
+    } catch (error) {
+      if (options.isFatal?.(error)) throw error;
+      if (error instanceof LimitExceeded || error instanceof ReadTimedOut) {
+        t.partial++;
+        out.reasons.add(error instanceof LimitExceeded ? "limit" : "time");
+        out.companionMissing += pairedLacking;
+        if (pairedLacking > 0) out.reasons.add("companion-missing");
+        return;
+      }
+      if (superseded.has(entry) && options.isAbsent?.(error)) {
+        // Gone from the store, so it leaks nothing: not a recording, and not a failed read.
+        t.files--;
+        fail(`${reader.id}/superseded-absent`);
+        return;
+      }
+      t.failed++;
+      fail(`${reader.id}/${options.failureClass(error)}`);
+      return;
+    }
+    if (!isReaderResult(result)) {
+      // A reader bug, not a property of the file: that file failed, under a closed class.
+      t.failed++;
+      fail(`${reader.id}/internal`);
+      return;
+    }
+    // Everything below only commits; on a result that passed `isReaderResult` it cannot throw.
+    if (result.coverage === "not-applicable") {
+      // Not this reader's format: unscreened under its extension, in no tally, no companions.
+      t.files--;
+      const extension = readerMatch(entry.path, [reader])?.extension ?? reader.extensions[0] ?? "";
+      out.notApplicable[extension] = (out.notApplicable[extension] ?? 0) + 1;
+      return;
+    }
+    for (const f of result.findings) out.findings.push(f);
+    for (const [key, n] of Object.entries(result.unscreened ?? {})) {
+      out.notApplicable[key] = (out.notApplicable[key] ?? 0) + n;
+    }
+    if (result.notes?.includes("companion-name-mismatch")) out.companionNameMismatch++;
+    // Companions the content names (an EEGLAB `.set`'s `.fdt`), checked against the same paths.
+    const lacking =
+      pairedLacking +
+      (superseded.has(entry)
+        ? 0
+        : namedCompanionsMissing(entry.path, result.needs, pathSet, lowered));
+    if (reader.id === "edf") {
+      const e = out.edf;
+      if (patient !== null && !result.findings.some((f) => f.kind === "edf-unreadable")) {
+        e.patientValues.add(patient);
+        const parts = patient.split(/\s+/);
+        if (parts.length >= 4) {
+          e.codeValues.add(parts[0] as string);
+          e.birthValues.add(parts[2] as string);
+          e.nameValues.add(parts[3] as string);
+        }
+      }
+      e.subjects.add(subjectOf(entry.path));
+      if (result.findings.some((f) => f.severity === "identifier")) {
+        e.flaggedFiles++;
+        if (patient !== null) e.flaggedPatientValues.add(patient);
+      }
+      for (const kind of new Set(result.findings.map((f) => f.kind))) {
+        e.flaggedKinds[kind] = (e.flaggedKinds[kind] ?? 0) + 1;
+      }
+    }
+    out.companionMissing += lacking;
+    // A reader that says complete after its source refused a read did not read everything.
+    const limited = source.limited;
+    if (result.coverage === "complete" && lacking === 0 && !limited) {
+      t.read++;
+      return;
+    }
+    t.partial++;
+    if (lacking > 0) out.reasons.add("companion-missing");
+    if (limited) out.reasons.add("limit");
+    if (result.coverage === "partial" && result.incomplete) out.reasons.add(result.incomplete);
+  };
+  await pool(
+    work,
+    options.concurrency,
+    readOne,
+    ({ reader }) => classOfReader.get(reader.id) ?? -1,
+    classLimits.map((limit) => Math.max(1, limit.concurrency)),
+  );
+
+  // A reader other than EDF/BDF whose files did not all get a full or partial read: the EDF/BDF
+  // shortfall has its own words (`edf-headers-unread`, `edf-headers-sampled`).
+  for (const id of READER_IDS) {
+    const t = out.tallies[id];
+    if (id !== "edf" && t.read + t.partial < t.files) out.reasons.add("recordings-unread");
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------
+// The report's version-2 fields
+// ---------------------------------------------------------------------------------------
+
+/** The recordings a scan counted, and the ones it read completely. */
+export function recordingCounts(outcome: Pick<RecordingsOutcome, "tallies">): {
+  recordings: number;
+  read: number;
+} {
+  let recordings = 0;
+  let read = 0;
+  for (const id of READER_IDS) {
+    recordings += outcome.tallies[id].files;
+    read += outcome.tallies[id].read;
+  }
+  return { recordings, read };
+}
+
+/**
+ * `read_by_format`, `companion_missing`, `companion_name_mismatch` (only when there is one, so a
+ * report without the note reads as it always did) and `readers`, as the report carries them.
+ */
+export function coverageFields(
+  outcome: Pick<RecordingsOutcome, "tallies" | "present" | "companionMissing"> &
+    Partial<Pick<RecordingsOutcome, "companionNameMismatch">>,
+  readers: readonly FormatReader[] = READERS,
+): {
+  read_by_format: Partial<Record<ReaderId, ReaderTally>>;
+  companion_missing: number;
+  companion_name_mismatch?: number;
+  readers: Partial<Record<ReaderId, string>>;
+} {
+  const read_by_format: Partial<Record<ReaderId, ReaderTally>> = {};
+  for (const id of READER_IDS) {
+    if (outcome.present.has(id)) read_by_format[id] = { ...outcome.tallies[id] };
+  }
+  const versions: Partial<Record<ReaderId, string>> = {};
+  for (const reader of readers) versions[reader.id] = reader.version;
+  const mismatch = outcome.companionNameMismatch ?? 0;
+  return {
+    read_by_format,
+    companion_missing: outcome.companionMissing,
+    ...(mismatch > 0 ? { companion_name_mismatch: mismatch } : {}),
+    readers: versions,
+  };
+}

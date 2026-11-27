@@ -788,9 +788,9 @@ describe("status from EDF/BDF headers", () => {
   test("a date with an unparsed recording format beside it follows the unscreened rule, not dates-only", async () => {
     const mixed = await scanFiles({
       [EDF]: edfHeader({ startdate: "14.03.93" }),
-      "sub-01/eeg/b.set": "x",
+      "sub-01/eeg/b.nwb": "x",
     });
-    expect(mixed.record.status).toBe("clean-edf-only-others-unscreened");
+    expect(mixed.record.status).toBe("partially-screened");
   });
 
   test("a date never hides an incomplete scan: an unreadable header beside it is unchecked", async () => {
@@ -916,16 +916,16 @@ describe("status from JSON keys: severity decides, not kind", () => {
 });
 
 describe("status from recording formats", () => {
-  const SET = "sub-01/eeg/sub-01_task-rest_eeg.set";
+  const SET = "sub-01/eeg/sub-01_task-rest_eeg.nwb";
   test("recordings only in a format the scanner cannot parse: not-screened, and never fetched", async () => {
     const { w, record } = await scanFiles({ [SET]: "x", "dataset_description.json": "{}" });
     expect(record.status).toBe("not-screened");
-    expect(record.unscreened_formats).toEqual({ ".set": 1 });
+    expect(record.unscreened_formats).toEqual({ ".nwb": 1 });
     expect(w.hits(w.pathOf(ID, SET))).toBe(0);
   });
-  test("clean EDF beside an unparsed format: clean-edf-only-others-unscreened", async () => {
+  test("clean EDF beside an unparsed format: partially-screened", async () => {
     const { record } = await scanFiles({ [EDF]: CLEAN, [SET]: "x" });
-    expect(record.status).toBe("clean-edf-only-others-unscreened");
+    expect(record.status).toBe("partially-screened");
     expect(record.incomplete).toBe(false);
   });
   test("the same clean EDF with no other format is plain clean", async () => {
@@ -946,6 +946,28 @@ describe("status from recording formats", () => {
   });
 });
 
+describe("ZIP archives (card A6): inner findings and inner formats reach the record", () => {
+  const fixture = (name: string) =>
+    new Uint8Array(readFileSync(join(import.meta.dir, "fixtures", "zip", name)));
+  test("an archive's inner EDF findings and its unread .xdf are in the record", async () => {
+    const { record } = await scanFiles({ "sourcedata/raw.zip": fixture("edf-and-xdf.zip") });
+    expect(record.status).toBe("direct-identifiers");
+    expect(record.findings_by_kind?.["edf-patient-name"]).toBe(1);
+    expect(record.unscreened_formats).toEqual({ "zip:.xdf": 1 });
+    expect(record.incomplete).toBe(false);
+  });
+  test("an archive holding only a nested archive and a clean EDF is partially screened", async () => {
+    const { record } = await scanFiles({ "sourcedata/raw.zip": fixture("nested.zip") });
+    expect(record.status).toBe("partially-screened");
+    expect(record.unscreened_formats).toEqual({ "zip:.zip": 1 });
+  });
+  test("an encrypted archive is unchecked, never clean", async () => {
+    const { record } = await scanFiles({ "sourcedata/raw.zip": fixture("encrypted.zip") });
+    expect(record.incomplete).toBe(true);
+    expect(record.incomplete_reasons).toContain("encrypted");
+  });
+});
+
 describe("recording data this scanner cannot parse is counted by what the file is", () => {
   const bids = (name: string, ext: string) => `sub-01/${name}/sub-01_task-a_${name}.${ext}`;
   const never = (w: StandIn, ...paths: string[]) => {
@@ -959,7 +981,7 @@ describe("recording data this scanner cannot parse is counted by what the file i
       "sub-01/meg/sub-01_task-a_meg.ds/a.res4": "y",
     };
     const { w, record } = await scanFiles(files);
-    expect(record.status).toBe("clean-edf-only-others-unscreened");
+    expect(record.status).toBe("partially-screened");
     expect(record.unscreened_formats).toEqual({ ".ds/": 1 });
     expect(record.incomplete).toBe(false);
     never(w, "sub-01/meg/sub-01_task-a_meg.ds/a.meg4", "sub-01/meg/sub-01_task-a_meg.ds/a.res4");
@@ -971,14 +993,21 @@ describe("recording data this scanner cannot parse is counted by what the file i
     expect(alone.record.status).toBe("clean");
   });
 
-  test(".hdf5 only is not-screened, not no-recordings; a dataset with no data file is no-recordings", async () => {
-    const file = bids("eeg", "hdf5");
+  test(".nwb only is not-screened, not no-recordings; a dataset with no data file is no-recordings", async () => {
+    const file = bids("ieeg", "nwb");
     const { w, record } = await scanFiles({ [file]: "x", "dataset_description.json": "{}" });
     expect(record.status).toBe("not-screened");
-    expect(record.unscreened_formats).toEqual({ ".hdf5": 1 });
+    expect(record.unscreened_formats).toEqual({ ".nwb": 1 });
     never(w, file);
     const none = await scanFiles({ "dataset_description.json": "{}" });
     expect(none.record.status).toBe("no-recordings");
+  });
+
+  test(".hdf5 that is not HDF5 is read by the HDF5 reader and is partial, never clean", async () => {
+    const file = bids("eeg", "hdf5");
+    const { record } = await scanFiles({ [file]: "x", "dataset_description.json": "{}" });
+    expect(record.status).toBe("unchecked");
+    expect(record.unscreened_formats ?? {}).toEqual({});
   });
 
   test(".edf.gz only is not-screened and is never read as an EDF header", async () => {
@@ -1005,14 +1034,14 @@ describe("recording data this scanner cannot parse is counted by what the file i
     expect(companions.record.status).toBe("no-recordings");
   });
 
-  test("other signal files count wherever they sit: .mat, .h5, .bdf.gz", async () => {
+  test("other signal files count wherever they sit: .mat, .nwb, .bdf.gz", async () => {
     const { record } = await scanFiles({
       "sourcedata/export.mat": "x",
-      "sourcedata/run1.h5": "y",
+      "sourcedata/run1.nwb": "y",
       [bids("emg", "bdf.gz")]: "z",
     });
     expect(record.status).toBe("not-screened");
-    expect(record.unscreened_formats).toEqual({ ".mat": 1, ".h5": 1, ".bdf.gz": 1 });
+    expect(record.unscreened_formats).toEqual({ ".mat": 1, ".nwb": 1, ".bdf.gz": 1 });
   });
 
   test("the other directory formats count once per directory: .mff/, .mefd/, .zarr/", async () => {
@@ -1031,20 +1060,20 @@ describe("recording data this scanner cannot parse is counted by what the file i
 describe("classifyDataset", () => {
   const base = {
     findings: [],
-    edfCount: 0,
-    headerRead: 0,
+    recordings: 0,
+    recordingsRead: 0,
     unscreenedCount: 0,
     incompleteReasons: [],
   };
   test("each status is reachable, and incompleteness only matters when nothing was found", () => {
     expect(classifyDataset(base)).toBe("no-recordings");
     expect(classifyDataset({ ...base, unscreenedCount: 2 })).toBe("not-screened");
-    expect(classifyDataset({ ...base, edfCount: 2, headerRead: 2 })).toBe("clean");
-    expect(classifyDataset({ ...base, edfCount: 2, headerRead: 2, unscreenedCount: 1 })).toBe(
-      "clean-edf-only-others-unscreened",
+    expect(classifyDataset({ ...base, recordings: 2, recordingsRead: 2 })).toBe("clean");
+    expect(classifyDataset({ ...base, recordings: 2, recordingsRead: 2, unscreenedCount: 1 })).toBe(
+      "partially-screened",
     );
     // headers not all read, even with no reason recorded
-    expect(classifyDataset({ ...base, edfCount: 2, headerRead: 1 })).toBe("unchecked");
+    expect(classifyDataset({ ...base, recordings: 2, recordingsRead: 1 })).toBe("unchecked");
     expect(classifyDataset({ ...base, incompleteReasons: ["json-sampled"] })).toBe("unchecked");
   });
 
@@ -1057,8 +1086,8 @@ describe("classifyDataset", () => {
     };
     const incomplete = {
       ...base,
-      edfCount: 2,
-      headerRead: 1,
+      recordings: 2,
+      recordingsRead: 1,
       unscreenedCount: 1,
       incompleteReasons: ["json-sampled"],
     };
@@ -1300,8 +1329,8 @@ describe("sampling caps are counted and make the dataset incomplete", () => {
   test("a dated scans row follows the same rules as a dated header: others unscreened, an unread header, a review finding", async () => {
     const table = "filename\tacq_time\nsub-01/eeg/a.edf\t2020-03-14T10:00:00\n";
     const scans = { "sub-01/sub-01_scans.tsv": table };
-    const withSet = await scanFiles({ [EDF]: CLEAN, ...scans, "sub-01/eeg/b.set": "x" });
-    expect(withSet.record.status).toBe("clean-edf-only-others-unscreened");
+    const withSet = await scanFiles({ [EDF]: CLEAN, ...scans, "sub-01/eeg/b.nwb": "x" });
+    expect(withSet.record.status).toBe("partially-screened");
     const unread = await scanFiles({
       [EDF]: CLEAN,
       ...scans,
@@ -2600,7 +2629,7 @@ describe("reading through a caller-supplied reader, and a clone source", () => {
     const denied = { ...never("denied/old.edf"), edf: true };
 
     const absent = await scanDatasetFromManifest(ctx, ID, null, current, "clone", {
-      supersededEdf: [gone],
+      supersededRecordings: [gone],
     });
     expect(absent.status).toBe("clean");
     expect(absent.incomplete).toBe(false);
@@ -2608,7 +2637,7 @@ describe("reading through a caller-supplied reader, and a clone source", () => {
     expect(absent.read_failures).toEqual({ "edf/superseded-absent": 1 });
 
     const refused = await scanDatasetFromManifest(ctx, ID, null, current, "clone", {
-      supersededEdf: [denied],
+      supersededRecordings: [denied],
     });
     expect(refused.status).toBe("unchecked");
     expect(refused.files).toMatchObject({ edf_bdf: 2, header_read: 1, header_read_failed: 1 });

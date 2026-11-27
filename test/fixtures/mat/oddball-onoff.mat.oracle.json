@@ -1,0 +1,52 @@
+[
+ {
+  "fields": [
+   "ONOFF_4Oddball"
+  ],
+  "class": "double",
+  "dims": [
+   50,
+   3
+  ],
+  "skipped": "size"
+ },
+ {
+  "fields": [
+   "ONOFF_4Oddball_HDR"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   5
+  ],
+  "value": [
+   "PD_ID"
+  ]
+ },
+ {
+  "fields": [
+   "ONOFF_4Oddball_HDR"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   7
+  ],
+  "value": [
+   "Session"
+  ]
+ },
+ {
+  "fields": [
+   "ONOFF_4Oddball_HDR"
+  ],
+  "class": "char",
+  "dims": [
+   1,
+   10
+  ],
+  "value": [
+   "ON=1 OFF=0"
+  ]
+ }
+]

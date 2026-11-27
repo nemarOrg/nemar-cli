@@ -24,12 +24,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  type Finding,
-  type FindingKind,
-  formatCoverage,
-  scanPaths,
-} from "../../shared/identifier-scan";
+import { formatCoverage } from "../../shared/identifier-readers";
+import { type Finding, type FindingKind, scanPaths } from "../../shared/identifier-scan";
 import { KNOWN_FORMATS } from "../../shared/identifier-screen-report";
 import { NAME_CLASSES, type NameClass, nameClass, nameTokens } from "../../shared/image-name-class";
 import { MINIMUM_FAILURES, minimumFailureSentence } from "../../shared/submission-minimums";
