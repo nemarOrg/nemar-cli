@@ -1170,3 +1170,11 @@ It is refused while the automatic denial is confirming that review or has acted 
 The re-review also counts in the depositor's 24-hour tally (`DEPOSITOR_RANK_SQL`), so repeated comparisons can decline that depositor's next screen-started review with `depositor_limit`; an administrator's own start is not held by it.
 If the new run cannot be handed over or is declined, the old review stays superseded and the approval gate blocks until the new review is restarted (`start <dataset-id>` restarts it); nothing is rolled back.
 Where section 8 says a reported review is never started again, this is the later text for an administrator who passes `again`; every start without it is unchanged.
+
+## Amendment 2026-11-27 (owner, epic #2449): ADR 0142 identifies LICENSE
+
+ADR 0142 partially supersedes section 3's LICENSE bullet and section 5's lowering rule for a cut LICENSE.
+The review job identifies the root LICENSE with a pinned askalono release; for a conclusive identification the model receives only the text left over after the matched license, under the same pre-send rules and cap,
+and a LICENSE that matches the `License` field no longer lowers `authors_and_license` to `unknown`.
+Every other LICENSE state keeps the rule above.
+ADR 0142 is the later text.

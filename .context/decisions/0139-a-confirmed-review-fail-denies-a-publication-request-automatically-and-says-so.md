@@ -147,3 +147,8 @@ It clears that reason alone.
   The derivation drops `license_lineage_unconfirmed`, and the stored verdict is derived again without it when the stored column still equals what its report derives; the verdict then follows the other reasons.
   It never clears another reason and never approves; an administrator's override still clears the reason too.
   The admin show and the administrators' mail print "License permission recorded on (date) by (administrator), ticket (ticket)".
+
+## Amendment 2026-11-27 (owner, epic #2449): the record names the license matcher
+
+Decision 9's record gains the license matcher version (`askalono-0.5.0+spdx-65dd995`), and decision 7's lineage records when it was resolved (ADR 0142).
+A LICENSE file that names a different license from the `License` field lowers `authors_and_license` to `unknown` and is never `auto_deny_eligible`, because both runs would see the same platform fact.
