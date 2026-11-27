@@ -1136,6 +1136,33 @@ describe("the calls and what they send", () => {
     });
   });
 
+  test("the stand-in's delay answers normally, and records a subscription only after the wait", async () => {
+    // What a test that fires a webhook has to wait for (#2402): a job can be bound while its
+    // subscription is still on the wire.
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    standin.delay("POST /v3/jobs/subscribe/:uuid", 400);
+    const started = Date.now();
+    const pending = subscribeWebhook(
+      ctx(env, { timeoutMs: 3000 }),
+      job.uuid,
+      "https://hooks.example/late",
+      60,
+    );
+    await Bun.sleep(150);
+    expect(standin.subscriptions).toHaveLength(0);
+    await expect(standin.fireWebhook(job.uuid)).rejects.toThrow("has no subscription");
+    const made = await pending;
+    expect(Date.now() - started).toBeGreaterThanOrEqual(400);
+    expect(made.url).toEqual(expect.any(String));
+    expect(standin.subscriptions).toHaveLength(1);
+    // One shot: the next subscription is not delayed.
+    const quick = Date.now();
+    await subscribeWebhook(ctx(env), job.uuid, "https://hooks.example/again", 60);
+    expect(Date.now() - quick).toBeLessThan(400);
+    expect(standin.subscriptions).toHaveLength(2);
+  });
+
   test("subscribeWebhook refuses a lifetime or an address Tapis would not take, before sending", async () => {
     const env = passwordEnv();
     const job = await submitJob(ctx(env), SUBMIT);
