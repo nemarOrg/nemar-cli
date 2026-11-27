@@ -53,6 +53,7 @@ import {
   type ZarrCommitAttestation,
   defaultInput,
   findRecipe,
+  placeholderRefusal,
   readRecipeRecord,
   recipeArguments,
   recipeCommand,
@@ -854,7 +855,8 @@ export async function dispatchPipelineJob(
     return fail("invalid_spec", datasetId, { field: "executor" });
   }
   // A placeholder is on no path: not an administrator's run, not the queue, not the cron.
-  if (recipe.placeholder === true) return fail("recipe_placeholder", datasetId);
+  const placeholder = placeholderRefusal(recipe);
+  if (placeholder !== null) return fail(placeholder, datasetId);
   // The cron is the Tapis queue's: `autoDispatch` says a recipe may be run automatically on Tapis, and a runner
   // run is an administrator's (the daily dispatcher never names an executor, so this holds for any other caller).
   if (input.actor.kind === "cron" && executor !== "tapis") {
@@ -1669,7 +1671,8 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
   if (!recipeRunsOn(recipe, executor)) {
     return { ok: false, code: "invalid_spec", field: "executor" };
   }
-  if (recipe.placeholder === true) return { ok: false, code: "recipe_placeholder" };
+  const placeholder = placeholderRefusal(recipe);
+  if (placeholder !== null) return { ok: false, code: placeholder };
   const recipeInput = input.input ?? defaultInput(executor);
   if (!recipeRunsInput(recipe, recipeInput, executor)) {
     return { ok: false, code: "invalid_spec", field: "input" };
@@ -1957,7 +1960,6 @@ const STOPS_A_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusal>([
   "pipelines_account_missing",
   // The same for every dataset: no Tapis job can be submitted from this Worker.
   "tapis_unconfigured",
-  "recipe_placeholder",
   "invalid_spec",
   "insufficient_balance",
   "platform_budget_exhausted",
@@ -2020,8 +2022,11 @@ export async function dispatchEligible(
 ): Promise<EligibleRun> {
   const run: EligibleRun = { results: [], dispatched: 0, stoppedBy: null, room: null };
   const recipe = findRecipe(input.recipe);
-  if (recipe === null || recipe.placeholder === true) {
-    const code = recipe === null ? "recipe_unknown" : "recipe_placeholder";
+  // An unknown recipe or a placeholder is refused here, once, before any sync or read: the loop below never
+  // meets either, so neither is among the words that stop it (`STOPS_A_RUN`).
+  const refused = recipe === null ? "recipe_unknown" : placeholderRefusal(recipe);
+  if (refused !== null || recipe === null) {
+    const code = refused ?? "recipe_unknown";
     run.results.push(fail(code, ""));
     run.stoppedBy = code;
     return run;

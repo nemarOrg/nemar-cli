@@ -54,6 +54,7 @@ import {
   RECIPE_INPUTS,
   defaultInput,
   findRecipe,
+  placeholderRefusal,
   recipeRunsInput,
   recipeRunsOn,
 } from "../../../../shared/compute-recipes.js";
@@ -439,7 +440,8 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
         executorIssue("that recipe is not dispatched to that executor"),
       );
     }
-    if (recipe.placeholder === true) return refuse(c, "recipe_placeholder");
+    const placeholder = placeholderRefusal(recipe);
+    if (placeholder !== null) return refuse(c, placeholder);
     if (executor === "runner" && body.dataset === undefined) {
       return invalid(c, "invalid_body", executorIssue("a runner run names one dataset"));
     }

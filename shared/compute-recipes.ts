@@ -410,6 +410,20 @@ export function recipeQualityPlugins(recipe: Pick<ComputeRecipe, "checkpoints">)
   return (quality?.steps ?? []).filter((s) => plugins.includes(s));
 }
 
+/** The one word a placeholder recipe is refused with, on every path (ADR 0118 amendment of 2026-11-05, item 3). */
+export const RECIPE_PLACEHOLDER_REFUSAL = "recipe_placeholder";
+
+/**
+ * Whether a recipe is refused as a placeholder, and with which word: the one decision the admin run route, the
+ * dispatch, the dry run and the queue each ask, after where the recipe may run and before anything is read. A
+ * recipe is a placeholder only when its entry says `placeholder: true`; a missing flag or `false` runs.
+ */
+export function placeholderRefusal(
+  recipe: Pick<ComputeRecipe, "placeholder">,
+): typeof RECIPE_PLACEHOLDER_REFUSAL | null {
+  return recipe.placeholder === true ? RECIPE_PLACEHOLDER_REFUSAL : null;
+}
+
 /**
  * The recipes whose run of the archive (`bids`) input can be handed the serving copy's index
  * (`--serving-index`, nemar-process P7) to declare the views of the serving copy: their derivative key on
