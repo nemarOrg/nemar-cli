@@ -584,7 +584,7 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
 
   test("caps, timings and the standing line", () => {
     expect(DEPOSITOR_DAILY_CAP).toBe(5);
-    expect(PLATFORM_DAILY_CAP).toBe(150);
+    expect(PLATFORM_DAILY_CAP).toBe(500);
     expect(PUBLICATION_REVIEW_DEADLINE_MINUTES).toBe(30);
     expect(REVIEW_OVERDUE_VIEW_MINUTES).toBe(PUBLICATION_REVIEW_DEADLINE_MINUTES + 30);
     expect(NOT_ASSESSED_LINE).toBe("Not assessed: whether the text names the depositors.");

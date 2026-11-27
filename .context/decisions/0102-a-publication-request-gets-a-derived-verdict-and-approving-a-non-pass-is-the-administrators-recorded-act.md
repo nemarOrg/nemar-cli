@@ -1155,3 +1155,8 @@ The Worker now also accepts a first run's report made on Sonnet 5.5 or Opus 5.5,
 A first run in the confirming run's exact shape (ADR 0139: Sonnet 5.5 at `max`) is still refused, so a confirming report cannot pass as a first run.
 A first run made on Sonnet 5.5, at any effort, never starts a confirming run: the automatic denial rests on two different models agreeing, and the depositor's mail says so.
 Every record names its model and effort, so the comparison is readable from the stored reviews.
+
+## Amendment 2026-11-27 (owner): the platform cap is 500
+
+The owner raised the platform's allowance from 150 to 500 model calls in any 24 hours, so the whole publication queue (more than 360 requests) and the model comparison on it can run in a day.
+The per-depositor allowance stays at 5, and an administrator's start still skips it.

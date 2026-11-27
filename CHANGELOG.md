@@ -17,6 +17,8 @@ earlier releases are described only by their generated notes.
 
 ### Changed
 
+- **The publication review's platform allowance is 500 model calls a day (was 150; ADR 0102 amendment).**
+  The per-depositor allowance stays 5, and an administrator's start skips it.
 - **The publication review accepts reports made on Sonnet 5.5 and Opus 5.5 (ADR 0102 amendment).**
   The review still calls Haiku 5.5 at high effort. The wider list lets the owner compare models and efforts on the real queue without a release: a branch of the review script that calls another model, checked out by the workflow in `nemarDatasets/.github`, reports results the Worker accepts.
   A first run in the confirming run's exact shape (Sonnet 5.5 at `max`) is still refused, and a first run made on Sonnet 5.5 never starts a confirming run, because the automatic denial needs two different models to agree (ADR 0139).
