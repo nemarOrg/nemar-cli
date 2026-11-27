@@ -26,24 +26,45 @@ One description key is withheld from the model in 34 of the 37 reviews, and the 
 
 ### 1. The review job identifies LICENSE with ScanCode, pinned
 
-- **The matcher is ScanCode toolkit 32.5.0** (nexB, Apache-2.0, `github.com/aboutcode-org/scancode-toolkit`), the release of 2026-01-15 and the latest on PyPI on 2026-11-27.
+- **The matcher is ScanCode toolkit 32.5.0** (nexB, Apache-2.0, `github.com/aboutcode-org/scancode-toolkit`), the release of 2026-01-15 and the latest on the Python Package Index (PyPI) on 2026-11-27.
   Its license database (the licenses and detection rules, including every CC license and variant) ships inside the release, and it maps them to SPDX license list 3.27.
 - **The matcher version the review records** is `scancode-32.5.0+spdx-3.27`: the toolkit release, which also versions its license database, and the SPDX list version that `scancode --version` prints.
   It joins ADR 0139 decision 9's record and every surface that prints it.
 - **How it is installed.**
   uv only, never pip.
-  nemar-cli carries a hashed requirements file for Linux x86_64 and Python 3.12 (`uv pip compile --generate-hashes`; 80 packages),
-  and `.github/dataset-workflows/run-publication-review.yml` installs it with `uv pip install --require-hashes` into a fresh environment, never at a version the dispatch payload names.
+  nemar-cli carries a hashed requirements file for Linux x86_64 and Python 3.12 (`scripts/ci/scancode-requirements.txt`, from `uv pip compile --generate-hashes`; 80 packages),
+  and the workflow installs it with `uv pip install --require-hashes --no-build` into a fresh environment, never at a version the dispatch payload names.
+  `--no-build` takes wheels only, so no package's build code runs at install time, and unpacking a wheel runs none either.
   The file pins `pluggy` below 1.6: measured, ScanCode 32.5.0 with the `pluggy` 1.7 that its own requirements admit fails at start (`did not find any 'pre_scan' hooks`).
   The install is fresh on every run, with no Actions cache, because a cache is writable from other workflows of the repository.
   A failed install or a hash mismatch is never a pass and never a denial: the identification is `unreadable`, the matcher word is `unavailable`, and LICENSE is handled as ADR 0102 handled it.
+- **The interpreter and uv are pinned.**
+  uv itself comes from `astral-sh/setup-uv` pinned to a full commit with an exact uv version, like every action in the workflow (its header's item (a)).
+  The interpreter is a uv-managed CPython at the exact patch version the requirements file was compiled for, named in a comment at its head (3.12.16 when this was measured);
+  uv checks the interpreter archive against the SHA-256 it carries for that version, and the step refuses to continue when `python -I -c 'import sys; print(sys.version)'` names another version.
+  The runner's own Python is not used, because the runner image changes it without a change here.
+- **Where it runs, in the workflow's threat model.**
+  The header of `run-publication-review.yml` says what each step can hold and what the order closes; ScanCode adds 80 packages of third-party code to it, so it does not run the way the review script does.
+  - The install is its own step after the dataset fetch, with no `env:` beyond the paths: it holds no dataset token (only the fetch and the validation-run lookup do) and no Anthropic identity, and, with `--no-build`, it executes no package code.
+  - The scan is its own step, before the OIDC fetch for Anthropic, and runs ScanCode as `sudo unshare --net -- setpriv --reuid=65534 --regid=65534 --clear-groups -- env -i PATH=<venv>/bin:/usr/bin scancode ...`, from an environment installed outside the runner user's home,
+    on a copy of LICENSE in a directory that user may read and an output directory it may write, and nothing else.
+    So the scanning process has no network, so it can send nothing anywhere; it has no environment, so neither the OIDC request variables that `id-token: write` puts in every step nor any token reach it;
+    and as another user it cannot write the runner user's files, so it cannot plant a hook for the mint action's post step or for the Review step.
+  - The Review step reads the output as JSON data, validated against the fields this decision uses; nothing ScanCode wrote is executed.
+  - Running ScanCode in the Review step with the SDK, as an accepted risk like the header's item (c), was rejected: it would put 80 packages' runtime code beside the Anthropic identity and the mint's post step, for no benefit.
+    A separate job was rejected for the reason the header gives: the LICENSE text would have to cross jobs as an artifact, and this repository's artifacts are public.
+  - Not closed: a kernel escape from the sandbox, and the callback token in the event file (the header's item (b)), which the sandbox cannot send anywhere.
+  Phase 1 proves on a runner that the scan step cannot open a socket and cannot write the workflow's `_actions` and `_temp` directories, and the header gains these lines in the same change.
 - **Its cost.**
   The download is about 153 MB (the ScanCode wheel is 126 MB), and the environment is about 667 MB installed, 573 MB of it the license index.
   A cold install took 20 seconds on a laptop, so 30 to 60 seconds is the estimate on a GitHub runner; one file scans in about 5 seconds, start-up included.
 - **How the job runs it.**
-  `scancode --license --license-text --license-text-diagnostics --copyright --processes 1 --timeout 120 --json <out> LICENSE`, on the file the job already holds, then it reads the JSON.
-  A depositor reproduces it with
-  `uv tool run --python 3.12 --from scancode-toolkit==32.5.0 --with "pluggy<1.6" scancode --license --license-text --license-text-diagnostics --copyright --json-pp - LICENSE`.
+  `scancode --license --license-text --license-text-diagnostics --copyright --processes 1 --timeout 120 --json <out> LICENSE`, inside the sandbox above, on the copy of the file the job already holds, under a step timeout of 5 minutes.
+- **How a depositor reproduces it.**
+  With the same hashed set: `uv venv --python 3.12.16 scancode-env`, then `uv pip install --python scancode-env --require-hashes --no-build -r scancode-requirements.txt`
+  (the file at the nemar-cli version the review names, published in the repository and linked from the docs page), then the command above.
+  The one-line `uv tool run --python 3.12 --from scancode-toolkit==32.5.0 --with "pluggy<1.6" scancode ...` is shorter, but its other dependencies may drift; the review's record names the toolkit version either way.
+  `nemar dataset license-check` does not bundle ScanCode: it prints the exact commands for the dataset's LICENSE.
 - **What ScanCode reports, measured on 2026-11-27** (texts from SPDX license-list-data `main` and creativecommons.org `legalcode.txt`):
 
   | File | Detected expression | Score / coverage of the license's match | Unmatched text |
@@ -64,16 +85,22 @@ One description key is withheld from the model in 34 of the 37 reviews, and the 
 
   Siblings are told apart, and the score alone never reveals an added restriction (99.57 for a permission sentence); the bracketed and uncovered text does.
 - **The decision rule.**
-  - `P` is the license of the longest match (`matched_length`) in the file.
-    When there is no match, or `P` is a `LicenseRef-scancode-*` term rather than an SPDX-listed identifier, the state is `unrecognized`.
-  - The identification is conclusive when some match of `P` has `score` at least 95 and `match_coverage` at least 95.
-    The lowest real full text measured is 98.8, and a notice that names its license scores 100; a weaker match is `unrecognized`.
+  - `P` is the `license_expression_spdx` of the longest match (`matched_length`) in the file.
+    When there is no match, or `P` is not a single SPDX-listed identifier (a `LicenseRef-scancode-*` term, or an expression), the state is `unrecognized`.
+  - The identification is conclusive only when that longest match itself has `score` at least 95 and `match_coverage` at least 95.
+    A shorter match of the same license (a title or a URL) never makes a trimmed or clause-deleted text conclusive.
+    The lowest real full text measured is 98.8, and a notice that names its license scores 100; a weaker longest match is `unrecognized`.
     A change of threshold is a reviewed code change.
+  - **A compound result is not conclusive.**
+    The file's expression is ScanCode's `detected_license_expression_spdx`.
+    When it joins `P` with another SPDX-listed identifier by `OR`, `AND` or `WITH` (for example `MIT OR Apache-2.0`, or a CC text beside a full CC0 text), the state is `unrecognized`, amber on the card,
+    and the review records the expression beside the fact (`license_file.expression`, ScanCode's words, never the depositor's).
+    `P` joined by `AND` only to `LicenseRef-scancode-*` terms (the measured rider gives `CC-BY-4.0 AND LicenseRef-scancode-proprietary-license`) is not compound: those matches are additions.
   - A conclusive `P` that equals the `License` field after normalization (`shared/license-lineage.ts`) is `matches`; one that differs is `matches_other`.
     When the field does not normalize, the two cannot be compared: the state is `unrecognized`, and `spdx` still names `P`.
   - A LICENSE that is byte for byte NEMAR's own generated notice for the field's license (`generateLicenseText`, line endings normalized) is `matches` with no additions,
     because ScanCode leaves its last line outside every match and reads its CC0 title as a public-domain clue.
-- **The identification is a closed fact**, `license_file: {state, spdx, additions}`:
+- **The identification is a closed fact**, `license_file: {state, spdx, additions, expression}` (`expression` is null unless the result was compound):
   - `matches`, `matches_other` and `unrecognized` as above;
   - `absent`: no LICENSE file;
   - `annexed`: LICENSE is an annexed link or pointer rather than text in git;
@@ -83,7 +110,7 @@ One description key is withheld from the model in 34 of the 37 reviews, and the 
   - a bracketed (unmatched) token in the `matched_text_diagnostics` of a match of `P`;
   - a match of any other license, except a `LicenseRef-scancode-unknown-license-reference` match on lines that a match of `P` also covers (the "licensed under the" of a notice);
   - a license clue;
-  - a line that no match covers, unless it is blank, only punctuation, or a copyright statement ScanCode reports (`--copyright`).
+  - a line that no match covers, unless it is blank, only punctuation, or holds nothing but a copyright statement ScanCode reports (`--copyright`); a line with a copyright statement and other text is leftover.
   The leftover text is those tokens, the matched text of those other matches and clues, and those lines.
   There is no minimum length, because a false `additions` costs only a model read, which is the safe direction.
 - **What the model receives.**
@@ -95,16 +122,23 @@ One description key is withheld from the model in 34 of the 37 reviews, and the 
   When the identification is `matches` and the leftover, if any, was sent whole, LICENSE no longer lowers `authors_and_license` to `unknown`;
   the model still answers the question, the authors half included.
   `matches_other` lowers `authors_and_license` to at best `unknown` with the fact word `license_file_differs`, shows a red cue,
-  and is not `auto_deny_eligible`: ADR 0139 needs two models to agree, and a platform fact would be identical in both runs.
+  and never leads to an automatic denial: when `license_file.state` is `matches_other`, a `fail` of `authors_and_license` is not eligible, whatever finding it carries (`license_inconsistent` included, which is in `AUTO_DENY_FINDING_CODES`).
+  Lowering to `unknown` does not lift a model's `fail`, and both runs would see the same platform fact and likely return the same blocker, so ADR 0139's two-model agreement would be no check at all.
+  The other questions keep their eligibility.
   Every other state keeps ADR 0102's rule: a cut or withheld LICENSE lowers the question to at best `unknown`, and an absent LICENSE does not lower it.
 
-### 2. Report version 3 and prompt version 3, in two releases
+### 2. Report version 3 and prompt version 3, in three ordered deploys
 
 - The report is version 3 and the prompt `publication-review-prompt/3`.
   Version 3's evidence adds `license_file`, the matcher version in the record, `description_keys_not_shown` (decision 5) and the lineage's `resolved_at` (decision 3);
   stored version 1 and 2 reports still parse as they were written.
-- **The Worker accepts version 3 first, in a release of its own; the job emits version 3 in the next release.**
-  The job checks its script out of nemar-cli `main`, so a job that emitted version 3 before the Worker in production parsed it would have every review stored as `report_invalid`.
+- **Three deploys, in this order.**
+  1. A nemar-cli release in which the Worker accepts version 3 (and still accepts 1 and 2).
+  2. The next nemar-cli release, in which the job's script emits version 3 and the hashed requirements file lands.
+     The job checks its script out of nemar-cli `main`, so a script that emitted version 3 before the Worker in production parsed it would have every review stored as `report_invalid`.
+     Until step 3, the script finds no ScanCode output and records `unreadable` with the matcher word `unavailable`, which keeps ADR 0102's handling.
+  3. The workflow change (the uv set-up, the install and the sandboxed scan) deployed to `nemarDatasets/.github`, which is a separate deploy from either release,
+     and only after step 2, as the workflow header requires of every change that names a script.
 
 ### 3. Lineage reliability
 
@@ -112,7 +146,7 @@ One description key is withheld from the model in 34 of the 37 reviews, and the 
   An `unresolved` source is never served from the resolver's cache.
   A fresher outcome on the card is shown beside the review's own with both times, and never raises the stored verdict (ADR 0093's stricter-of-two rule);
   when it is better, the card's next action is to review again (`start <id> --again`).
-- An `osf.io/<id>` URL maps to its DataCite DOI, `10.17605/OSF.IO/<ID>`, and falls back to the license OSF's API declares for the node.
+- An `osf.io/<id>` URL of the Open Science Framework (OSF) maps to its DataCite DOI, `10.17605/OSF.IO/<ID>`, and falls back to the license OSF's application programming interface (API) declares for the node.
 - A DOI candidate cut out of a README (a suffix too short to be one, or one that ends where the sent text ends) is not a source:
   it is dropped and counted, and never makes the lineage `unresolved`.
 - `needs_permission` shows the license the source declares, in the lineage command, the permission sentence and the card.
@@ -127,12 +161,16 @@ One structure, built by the Worker and printed by `nemar admin dataset publish s
 - **A license panel**: the `License` field, the file identification, the lineage outcome, whether the source is credited, and the source's declared license,
   with one cue and a one-line reason.
   - Red: no `License` field, `matches_other`, `needs_permission`, a share-alike mismatch, or `redistribution_prohibited` without recorded permission.
-  - Amber: `unrecognized`, `annexed`, `unreadable`, LICENSE absent beside a recognized field, `unresolved`, `source_is_publication`, an uncredited attribution source, or an enrichment license that disagrees with the field.
+  - Amber: `unrecognized` (a compound expression included), `annexed`, `unreadable`, LICENSE absent beside a recognized field or beside a field that does not normalize, `unresolved`, `source_is_publication`, an uncredited attribution source, or an enrichment license that disagrees with the field.
   - Green: anything else.
 - **Authors**, with placeholders flagged.
 - **Per question**: the answer and its strongest finding.
 - **The identifier-screen line**, as `describeScreen` words it.
-- **One suggested next action**, from a closed list, that never says approve while a gate withholds approval.
+- **One suggested next action**, from a closed list, that never says approve while a gate withholds approval:
+  `approve` (only when the approval gate would accept the approval with no override and no acknowledgment still owed),
+  `acknowledge_screen`, `rerun_screen`, `wait` (the screen or the review is running), `start_review`, `review_again` (decision 3),
+  `record_license_permission`, `ask_depositor` (a reason only the depositor can cure) and `deny`.
+  An override is the administrator's own act (ADR 0102 section 8), so no action suggests one.
 - Depositor and model text stays labeled as such, as in ADR 0102 section 8.
 
 ### 5. The withheld description key
@@ -152,7 +190,7 @@ A docs.nemar.org page, `/platform/license-check`, explains the check to deposito
 - A license file that contradicts the field is red and needs a person; it never denies on its own.
 - The review job installs about 153 MB of pinned packages before the model call, which adds an estimated 30 to 60 seconds, and a failed install degrades to ADR 0102's handling rather than failing the review.
 - The administrator reads one card, license first, and the suggested action is computed once.
-- Obligations: two releases in order (decision 2); the hashed requirements file and its refresh when ScanCode is bumped; the docs page, outlined here:
+- Obligations: three deploys in order (decision 2); the hashed requirements file and its refresh when ScanCode is bumped; the docs page, outlined here:
   1. What a depositor sees: the file identification, its three-color cue and reason, and that a file contradicting `License` needs a person, never an automatic denial.
   2. Why the full license text is fine to ship, and that added terms are read and judged.
   3. The matcher and its version (`scancode-32.5.0+spdx-3.27`), the threshold, and what `additions` means, with the measured table above.
@@ -163,7 +201,8 @@ A docs.nemar.org page, `/platform/license-check`, explains the check to deposito
 
 - ScanCode's results above were measured on macOS arm64; Phase 1 repeats them on a GitHub runner, adds the 37 reviewed LICENSE files, and records both in its pull request.
 - The install size and time on a runner are estimates from wheel sizes and one laptop install, not a runner measurement.
-- ScanCode reports line ranges, not token offsets, so text before a match on the line where it starts (a notice's "This dataset is" before "licensed under") is not leftover.
+- ScanCode reports line ranges, not token offsets, so text before a match on the line where it starts (a notice's "This dataset is" before "licensed under"), or after a match on the line where it ends, is not leftover.
+  Phase 1 tries to close it by comparing each match's `matched_text` with its lines; if that is not exact, the gap stays and the docs page says so.
 - The `pluggy` pin works around a dependency the release does not cap; a later ScanCode release may need a different pin, which the hashed file makes a reviewed change.
 - ScanCode looks for libmagic on the host and warns when it uses the system copy; a LICENSE is read as text either way.
 - A new SPDX license reaches the review only with a new ScanCode release and a reviewed bump of the pin.
