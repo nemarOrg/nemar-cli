@@ -179,3 +179,16 @@ Decision 7 and the license permission amendment change in two places, after a de
   Every sentence names the dataset's `License` as written (`CC-BY-4.0`), not the normalized family (`cc-by`), when that value is a license identifier that normalizes to the license the outcome was judged against;
   otherwise the normalized word stays.
   The review's basis keeps it as `target_license_declared`; what a permission covers does not read it.
+
+## Amendment 2026-11-27 (owner, follow-up): data containers are not publications
+
+Decision 7's `source_is_publication` is for publications only; a record that holds data is read for its license (resolver `license-lineage/5`).
+Measured on the depositor's sources after the first hotfix:
+
+- **A DataCite `Collection`** (a figshare collection, `10.6084/m9.figshare.c.6979581.v1`) and **an OSF project**, which OSF registers as `Text` with resourceType `Project` (`10.17605/osf.io/f8sq3`), are data containers: their rights apply.
+  Only an OSF DOI's `Text` / `Project` counts; every other `Text` record stays a publication.
+- **A Crossref `component`** (supplementary material, such as the PLOS file `10.1371/journal.pone.0303144.s001`, which DataCite does not hold) is a data container.
+  It takes the license Crossref gives it, else its parent article's version-of-record license (the parent from `relation.is-component-of`, else the DOI without its `.sNNN` suffix).
+  With neither, its license is unknown and the source is `unresolved`, never compatible by default; such a record is never cached.
+- Genuine publications stay publications: `10.5281/zenodo.6529724` and `10.6084/m9.figshare.28309157` are `JournalArticle` records.
+

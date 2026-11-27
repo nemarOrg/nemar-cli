@@ -15,6 +15,12 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Fixed
+
+- **License lineage reads data containers and ellipsis-cut README DOIs (resolver version 5; ADR 0139 decision 7 and ADR 0142 decision 3, amendments of 2026-11-27).**
+  A README DOI that prefixes a declared DOI and is followed by an ellipsis (`[...]`, `[…]`, `...`, `…`) is dropped and counted, so nm000746 and nm000843 resolve compatible.
+  A DataCite `Collection`, an OSF project (`Text` / `Project`) and a Crossref `component` (supplementary file) are read as data, not publications; a component takes its own license, else its article's, else it is `unresolved`. Journal articles stay `source_is_publication`.
+
 ## 0.10.51 - 2026-11-27
 
 ### Fixed

@@ -253,6 +253,12 @@ Decision 3 gains two rules, and the resolver becomes `license-lineage/4` because
   The normalizer reads dandischema's `LicenseType` values (`spdx:CC-BY-4.0`, `spdx:CC0-1.0`, any `spdx:` identifier) and the enum names that DANDI's DataCite records give as `rightsIdentifier` (`cc_by_40`, `cc0_10`).
   `10.48324/dandi.001535/0.250714.1218` (nm001003) declares only `cc_by_40`, which read as `other` and made the lineage `needs_permission`; it is now CC BY 4.0, `compatible_attribution` for a CC-BY-4.0 target.
 
+## Amendment 2026-11-27 (owner, follow-up): README DOIs cut by an ellipsis
+
+The README prefix rule of the amendment above also drops a README DOI candidate that is a strict prefix of a declared or longer README DOI when an ellipsis follows it immediately (optional whitespace between): `[...]`, `[…]`, `...` or `…`.
+nm000746 and nm000843 carry a truncated cell, `https://doi.org/10.5281/zenodo.2231 [...]; N: 30`, beside the declared `10.5281/zenodo.22314785` (and `zenodo.236` beside `zenodo.23610719`).
+Two distinct records, one a prefix of the other, with no ellipsis right after the shorter, are both kept. Resolver `license-lineage/5`.
+
 ## Receipts
 
 - Epic nemarOrg/nemar-cli#2449, issue #2450; the 37-review measurement in the epic.
