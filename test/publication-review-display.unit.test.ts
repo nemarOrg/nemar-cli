@@ -15,7 +15,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { evidenceFor, failingReport } from "../backend/test/helpers/publication-review";
+import {
+  evidenceFor,
+  failingReport,
+  v3PublicationReport,
+} from "../backend/test/helpers/publication-review";
 import type {
   PublicationReviewDetail,
   PublicationReviewRecord,
@@ -33,6 +37,7 @@ import {
   approveEvidenceLines,
   evidenceLine,
   historyLines,
+  licenseFileLine,
   requestStatusLabel,
   reviewDetailLines,
   reviewListLine,
@@ -370,6 +375,31 @@ describe("shownLine and withheldLine", () => {
 
   test("nothing withheld for a finding, nothing said", () => {
     expect(withheldLine(evidenceOf())).toBeNull();
+  });
+});
+
+describe("licenseFileLine (ADR 0142)", () => {
+  test("a version-3 identification is one line: its state and the identifier it names", () => {
+    const v3 = parsePublicationReviewReport(v3PublicationReport()).evidence;
+    expect(licenseFileLine(v3)).toBe("LICENSE: matches CC-BY-4.0");
+    const other = parsePublicationReviewReport(
+      v3PublicationReport({
+        documents: { ...(evidenceFor().documents as object), license: "absent" },
+        license_file: { state: "absent", spdx: null, additions: false, expression: null },
+      }),
+    ).evidence;
+    expect(licenseFileLine(other)).toBe("LICENSE: absent");
+  });
+
+  test("a review from before version 3 has no line, and an odd shape costs only the line", () => {
+    expect(licenseFileLine(evidenceOf())).toBeNull();
+    const odd = { ...evidenceOf(), license_file: { state: 3 } } as never;
+    expect(licenseFileLine(odd)).toBeNull();
+    const hostile = {
+      ...evidenceOf(),
+      license_file: { state: "\u001b[31mred", spdx: null },
+    } as never;
+    expect(licenseFileLine(hostile)).not.toContain("\u001b");
   });
 });
 
