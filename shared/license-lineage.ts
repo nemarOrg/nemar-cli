@@ -1441,6 +1441,53 @@ export function crossrefLicenses(license: unknown): RecordLicenses {
 const CROSSREF_DATA_TYPES = new Set(["dataset", "database"]);
 
 /**
+ * DataCite resourceTypeGeneral values that are positively papers: a source of one of these is a
+ * publication, never data. `Text` is not listed (OSF registers projects as `Text`), nor
+ * `Collection`, `Dataset` or a missing type.
+ */
+export const DATACITE_PAPER_TYPES: ReadonlySet<string> = new Set([
+  "JournalArticle",
+  "Preprint",
+  "ConferencePaper",
+  "ConferenceProceeding",
+  "Book",
+  "BookChapter",
+  "Dissertation",
+  "Report",
+  "PeerReview",
+  "DataPaper",
+]);
+
+/**
+ * Crossref `type` values that are positively papers. A `component` (supplementary material), a
+ * `dataset` or `database`, and any type not listed are not.
+ */
+export const CROSSREF_PAPER_TYPES: ReadonlySet<string> = new Set([
+  "journal-article",
+  "proceedings-article",
+  "book-chapter",
+  "book",
+  "edited-book",
+  "monograph",
+  "reference-entry",
+  "posted-content",
+  "report",
+  "dissertation",
+  "peer-review",
+]);
+
+/**
+ * Whether a registry record is positively a paper (ADR 0139 decision 7, amendment of 2026-11-27):
+ * its DataCite resourceTypeGeneral is in {@link DATACITE_PAPER_TYPES}, or, with no DataCite type
+ * (a Crossref record), its type is in {@link CROSSREF_PAPER_TYPES}. A missing or unrecognized type
+ * is not shown to be a paper. Enrichment drops a stale IsDerivedFrom only on this answer.
+ */
+export function isPaperRecord(resourceTypeGeneral: string | null, type: string | null): boolean {
+  if (resourceTypeGeneral !== null) return DATACITE_PAPER_TYPES.has(resourceTypeGeneral);
+  return type !== null && CROSSREF_PAPER_TYPES.has(type);
+}
+
+/**
  * An OSF project (ADR 0139 decision 7, amendment of 2026-11-27): an OSF DOI whose DataCite
  * resourceType is `Project`, which OSF registers as `Text` (`10.17605/osf.io/f8sq3`) or `Dataset`.
  * It holds data, and its license is read from OSF's API for the node and each child component

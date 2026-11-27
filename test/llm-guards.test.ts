@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   EMPTY_DOI_RESOLUTION,
+  type ResolvedDoi,
   datasetDoisOf,
   parseCrossrefWork,
   parseDataCiteJson,
@@ -444,6 +445,53 @@ describe("dropStaleDerivations: an IsDerivedFrom is not carried forward once it 
     const out = dropStaleDerivations(seedFromBids(desc, before), desc, RESOLVED);
     expect(out.dropped).toEqual([PAPER]);
     expect(out.result.related_identifiers?.some((r) => r.identifier === PAPER)).toBe(false);
+  });
+
+  test("only a record positively typed as a paper is dropped; any other type keeps the relation", () => {
+    const desc = { Name: "x", SourceDatasets: [{ URL: FIGSHARE }] };
+    const kinds: Array<[string, Partial<ResolvedDoi>, boolean]> = [
+      // Crossref (no DataCite type): a paper, a dataset, a component, an unknown type.
+      ["10.1/crossref-article", { type: "journal-article" }, true],
+      ["10.1/crossref-proceedings", { type: "proceedings-article" }, true],
+      ["10.1/crossref-dataset", { type: "dataset" }, false],
+      ["10.1371/journal.pone.0303144.s001", { type: "component" }, false],
+      ["10.1/crossref-other", { type: "other" }, false],
+      // DataCite: a paper, a Collection, a Text record (OSF projects are Text), no type at all.
+      [
+        "10.1/datacite-article",
+        { type: "JournalArticle", resource_type_general: "JournalArticle" },
+        true,
+      ],
+      [
+        "10.1/datacite-collection",
+        { type: "Collection", resource_type_general: "Collection" },
+        false,
+      ],
+      ["10.1/datacite-text", { type: "Project", resource_type_general: "Text" }, false],
+      ["10.1/no-type", {}, false],
+    ];
+    const meta = {
+      version: "2.0" as const,
+      related_identifiers: kinds.map(([doi]) => ({
+        identifier: doi,
+        identifier_type: "DOI" as const,
+        relation_type: "IsDerivedFrom",
+      })),
+    };
+    const resolution = {
+      ...EMPTY_DOI_RESOLUTION,
+      resolved: kinds.map(([doi, rec]) => ({ doi, title: "t", ...rec })),
+    };
+    const out = dropStaleDerivations(meta, desc, resolution);
+    expect(out.dropped.sort()).toEqual(
+      kinds
+        .filter(([, , paper]) => paper)
+        .map(([doi]) => doi)
+        .sort(),
+    );
+    expect(out.result.related_identifiers?.map((r) => r.identifier)).toEqual(
+      kinds.filter(([, , paper]) => !paper).map(([doi]) => doi),
+    );
   });
 
   test("a Stage 1d that failed, skipped or found nothing keeps every earlier IsDerivedFrom", () => {
