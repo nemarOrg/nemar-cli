@@ -17,6 +17,10 @@ earlier releases are described only by their generated notes.
 
 ### Changed
 
+- **nemar-ica is no longer a placeholder: an administrator can run it (owner decision of 2026-11-27).**
+  `nemar admin compute pipeline run nemar-ica` (with `--dataset`, or `--eligible` and `--limit`, and `--dry-run`) is no longer refused with `recipe_placeholder`; it goes through every other check a run has, on Tapis only, reads its tag's commit and stages the serving index first (ADR 0143, ADR 0141), so a GitHub or index fault defers it (`source_commit_deferred`, `serving_index_deferred`).
+  It is still never run by the daily dispatcher (`autoDispatch` is false), still runs on Tapis only, and still needs the owner's compute switches, the Tapis configuration and a funded GPU pool.
+  The pipeline grid and coverage now report it with `placeholder: false`, so the admin page no longer says it is a placeholder.
 - **nemar-ica is handed a serving index built after its version's tag when only NEMAR's own metadata changed since (ADR 0144).**
   One GitHub compare of the tag's commit and the index's admits the index when every path between them is under `.nemar/` or `.github/`, or is a `.gitattributes` file whose patch adds or removes no `eol=crlf`, `working-tree-encoding`, `ident` or non-annex `filter`.
   The run stays the tag's: it is handed the tag's commit and keyed by it, and the job's specification records the index's own commit as provenance (`ahead_of_tag`).

@@ -294,8 +294,10 @@ describe("where the launcher places the index, and the arguments that hand it to
     ).toThrow(RangeError);
   });
 
-  test("nemar-ica stays a placeholder", () => {
-    expect(findRecipe("nemar-ica")?.placeholder).toBe(true);
+  test("nemar-ica is no longer a placeholder, and runs on Tapis only, where the serving index is staged", () => {
+    const ica = findRecipe("nemar-ica");
+    expect(ica?.placeholder).toBe(false);
+    expect(ica?.executors).toEqual(["tapis"]);
   });
 });
 

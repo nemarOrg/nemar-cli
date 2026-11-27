@@ -3,8 +3,8 @@
  * through the real `dataRoutes` router over a real bun:sqlite D1 carrying every production migration and
  * Miniflare's R2 as the derivatives bucket. The product is nemar-ica's real one (copied from nemar-process
  * P7, `test/fixtures/quality/ica-views`), stored under the derivative's key as the derivative store stores
- * it; the dataset, stamp and derivative rows are written with SQL the tables accept (nemar-ica is a
- * placeholder no path dispatches).
+ * it; the dataset, stamp and derivative rows are written with SQL the tables accept (a nemar-ica run is a
+ * Tapis job this suite does not make).
  *
  * The access matrix, each case by the mutation it kills (the mutation table of the PR names them):
  *  - every term of the dataset gate (active, public, not concealed, first published, not withdrawn, not
