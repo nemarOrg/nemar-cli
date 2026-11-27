@@ -31,6 +31,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { parse } from "yaml";
+import { SCAN_FILES, identifyLicenseFile, readScanOutput } from "../scripts/ci/license-file-fact";
 import { CALLBACK_ORIGINS, main } from "../scripts/ci/publication-review";
 import {
   DATA_SIDECAR,
@@ -43,6 +44,12 @@ import {
   structuralSummary,
   tagState,
 } from "../scripts/ci/publication-review-evidence";
+import {
+  SCANCODE_ARGS,
+  SCANCODE_PYTHON,
+  SCANCODE_TOOLKIT_VERSION,
+  SPDX_LICENSE_LIST_VERSION,
+} from "../shared/license-file";
 import {
   CHANGES_CANDIDATES,
   LICENSE_CANDIDATES,
@@ -286,6 +293,10 @@ describe("what runs after the mint is not install-time code (#1728)", () => {
       FETCH,
       BIDS,
       "Check out the review script",
+      "Set up uv",
+      "Install the license matcher",
+      "Prepare the license scan",
+      "Scan LICENSE in a sandbox",
       "Set up Bun",
       INSTALL,
       OIDC,
@@ -359,7 +370,7 @@ describe("every action is pinned to a full commit, with its version in a comment
     for (const { ref, comment } of USES) expect(comment, ref).toMatch(/^v\d+(\.\d+){0,2}$/);
   });
 
-  test("the actions are exactly the four this job has reviewed", () => {
+  test("the actions are exactly the five this job has reviewed", () => {
     expect(
       USES.map((u) => u.ref.split("@")[0])
         .sort()
@@ -369,6 +380,7 @@ describe("every action is pinned to a full commit, with its version in a comment
         "actions/checkout",
         "actions/create-github-app-token",
         "actions/github-script",
+        "astral-sh/setup-uv",
         "oven-sh/setup-bun",
       ].sort(),
     );
@@ -549,11 +561,12 @@ describe("the dispatch payload is untrusted", () => {
       '--dataset "$DATASET_ID"',
       '--anonymous "$ANONYMOUS"',
       '--environment "$ENVIRONMENT"',
+      "--license-scan-dir /tmp/license-scan",
     ]) {
       expect(review.run, arg).toContain(arg);
     }
     // And nothing else is passed.
-    expect([...(review.run ?? "").matchAll(/--[a-z-]+ /g)]).toHaveLength(10);
+    expect([...(review.run ?? "").matchAll(/--[a-z-]+ /g)]).toHaveLength(11);
   });
 
   test("the validation runs are read from the API at the dispatched commit, and a failure is not a failed job", () => {
@@ -1661,6 +1674,280 @@ describe("the shell steps, run for real", () => {
     expect(modelRequests).toHaveLength(1);
     expect(modelRequests[0]).toContain("Twelve volunteers at rest");
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The license matcher (ADR 0142)
+// ---------------------------------------------------------------------------------------------
+
+describe("the license matcher runs pinned, apart and sandboxed (ADR 0142)", () => {
+  const SETUP = "Set up uv";
+  const INSTALL = "Install the license matcher";
+  const PREPARE = "Prepare the license scan";
+  const SCAN = "Scan LICENSE in a sandbox";
+  const MATCHER = [SETUP, INSTALL, PREPARE, SCAN];
+  const names = job.steps.map((s) => s.name);
+  const at = (n: string) => names.indexOf(n);
+
+  test("its steps follow the review script's checkout, in order, and the scan ends before the OIDC token", () => {
+    expect(names.slice(at("Check out the review script") + 1, at("Set up Bun"))).toEqual(MATCHER);
+    expect(at(SCAN)).toBeLessThan(at(OIDC));
+    expect(at(SCAN)).toBeLessThan(at("Review"));
+    for (const n of MATCHER) expect(at(n), n).toBeGreaterThan(at(MINT));
+  });
+
+  test("uv is pinned to a commit, an exact version and that version's archive checksum, with no cache", () => {
+    const setup = step(SETUP);
+    expect(setup.uses).toMatch(/^astral-sh\/setup-uv@[0-9a-f]{40}$/);
+    expect(setup.with?.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(setup.with?.checksum).toMatch(/^[0-9a-f]{64}$/);
+    expect(String(setup.with?.["enable-cache"])).toBe("false");
+    expect(setup.with?.["github-token"]).toBe("");
+  });
+
+  test("no matcher step holds a secret, a token, a variable or the payload", () => {
+    for (const n of MATCHER) {
+      const text = JSON.stringify(step(n));
+      expect(text, n).not.toMatch(
+        /secrets\.|vars\.|github\.token|client_payload|app-token|GH_TOKEN/,
+      );
+      expect(text, n).not.toMatch(/CALLBACK_TOKEN|ANTHROPIC_/);
+    }
+    expect(step(INSTALL).env).toEqual({
+      SCANCODE_PYTHON,
+      SCANCODE_VERSION: SCANCODE_TOOLKIT_VERSION,
+      SCANCODE_SPDX: SPDX_LICENSE_LIST_VERSION,
+    });
+    expect(step(PREPARE).env).toEqual({
+      MATCHER_STATUS: "${{ steps.license-install.outputs.status }}",
+    });
+    expect(step(SCAN).env).toBeUndefined();
+  });
+
+  test("the install, the prepare and the scan never fail the job, and each has its own limit", () => {
+    const raw = job.steps as (Step & {
+      "continue-on-error"?: boolean;
+      "timeout-minutes"?: number;
+    })[];
+    const of = (n: string) => raw.find((s) => s.name === n);
+    expect([INSTALL, PREPARE, SCAN].map((n) => of(n)?.["continue-on-error"])).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect([INSTALL, PREPARE, SCAN].map((n) => of(n)?.["timeout-minutes"])).toEqual([4, 1, 3]);
+    expect(step(SCAN).if).toContain("steps.license-install.outputs.status == 'ok'");
+    expect(step(SCAN).if).toContain("steps.license-prepare.outputs.scan == 'true'");
+  });
+
+  test("each drops the OIDC request variables before running anything", () => {
+    for (const n of [INSTALL, PREPARE, SCAN]) {
+      const lines = (step(n).run ?? "")
+        .split("\n")
+        .filter((l) => l.trim() && !l.trim().startsWith("#"));
+      expect(lines[1]?.trim(), n).toBe(
+        "unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+      );
+    }
+  });
+
+  test("the install is hashed, wheels only, from nemar-cli's file, fresh, and made root's and read-only", () => {
+    const install = step(INSTALL);
+    const run = install.run ?? "";
+    expect(install["working-directory"]).toBe("tool");
+    expect(run).toMatch(
+      /uv pip install --no-config --python "\$root\/venv\/bin\/python" --require-hashes --no-build \\\n\s+-r scripts\/ci\/scancode-requirements\.txt/,
+    );
+    expect(run).toContain(
+      'uv python install --no-config --install-dir "$root/python" "$SCANCODE_PYTHON"',
+    );
+    expect(run).toContain('sudo rm -rf "$root" "$work"');
+    expect(run).toContain('sudo chown -R root:root "$root"');
+    expect(run).toContain('sudo chmod -R a+rX,go-w "$root"');
+    expect(run).toContain('grep -qxF "ScanCode version: $SCANCODE_VERSION"');
+    expect(run).toContain('grep -qxF "SPDX License list version: $SCANCODE_SPDX"');
+    expect(run).not.toMatch(
+      /actions\/cache|--index-url|--extra-index-url|\bpip install\b(?! --no-config)/,
+    );
+  });
+
+  /** The scancode options a script passes, between its last scancode call and `--json`. */
+  function scancodeOptions(run: string, call: string): string[] {
+    const flat = run.replace(/\s*\\\n\s*/g, " ");
+    const from = flat.lastIndexOf(call);
+    expect(from, call).toBeGreaterThanOrEqual(0);
+    const rest = flat.slice(from + call.length);
+    return rest.slice(0, rest.indexOf("--json")).trim().split(/\s+/);
+  }
+
+  test("the scan's and the warm-up's options are SCANCODE_ARGS, to a JSON file", () => {
+    const scan = step(SCAN).run ?? "";
+    expect(scancodeOptions(scan, '"$venv/bin/scancode"')).toEqual([...SCANCODE_ARGS]);
+    expect(scan.replace(/\s*\\\n\s*/g, " ")).toContain(
+      '--json "$scan/out/result.json" "$scan/in/LICENSE"',
+    );
+    expect(scancodeOptions(step(INSTALL).run ?? "", 'run "$root/venv/bin/scancode"')).toEqual([
+      ...SCANCODE_ARGS,
+    ]);
+  });
+
+  test("the scan runs as uid 65534 with no network, its own PID namespace and only its paths", () => {
+    const flat = (step(SCAN).run ?? "").replace(/\s*\\\n\s*/g, " ");
+    expect(flat).toContain(
+      'sudo /usr/bin/unshare --net --pid --fork --kill-child -- /usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups -- /usr/bin/env -i PATH="$venv/bin:/usr/bin:/bin" HOME="$scan/home" TMPDIR="$scan/tmp" SCANCODE_CACHE="$scan/home" SCANCODE_TEMP="$scan/tmp" "$venv/bin/scancode"',
+    );
+    expect(flat).toContain('cd "$scan"');
+    // `status` is ok whenever ScanCode wrote a result (a scan error inside it is the review's to
+    // read), and is written after the output directory is opened to the runner user.
+    expect(flat.indexOf('sudo chmod 0755 "$scan/out"')).toBeLessThan(flat.indexOf("status=ok"));
+    expect(flat).toContain(
+      'if [ -f "$scan/out/result.json" ] && [ ! -L "$scan/out/result.json" ]; then',
+    );
+  });
+
+  test("the scan directory's names are the ones the review reads", () => {
+    const prepare = step(PREPARE).run ?? "";
+    const scan = step(SCAN).run ?? "";
+    expect(prepare).toContain("scan=/tmp/license-scan");
+    expect(scan).toContain("scan=/tmp/license-scan");
+    expect(prepare).toContain(`> "$scan/${SCAN_FILES.matcher}"`);
+    expect(prepare).toContain(`> "$scan/${SCAN_FILES.oid}"`);
+    expect(scan).toContain(`> "$scan/${SCAN_FILES.status}"`);
+    expect(scan).toContain(`"$scan/${SCAN_FILES.result}"`);
+    expect(step("Review").run).toContain("--license-scan-dir /tmp/license-scan");
+  });
+
+  test("the job's limit is 28 minutes: the 20 it had and the matcher steps' 4, 1 and 3", () => {
+    expect(job["timeout-minutes"]).toBe(28);
+    expect(SRC).toContain(
+      "the job's 28 minutes are the 20 it had before plus the matcher steps' own",
+    );
+  });
+
+  describe("the prepare step, run for real on a repository", () => {
+    const root = mkdtempSync(join(tmpdir(), "license-prepare-"));
+    afterAll(() => {
+      execFileSync("rm", ["-rf", root]);
+    });
+    const GIT = {
+      PATH: process.env.PATH ?? "",
+      HOME: root,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.org",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.org",
+    };
+    let seq = 0;
+
+    /** A dataset at refs/remotes/origin/main, where the fetch step leaves it. */
+    function repoWith(license: "text" | "symlink" | "pointer" | "absent"): string {
+      const temp = join(root, `t${++seq}`);
+      const repo = join(temp, "repo");
+      mkdirSync(repo, { recursive: true });
+      const git = (...a: string[]) =>
+        execFileSync("git", ["-C", repo, ...a], { env: GIT, encoding: "utf8" }).trim();
+      git("init", "-q");
+      writeFileSync(join(repo, "dataset_description.json"), '{"Name": "x"}\n');
+      if (license === "text") writeFileSync(join(repo, "LICENSE"), "CC0 1.0 Universal\n");
+      if (license === "pointer") {
+        writeFileSync(join(repo, "LICENSE"), "/annex/objects/SHA256E-s9--0123abcd\n");
+      }
+      if (license === "symlink") {
+        symlinkSync(".git/annex/objects/x/y/SHA256E-s1--k/SHA256E-s1--k", join(repo, "LICENSE"));
+      }
+      git("add", "-A");
+      git("commit", "-q", "-m", "x");
+      git("update-ref", "refs/remotes/origin/main", "HEAD");
+      return temp;
+    }
+
+    /**
+     * The step's own text, with its fixed scan directory moved into the test's and `sudo` a
+     * stand-in that runs the command as this user (the 65534 owner is the runner's to give).
+     */
+    function runPrepare(temp: string) {
+      const run = step(PREPARE).run ?? "";
+      expect(run).toContain("scan=/tmp/license-scan\n");
+      const scanDir = join(temp, "license-scan");
+      const bin = join(temp, "bin");
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, "sudo"),
+        '#!/usr/bin/env bash\nif [ "$1" = install ]; then shift; args=(); while [ $# -gt 0 ]; do case "$1" in -o|-g) shift 2;; *) args+=("$1"); shift;; esac; done; exec install "${args[@]}"; fi\nexec "$@"\n',
+        { mode: 0o755 },
+      );
+      const script = join(temp, "prepare.sh");
+      writeFileSync(script, run.replace("scan=/tmp/license-scan\n", `scan=${scanDir}\n`));
+      const out = join(temp, "output");
+      writeFileSync(out, "");
+      execFileSync("bash", ["-e", script], {
+        env: {
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          HOME: temp,
+          RUNNER_TEMP: temp,
+          GITHUB_OUTPUT: out,
+          MATCHER_STATUS: "ok",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      return { scanDir, output: readFileSync(out, "utf8") };
+    }
+
+    test("a LICENSE that is text in git is extracted with its blob id, and marked for the scan", () => {
+      const temp = repoWith("text");
+      const { scanDir, output } = runPrepare(temp);
+      expect(output).toBe("scan=true\n");
+      expect(readFileSync(join(scanDir, "in", "LICENSE"), "utf8")).toBe("CC0 1.0 Universal\n");
+      const oid = execFileSync("git", ["-C", join(temp, "repo"), "rev-parse", "HEAD:LICENSE"], {
+        env: GIT,
+        encoding: "utf8",
+      }).trim();
+      expect(readFileSync(join(scanDir, SCAN_FILES.oid), "utf8").trim()).toBe(oid);
+      expect(readFileSync(join(scanDir, SCAN_FILES.matcher), "utf8")).toBe("ok\n");
+      expect(statSync(join(scanDir, "in", "LICENSE")).mode & 0o777).toBe(0o644);
+      for (const d of ["out", "home", "tmp"])
+        expect(statSync(join(scanDir, d)).mode & 0o777).toBe(0o700);
+    });
+
+    test.each(["symlink", "absent"] as const)(
+      "a %s LICENSE is never extracted or scanned",
+      (kind) => {
+        const { scanDir, output } = runPrepare(repoWith(kind));
+        expect(output).toBe("");
+        expect(existsSync(join(scanDir, "in", "LICENSE"))).toBe(false);
+        expect(existsSync(join(scanDir, SCAN_FILES.oid))).toBe(false);
+        expect(readFileSync(join(scanDir, SCAN_FILES.matcher), "utf8")).toBe("ok\n");
+      },
+    );
+
+    test("an annex pointer file is text in git, so it is extracted, and the review still calls it annexed", async () => {
+      const temp = repoWith("pointer");
+      const { scanDir, output } = runPrepare(temp);
+      expect(output).toBe("scan=true\n");
+      // The review reads LICENSE from git as an annexed pointer, so it never asks the scan
+      // directory about it: only the install's word is read.
+      const tree = await readTree(
+        join(temp, "repo"),
+        execFileSync("git", ["-C", join(temp, "repo"), "rev-parse", "HEAD"], {
+          env: GIT,
+          encoding: "utf8",
+        }).trim(),
+      );
+      const docs = readRootDocuments(join(temp, "repo"), tree);
+      expect(docs.license.state).toBe("annexed");
+      const id = identifyLicenseFile({
+        document: { state: docs.license.state, text: docs.license.text },
+        licenseField: "CC0",
+        scan: readScanOutput(scanDir, null),
+      });
+      expect(id.fact.state).toBe("annexed");
+      expect(id.matcher).toBe(
+        `scancode-${SCANCODE_TOOLKIT_VERSION}+spdx-${SPDX_LICENSE_LIST_VERSION}`,
+      );
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------------------------

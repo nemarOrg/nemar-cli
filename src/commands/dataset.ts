@@ -6509,8 +6509,7 @@ function licenseMatcherLines(m: ReturnType<typeof licenseMatcherOf>): string[] {
   return [
     "",
     `License file: ${m.license_file}`,
-    // TODO(#2451): say "identifies" again at deploy 3, when the scan step reaches the workflow.
-    `  NEMAR's review will identify it with ScanCode (${m.version}) once that step is released. To run the same scan:`,
+    `  NEMAR's review identifies it with ScanCode (${m.version}). To run the same scan:`,
     ...m.commands.map((c) => `    ${c}`),
   ];
 }
@@ -6541,8 +6540,8 @@ Description:
   The deposit attestation is read only by the server's check.
 
   It also prints the commands that scan the dataset's LICENSE with the
-  license matcher NEMAR's review is adopting (ScanCode, pinned), and runs
-  none of them.
+  license matcher NEMAR's review uses (ScanCode, pinned), and runs none
+  of them.
 
 Exit codes:
   0  compatible, compatible_attribution or compatible_nc
