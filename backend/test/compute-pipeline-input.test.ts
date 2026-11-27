@@ -450,33 +450,32 @@ describe("an input the executor does not run is refused before anything is writt
     expect(await snapshot(w.d1)).toEqual(before);
   });
 
-  test("an executor the recipe does not list is refused before anything else, through the route, the service and the dry run (MUTATION: if (false) at each call site of recipeRunsOn)", async () => {
+  test("every recipe lists both executors now, so an executor is never refused for a registered recipe: nemar-ica on a runner goes on to its input, through the route, the service and the dry run", async () => {
+    // Since card Q1z no registered recipe lists one executor only, so the executor refusal (`recipeRunsOn`, whose
+    // decision `test/compute-recipes.unit.test.ts` shows on synthetic entries) is not reachable here; what IS is
+    // that a runner run of nemar-ica is decided by its input, never refused for its executor.
     const [w] = worlds() as [World];
     await ready(w);
     const env = w.env();
     const id = await dataset(w);
     const before = await snapshot(w.d1);
-    // `nemar-ica` lists Tapis only, so the real registry shows the answer for an unlisted executor (nemar-floor
-    // lists both).
-    for (const extra of [{}, { dry_run: true }]) {
-      const r = await call(
-        "POST",
-        "/compute/pipeline/run",
-        "admin",
-        { recipe: "nemar-ica", dataset: id, executor: "runner", ...extra },
-        env,
-      );
-      expect([extra, r.status, r.body.code]).toEqual([extra, 400, "invalid_body"]);
-      expect(String(r.body.error)).toContain("executor");
+    for (const recipe of ["nemar-floor", "nemar-ica"]) {
+      expect([recipe, findRecipe(recipe)?.executors]).toEqual([recipe, ["tapis", "runner"]]);
     }
-    expect(await dispatch(env, id, { recipe: "nemar-ica", executor: "runner" })).toMatchObject({
-      ok: false,
-      code: "invalid_spec",
-      field: "executor",
-    });
+    const r = await call(
+      "POST",
+      "/compute/pipeline/run",
+      "admin",
+      { recipe: "nemar-ica", dataset: id, executor: "runner", input: "bids", dry_run: true },
+      env,
+    );
+    expect([r.status, r.body.code, r.body.field]).toEqual([400, "invalid_spec", "input"]);
+    expect(
+      await dispatch(env, id, { recipe: "nemar-ica", executor: "runner", input: "bids" }),
+    ).toMatchObject({ ok: false, code: "invalid_spec", field: "input" });
     expect(
       await pipelineDryRun(env, { recipe: "nemar-ica", datasetId: id, executor: "runner" }),
-    ).toEqual({ ok: false, code: "invalid_spec", field: "executor" });
+    ).toMatchObject({ ok: true, would_dispatch: [{ dataset_id: id, version: "v1.0.0" }] });
     expect(await snapshot(w.d1)).toEqual(before);
   });
 
