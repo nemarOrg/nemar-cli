@@ -90,6 +90,7 @@ import {
   getJob as getTapisJob,
   listJobs,
 } from "./tapis/client.js";
+import { tapisConfig } from "./tapis/config.js";
 import { TapisError } from "./tapis/errors.js";
 import { TAPIS_JOB_UUID_RE, TAPIS_OWNER_RE } from "./tapis/schemas.js";
 
@@ -155,10 +156,13 @@ export interface TenantSweepResult {
   occupied: number | null;
   ceiling: number | null;
   /**
-   * Set (and only ever `true`) when Tapis is not configured and no `executor = 'tapis'` job is live: the
-   * Worker runs runner jobs only (ADR 0118 amendment of 2026-11-14, item 2), so there is nothing for the
-   * sweep to look at and nothing for a person to do. Absent on every other result. `admin compute status`
-   * still reports Tapis as unconfigured (ADR 0136); this only keeps the sweep's log quiet.
+   * Set (and only ever `true`) when the Worker holds no Tapis configuration and no Tapis credential at all
+   * (none of `TAPIS_USERNAME`, `TAPIS_PASSWORD`, `TAPIS_SERVICE_TOKEN`) and no `executor = 'tapis'` job is
+   * live: it runs runner jobs only (ADR 0118 amendment of 2026-11-14, item 2), so there is nothing for the
+   * sweep to look at and nothing for a person to do. A configuration that is present but unusable, or a
+   * stray credential (which item 1 forbids where compute is on), stays `unconfigured` at error level.
+   * Absent on every other result. `admin compute status` still reports Tapis as unconfigured (ADR 0136);
+   * this only keeps the sweep's log quiet.
    */
   tapisUnconfigured?: true;
   /** Fixed words; never a message. */
@@ -659,6 +663,17 @@ async function readTenantSlots(env: Bindings, r: TenantSweepResult, live: number
   }
 }
 
+/** No Tapis configuration and no Tapis credential, not even a stray one: a runner-only Worker. */
+function holdsNoTapisAtAll(env: Bindings): boolean {
+  const given = (v: string | undefined) => typeof v === "string" && v.trim() !== "";
+  return (
+    tapisConfig(env).unconfigured === true &&
+    !given(env.TAPIS_USERNAME) &&
+    !given(env.TAPIS_PASSWORD) &&
+    !given(env.TAPIS_SERVICE_TOKEN)
+  );
+}
+
 /** The `executor = 'tapis'` jobs in a live state: what an unconfigured Tapis would leave unwatched. */
 async function countLiveTapisJobs(env: Bindings): Promise<number> {
   const row = await env.DB.prepare(
@@ -682,9 +697,15 @@ export async function sweepTenantJobs(
   try {
     const ctx = tapisAccess(env, TICK_READ);
     if (ctx === null) {
-      // Unconfigured is a gap only while a Tapis job is live: such a job would go unwatched. With none,
-      // the Worker is running runner jobs only and the sweep is idle on purpose. A count that cannot be
-      // read is never taken for zero.
+      // A configuration that is there but unusable, or any Tapis credential, is loud: in a Worker with
+      // compute on a credential is the Tapis go-live (ADR 0118 amendment of 2026-11-14, items 1 and 3).
+      if (!holdsNoTapisAtAll(env)) {
+        r.errors.push("unconfigured");
+        return r;
+      }
+      // With no Tapis at all, unconfigured is a gap only while a Tapis job is live: such a job would go
+      // unwatched. With none, the Worker runs runner jobs only and the sweep is idle on purpose. A count
+      // that cannot be read is never taken for zero.
       let liveTapis: number;
       try {
         liveTapis = await countLiveTapisJobs(env);

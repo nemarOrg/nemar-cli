@@ -957,7 +957,14 @@ describe("what the sweep will not do", () => {
 });
 
 describe("Tapis unconfigured in a Worker that runs runner jobs only (ADR 0118 amendment, item 2)", () => {
-  const unconfigured = () => env({ TAPIS_AUTH_STRATEGY: undefined });
+  /** A runner-only Worker: no Tapis configuration and no Tapis credential at all. */
+  const NO_TAPIS: Partial<Bindings> = {
+    TAPIS_AUTH_STRATEGY: undefined,
+    TAPIS_USERNAME: undefined,
+    TAPIS_PASSWORD: undefined,
+    TAPIS_SERVICE_TOKEN: undefined,
+  };
+  const unconfigured = () => env(NO_TAPIS);
 
   /** The sweep in both modes with Tapis unconfigured: quiet in `live`, one information line in `week`. */
   async function expectQuiet(): Promise<void> {
@@ -1000,15 +1007,33 @@ describe("Tapis unconfigured in a Worker that runs runner jobs only (ADR 0118 am
     hook.armAfterFirst("FROM compute_jobs WHERE executor = 'tapis'", () => {
       throw new Error("D1 refused the read");
     });
-    const result = await sweepTenantJobs(
-      env({ DB: hook.db, TAPIS_AUTH_STRATEGY: undefined }),
-      "live",
-    );
+    const result = await sweepTenantJobs(env({ ...NO_TAPIS, DB: hook.db }), "live");
     expect(result?.errors).toEqual(["tenant_unreadable"]);
     expect(result && "tapisUnconfigured" in result).toBe(false);
     const log = result ? tenantLogLine(result) : null;
     expect(log?.level).toBe("error");
     expect(log?.line).toContain("errors=tenant_unreadable");
+  });
+
+  test("a Tapis configuration present but unusable, or a stray credential, stays loud with no live job", async () => {
+    const loud: Array<Partial<Bindings>> = [
+      // Service strategy with its token but no usable username: `admin compute status` says configured.
+      { ...NO_TAPIS, TAPIS_AUTH_STRATEGY: "service", TAPIS_SERVICE_TOKEN: "x" },
+      // No strategy, yet a credential is set: forbidden where compute is on (ADR 0118, 2026-11-14, item 1).
+      { ...NO_TAPIS, TAPIS_USERNAME: "someone" },
+      { ...NO_TAPIS, TAPIS_PASSWORD: "x" },
+      { ...NO_TAPIS, TAPIS_SERVICE_TOKEN: "x" },
+    ];
+    const requests = fx.tapis.log.length;
+    for (const over of loud) {
+      const result = await sweepTenantJobs(env(over), "live");
+      expect(result?.errors).toEqual(["unconfigured"]);
+      expect(result && "tapisUnconfigured" in result).toBe(false);
+      const log = result ? tenantLogLine(result) : null;
+      expect(log?.level).toBe("error");
+      expect(log?.line).toContain("errors=unconfigured");
+    }
+    expect(fx.tapis.log.length).toBe(requests);
   });
 
   test("with Tapis configured the result never carries the field, and a quiet run still says nothing", async () => {
