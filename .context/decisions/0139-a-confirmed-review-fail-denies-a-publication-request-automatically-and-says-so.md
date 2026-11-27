@@ -152,4 +152,6 @@ It clears that reason alone.
 
 `PUBLICATION_AUTO_DENY_MODE = "shadow"` joins production `[vars]`: an eligible fail gets its confirming run and an agreement is recorded as `would_deny`, and nothing is denied.
 The owner reads the shadow results on the queue before switching to `on`, which is a separate reviewed change to the same line and its guard test.
-The daily cap stays unset (25).
+The daily cap stays unset (25); past 25 agreements in a day, an agreement is recorded as `capped`, not `would_deny`, and the confirming run has been spent either way.
+The daily digest lists the `would_deny` rows to the administrators.
+A `would_deny` first run may be reviewed again by an administrator (`start --again`), because nothing was denied.

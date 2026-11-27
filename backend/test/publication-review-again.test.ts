@@ -628,7 +628,7 @@ describe("again is refused while the automatic denial holds the review", () => {
     expect(h.dispatches()).toHaveLength(0);
   });
 
-  for (const word of ["denied", "would_deny", "capped", "no_service_account", "restored"]) {
+  for (const word of ["denied", "capped", "no_service_account", "restored"]) {
     test(`once it acted or is waiting on the cap and the digest (${word})`, async () => {
       const { admin, requestId, oldId } = await reportedRequest();
       setWord(oldId, word);
@@ -639,7 +639,7 @@ describe("again is refused while the automatic denial holds the review", () => {
     });
   }
 
-  for (const word of ["not_eligible", "disagreed", "confirm_failed"]) {
+  for (const word of ["not_eligible", "disagreed", "confirm_failed", "would_deny"]) {
     test(`not once it ended with a person to decide (${word}), and the cap still counts it`, async () => {
       const { admin, requestId, oldId } = await reportedRequest();
       setWord(oldId, word);
