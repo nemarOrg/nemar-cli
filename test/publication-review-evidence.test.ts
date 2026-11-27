@@ -1725,6 +1725,22 @@ describe("before the scan step is deployed: every report the job posts parses (A
       code: "name_differs_from_upstream",
       detail: null,
     });
+    // The author-year must name one of the description's Authors (or the record's creators).
+    const notAuthor = await production(
+      newDataset("name-not-author", {
+        "dataset_description.json": named(`${source.title}, Motor 2024`),
+      }),
+      inputs,
+    );
+    expect(notAuthor.evidence.name_upstream).toBe("differs");
+    // A version-less source resolved to its latest version: an administrator decides.
+    const latest = await production(
+      newDataset("name-latest", { "dataset_description.json": named("Anything") }),
+      fullInputs({
+        lineage: { ...inputs.lineage, sources: [{ ...source, resolved_latest: true }] },
+      }),
+    );
+    expect(latest.evidence.name_upstream).toBe("unknown");
     // No upstream source served: nothing to follow.
     const none = await production(newDataset("name-none"), emptyInputs());
     expect(none.evidence.name_upstream).toBe("not_applicable");
