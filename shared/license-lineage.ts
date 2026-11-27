@@ -1098,6 +1098,14 @@ export interface SourceRecord {
   declared_licenses: DeclaredLicense[];
   evidence_url: string | null;
   status: SourceStatus;
+  /**
+   * A data container's parts (a figshare collection's members, an OSF node and its child
+   * components), each license as read. Each part is judged against the target on its own and the
+   * parts combine as separate sources do ({@link sourceOutcome}), because one license cannot stand
+   * for two whose duties differ (CC BY-SA beside CC BY-NC). `license` is then the most restrictive
+   * part, for display only. Absent for every other record.
+   */
+  parts?: NormalizedLicenseValue[];
 }
 
 /** The most creators' names a record keeps. */
@@ -1493,7 +1501,7 @@ async function resolveCollection(
     raws.push(texts[0]);
     entries.push(declared(lic.name, lic.url));
   }
-  return withLicense(base, values, raws, true, declaredList(entries));
+  return { ...withLicense(base, values, raws, true, declaredList(entries)), parts: values };
 }
 
 /** The DOI prefix of PLOS, whose policy puts supplementary files under the article's CC BY. */
@@ -1785,7 +1793,7 @@ async function resolveOsf(
     raws.push(...lic.texts);
     entries.push(lic.declared);
   }
-  return withLicense(base, values, raws, dataLike, declaredList(entries));
+  return { ...withLicense(base, values, raws, dataLike, declaredList(entries)), parts: values };
 }
 
 /**
@@ -1921,6 +1929,14 @@ export function isValidCachedRecord(hit: unknown): hit is SourceRecord {
     CACHEABLE.has(hit.status as SourceStatus) &&
     // A record read but with no license is an `unresolved` source, never served from the cache.
     !(hit.status === "resolved" && hit.license === null) &&
+    (hit.parts === undefined ||
+      (Array.isArray(hit.parts) &&
+        hit.parts.every(
+          (p) =>
+            isRecord(p) &&
+            (NORMALIZED_LICENSES as readonly string[]).includes(String(p.license)) &&
+            (p.version === null || typeof p.version === "string"),
+        ))) &&
     (hit.license === null ||
       (NORMALIZED_LICENSES as readonly string[]).includes(String(hit.license)))
   );
@@ -1998,10 +2014,21 @@ function versionAtLeast(target: string | null, source: string | null): boolean {
 
 /** One source's outcome against the target license. */
 export function sourceOutcome(
-  record: Pick<SourceRecord, "status" | "license" | "license_version">,
+  record: Pick<SourceRecord, "status" | "license" | "license_version" | "parts">,
   target: NormalizedLicenseValue,
 ): LineageOutcome {
   if (record.status === "publication") return "source_is_publication";
+  if (record.status === "resolved" && record.parts !== undefined && record.parts.length > 0) {
+    return combineOutcomes(
+      record.parts.map((p) => ({
+        license: p.license,
+        outcome: sourceOutcome(
+          { status: "resolved", license: p.license, license_version: p.version },
+          target,
+        ),
+      })),
+    );
+  }
   if (record.status !== "resolved" || record.license === null) return "unresolved";
   const t = target.license;
   switch (record.license) {

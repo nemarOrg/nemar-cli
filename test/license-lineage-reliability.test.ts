@@ -782,6 +782,45 @@ describe("data containers are data; publications stay publications", () => {
     expect(standIn.requests.some((k) => k.includes("/v2/articles/100"))).toBe(false);
   });
 
+  test("each member is judged on its own: share-alike beside NonCommercial is never compatible_nc", async () => {
+    const DOI = { DOI: "10.6084/m9.figshare.c.3307977" };
+    const fixture = (id: number) =>
+      Bun.file(
+        `${import.meta.dir}/fixtures/license-lineage/${id === 3563031 ? "60" : "61"}-figshare-article-${id}.json`,
+      ).json();
+    const set = async (id: number, name: string, url: string) => {
+      const member = await fixture(id);
+      member.license = { value: 9, name, url };
+      standIn.override(`figshare /v2/articles/${id}`, {
+        status: 200,
+        body: JSON.stringify(member),
+      });
+    };
+    // Members CC0, CC BY-SA 4.0 and CC BY-NC 4.0, target CC BY-NC 4.0: the share-alike member
+    // cannot be NonCommercial, and the two conflict. One merged rank (NC) would say compatible_nc.
+    await set(3563031, "CC BY-SA 4.0", "https://creativecommons.org/licenses/by-sa/4.0/");
+    await set(3563028, "CC BY-NC 4.0", "https://creativecommons.org/licenses/by-nc/4.0/");
+    const saNc = await run(inputs("CC-BY-NC-4.0", [DOI]));
+    expect(saNc.outcome).not.toBe("compatible_nc");
+    expect(saNc.outcome).toBe("needs_permission");
+    expect(saNc.sources[0].outcome).toBe("needs_permission");
+    standIn.stop();
+    standIn = startStandIn();
+    // ODbL beside NonCommercial keeps the share-alike duty: never compatible_nc.
+    await set(3563031, "ODbL", "https://opendatacommons.org/licenses/odbl/1-0/");
+    await set(3563028, "CC BY-NC 4.0", "https://creativecommons.org/licenses/by-nc/4.0/");
+    const odbl = await run(inputs("CC-BY-NC-4.0", [DOI]));
+    expect(odbl.outcome).not.toBe("compatible_nc");
+    // ODbL and NonCommercial conflict, as two separate sources would.
+    expect(odbl.outcome).toBe("needs_permission");
+    standIn.stop();
+    standIn = startStandIn();
+    // Members CC BY-SA 3.0 and 4.0 under a 3.0 target: the 4.0 member is a mismatch.
+    await set(3563031, "CC BY-SA 3.0", "https://creativecommons.org/licenses/by-sa/3.0/");
+    await set(3563028, "CC BY-SA 4.0", "https://creativecommons.org/licenses/by-sa/4.0/");
+    expect((await run(inputs("CC-BY-SA-3.0", [DOI]))).outcome).toBe("share_alike_mismatch");
+  });
+
   test("among several members the most restrictive wins; a member with an empty license is unresolved", async () => {
     // c.3307977 has three CC0 members; make the second NonCommercial.
     const member = JSON.parse(
@@ -842,44 +881,54 @@ describe("data containers are data; publications stay publications", () => {
     expect(standIn.misses).toEqual([]);
   });
 
-  test("an OSF project's children count: the most restrictive of node and children wins", async () => {
-    // yb3pq: CC BY-NC-SA 4.0 node and children, one child CC BY 4.0.
-    const r = await run(inputs("CC-BY-NC-SA-4.0", [{ DOI: "10.17605/osf.io/yb3pq" }]));
-    expect(r.sources[0]).toMatchObject({ resolver: "osf", license: "cc-by-nc-sa" });
-    expect(r.outcome).toBe("compatible_nc");
-    expect(standIn.misses).toEqual([]);
-    // A child under a stricter license than the node decides the outcome.
-    standIn.stop();
-    standIn = startStandIn();
-    const kids = JSON.parse(
-      await Bun.file(
-        `${import.meta.dir}/fixtures/license-lineage/45-osf-children-f8sq3.json`,
-      ).text(),
-    );
-    kids.data = [
-      {
-        id: "abcde",
-        relationships: { license: { data: { id: "x", type: "licenses" } } },
-        embeds: {
-          license: {
-            data: {
-              attributes: {
-                name: "CC-BY Attribution-NoDerivatives 4.0 International",
-                url: "https://creativecommons.org/licenses/by-nd/4.0/legalcode",
-              },
-            },
-          },
-        },
+  /** A synthetic OSF child: a license (name and URL), or none, and how many children it has. */
+  const osfChild = (
+    id: string,
+    license: { name: string; url: string } | null,
+    children: number | null = 0,
+  ) => ({
+    id,
+    relationships: {
+      license: license === null ? null : { data: { id: "x", type: "licenses" } },
+      children: {
+        links: { related: { meta: children === null ? {} : { count: children } } },
       },
-    ];
-    standIn.override("osf /v2/nodes/f8sq3/children/", { status: 200, body: JSON.stringify(kids) });
-    const nd = await run(inputs("CC-BY-4.0", [{ DOI: "10.17605/osf.io/f8sq3" }]));
+    },
+    ...(license === null ? {} : { embeds: { license: { data: { attributes: license } } } }),
+  });
+  const childrenOf = (data: unknown[]) => JSON.stringify({ data, links: { next: null } });
+  const SA3 = { name: "CC BY-SA 3.0", url: "https://creativecommons.org/licenses/by-sa/3.0/" };
+  const SA4 = { name: "CC BY-SA 4.0", url: "https://creativecommons.org/licenses/by-sa/4.0/" };
+  const NC4 = { name: "CC BY-NC 4.0", url: "https://creativecommons.org/licenses/by-nc/4.0/" };
+  const ND4 = { name: "CC BY-ND 4.0", url: "https://creativecommons.org/licenses/by-nd/4.0/" };
+  const F8 = [{ DOI: "10.17605/osf.io/f8sq3" }];
+
+  test("each child is judged on its own: a stricter child decides, and two share-alike versions do not merge", async () => {
+    standIn.override("osf /v2/nodes/f8sq3/children/", {
+      status: 200,
+      body: childrenOf([osfChild("abcde", ND4)]),
+    });
+    const nd = await run(inputs("CC-BY-4.0", F8));
     expect(nd.sources[0].license).toBe("cc-by-nd");
     expect(nd.outcome).toBe("needs_permission");
+    standIn.stop();
+    standIn = startStandIn();
+    // Node CC BY 4.0, children CC BY-SA 3.0 and 4.0, target CC BY-SA 3.0: the 4.0 child cannot
+    // be relicensed under 3.0.
+    standIn.override("osf /v2/nodes/f8sq3/children/", {
+      status: 200,
+      body: childrenOf([osfChild("abcde", SA3), osfChild("fghij", SA4)]),
+    });
+    const sa = await run(inputs("CC-BY-SA-3.0", F8));
+    expect(sa.outcome).toBe("share_alike_mismatch");
+    expect(sa.sources[0].parts?.map((p) => `${p.license} ${p.version}`)).toEqual([
+      "cc-by 4.0",
+      "cc-by-sa 3.0",
+      "cc-by-sa 4.0",
+    ]);
   });
 
   test("an OSF children list that fails, cannot be parsed, or has more pages leaves no verdict", async () => {
-    const F8 = [{ DOI: "10.17605/osf.io/f8sq3" }];
     standIn.override("osf /v2/nodes/f8sq3/children/", { status: 503 });
     const failed = await run(inputs("CC-BY-4.0", F8), { retry: NO_RETRY });
     expect(failed.sources[0].status).toBe("fetch_failed");
@@ -888,7 +937,15 @@ describe("data containers are data; publications stay publications", () => {
     standIn.override("osf /v2/nodes/f8sq3/children/", {
       status: 200,
       body: JSON.stringify({
-        data: [{ id: "abcde", relationships: { license: { data: {} } } }],
+        data: [
+          {
+            id: "abcde",
+            relationships: {
+              license: { data: {} },
+              children: { links: { related: { meta: { count: 0 } } } },
+            },
+          },
+        ],
         links: { next: null },
       }),
     });
