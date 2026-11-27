@@ -5,6 +5,8 @@
 **Accepted:** 2026-11-18
 **Owner:** Seyed Yahya Shirazi
 
+Partially superseded by [ADR 0143](0143-every-worker-dispatched-run-of-the-archive-is-handed-its-tags-commit-or-waits-for-it.md) (2026-11-27): the last clause of decision 10, that a Worker-dispatched BIDS record carries no commit, no longer holds.
+
 Epic #2145.
 This Architecture Decision Record (ADR) refines [ADR 0118](0118-the-compute-gateway-records-every-tenant-job-and-keeps-the-ledger-in-expanse-service-units.md) for jobs that are not Tapis tenant jobs, and refines stage 3 of [ADR 0049](0049-compute-runs-in-the-browser-osa-owns-the-runtime-only-hpc-is-gated.md) a second time.
 A tenant or partner job has a Tapis job and is always `su`, so nothing changes for it.
@@ -80,6 +82,7 @@ Money must be counted only where an allocation exists, and every job, wherever i
     Third, the registry hold is per input, not one per registry tuple: a finished record that names another recipe version, engine or input than the stamp claimed holds the claimed tuple and input only, and a record of another input ends the stamp `failed` with `tuple_mismatch` (that stamp is the hold), so a stamp never says "read zarr" of a run that read something else.
     Fourth, a `succeeded` stamp takes three fields from the recipe's own record, each stored only in the shape of its column and otherwise left empty and logged by name: `reader`, `input_engine` and `input_digest`.
     A Zarr digest (`sha256:`) is stored only when the record shows it covers every store the run was given (an empty `stores_unread`, a non-empty `stores_content`, and the paths of its rows equal to `input.stores`, each once), which a run over a subset of the stores (`--recording`) satisfies for the stores it was given, so the derivative store's spec check, not the stamp, decides whether that subset is an input it keys on; a BIDS digest is `git:` and the source commit the record carries, and a Worker-dispatched BIDS record carries none, so a BIDS stamp has no digest.
+    Superseded 2026-11-27 by [ADR 0143](0143-every-worker-dispatched-run-of-the-archive-is-handed-its-tags-commit-or-waits-for-it.md): every Worker-dispatched run of the archive is handed its tag's commit (`--source-commit`), or is not dispatched, so its record carries the commit and its stamp a `git:` digest.
     The stamp does not recompute the digest from the rows: that check belongs to the derivative store (item 8), which holds the one shared definition of the input digest.
     One ordering changes with it: where a recipe may run (its listed executors) is now asked before the placeholder question, so a placeholder asked to run on an executor it does not list (`nemar-ica` on a runner) is refused as an unlisted executor, not as `recipe_placeholder`; item 3 of the ADR 0118 amendment, which says a placeholder is refused on every path with `recipe_placeholder`, is inexact for that one case.
 
