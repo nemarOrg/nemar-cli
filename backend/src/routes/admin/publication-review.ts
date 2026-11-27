@@ -119,7 +119,7 @@ export const START_REFUSALS: Record<StartRefusedReason, PublicationReviewErrorBo
   has_result: {
     code: "has_result",
     error:
-      "A review of this commit has already reported. A new screened commit starts a new review, and an administrator can review this one again with --again.",
+      "A review of this commit has already reported. A new screened commit starts a new review.",
   },
   auto_deny_active: {
     code: "auto_deny_active",
