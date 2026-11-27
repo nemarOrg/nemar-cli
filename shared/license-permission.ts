@@ -111,6 +111,9 @@ export interface PermissionBasis {
  */
 export const DECLARED_TARGET = /^[A-Za-z0-9][A-Za-z0-9.+-]{0,39}$/;
 
+/** A word after a version number (`CC-BY-4.0-Whatever`, `CC0-1.0-Universal`). */
+const DECLARED_TRAILING_WORD = /\d-[A-Za-z]/;
+
 /** The declared License when it is quotable and reads as `target`, else null. */
 export function declaredTargetOf(
   declared: unknown,
@@ -119,6 +122,8 @@ export function declaredTargetOf(
   if (typeof declared !== "string" || target === null || !DECLARED_TARGET.test(declared)) {
     return null;
   }
+  // A clean id ends at its version: a word after it (`CC-BY-4.0-Whatever`) is not quoted.
+  if (DECLARED_TRAILING_WORD.test(declared)) return null;
   return normalizeLicense(declared).license === target ? declared : null;
 }
 

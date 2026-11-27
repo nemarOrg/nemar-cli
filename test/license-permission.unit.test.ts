@@ -144,8 +144,17 @@ describe("the depositor's message", () => {
       "does not permit this copy under CC-BY-4.0. Please send evidence from the original authors that they accept this copy being published under CC-BY-4.0,",
     );
     expect(declared("CC0", "cc0")).toContain("under CC0.");
+    expect(declared("CC0-1.0", "cc0")).toContain("under CC0-1.0.");
+    expect(declared("ODC-By-1.0", "odc-by")).toContain("under ODC-By-1.0.");
     // Text that is not a license id, or that names another license, is never quoted.
-    for (const d of ["CC BY 4.0 <b>", "CC-BY-NC-4.0", "https://example.org/x", null, 7]) {
+    for (const d of [
+      "CC BY 4.0 <b>",
+      "CC-BY-NC-4.0",
+      "CC-BY-4.0-Whatever",
+      "https://example.org/x",
+      null,
+      7,
+    ]) {
       expect(declared(d)).toContain("does not permit this copy under cc-by.");
     }
     // The publication sentence names it too.
