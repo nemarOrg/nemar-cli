@@ -156,11 +156,12 @@ export interface TenantSweepResult {
   occupied: number | null;
   ceiling: number | null;
   /**
-   * Set (and only ever `true`) when the Worker holds no Tapis configuration and no Tapis credential at all
+   * Set (and only ever `true`) when the Tapis configuration does not parse, no Tapis credential is present
    * (none of `TAPIS_USERNAME`, `TAPIS_PASSWORD`, `TAPIS_SERVICE_TOKEN`) and no `executor = 'tapis'` job is
-   * live: it runs runner jobs only (ADR 0118 amendment of 2026-11-14, item 2), so there is nothing for the
-   * sweep to look at and nothing for a person to do. A configuration that is present but unusable, or a
-   * stray credential (which item 1 forbids where compute is on), stays `unconfigured` at error level.
+   * live: the Worker runs runner jobs only (ADR 0118 amendment of 2026-11-14, item 2), so there is nothing
+   * for the sweep to look at and nothing for a person to do. A strategy with no credential is quiet. A
+   * configuration that parses but has no usable owner, or any Tapis credential (which item 1 forbids where
+   * compute is on), stays `unconfigured` at error level.
    * Absent on every other result. `admin compute status` still reports Tapis as unconfigured (ADR 0136);
    * this only keeps the sweep's log quiet.
    */
@@ -663,7 +664,7 @@ async function readTenantSlots(env: Bindings, r: TenantSweepResult, live: number
   }
 }
 
-/** No Tapis configuration and no Tapis credential, not even a stray one: a runner-only Worker. */
+/** A Tapis configuration that does not parse and no Tapis credential, not even a stray one: a runner-only Worker. */
 function holdsNoTapisAtAll(env: Bindings): boolean {
   const given = (v: string | undefined) => typeof v === "string" && v.trim() !== "";
   return (
@@ -697,8 +698,9 @@ export async function sweepTenantJobs(
   try {
     const ctx = tapisAccess(env, TICK_READ);
     if (ctx === null) {
-      // A configuration that is there but unusable, or any Tapis credential, is loud: in a Worker with
-      // compute on a credential is the Tapis go-live (ADR 0118 amendment of 2026-11-14, items 1 and 3).
+      // A configuration that parses but has no usable owner, or any Tapis credential, stays `unconfigured`
+      // at error level: in a Worker with compute on a credential is the Tapis go-live (ADR 0118 amendment
+      // of 2026-11-14, items 1 and 3).
       if (!holdsNoTapisAtAll(env)) {
         r.errors.push("unconfigured");
         return r;
