@@ -1160,3 +1160,13 @@ Every record names its model and effort, so the comparison is readable from the 
 
 The owner raised the platform's allowance from 150 to 500 model calls in any 24 hours, so the whole publication queue (more than 360 requests) and the model comparison on it can run in a day.
 The per-depositor allowance stays at 5, and an administrator's start still skips it.
+
+## Amendment 2026-11-27 (owner): an administrator may re-review a reported review
+
+An administrator's start may pass `again`, so the owner can compare models and efforts on the same request at the same commit (migration 0161).
+A review that has reported is then superseded, never overwritten: it keeps its row and its words, gains `superseded_at` and `superseded_by`, and stays in the history; a new first run of the same commit and release kind takes its place.
+The review in force is the newest unsuperseded first run, which every read, the approval gate and an override look at, and the new run counts against the platform's allowance like any administrator's start (the superseded call still counts too).
+It is refused while the automatic denial is confirming that review or has acted on it or is waiting on its daily cap and digest (`auto_deny_active`), and a confirming row is never superseded.
+The re-review also counts in the depositor's 24-hour tally (`DEPOSITOR_RANK_SQL`), so repeated comparisons can decline that depositor's next screen-started review with `depositor_limit`; an administrator's own start is not held by it.
+If the new run cannot be handed over or is declined, the old review stays superseded and the approval gate blocks until the new review is restarted (`start <dataset-id>` restarts it); nothing is rolled back.
+Where section 8 says a reported review is never started again, this is the later text for an administrator who passes `again`; every start without it is unchanged.

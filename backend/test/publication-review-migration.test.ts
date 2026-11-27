@@ -114,6 +114,9 @@ describe("0098 publication_reviews: columns", () => {
     denial_mail_listed_at: { type: "TEXT", notnull: 0, dflt: null },
     // Migration 0154: the lineage the review was served, for a license permission (card B6).
     lineage_basis: { type: "TEXT", notnull: 0, dflt: null },
+    // Migration 0161: an administrator's re-review of a reported review (ADR 0102, amendment 2026-11-27).
+    superseded_at: { type: "TEXT", notnull: 0, dflt: null },
+    superseded_by: { type: "INTEGER", notnull: 0, dflt: null },
   };
 
   test("exactly the declared columns, types, NOT NULLs and defaults", () => {
@@ -140,7 +143,8 @@ describe("0098 publication_reviews: columns", () => {
     expect(names).toContain("idx_publication_reviews_depositor");
     expect(names).toContain("idx_publication_reviews_state");
     // Migration 0153: the table's UNIQUE became a partial unique index over first runs, so a
-    // confirming row (ADR 0139) can share its first run's request, commit and kind.
+    // confirming row (ADR 0139) can share its first run's request, commit and kind. Migration 0161
+    // narrowed it to first runs no re-review has superseded.
     expect(names.filter((n) => n.startsWith("sqlite_autoindex_publication_reviews"))).toEqual([]);
     const key = list.find((i) => i.name === "idx_publication_reviews_key");
     expect(key).toMatchObject({ unique: 1, partial: 1 });
@@ -148,6 +152,12 @@ describe("0098 publication_reviews: columns", () => {
       db.query("PRAGMA index_info(idx_publication_reviews_key)").all() as { name: string }[]
     ).map((c) => c.name);
     expect(cols).toEqual(["request_id", "head_sha", "anonymous"]);
+    const ddl = db
+      .query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE name = 'idx_publication_reviews_key'",
+      )
+      .get()?.sql;
+    expect(ddl).toContain("WHERE confirm_of IS NULL AND superseded_at IS NULL");
   });
 });
 
@@ -586,6 +596,8 @@ describe("the row module", () => {
         "createdAt",
         "decidedAt",
         "scannerId",
+        "supersededAt",
+        "supersededBy",
         "readerVersions",
         "resolverVersion",
         "models",

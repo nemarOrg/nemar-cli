@@ -19,6 +19,12 @@ earlier releases are described only by their generated notes.
 
 - **The publication review's platform allowance is 500 model calls a day (was 150; ADR 0102 amendment).**
   The per-depositor allowance stays 5, and an administrator's start skips it.
+- **An administrator can review a reported publication review again (ADR 0102 amendment, migration 0161).**
+  `nemar admin dataset publish start <dataset-id> --again` replaces a review that has reported with a new one of the same commit: the earlier review is kept in the history, marked superseded, and the new one is the review in force, which `show` and the approval gate read.
+  It is one more model call against the platform's allowance, and it is refused while the automatic denial is confirming the review or has acted on it (`auto_deny_active`).
+  It takes one dataset id, never `--all`, and a start without `--again` still answers `has_result`.
+  The re-review also counts in the depositor's 24-hour tally, so repeated comparisons can decline that depositor's next screen-started review with `depositor_limit` (an administrator's start is not held by it).
+  If the new run cannot be handed over or is declined, the old review stays superseded and approval is blocked until the new review is restarted with `start <dataset-id>`.
 - **The publication review accepts reports made on Sonnet 5.5 and Opus 5.5 (ADR 0102 amendment).**
   The review still calls Haiku 5.5 at high effort. The wider list lets the owner compare models and efforts on the real queue without a release: a branch of the review script that calls another model, checked out by the workflow in `nemarDatasets/.github`, reports results the Worker accepts.
   A first run in the confirming run's exact shape (Sonnet 5.5 at `max`) is still refused, and a first run made on Sonnet 5.5 never starts a confirming run, because the automatic denial needs two different models to agree (ADR 0139).

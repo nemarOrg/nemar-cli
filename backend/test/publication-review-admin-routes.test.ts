@@ -1188,7 +1188,18 @@ describe("GET /admin/publish/:id/review", () => {
     );
     expect(d.review?.reproducibility).toBeNull();
     expect(Object.keys(d.history[0]).sort()).toEqual(
-      ["id", "head_sha", "anonymous", "state", "stored_verdict", "created_at", "decided_at"].sort(),
+      [
+        "id",
+        "head_sha",
+        "anonymous",
+        "state",
+        "stored_verdict",
+        "created_at",
+        "decided_at",
+        // Migration 0161: an administrator's re-review replaced this review, or null.
+        "superseded_at",
+        "superseded_by",
+      ].sort(),
     );
     expect(Object.keys(d.reasons[0]).sort()).toEqual(
       [
@@ -1273,6 +1284,8 @@ describe("GET /admin/publish/:id/review", () => {
         stored_verdict: "fail",
         created_at: expect.any(String),
         decided_at: expect.any(String),
+        superseded_at: null,
+        superseded_by: null,
       },
     ]);
     expect(d.history_truncated).toBe(false);

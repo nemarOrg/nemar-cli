@@ -435,7 +435,9 @@ async function movedRefusal(
  * lands moves `state` (and `decided_at`), a restart moves all three, and the watchdog moves
  * `state`, so an override can only attach to the result the administrator was shown. `decided_at`
  * is compared with `IS`, which is how a bound NULL matches the `NULL` of a row still running.
- * Zero changes means the row moved, and the override is refused (`review_changed`).
+ * Zero changes means the row moved, and the override is refused (`review_changed`). A row an
+ * administrator's re-review superseded since the gate read it has moved too (`superseded_at`): an
+ * override never attaches to a review that is no longer the one in force.
  *
  * `override_by` is pinned too, as the gate read it (`IS`, so a bound NULL matches no override yet):
  * an administrator replaces the override they were shown, never one that landed after their read.
@@ -453,4 +455,5 @@ async function movedRefusal(
 export const RECORD_OVERRIDE_SQL = `UPDATE publication_reviews
      SET override_by = ?, override_at = datetime('now'), override_reasons = ?
    WHERE id = ? AND request_id = ? AND head_sha = ? AND anonymous = ?
-     AND state = ? AND created_at = ? AND decided_at IS ? AND override_by IS ?`;
+     AND state = ? AND created_at = ? AND decided_at IS ? AND override_by IS ?
+     AND superseded_at IS NULL`;

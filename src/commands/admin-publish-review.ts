@@ -4,6 +4,7 @@
  *
  *   nemar admin dataset publish show <ds>            the review of the active request, in the Worker's words
  *   nemar admin dataset publish start <ds>           start the review of the current screened commit
+ *   nemar admin dataset publish start <ds> --again   review a commit again, replacing a review that reported
  *   nemar admin dataset publish start --all          start every review that can be started
  *
  * Registered on the `publish` group by `admin-publish.ts`. Every sentence about a review comes
@@ -94,6 +95,10 @@ Examples:
     .command("start")
     .description("Start the automated review of a publication request, or of every one waiting")
     .argument("[dataset-id]", "Dataset ID")
+    .option(
+      "--again",
+      "Review a commit whose review has reported again; the earlier review stays in the history",
+    )
     .option("--all", "Every request whose review can be started, oldest first")
     .option("--dry-run", "With --all: list what would be started and start nothing")
     .option(YES_OPTION, "With --all: do not ask before starting")
@@ -104,8 +109,16 @@ Examples:
 Description:
   Start the review of the request's current screened commit, or start again one
   that was declined, ended in an error, never reported or is past its deadline.
-  A review that is running or has reported is not started again. The review runs
-  in the background; read it with 'nemar admin dataset publish show <dataset-id>'.
+  A review that is running or has reported is not started again, unless you pass
+  --again. The review runs in the background; read it with
+  'nemar admin dataset publish show <dataset-id>'.
+
+  --again reviews a commit whose review has reported once more, to compare models
+  or efforts. The earlier review is kept in the history, marked superseded, and the
+  new one is the review in force; approval reads the new one. It is one more model
+  call against the platform's allowance. It is refused while the automatic denial
+  is confirming the review or has acted on it, and it takes one dataset id, never
+  --all. On any other review it starts as usual.
 
   The review needs a screen result to read, so a request whose identifier screen
   has not reported is not startable until it has. The Worker also refuses a
@@ -121,22 +134,38 @@ Description:
 
 Exit status:
   0 when the review is going or already exists (a start, a review that is running
-  or has reported); 1 for everything else: any other refusal, a Worker that could
+  or has reported, and with --again, one that replaced the earlier review); 1 for
+  everything else: any other refusal, a Worker that could
   not hand the review over, and for --all, a cancelled run or any request that was
   not started, failed or was not tried.
 
 Examples:
   $ nemar admin dataset publish start nm000480
+  $ nemar admin dataset publish start nm000480 --again
   $ nemar admin dataset publish start --all --dry-run
   $ nemar admin dataset publish start --all --yes`,
     )
     .action(
       async (
         datasetArg: string | undefined,
-        options: { all?: boolean; dryRun?: boolean; yes?: boolean; json?: boolean },
+        options: {
+          all?: boolean;
+          again?: boolean;
+          dryRun?: boolean;
+          yes?: boolean;
+          json?: boolean;
+        },
       ) => {
         const json = options.json === true;
         if (!requireSignedIn(json)) return;
+        if (options.again && options.all) {
+          failMessage("--again takes one dataset id and cannot be combined with --all.", {
+            json,
+            answered: true,
+            hint: "nemar admin dataset publish start nm000480 --again",
+          });
+          return;
+        }
         if (options.all) {
           if (datasetArg !== undefined) {
             failMessage("Give either a dataset id or --all, not both.", { json, answered: true });
@@ -159,7 +188,7 @@ Examples:
         }
         const datasetId = checkedDatasetId(datasetArg, json);
         if (datasetId === null) return;
-        await startOne(datasetId, json);
+        await startOne(datasetId, json, options.again === true);
       },
     );
 }
@@ -197,9 +226,9 @@ function sentenceOf(error: unknown, fallback: string): string {
  * code's: a review that is going or exists is an answer of success, every other word is a start
  * that did not happen, and a script has to be able to tell.
  */
-async function attemptStart(datasetId: string): Promise<StartAnswer> {
+async function attemptStart(datasetId: string, again = false): Promise<StartAnswer> {
   try {
-    return { kind: "started", body: await startPublicationReview(datasetId) };
+    return { kind: "started", body: await startPublicationReview(datasetId, { again }) };
   } catch (error) {
     const word = reviewErrorCode(error);
     const sentence = sentenceOf(error, "The review could not be started.");
@@ -217,9 +246,9 @@ async function attemptStart(datasetId: string): Promise<StartAnswer> {
 const withWord = (sentence: string, word: string | undefined): string =>
   word === undefined ? sentence : `${sentence} (${plain(word)})`;
 
-async function startOne(datasetId: string, json: boolean): Promise<void> {
+async function startOne(datasetId: string, json: boolean, again: boolean): Promise<void> {
   const spinner = json ? null : ora("Starting the review...").start();
-  const answer = await attemptStart(datasetId);
+  const answer = await attemptStart(datasetId, again);
   spinner?.stop();
   switch (answer.kind) {
     case "started": {
@@ -228,6 +257,11 @@ async function startOne(datasetId: string, json: boolean): Promise<void> {
         return;
       }
       console.log(chalk.green(startedSentence(answer.body.reason, datasetId)));
+      if (answer.body.superseded_review_id !== undefined) {
+        console.log(
+          `  The earlier review (#${plain(String(answer.body.superseded_review_id))}) is kept in the history, marked superseded; the new one (#${plain(String(answer.body.review_id))}) is the review in force.`,
+        );
+      }
       console.log(
         chalk.dim(`  nemar admin dataset publish show ${datasetId}   read it when it reports`),
       );
@@ -239,7 +273,16 @@ async function startOne(datasetId: string, json: boolean): Promise<void> {
     case "has_review":
       // The review exists, which is what was asked for: said, and not a failure.
       if (json) console.log(JSON.stringify(answer.body, null, 2));
-      else console.log(chalk.yellow(withWord(`${datasetId}: ${answer.sentence}`, answer.word)));
+      else {
+        console.log(chalk.yellow(withWord(`${datasetId}: ${answer.sentence}`, answer.word)));
+        if (answer.word === "has_result" && !again) {
+          console.log(
+            chalk.dim(
+              `  nemar admin dataset publish start ${datasetId} --again   review it once more`,
+            ),
+          );
+        }
+      }
       return;
     case "not_started":
       failMessage(withWord(`${datasetId}: ${answer.sentence}`, answer.word), {
