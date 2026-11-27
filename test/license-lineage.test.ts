@@ -32,7 +32,9 @@ import {
   dataciteDescribed,
   dataciteLicenses,
   extractSourceRefs,
+  isLatestSource,
   isValidCachedRecord,
+  isZenodoConcept,
   lineageExitCode,
   lineageLines,
   mapCache,
@@ -598,7 +600,7 @@ describe("cached hits", () => {
 
   test("a bad hit is fetched again", async () => {
     const cache = mapCache();
-    await cache.put(`${RESOLVER_VERSION}:doi:10.5281/zenodo.24539621`, {
+    await cache.put(`${RESOLVER_VERSION}:doi2:10.5281/zenodo.24539621`, {
       id: "10.5281/zenodo.24539621",
       status: "bogus",
     } as never);
@@ -608,6 +610,57 @@ describe("cached hits", () => {
     });
     expect(r.outcome).toBe("compatible_attribution");
     expect(standIn.requests.some((k) => k.includes("zenodo.24539621"))).toBe(true);
+  });
+});
+
+describe("sources not fixed to a declared version (the name rule's resolved_latest)", () => {
+  test("a Zenodo concept DOI is flagged, and a version DOI is not", async () => {
+    // 24539621 lists its version 24539622 (HasVersion); 22967622 is a version (IsVersionOf).
+    const concept = await run(inputs({ license: "CC0", sources: [ZENODO_BY] }));
+    expect(concept.sources[0]).toMatchObject({ concept: true, resolved_latest: true });
+    const version = await run(inputs({ license: "CC-BY-NC-4.0", sources: [ZENODO_NC] }));
+    expect("resolved_latest" in (version.sources[0] ?? {})).toBe(false);
+    expect("concept" in (version.sources[0] ?? {})).toBe(false);
+  });
+
+  test("the concept rule reads the relations: HasVersion without IsVersionOf, on Zenodo only", () => {
+    const has = [{ relationType: "HasVersion" }];
+    expect(isZenodoConcept("10.5281/zenodo.1", has)).toBe(true);
+    expect(isZenodoConcept("10.5281/zenodo.1", [...has, { relationType: "IsVersionOf" }])).toBe(
+      false,
+    );
+    expect(isZenodoConcept("10.5281/zenodo.1", [{ relationType: "IsVersionOf" }])).toBe(false);
+    expect(isZenodoConcept("10.6084/m9.figshare.1", has)).toBe(false);
+    expect(isZenodoConcept("10.5281/zenodo.1", null)).toBe(false);
+  });
+
+  test("an OSF node is flagged: its title is edited in place", () => {
+    const rec = { resolver: "osf", concept: undefined } as unknown as Parameters<
+      typeof isLatestSource
+    >[1];
+    const ref = { kind: "doi", doi: "10.17605/osf.io/rmafj", origin: "source_datasets" } as const;
+    expect(isLatestSource(ref, rec)).toBe(true);
+    expect(isLatestSource(ref, { ...rec, resolver: "datacite" })).toBe(false);
+  });
+
+  test("a record cached before the concept flag (the old key) is read again", async () => {
+    const cache = mapCache();
+    const stale = (await run(inputs({ license: "CC0", sources: [ZENODO_BY] }))).sources[0];
+    const {
+      concept: _c,
+      resolved_latest: _l,
+      origin: _o,
+      outcome: _u,
+      ...old
+    } = stale as never as Record<string, unknown>;
+    await cache.put(`${RESOLVER_VERSION}:doi:10.5281/zenodo.24539621`, old as never);
+    standIn.requests.length = 0;
+    const r = await resolveLicenseLineage(inputs({ license: "CC0", sources: [ZENODO_BY] }), {
+      bases: standIn.bases,
+      cache,
+    });
+    expect(standIn.requests.some((k) => k.includes("zenodo.24539621"))).toBe(true);
+    expect(r.sources[0]?.resolved_latest).toBe(true);
   });
 });
 

@@ -17,6 +17,9 @@
  *  - skipping the people check turns "the surnames must be the dataset's people" red;
  *  - counting README candidates as declared turns "README candidates neither match nor differ"
  *    red;
+ *  - the -our fold back to bare -our (no inner endings) turns "each British spelling" red, and
+ *    dropping its three-letter stem floor turns it red too (four, hour, tour fold);
+ *  - matching any word of a person, not the family name, turns "only the family name counts" red;
  *  - ignoring `resolved_latest` turns "an upstream resolved to its latest version" red.
  *
  * CI TIER: unit-pure. No network: the registry answers are the recorded fixture.
@@ -33,6 +36,7 @@ import {
   NAME_UPSTREAM_RESULTS,
   SPELLING_FOLDS,
   type UpstreamTitleSource,
+  familyNameOf,
   foldWord,
   foldWords,
   followsTitle,
@@ -112,6 +116,31 @@ describe("what compares equal", () => {
     }
     // -ence is a variant for those four words only.
     expect(foldWord("science")).toBe("science");
+    // -our inside a word, before the closed endings, folds too.
+    for (const [b, a2] of [
+      ["Behavioural task", "Behavioral task"],
+      ["Neurobehavioural", "Neurobehavioral"],
+      ["Colourful", "Colorful"],
+      ["Favourite", "Favorite"],
+      ["Honourable", "Honorable"],
+    ]) {
+      expect(followsTitle(b as string, a2 as string), b).toBe(true);
+    }
+    // Words whose -our is not the variant keep their letters.
+    for (const w of [
+      "four",
+      "hour",
+      "your",
+      "tour",
+      "pour",
+      "flour",
+      "journal",
+      "source",
+      "course",
+      "resource",
+    ]) {
+      expect(foldWord(w), w).toBe(w);
+    }
     // Short words keep their letters.
     expect(foldWord("rise")).toBe("rise");
     expect(foldWord("four")).toBe("four");
@@ -175,6 +204,18 @@ describe("the suffix grammar", () => {
     // A word that is no author's is no author-year, whatever its shape.
     expect(followsTitle("EEG (Replication 2021)", "EEG", PEOPLE)).toBe(false);
     expect(followsTitle("EEG, Motor 2019", "EEG", PEOPLE)).toBe(false);
+  });
+
+  test("only the family name counts: before the comma of Family, Given, else the last word", () => {
+    expect(familyNameOf("Kim, Mark")).toEqual(["kim"]);
+    expect(familyNameOf("Ada Lee")).toEqual(["lee"]);
+    expect(familyNameOf("Pat O'Brien-Smith")).toEqual(["obrien", "smith"]);
+    expect(followsTitle("EEG (Mark 2019)", "EEG", ["Kim, Mark"])).toBe(false);
+    expect(followsTitle("EEG (Kim 2019)", "EEG", ["Kim, Mark"])).toBe(true);
+    expect(followsTitle("EEG, Ada 2019", "EEG", ["Ada Lee"])).toBe(false);
+    // A particle before the family name is the family name's.
+    expect(followsTitle("EEG, van der Berg 2019", "EEG", ["Jan van der Berg"])).toBe(true);
+    expect(nameFollowsUpstream("EEG (Mark 2019)", [dataset("EEG")], ["Kim, Mark"])).toBe("differs");
   });
 
   test("the people are the dataset's Authors and the matched record's creators", () => {
@@ -395,8 +436,9 @@ describe("the nine datasets whose names drifted (real names, real registry title
   const EXPECTED: Record<string, string> = {
     // The Name is the upstream title, which itself begins with an author-year.
     nm000781: "matches",
-    // The upstream title is the acronym "SVWM"; the Name expands it.
-    nm000690: "differs",
+    // The upstream title is the acronym "SVWM" and the Name expands it, but the upstream is an OSF
+    // project, whose title is edited in place: whether it was renamed is an administrator's call.
+    nm000690: "unknown",
     // The upstream title with " (fNIRS)" appended, which is not an author-year.
     nm000710: "differs",
     nm000716: "matches",
@@ -419,7 +461,7 @@ describe("the nine datasets whose names drifted (real names, real registry title
   });
 
   test("each drifted one follows its title once the drift is undone", () => {
-    for (const d of datasets.filter((x) => EXPECTED[x.dataset] === "differs")) {
+    for (const d of datasets.filter((x) => EXPECTED[x.dataset] !== "matches")) {
       const [title] = upstreamDatasetTitles(d.sources) as [string];
       expect(nameFollowsUpstream(title, d.sources), d.dataset).toBe("matches");
       expect(nameFollowsUpstream(`${title} v2`, d.sources), d.dataset).toBe("matches");

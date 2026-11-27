@@ -40,7 +40,8 @@
           "title": "SVWM",
           "status": "resolved",
           "origin": "source_datasets",
-          "outcome": "compatible_attribution"
+          "outcome": "compatible_attribution",
+          "resolved_latest": true
         }
       ]
     },
@@ -146,7 +147,8 @@
           "title": "A Guide to Parent-Child fNIRS Hyperscanning Data Analysis",
           "status": "resolved",
           "origin": "source_datasets",
-          "outcome": "compatible_attribution"
+          "outcome": "compatible_attribution",
+          "resolved_latest": true
         }
       ]
     },
