@@ -73,3 +73,20 @@ A launcher that reads version 1 would therefore refuse a specification that carr
 
 - nemar-cli #2324 (phase B2b) and #2383 ("Next: B2b"); nemarOrg/nemar-process#65 and #95.
 - `shared/contract/compute-launch.schema.json`, `shared/contract/compute-launch.ts`, `shared/contract/compute.ts`, `backend/src/services/serving-index-staging.ts`, `backend/src/routes/callbacks/compute-job-callbacks.ts`, `backend/src/services/compute-derivatives.ts`.
+
+## Amendment 2026-11-27: a run staged without an index is still handed the tag's commit
+
+Decision 4 named the arguments of a run with a staged index and said nothing of the commit of a run without one, and the dispatcher handed such a run no `--source-commit`.
+The recipe records the commit it is handed as `extensions.nemar.dataset.source_commit`, which is the `git:` input digest a BIDS derivative is keyed by (ADR 0123 decision 3).
+Such a run's stamp therefore had no digest and its derivative was skipped for good (`no_input_digest`), although decision 6 keys it `none` and the consequences say it is stored.
+A local end-to-end run found it: the serving index of on007823 was built from another commit than its tag's, so no index was staged and the run could not be stored.
+
+This names the mechanism decision 6 always implied; the verdict stands.
+
+- The dispatcher reads the tag's commit whatever becomes of the index, and hands a run without an index `--source-commit` and that commit whenever it was read: every word but those GitHub or its credentials gave (`tag_absent`, `github_unreadable`, `token_mint_failed`, `no_github_credentials`).
+  A run handed none states none and is still not keyed.
+- A run with a staged index keeps its arguments byte for byte; a run without one gains only those two values, after the archive's own, and no `--serving-index`, so its key still reads `none` from the recorded word.
+- The recipe uses a row of an index only when the index's commit is its `--source-commit`, so a run handed a commit and no index still declares no view of the serving copy.
+- ADR 0121 decision 10's "a Worker-dispatched BIDS record carries none" now holds only for a recipe that does not key the serving index (`nemar-floor` on `bids`) and for a run whose tag could not be read.
+
+Receipts: `tagCommit` in `backend/src/services/serving-index-staging.ts`, `recipeSourceCommitArguments` in `shared/compute-recipes.ts`, `recipeJobSpec` in `backend/src/services/compute-pipeline.ts`, and the cases of `backend/test/serving-index-staging.test.ts` and `backend/test/compute-derivatives.test.ts` that fail without it.
