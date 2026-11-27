@@ -145,6 +145,14 @@ describe("the decision card in show", () => {
     expect(lines).toContain("    (not read)");
   });
 
+  test("a lineage whose README DOIs were dropped as cut short says how many", () => {
+    const card = fixtureCard() as unknown as { license: { lineage: Record<string, unknown> } };
+    card.license.lineage = { ...card.license.lineage, dropped_doi_candidates: 2 };
+    expect(decisionCardLines(card)).toContain("      2 README DOIs dropped as cut short");
+    card.license.lineage = { ...card.license.lineage, dropped_doi_candidates: 0 };
+    expect(decisionCardLines(card).join("\n")).not.toContain("dropped as cut short");
+  });
+
   test("hostile text in the dataset's fields is printed plain", () => {
     const card = fixtureCard();
     const hostile = {

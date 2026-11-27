@@ -73,6 +73,10 @@ function lineageLine(which: string, l: CardLineage | null | undefined): string[]
     const label = typeof d?.label === "string" ? plain(d.label) : REGISTRY_TEXT_LABEL;
     out.push(`      Declared (${label}): ${declared}`);
   }
+  const dropped = l.dropped_doi_candidates;
+  if (typeof dropped === "number" && Number.isInteger(dropped) && dropped > 0) {
+    out.push(`      ${dropped} README DOI${dropped === 1 ? "" : "s"} dropped as cut short`);
+  }
   return out;
 }
 

@@ -188,6 +188,8 @@ export interface ServedLineage {
   credited: boolean;
   resolved_at: string | null;
   declared_licenses: string[];
+  /** README DOIs dropped as cut short (license-lineage/4 and /5); absent on older snapshots. */
+  dropped_doi_candidates?: number;
 }
 
 /** A lineage result as the card keeps it. */
@@ -206,6 +208,9 @@ export function cardLineageOf(result: LineageResult): ServedLineage {
     credited: result.sources.some((s) => s.origin === "source_datasets"),
     resolved_at: result.resolved_at,
     declared_licenses: declared,
+    ...((result.dropped_doi_candidates ?? 0) > 0
+      ? { dropped_doi_candidates: result.dropped_doi_candidates }
+      : {}),
   };
 }
 
@@ -290,11 +295,16 @@ function readLineage(v: unknown): ServedLineage | null | undefined {
   ) {
     return undefined;
   }
+  const dropped = v.dropped_doi_candidates;
+  if (dropped !== undefined && !(Number.isInteger(dropped) && (dropped as number) >= 0)) {
+    return undefined;
+  }
   return {
     outcome: v.outcome as LineageOutcome,
     credited: v.credited,
     resolved_at: v.resolved_at,
     declared_licenses: declared,
+    ...(typeof dropped === "number" && dropped > 0 ? { dropped_doi_candidates: dropped } : {}),
   };
 }
 
@@ -420,12 +430,6 @@ export const LICENSE_CUE_RULES: readonly CueRule[] = [
       "The upstream data's license prohibits redistribution; an administrator decides even with a recorded permission.",
   },
   {
-    code: "matcher_unavailable",
-    cue: "amber",
-    applies: (f) => f.matcher === "unavailable",
-    reason: "License matcher unavailable.",
-  },
-  {
     code: "license_file_unrecognized",
     cue: "amber",
     applies: (f) => fileIs(f, "unrecognized"),
@@ -442,7 +446,9 @@ export const LICENSE_CUE_RULES: readonly CueRule[] = [
   {
     code: "license_file_unreadable",
     cue: "amber",
-    applies: (f) => fileIs(f, "unreadable"),
+    // Unscanned is not unread: with the matcher unavailable the file was read whole for the model,
+    // and the matcher's own line says why it was not identified.
+    applies: (f) => fileIs(f, "unreadable") && f.matcher !== "unavailable",
     reason: "The LICENSE file could not be read in full, so it was not identified.",
   },
   {
@@ -490,6 +496,14 @@ export const LICENSE_CUE_RULES: readonly CueRule[] = [
     cue: "amber",
     applies: (f) => licensesDisagree(f.enrichmentLicense, f.field),
     reason: "The enrichment's license disagrees with the License field.",
+  },
+  // Last among the ambers, so an actionable reason (the lineage above all) heads the card; until the
+  // matcher's workflow step deploys (ADR 0142, deploy 3) every review records it unavailable.
+  {
+    code: "matcher_unavailable",
+    cue: "amber",
+    applies: (f) => f.matcher === "unavailable",
+    reason: "License matcher unavailable.",
   },
 ];
 
@@ -799,6 +813,9 @@ function reviewLineageOf(
     credited: recorded.credited,
     resolved_at: recorded.resolved_at ?? snapshot?.lineage?.resolved_at ?? null,
     declared_licenses: snapshot?.lineage?.declared_licenses ?? [],
+    ...(snapshot?.lineage?.dropped_doi_candidates
+      ? { dropped_doi_candidates: snapshot.lineage.dropped_doi_candidates }
+      : {}),
   };
 }
 
@@ -823,6 +840,7 @@ function labeledLineage(l: ServedLineage, covered: boolean): CardLineage {
     credited: l.credited,
     resolved_at: l.resolved_at,
     declared_licenses: { label: REGISTRY_TEXT_LABEL, licenses: l.declared_licenses },
+    ...(l.dropped_doi_candidates ? { dropped_doi_candidates: l.dropped_doi_candidates } : {}),
     permission_covers: covered,
   };
 }

@@ -279,3 +279,10 @@ Decision 4 is extended by the rulings of phase 4's review (pull request #2479).
 - askalono 0.5.0 (archived; `.gitmodules` pins `spdx/license-list-data` at commit `7bd3f753`, two builds after v3.17).
 - `src/lib/license.ts` (`generateLicenseText`).
 - ADR 0102 sections 2, 3 and 5; ADR 0139 decisions 1, 7 and 9; ADR 0093.
+
+## Amendment 2026-11-27 (seam review of #2486): two cues decision 4 did not list
+
+`administrator_reads` also covers an unresolved lineage: ADR 0139's amendment of the same day makes `unresolved` NEMAR's failure to read a registry, not the depositor's to cure, so no depositor mail is sent and the card does not ask the depositor.
+Decision 4's amber list also holds `license_file_not_identified`, for a review made before report v3, which recorded no identification.
+Until deploy 3 every review records the matcher `unavailable`; its amber line is listed last, after every reason an administrator can act on, and a LICENSE that was read whole but not scanned is not called unreadable.
+The card shows how many README DOIs the resolver dropped as cut short, which explains a lineage that names no source.

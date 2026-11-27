@@ -120,6 +120,8 @@ export interface CardLineage {
   resolved_at: string | null;
   /** Each license a source's registry declares, `id: text`, under {@link REGISTRY_TEXT_LABEL}. */
   declared_licenses: { label: string; licenses: string[] };
+  /** README DOIs the resolver dropped as cut short, when any; why a lineage may show no source. */
+  dropped_doi_candidates?: number;
   /** A recorded license permission covers this lineage's outcome and sources. */
   permission_covers: boolean;
 }

@@ -107,6 +107,21 @@ describe("the license cue, rule by rule", () => {
     expect(licenseCueOf(GREEN)).toEqual({ cue: "green", reason: GREEN_REASON, reasons: [] });
   });
 
+  test("before deploy 3 an unresolved lineage heads the card, not the unavailable matcher (seam review of #2486)", () => {
+    const cue = licenseCueOf({
+      ...GREEN,
+      file: { ...file("unreadable"), spdx: null },
+      matcher: "unavailable",
+      lineages: [{ outcome: "unresolved", covered: false }],
+    });
+    const reasonOf = (code: string) => LICENSE_CUE_RULES.find((r) => r.code === code)?.reason;
+    expect(cue.cue).toBe("amber");
+    expect(cue.reason).toBe(reasonOf("lineage_unresolved"));
+    expect(cue.reasons.at(-1)).toBe(reasonOf("matcher_unavailable"));
+    // Unscanned is not unread: no "could not be read in full" while the matcher is unavailable.
+    expect(cue.reasons).not.toContain(reasonOf("license_file_unreadable"));
+  });
+
   const cases: Array<[string, Partial<CueFacts>, "red" | "amber", string]> = [
     ["no License field is red", { fieldPresent: false, field: null }, "red", "no_license_field"],
     [
