@@ -15,6 +15,8 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.46 - 2026-11-27
+
 ### Changed
 
 - **The publication review runs in production (#2370, ADR 0102).**
