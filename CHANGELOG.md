@@ -15,6 +15,11 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Changed
+
+- **The publication review job writes report v3 and prompt version 3 (ADR 0142, deploy 2).**
+  A LICENSE the matcher identifies conclusively is sent as no text, or as only the text it adds beyond the license (the whole file when part of the license is missing); the facts name the identification, the License field's normalized license and the matcher, and question 3 says to trust it. The report records `license_file`, the names of the description keys not shown, the lineage's `resolved_at` and the matcher; until the scan step is deployed every report carries `absent`, `annexed` or `unreadable` with matcher `unavailable`, and LICENSE is sent as before.
+
 ## 0.10.50 - 2026-11-27
 
 ### Changed

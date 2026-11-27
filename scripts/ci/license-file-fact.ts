@@ -50,6 +50,7 @@ import {
 } from "../../shared/license-file";
 import { normalizeLicense } from "../../shared/license-lineage";
 import { RECOMMENDED_LICENSES, generateLicenseText } from "../../shared/license-text";
+import { LICENSE_EXPRESSION_RE, SPDX_ID_RE } from "../../shared/publication-review";
 
 /** The uid the sandboxed scan runs as (`nobody`), and so the owner its output must have. */
 export const SCAN_UID = 65534;
@@ -419,16 +420,27 @@ export interface LicenseIdentification {
 
 const SCANCODE_REF = /^LicenseRef-scancode-/;
 const UNKNOWN_REFERENCE = "LicenseRef-scancode-unknown-license-reference";
-/** One identifier on the SPDX license list: no `LicenseRef-`, no operator, no space. */
-const SPDX_ID = /^(?!LicenseRef-)[A-Za-z0-9][A-Za-z0-9.+-]*$/;
+/**
+ * One identifier on the SPDX license list: no `LicenseRef-`, no operator, no space, and no longer
+ * than the Worker's parser takes, so an identifier this rule accepts is one the report can carry.
+ */
+const SPDX_ID = SPDX_ID_RE;
 const OPERATORS = new Set(["AND", "OR", "WITH"]);
 
+/**
+ * A fact with no additions. An expression the Worker's parser would refuse (longer than its 512
+ * characters, which many `LicenseRef-` detections can make, or a character outside its set) is
+ * recorded as no expression: the state is `unrecognized` either way, and a report that carried it
+ * would be refused whole as `bad_evidence`.
+ */
 function fact(
   state: LicenseFileFact["state"],
   spdx: string | null = null,
   expression: string | null = null,
 ): LicenseFileFact {
-  return { state, spdx, additions: false, expression };
+  const recorded =
+    expression !== null && LICENSE_EXPRESSION_RE.test(expression) ? expression : null;
+  return { state, spdx, additions: false, expression: recorded };
 }
 
 /**

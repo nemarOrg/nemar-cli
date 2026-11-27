@@ -16,10 +16,13 @@
  *
  * **LICENSE is identified by a pinned matcher** (ADR 0142, section 1). `--license-scan-dir` names the
  * directory the workflow's sandboxed ScanCode step wrote (`scripts/ci/license-file-fact.ts` reads
- * it); without it, the identification is `unreadable` and the matcher word `unavailable`. In this
- * phase the identification changes nothing the model sees, the report or the input digest: the
- * script logs one fixed line, `license_file <state>; matcher <word>`, never the SPDX identifier or
- * any text, and returns the identification beside the result.
+ * it); without it, the identification is `unreadable` (or `absent`, or `annexed`) and the matcher
+ * word `unavailable`, and LICENSE is sent as ADR 0102 sends it. The report is version 3: it carries
+ * the identification (`evidence.license_file`) and the matcher word (`record.license_matcher`). A
+ * conclusive identification sends the model no LICENSE text, or only the text the file adds beyond
+ * the license (the whole file when the license's own text is not all there), and the facts block
+ * names the identification (`publication-review-evidence.ts`, `licenseDocumentFor`). The script
+ * logs one fixed line, `license_file <state>; matcher <word>`, never the SPDX identifier or any text.
  *
  * The callback token comes from the environment (PUBLICATION_REVIEW_CALLBACK_TOKEN), never argv. A
  * job that fails before this script can report is reported by the workflow's own curl step, which
@@ -155,8 +158,8 @@ export type PublicationReviewResult = (
   | { outcome: "error"; error: JobRunError; diag?: string }
 ) & {
   /**
-   * LICENSE's identification, when the run got as far as reading the root documents. Internal:
-   * it is not posted in this phase (ADR 0142 decision 2's deploy order).
+   * LICENSE's identification, when the run got as far as reading the root documents. The report
+   * carries its fact; the leftover and the `partial` flag stay here, internal to the job.
    */
   licenseFile?: LicenseIdentification;
 };
@@ -365,7 +368,12 @@ async function reviewOnce(
     }
     const inputs = {
       presend: presendInputs(body),
-      lineage: { outcome: body.lineage.outcome, credited: lineageCredited(body.lineage.sources) },
+      lineage: {
+        outcome: body.lineage.outcome,
+        credited: lineageCredited(body.lineage.sources),
+        // When the Worker resolved it (ADR 0142, decision 3), copied as the inputs give it.
+        resolved_at: body.lineage.resolved_at,
+      },
     };
 
     const tree = await readTree(args.repoDir, args.head);
@@ -374,21 +382,33 @@ async function reviewOnce(
     // Fixed words only: never the SPDX identifier, the expression or any leftover text.
     (args.log ?? console.log)(`license_file ${license.fact.state}; matcher ${license.matcher}`);
     onLicense(license);
-    const { facts, cleared, clearedInputs } = evidenceFromDocuments(docs, {
+    const {
+      facts,
+      cleared,
+      clearedInputs,
+      license: licenseView,
+    } = evidenceFromDocuments(docs, {
       head: args.head,
       anonymous: args.anonymous,
       tagsText: readText(args.tagsFile),
       bidsRuns: readText(args.bidsRunsFile),
       summary: structuralSummary(args.repoDir, tree),
       inputs,
+      licenseFile: license,
     });
     const { system, user } = buildPublicationReviewMessages({
       facts,
       cleared,
       clearedInputs,
+      license: licenseView,
       nonce: randomUUID().replaceAll("-", ""),
     });
-    const inputDigest = publicationInputDigest({ facts, cleared, clearedInputs });
+    const inputDigest = publicationInputDigest({
+      facts,
+      cleared,
+      clearedInputs,
+      license: licenseView,
+    });
     // A confirming run (ADR 0139, decision 1) is told its model by the Worker, in the inputs; the
     // inputs, the prompt and so the digest are the first run's, and only the model and its effort
     // differ. Any other pair is refused, so the inputs can never pick an arbitrary call.
@@ -408,6 +428,7 @@ async function reviewOnce(
         resolverVersion: body.lineage.resolver_version,
         enrichmentSource: body.enrichment?.source ?? null,
         effort: confirm?.shape.effort ?? PUBLICATION_REVIEW_EFFORT,
+        licenseMatcher: license.matcher,
       }),
     };
   } catch (e) {

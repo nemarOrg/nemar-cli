@@ -60,10 +60,10 @@ import { sanitizeNote } from "./untrusted-text.js";
  * Version 3 (ADR 0142, decision 2) adds the LICENSE identification (`evidence.license_file`), the
  * closed names of the description keys not shown (`evidence.description_keys_not_shown_names`),
  * when the lineage was resolved (`evidence.lineage.resolved_at`) and the license matcher
- * (`record.license_matcher`). The Worker reads it from the first of ADR 0142's three deploys; the
- * job still writes version 2 until the second, so this constant stays at 2 until then.
+ * (`record.license_matcher`). The Worker reads it from the first of ADR 0142's three deploys, and
+ * the job writes it from the second.
  */
-export const PUBLICATION_REPORT_VERSION = 2;
+export const PUBLICATION_REPORT_VERSION = 3;
 /** Every version the parser reads. */
 export const PUBLICATION_REPORT_VERSIONS = [1, 2, 3] as const;
 export type PublicationReportVersion = (typeof PUBLICATION_REPORT_VERSIONS)[number];
@@ -73,8 +73,11 @@ export type PublicationReportVersion = (typeof PUBLICATION_REPORT_VERSIONS)[numb
  * every change to the system prompt, the output schema or the shape of the user message, so two
  * reviews with the same prompt version, models and input digest were asked the same thing
  * (ADR 0139, decision 9). Reviews before this constant existed are version 1 and record none.
+ * Version 3 (ADR 0142): the facts carry the LICENSE identification, the `License` field's
+ * normalized license and the matcher, a conclusive LICENSE is sent as its added text only (or not
+ * at all), and question 3 says to trust the identification.
  */
-export const PUBLICATION_PROMPT_VERSION = "publication-review-prompt/2";
+export const PUBLICATION_PROMPT_VERSION = "publication-review-prompt/3";
 
 /**
  * The effort every call of the review is made at. One word, recorded with the model. `max` since
@@ -1207,9 +1210,9 @@ function parseLineage(raw: unknown, v3: boolean): ReviewLineage | null {
 }
 
 /** One SPDX-listed identifier, as the job's decision rule takes it: no `LicenseRef-`, no operator. */
-const SPDX_ID_RE = /^(?!LicenseRef-)[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/;
+export const SPDX_ID_RE = /^(?!LicenseRef-)[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/;
 /** ScanCode's file expression: identifiers, `LicenseRef-` terms, operators and parentheses only. */
-const LICENSE_EXPRESSION_RE = /^[A-Za-z0-9.+\-() ]{1,512}$/;
+export const LICENSE_EXPRESSION_RE = /^[A-Za-z0-9.+\-() ]{1,512}$/;
 
 /**
  * The LICENSE identification (ADR 0142, decision 1), and its agreement with itself and with the

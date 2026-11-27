@@ -2410,8 +2410,8 @@ describe("what the caps count", () => {
 });
 
 describe("a version-3 report (ADR 0142, decision 2, first deploy)", () => {
-  test("the job still writes version 2; the Worker already reads version 3", () => {
-    expect(PUBLICATION_REPORT_VERSION).toBe(2);
+  test("the job writes version 3, and the Worker reads it", () => {
+    expect(PUBLICATION_REPORT_VERSION).toBe(3);
   });
 
   test("it stores whole, its matcher joins the record, and its verdict is derived", async () => {
