@@ -90,6 +90,7 @@ import {
   getJob as getTapisJob,
   listJobs,
 } from "./tapis/client.js";
+import { tapisConfig } from "./tapis/config.js";
 import { TapisError } from "./tapis/errors.js";
 import { TAPIS_JOB_UUID_RE, TAPIS_OWNER_RE } from "./tapis/schemas.js";
 
@@ -154,6 +155,17 @@ export interface TenantSweepResult {
   tenantLive: number | null;
   occupied: number | null;
   ceiling: number | null;
+  /**
+   * Set (and only ever `true`) when the Tapis configuration does not parse, no Tapis credential is present
+   * (none of `TAPIS_USERNAME`, `TAPIS_PASSWORD`, `TAPIS_SERVICE_TOKEN`) and no `executor = 'tapis'` job is
+   * live: the Worker runs runner jobs only (ADR 0118 amendment of 2026-11-14, item 2), so there is nothing
+   * for the sweep to look at and nothing for a person to do. A strategy with no credential is quiet. A
+   * configuration that parses but has no usable owner, or any Tapis credential (which item 1 forbids where
+   * compute is on), stays `unconfigured` at error level.
+   * Absent on every other result. `admin compute status` still reports Tapis as unconfigured (ADR 0136);
+   * this only keeps the sweep's log quiet.
+   */
+  tapisUnconfigured?: true;
   /** Fixed words; never a message. */
   errors: string[];
   errorClass: string | null;
@@ -652,6 +664,26 @@ async function readTenantSlots(env: Bindings, r: TenantSweepResult, live: number
   }
 }
 
+/** A Tapis configuration that does not parse and no Tapis credential, not even a stray one: a runner-only Worker. */
+function holdsNoTapisAtAll(env: Bindings): boolean {
+  const given = (v: string | undefined) => typeof v === "string" && v.trim() !== "";
+  return (
+    tapisConfig(env).unconfigured === true &&
+    !given(env.TAPIS_USERNAME) &&
+    !given(env.TAPIS_PASSWORD) &&
+    !given(env.TAPIS_SERVICE_TOKEN)
+  );
+}
+
+/** The `executor = 'tapis'` jobs in a live state: what an unconfigured Tapis would leave unwatched. */
+async function countLiveTapisJobs(env: Bindings): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM compute_jobs WHERE executor = 'tapis' AND state IN (${LIVE_STATES_SQL})`,
+  ).first<{ n: number }>();
+  if (row === null) throw new Error("the live Tapis job count returned no row");
+  return row.n;
+}
+
 /**
  * One run of the tenant sweep. Null outside exact production and while compute is off, before anything
  * is read. A listing that fails is `list_failed` and nothing at all is written.
@@ -666,7 +698,26 @@ export async function sweepTenantJobs(
   try {
     const ctx = tapisAccess(env, TICK_READ);
     if (ctx === null) {
-      r.errors.push("unconfigured");
+      // A configuration that parses but has no usable owner, or any Tapis credential, stays `unconfigured`
+      // at error level: in a Worker with compute on a credential is the Tapis go-live (ADR 0118 amendment
+      // of 2026-11-14, items 1 and 3).
+      if (!holdsNoTapisAtAll(env)) {
+        r.errors.push("unconfigured");
+        return r;
+      }
+      // With no Tapis at all, unconfigured is a gap only while a Tapis job is live: such a job would go
+      // unwatched. With none, the Worker runs runner jobs only and the sweep is idle on purpose. A count
+      // that cannot be read is never taken for zero.
+      let liveTapis: number;
+      try {
+        liveTapis = await countLiveTapisJobs(env);
+      } catch (err) {
+        r.errors.push("tenant_unreadable");
+        r.errorClass = errorClassName(err);
+        return r;
+      }
+      if (liveTapis > 0) r.errors.push("unconfigured");
+      else r.tapisUnconfigured = true;
       return r;
     }
     let listed: TapisJob[];
@@ -750,6 +801,13 @@ export async function sweepTenantJobs(
 export function tenantLogLine(
   r: TenantSweepResult,
 ): { level: "info" | "warn" | "error"; line: string } | null {
+  // Tapis unconfigured with no live Tapis job: silent every 30 minutes, one information line a day so a
+  // person reading the daily logs sees the sweep is idle on purpose.
+  if (r.tapisUnconfigured === true && r.errors.length === 0) {
+    return r.mode === "week"
+      ? { level: "info", line: "[compute-tenant] mode=week tapis=unconfigured live_tapis=0" }
+      : null;
+  }
   const accessFailed = Object.entries(r.accessFailed).reduce((n, [, c]) => n + c, 0);
   // A cut listing needs a person in a `week` pass (a job of the week may be missing) and, in a `live` pass,
   // only when a live job could be hiding past the cut.
