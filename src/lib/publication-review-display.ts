@@ -388,23 +388,35 @@ export function resubmissionNoteLines(d: PublicationReviewDetail): string[] {
 }
 
 /**
+ * Which request `show` is about: the dataset, the request, its status and its release kind, and
+ * the non-production note when the Worker is not production's. Printed first, before the decision
+ * card, so the release kind is said up front. Pure.
+ */
+export function reviewHeaderLines(d: PublicationReviewDetail): string[] {
+  const kind = d.anonymous ? chalk.yellow("ANONYMOUS RELEASE") : "named publication";
+  const status =
+    d.block_reason === null || d.block_reason === undefined
+      ? plain(d.request_status)
+      : `${plain(d.request_status)} (${plain(d.block_reason)})`;
+  const out = [
+    `${chalk.bold(plain(d.dataset_id))}  request ${plain(String(d.request_id))}, ${status}, ${kind}`,
+  ];
+  if (d.environment !== "production") out.push(`  ${chalk.yellow(NON_PRODUCTION_NOTE)}`);
+  return out;
+}
+
+/**
  * `GET /admin/publish/:id/review` as the lines `show` prints: the request, the screen, then the
  * review in the Worker's words (its headline, the gate, every reason with what clears it), the
  * model's answers, the platform facts that lowered one, the model's findings and summary under
  * their labels, the evidence, what the model was shown, an override on record, the standing line
  * and the next command, then the history. Pure.
  */
-export function reviewDetailLines(d: PublicationReviewDetail): string[] {
-  const out: string[] = [];
-  const kind = d.anonymous ? chalk.yellow("ANONYMOUS RELEASE") : "named publication";
-  const status =
-    d.block_reason === null || d.block_reason === undefined
-      ? plain(d.request_status)
-      : `${plain(d.request_status)} (${plain(d.block_reason)})`;
-  out.push(
-    `${chalk.bold(plain(d.dataset_id))}  request ${plain(String(d.request_id))}, ${status}, ${kind}`,
-  );
-  if (d.environment !== "production") out.push(`  ${chalk.yellow(NON_PRODUCTION_NOTE)}`);
+export function reviewDetailLines(
+  d: PublicationReviewDetail,
+  o: { header?: boolean } = {},
+): string[] {
+  const out: string[] = o.header === false ? [] : reviewHeaderLines(d);
 
   const noteLines = resubmissionNoteLines(d);
   if (noteLines.length > 0) out.push("", ...noteLines);

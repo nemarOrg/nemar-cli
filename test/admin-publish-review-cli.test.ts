@@ -568,6 +568,28 @@ describe("show", () => {
     expect(r.stdout).toContain("blocked (min_requirements_failed)");
   });
 
+  test("show opens with the request, then the decision card, then the review (ADR 0142, decision 4)", async () => {
+    seedPassing("nm000484");
+
+    const r = await h.cli(["admin", "dataset", "publish", "show", "nm000484"]);
+
+    expect(r.exitCode).toBe(0);
+    const detail = await detailOf("nm000484");
+    expect(detail.decision_card?.next_action.action).toBeDefined();
+    expectInOrder(r.stdout, [
+      "nm000484  request",
+      "Decision card",
+      `  Next: ${detail.decision_card?.next_action.sentence}`,
+      "  License: ",
+      "  The dataset's own words (written by the depositor)",
+      "  Questions:",
+      "Identifier screen:",
+      "Publication review: pass",
+    ]);
+    const json = await h.cli(["admin", "dataset", "publish", "show", "nm000484", "--json"]);
+    expect(JSON.parse(json.stdout).decision_card).toEqual(detail.decision_card);
+  });
+
   test("an anonymous release says so up front", async () => {
     seedScreenedRequest(h.db, { datasetId: "nm000480", anonymous: true });
 
