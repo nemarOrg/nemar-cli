@@ -15,6 +15,14 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Fixed
+
+- **The license notice no longer mails depositors wrongly (resolver version 4; ADR 0139 decision 7 and ADR 0142 decision 3, amendments of 2026-11-27).**
+  A README DOI that is a strict prefix of a DOI declared elsewhere (or of another README DOI) is that DOI cut short, and is dropped and counted; it had made nm000746 and nm000843 `unresolved` beside a compatible Zenodo source.
+  DANDI's license spellings (`cc_by_40`, `cc0_10`, `spdx:CC-BY-4.0`) are read, so nm001003's DANDI source is CC BY 4.0 instead of `needs_permission`.
+  An `unresolved` lineage mails the depositor nothing (it is NEMAR's failure to read a registry); administrators still see it.
+  `source_is_publication` has its own sentence, asking for the dataset the data came from instead of saying the license does not permit the copy, and every sentence names the dataset's License as declared (`CC-BY-4.0`), not the normalized family.
+
 ## 0.10.50 - 2026-11-27
 
 ### Changed
