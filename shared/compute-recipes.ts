@@ -242,7 +242,7 @@ const checkpoint = (name: DeclarableCheckpoint, steps: readonly string[]): Recip
  * `pyproject.toml` (the suffix is added by `recipes/nemar_process/common/versions.py`). It moves with that
  * pin, and the `+<commit>` suffix goes when the images move to an eegprep release installed from an index.
  */
-const RECIPE_ENGINE = "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8";
+const RECIPE_ENGINE = "eegprep@0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3";
 
 /**
  * The recipes. `nemar-floor` annotates every EEG recording of a dataset and runs on a CPU partition: on

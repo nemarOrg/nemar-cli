@@ -15,6 +15,26 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Changed
+
+- **The recipes' engine moves to eegprep `871bc7f8` (#2411, nemarOrg/nemar-process#101).**
+  `nemar-floor` and `nemar-ica` `1.0.0-b2` now declare `eegprep@0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3`, the commit nemar-process's images install: ICLabel runs its network on ONNX (onnxruntime 1.32.0, stamped in every record), and `nemar-quality` 0.2.0 adds `nemar-quality:mutualInformationReduction` (MIR, through eegprep's `eeg_mir`).
+  Recipe versions are unchanged, so the tuple a run stamps differs only in its engine.
+  **Deploy order (the 0.10.40 procedure):** release nemar-process (after nemarOrg/nemar-process#98), publish the runtime image from its `main`, repin `COMPUTE_RUNTIME_IMAGE`, check the pinned digest's tuple with `nemar-recipe version`, and only then let this reach an environment with compute on.
+  Deployed before the image, one record from the older image holds the recipe's whole claimed tuple (`tuple_mismatch`), and the cron then skips that recipe for every dataset (`registry_drift`).
+  The hold does not clear with time or by repinning the image: only deleting the hold rows or a new registry tuple clears it.
+  Compute stays dark until the owner turns it on.
+- **neuroschema 0.6.1 is vendored (nemarOrg/neuroschema#40).**
+  It is 0.6.0's schemas with the sensor-field and sensor-layout vectors regenerated at eegprep `871bc7f8`; `metadata.json` now says `schema_version` `0.6.1`.
+  Stored documents stamped `0.6.0` or earlier still validate: the bundle never checks the stamp, and the backend validates extension objects by their `nsc:` ids.
+- **The `nemar-ica` quality fixture is nemar-process `90e248d7`'s product**, with `nemar-quality` 0.2.0 and its MIR metric.
+- **`frame_rotated` is retired** from nemar-process's view-skip words: eegprep now orients the CTF, 4DBti and KitYokogawa frames, and a `nemar-ica` recording whose frame it cannot orient fails with the detail `iclabel_frame_unoriented`.
+  A stored record whose `views_skipped` gives `frame_rotated` is still admitted: the list documents the words and never closes them, and a test holds that.
+
+### Continuous integration
+
+- **The test workflow checks out nemar-process `dev` again (#2411)**, removing the `a5125c7b` pin of 0.10.44: the recipe, observation-schema and queue drift tests compare with nemar-process `dev`.
+
 ## 0.10.46 - 2026-11-27
 
 ### Changed

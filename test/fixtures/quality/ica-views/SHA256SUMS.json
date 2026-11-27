@@ -3,7 +3,7 @@
   "description": "nemar-ica's product with every view, copied byte for byte from nemarOrg/nemar-process at source_commit (its README says how it is made): each copy's path here, its path in that repository, its size and its SHA-256. The fixture of the backend's quality phases B1 and B2 (ADR 0137, nemar-cli #2341).",
   "note": "Do not hand-edit; copy again from nemar-process with git show <source_commit>:<source> and update this file.",
   "source": "https://github.com/nemarOrg/nemar-process",
-  "source_commit": "e4feec7b26f643004b8d61a87e05aff1622c8a1d",
+  "source_commit": "90e248d73be13f5b9e99b0befa32ef1b877a5b09",
   "attribution": "Derived from OpenNeuro ds007823 v1.0.1 (NEMAR on007823), CC0 1.0; see nemar-process tests/fixtures/eeg/README.md.",
   "files": [
     {
@@ -15,20 +15,20 @@
     {
       "path": "product/desc-nemarica_dataquality.json",
       "source": "tests/fixtures/ica-views/product/desc-nemarica_dataquality.json",
-      "size": 6585,
-      "sha256": "329f12d212c5ec690a8f8f5ec899f7d6dca48c646ed4e4b1882b60b409afc56e"
+      "size": 7745,
+      "sha256": "ca7bd203a5fe75ec46f8decb1a436c60ab8d241a71c69d5b19c202f03fceb4fe"
     },
     {
       "path": "product/desc-nemarica_recordings.tsv",
       "source": "tests/fixtures/ica-views/product/desc-nemarica_recordings.tsv",
-      "size": 710,
-      "sha256": "d300c348163f3ef3bf96e3a358a77e046570ffabd4c93a6731ef55952e3621d9"
+      "size": 728,
+      "sha256": "82739e0f42cc2adf7554f68812641dc299000911d02925d9a1ebd4012a49ea9f"
     },
     {
       "path": "product/desc-nemarica_signalJourney.json",
       "source": "tests/fixtures/ica-views/product/desc-nemarica_signalJourney.json",
-      "size": 26428,
-      "sha256": "4805ad20f62713371938980ccf9ceede2e60f1df078d432ead5294a9695b6111"
+      "size": 27411,
+      "sha256": "bb64f6cb7ef9fe891763f4952c48ad1acd4e29082060dce62adf66a67a7e1cac"
     },
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_asr.json",
@@ -58,7 +58,7 @@
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_components.tsv",
       "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_components.tsv",
       "size": 1448,
-      "sha256": "471642ab64dce5ab6b81d5cbab65d1ba78ad773b7582c0de1618ad7712d8ba07"
+      "sha256": "164a56083952cce2fdef1a854d0ce62284f74166fefbf5dc68d96a96cfd4b096"
     },
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_filters.json",
@@ -69,8 +69,8 @@
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_ica.json",
       "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_ica.json",
-      "size": 9511,
-      "sha256": "003099ed2ff3671bc1e39fce464581f60cde33f517951e9a5ff3a748dbdb8a51"
+      "size": 9723,
+      "sha256": "4b67ddd4eafb5857eb1b59a0e1a0190d3e724ad0f592bcd65e5e4f41c6ea573f"
     },
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_icclasses.json",
@@ -81,8 +81,8 @@
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_mixing.tsv",
       "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_mixing.tsv",
-      "size": 6991,
-      "sha256": "346942799b8897e62236dbda8d4c702fc3628c2e99a006391c0a888dd25d5293"
+      "size": 7012,
+      "sha256": "f34f98780de6b14149cde412831a5f40c257bd19076a3af7ea5c1e5e87ea9c38"
     },
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_qc.json",
@@ -99,38 +99,38 @@
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_servingunmixing.tsv",
       "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_servingunmixing.tsv",
-      "size": 7539,
-      "sha256": "be8f5dc22f6cd3384547c6994905bae27a6705e2a4ba5a40054fcf01f6c45713"
+      "size": 7552,
+      "sha256": "3e09a37450c851022cb9b7d8f513b8fc53084ca89f4354f1503932224f338cdb"
     },
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_signalJourney.json",
       "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_signalJourney.json",
-      "size": 79265,
-      "sha256": "6e65e28ee26fb1b0031fb1dfe0a1bb26c5be553b2a0404909f36716a35910e4d"
+      "size": 80117,
+      "sha256": "793647a6df82c7798705f25368fb9a93c242f68445bfe67d7683462ce9ed8740"
     },
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_spectrum.tsv",
       "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_spectrum.tsv",
-      "size": 76266,
-      "sha256": "452b2488efaafbd59af03a3baae54fb2b7f4fa2404894898dbbbc0f3529a2301"
+      "size": 76263,
+      "sha256": "98aa4016ebde00b63abadf7b01c96bd93706cf2171822c0359f9895f6ee6d85b"
     },
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_sphere.tsv",
       "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_sphere.tsv",
-      "size": 7524,
-      "sha256": "2099bf2afd191499205ec5b0f2ad325a6f5bd15fa70b0ebbb61a64a9cc53655c"
+      "size": 7544,
+      "sha256": "7ca2fed2e51f3288e4d36d0bdc37e026c99ef6b5d5106f24629b5a77f9e19458"
     },
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_unmixing.tsv",
       "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_unmixing.tsv",
-      "size": 7539,
-      "sha256": "ae1185598b20b2e7776996bda8640cb3db956aa28e1d797014217ed5912b081a"
+      "size": 7540,
+      "sha256": "c0e5237835cd51a31ec40ecfc4084cae46055a455287cf1db03c27dee9e26c06"
     },
     {
       "path": "product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_weights.tsv",
       "source": "tests/fixtures/ica-views/product/sub-CUCOV076/eeg/sub-CUCOV076_task-COVID_desc-nemarica_weights.tsv",
-      "size": 7377,
-      "sha256": "88a92b3af42e63817fc8e839273df68cdd50374aa398a90dfc9baf81b85fc303"
+      "size": 7396,
+      "sha256": "3a6fd246994f5d58ea8274b3f46a1fdfd53c4ff3adafb7826e039f35040c7583"
     }
   ]
 }

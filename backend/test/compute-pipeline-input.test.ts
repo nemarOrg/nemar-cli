@@ -642,7 +642,7 @@ describe("the queue and the dry run read the input", () => {
         .prepare(
           `INSERT INTO compute_pipeline_stamps
              (dataset_id, version, recipe, recipe_version, engine, input, attempt, state, refusal_code, updated_at)
-           VALUES (?1, 'v1.0.0', 'nemar-floor', '1.0.0-b2', 'eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8', 'zarr', ?2, 'failed',
+           VALUES (?1, 'v1.0.0', 'nemar-floor', '1.0.0-b2', 'eegprep@0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3', 'zarr', ?2, 'failed',
                    'outputs_missing', datetime('now', '-30 days'))`,
         )
         .bind(id, attempt)
@@ -770,7 +770,7 @@ describe("a succeeded stamp records what the run read", () => {
       state: "succeeded",
       input: "zarr",
       recipe_version: "1.0.0-b2",
-      engine: "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
+      engine: "eegprep@0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3",
       reader: READER,
       input_engine: "0.4.2",
       input_digest: DIGEST,

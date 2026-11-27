@@ -27,6 +27,7 @@
         },
         "ica_engine": "pamica-torch",
         "numpy": "2.5.4",
+        "onnxruntime": "1.32.0",
         "package": "eegprep",
         "pamica": "0.4.0",
         "python": "3.12.13",
@@ -40,7 +41,7 @@
         ],
         "threads": 1,
         "torch": "2.12.1",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "fallbacks": [],
       "gpu_contention_mib": 256,
@@ -56,12 +57,12 @@
         "tag": null
       },
       "plan_hashes": {
-        "sha256:7af7faa04477a7380170abc9f9b76eb7d41b30b5b46fd5203adab013f8ffe271": 1
+        "sha256:484a4e14ee568965f8ea642d2a8cdd42331b65bbf2c5db3448ce1d18cdabc3e1": 1
       },
       "process": {
         "build": "source",
         "commit": null,
-        "version": "0.1.2-dev2"
+        "version": "0.1.2-dev5"
       },
       "profile": "dataset",
       "recipe": {
@@ -80,7 +81,7 @@
           19,
           282.0,
           200.0,
-          "sha256:7af7faa04477a7380170abc9f9b76eb7d41b30b5b46fd5203adab013f8ffe271",
+          "sha256:484a4e14ee568965f8ea642d2a8cdd42331b65bbf2c5db3448ce1d18cdabc3e1",
           "pamica-torch",
           18,
           5,
@@ -95,8 +96,9 @@
           40.7872,
           7.48,
           44.4444,
+          0.0222,
           "line_noise_50:below_threshold,line_noise_60:below_threshold",
-          "aec5068d2f14deb49892488f6605245bf2286fdd40d83699ab960c547056d259"
+          "3146baf69b64269cf856c906072f8dc703f445993e16d32663819b39d4a4ec8e"
         ]
       ],
       "recordings_table": {
@@ -126,26 +128,27 @@
           "pct_good_samples",
           "line_db_before",
           "pct_brain_components",
+          "mir_nats",
           "skipped_steps",
           "record_content_sha256"
         ],
         "location": "desc-nemarica_recordings.tsv",
         "rows_in_record": 1,
         "rows_truncated": 0,
-        "sha256": "d300c348163f3ef3bf96e3a358a77e046570ffabd4c93a6731ef55952e3621d9",
-        "size": 710
+        "sha256": "82739e0f42cc2adf7554f68812641dc299000911d02925d9a1ebd4012a49ea9f",
+        "size": 728
       },
       "report": {
         "discovered_count": 1,
-        "engine_version": "nemar-ica@1.0.0-b2/eegprep==0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8/sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "engine_version": "nemar-ica@1.0.0-b2/eegprep==0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3/sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "failed_count": 0,
-        "finished_utc": "2026-11-25T19:41:00Z",
+        "finished_utc": "2026-11-27T04:37:38Z",
         "pending_count": 0,
         "process": "nemar-ica",
         "records": [],
         "records_truncated": 0,
         "source_commit": "5555555555555555555555555555555555555555",
-        "started_utc": "2026-11-25T19:40:56Z",
+        "started_utc": "2026-11-27T04:37:34Z",
         "succeeded_count": 1
       },
       "run_id": "ica-views-e2e",
@@ -156,7 +159,7 @@
   },
   "pipelineInfo": {
     "description": "NEMAR decomposition, dataset level.",
-    "executionDate": "2026-11-25T19:41:00Z",
+    "executionDate": "2026-11-27T04:37:38Z",
     "name": "nemar-ica",
     "pipelineType": "ica",
     "version": "1.0.0-b2"
@@ -198,7 +201,7 @@
         "functionCall": "eegprep.pop_load_frombids",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "load"
     },
@@ -236,7 +239,7 @@
         "functionCall": "eegprep.pop_select",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "signal_channels"
     },
@@ -272,7 +275,7 @@
         "functionCall": "eegprep.clean_flatlines",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "flatline"
     },
@@ -316,7 +319,7 @@
         "functionCall": "eegprep.pop_eegfiltnew",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "drift"
     },
@@ -374,7 +377,7 @@
         "functionCall": "eegprep.functions.sigprocfunc.spectopo.compute_spectra",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "line_noise_measure"
     },
@@ -420,7 +423,7 @@
         "functionCall": "eegprep.pop_eegfiltnew",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "line_noise_50"
     },
@@ -466,7 +469,7 @@
         "functionCall": "eegprep.pop_eegfiltnew",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "line_noise_60"
     },
@@ -513,7 +516,7 @@
         "functionCall": "eegprep.clean_channels",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "bad_channels"
     },
@@ -582,7 +585,7 @@
         "functionCall": "eegprep.clean_windows",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "bad_windows"
     },
@@ -668,7 +671,7 @@
         "functionCall": "eegprep.clean_asr",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "asr"
     },
@@ -703,7 +706,7 @@
         "functionCall": "eegprep.pop_reref",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "reref"
     },
@@ -738,7 +741,7 @@
         "functionCall": "eegprep.pop_runica",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "ica"
     },
@@ -773,7 +776,7 @@
         "functionCall": "eegprep.pop_iclabel",
         "name": "eegprep",
         "url": "https://github.com/sccn/eegprep",
-        "version": "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8"
+        "version": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3"
       },
       "stepId": "iclabel"
     }
@@ -914,6 +917,40 @@
       "min": 7.48,
       "n": 1,
       "unit": "dB"
+    },
+    "nemar-quality:mutualInformationReduction": {
+      "description": "Mutual information reduction of the decomposition: the mutual information its unmixing removes from the sphered data, log|det W| + sum h(x_i) - sum h(y_i), each entropy over 256 fixed bins (eegprep's eeg_mir). Not comparable with Delorme et al. 2012 or the legacy NEMAR report, whose MIR includes the reduction sphering achieves.",
+      "histogram": {
+        "counts": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "edges": [
+          0.0,
+          0.25,
+          0.5,
+          1.0,
+          2.0,
+          4.0,
+          8.0,
+          16.0,
+          32.0
+        ],
+        "missing": 0,
+        "overflow": 0,
+        "underflow": 0
+      },
+      "max": 0.0222,
+      "median": 0.0222,
+      "min": 0.0222,
+      "n": 1,
+      "unit": "nat"
     },
     "nemar-quality:percentBrainComponents": {
       "description": "Share of components whose most probable ICLabel class is Brain.",

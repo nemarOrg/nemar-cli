@@ -3,8 +3,8 @@
     "source": "https://github.com/nemarOrg/neuroschema",
     "generated_by": "shared/contract/neuroschema/build-vendor.mjs",
     "note": "Do not hand-edit; regenerate from the neuroschema repo.",
-    "neuroschema_version": "0.6.0",
-    "source_commit": "e09ed40791b68c35d9698f3b663bfc4a998f3986"
+    "neuroschema_version": "0.6.1",
+    "source_commit": "86f28d186ade3bad5250e112812f79a5133f9f36"
   },
   "root": "nsc:/core/dataset.schema.json",
   "roots": {
