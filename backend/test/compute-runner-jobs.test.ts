@@ -376,7 +376,7 @@ describe("the recipe registry", () => {
     expect(r).toMatchObject({
       name: "nemar-floor",
       version: "1.0.0-b2",
-      engine: "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
+      engine: "eegprep@0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3",
       partition: "shared",
       nodes: 1,
       cores: 4,
@@ -855,7 +855,7 @@ describe("a runner job through the admin route", () => {
       state: "dispatched",
       job_id: job.id,
       recipe: "nemar-floor",
-      engine: "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
+      engine: "eegprep@0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3",
       input: "zarr",
     });
     expect(fx.tapis.log).toEqual([]);

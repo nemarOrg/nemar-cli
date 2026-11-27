@@ -631,7 +631,7 @@ describe("a finished Zarr job becomes a stored derivative", () => {
         version: "v1.0.0",
         recipe: "nemar-floor",
         recipe_version: "1.0.0-b2",
-        engine: "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
+        engine: "eegprep@0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3",
         input: "zarr",
         profile: "serving",
         input_digest: row.input_digest,

@@ -4,7 +4,7 @@
     "generated_by": "shared/contract/neuroschema/build-vendor.mjs",
     "note": "Do not hand-edit; regenerate from the neuroschema repo.",
     "neuroschema_version": "0.6.0",
-    "source_commit": "e09ed40791b68c35d9698f3b663bfc4a998f3986"
+    "source_commit": "1cf0d2addc287fdf16a0218d46f32d10f8e4f4ef"
   },
   "root": "nsc:/core/dataset.schema.json",
   "roots": {

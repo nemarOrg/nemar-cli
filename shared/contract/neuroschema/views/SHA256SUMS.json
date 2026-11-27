@@ -4,7 +4,7 @@
   "generated_by": "shared/contract/neuroschema/build-vendor.mjs",
   "note": "Do not hand-edit; regenerate from the neuroschema repo.",
   "neuroschema_version": "0.6.0",
-  "source_commit": "e09ed40791b68c35d9698f3b663bfc4a998f3986",
+  "source_commit": "1cf0d2addc287fdf16a0218d46f32d10f8e4f4ef",
   "files": [
     {
       "path": "examples/dataquality-record-nemar-ica.json",
@@ -213,8 +213,8 @@
     {
       "path": "vectors/sensor-field.v1.json",
       "source": "views/vectors/sensor-field.v1.json",
-      "size": 2338544,
-      "sha256": "4b17295f7671b672cc0b7501aba22449568f47e0d680d2b4292b6d9ad6a73daf"
+      "size": 2338575,
+      "sha256": "9ebe1663c957172871a2491a09bace2d9908434231989c1d362ef49222255c6c"
     },
     {
       "path": "vectors/sensor-labels.v1.json",
@@ -226,7 +226,7 @@
       "path": "vectors/sensor-layout.v1.json",
       "source": "views/vectors/sensor-layout.v1.json",
       "size": 273484,
-      "sha256": "93afc886806cfdbdac51ec9fd989d90ac69944d57f1eb275ec3e8b91e5d804e0"
+      "sha256": "8dc97434e60b9ba3b177bb06d8a2af88a0fbc47e4f739e5531480d26040eed79"
     },
     {
       "path": "vectors/view-digest.v1.json",

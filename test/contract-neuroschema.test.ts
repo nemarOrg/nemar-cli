@@ -479,7 +479,9 @@ describe("neuroschema bundle: record root and processing extensions", () => {
 describe("neuroschema 0.6.0: views and the vendored view files", () => {
   const VENDOR_DIR = join(import.meta.dir, "../shared/contract/neuroschema");
   const VIEWS_DIR = join(VENDOR_DIR, "views");
-  const RELEASE_COMMIT = "e09ed40791b68c35d9698f3b663bfc4a998f3986";
+  // The 0.6.0 release (tag v0.6.0, e09ed407) plus its sensor vectors regenerated at the recipes' eegprep
+  // commit (nemarOrg/neuroschema#40, #2411). Still stamped 0.6.0: it moves to the 0.6.1 release commit.
+  const RELEASE_COMMIT = "1cf0d2addc287fdf16a0218d46f32d10f8e4f4ef";
   const bundle = JSON.parse(readFileSync(join(VENDOR_DIR, "dataset.bundle.json"), "utf8")) as {
     _provenance: { neuroschema_version: string; source_commit: string };
     schemas: { $id: string }[];
@@ -494,7 +496,7 @@ describe("neuroschema 0.6.0: views and the vendored view files", () => {
     JSON.parse(readFileSync(join(import.meta.dir, "fixtures/neuroschema", name), "utf8"));
   const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-  test("the bundle and the view files are stamped 0.6.0 at the release commit (tag v0.6.0)", () => {
+  test("the bundle and the view files are stamped 0.6.0 at the vendored commit", () => {
     expect(NEUROSCHEMA_VERSION).toBe("0.6.0");
     expect(bundle._provenance.neuroschema_version).toBe("0.6.0");
     expect(bundle._provenance.source_commit).toBe(RELEASE_COMMIT);
