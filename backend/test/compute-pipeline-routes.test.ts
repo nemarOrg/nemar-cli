@@ -38,7 +38,7 @@ let fx: LifecycleFixture;
 const handle = makeComputeApp();
 
 beforeAll(async () => {
-  fx = await startLifecycleFixture();
+  fx = await startLifecycleFixture({ githubTags: true });
 }, 120_000);
 
 beforeEach(async () => {
@@ -227,13 +227,13 @@ describe("a dry run", () => {
       expect([res.status, res.body.code]).toEqual([200, undefined]);
       expect(res.body.would_dispatch).toEqual([{ dataset_id: "nm000104", version: "v1.0.0" }]);
     }
-    // A live run stages the serving index first: this Worker has no GitHub credentials, a fault, so the run is
-    // deferred (ADR 0141), never refused as a placeholder.
+    // A live run reads its tag's commit (ADR 0143), then stages the serving index, which this production-shaped
+    // Worker cannot read: a fault, so the run is deferred (ADR 0141), never refused as a placeholder.
     const live = await run("admin", { recipe: "nemar-ica", dataset: "nm000104" }, env);
     expect([live.status, live.body.code, live.body.reason]).toEqual([
       503,
       "serving_index_deferred",
-      "no_github_credentials",
+      "index_unreadable",
     ]);
   });
 

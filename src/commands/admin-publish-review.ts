@@ -117,8 +117,9 @@ Description:
   or efforts. The earlier review is kept in the history, marked superseded, and the
   new one is the review in force; approval reads the new one. It is one more model
   call against the platform's allowance. It is refused while the automatic denial
-  is confirming the review or has acted on it, and it takes one dataset id, never
-  --all. On any other review it starts as usual.
+  is confirming the review, has denied the request or holds it under the daily cap
+  (a shadow-mode would-deny may be reviewed again), and it takes one dataset id,
+  never --all. On any other review it starts as usual.
 
   The review needs a screen result to read, so a request whose identifier screen
   has not reported is not startable until it has. The Worker also refuses a

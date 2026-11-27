@@ -66,7 +66,7 @@ import { logged } from "./helpers/logs";
 let fx: LifecycleFixture;
 
 beforeAll(async () => {
-  fx = await startLifecycleFixture({ withD1: true });
+  fx = await startLifecycleFixture({ withD1: true, githubTags: true });
 }, 120_000);
 
 afterAll(async () => {
@@ -547,7 +547,7 @@ describe("what a run refuses, before it writes anything", () => {
     await nothingWritten(env);
   });
 
-  test("nemar-ica is no longer a placeholder: no path refuses it as one, and a run without GitHub credentials is deferred, holding nothing (MUTATION: set placeholder back to true)", async () => {
+  test("nemar-ica is no longer a placeholder: no path refuses it as one, and a run whose serving index cannot be read is deferred, holding nothing (MUTATION: set placeholder back to true)", async () => {
     const { env } = await world();
     await fundPipelines(env, 100_000_000, true);
     expect(await pipelineDryRun(env, { recipe: "nemar-ica", datasetId: "nm000104" })).toMatchObject(
@@ -556,11 +556,12 @@ describe("what a run refuses, before it writes anything", () => {
         would_dispatch: [{ dataset_id: "nm000104", version: "v1.0.0" }],
       },
     );
-    // A live run stages the serving index first; this Worker has no GitHub credentials, a fault (ADR 0141).
+    // A live run reads its tag's commit (ADR 0143, the stand-in answers it), then stages the serving index, which
+    // this production-shaped Worker cannot read: a fault, so the run is deferred (ADR 0141).
     expect(await run(env, { recipe: "nemar-ica" })).toMatchObject({
       ok: false,
       code: "serving_index_deferred",
-      reason: "no_github_credentials",
+      reason: "index_unreadable",
     });
     // The queue's one candidate is deferred the same way; a deferral is not a word that stops the queue.
     const queue = await dispatchEligible(env, { recipe: "nemar-ica", limit: 3, actor: ADMIN });
@@ -572,7 +573,7 @@ describe("what a run refuses, before it writes anything", () => {
         code: "serving_index_deferred",
         datasetId: "nm000104",
         version: "v1.0.0",
-        reason: "no_github_credentials",
+        reason: "index_unreadable",
       });
     }
     // A deferral is a refused stamp and nothing else: no job, no hold, no submit.

@@ -627,10 +627,25 @@ export function recipeServingIndexArguments(input: {
   if (typeof input.path !== "string" || !input.path.startsWith("/")) {
     throw new RangeError("the serving index path is absolute");
   }
-  if (!isSourceCommit(input.sourceCommit)) {
+  return [
+    RECIPE_SERVING_INDEX_FLAG,
+    input.path,
+    ...recipeSourceCommitArguments(input.sourceCommit),
+  ];
+}
+
+/**
+ * The argument every Worker-dispatched run of the archive is handed when no serving index was staged for it
+ * (ADR 0143): `--source-commit` and the commit of the version's tag, which the recipe records as
+ * `extensions.nemar.dataset.source_commit`, the `git:` input digest a BIDS derivative is keyed by (ADR 0123
+ * decision 3). It follows {@link recipeArguments}, as {@link recipeServingIndexArguments} does, which ends with
+ * the same two values. A commit that is not 40 lowercase hex digits is a programming error, never passed on.
+ */
+export function recipeSourceCommitArguments(sourceCommit: string): string[] {
+  if (!isSourceCommit(sourceCommit)) {
     throw new RangeError("a source commit is 40 lowercase hex digits");
   }
-  return [RECIPE_SERVING_INDEX_FLAG, input.path, RECIPE_SOURCE_COMMIT_FLAG, input.sourceCommit];
+  return [RECIPE_SOURCE_COMMIT_FLAG, sourceCommit];
 }
 
 /**
@@ -822,8 +837,11 @@ function zarrCoverageRefusal(block: Record<string, unknown> | null): StampRefusa
  *    `sha256:` and 64 hexadecimal digits), the digest only when the record shows it covers every store of the
  *    run ({@link zarrCoverageRefusal});
  *  - `bids`: the input digest `git:` and `extensions.nemar.dataset.source_commit`, when that is a full commit
- *    (40 lowercase hexadecimal digits); no reader and no Zarr engine. A Worker-dispatched BIDS run is not given
- *    a source commit, so its record carries none and its digest is null: an expected null, not logged as absent.
+ *    (40 lowercase hexadecimal digits); no reader and no Zarr engine. The record states the commit the run was
+ *    handed (`--source-commit`), and every Worker-dispatched BIDS run is handed the commit of its version's tag,
+ *    or is not dispatched at all (ADR 0143). A record that states none (a job from before, or a recipe that did
+ *    not write it) has a null digest, not logged as absent, and its derivative is never keyed (`no_input_digest`);
+ *    the derivative store also checks a stated digest against the commit the specification handed.
  * A value that does not fit is left null and named in `refused` with its reason; a Zarr value the record does
  * not state is null and named in `absent`. Nothing the record says is stored as it came: the record is the
  * job's own statement and the columns hold fixed shapes only.
@@ -870,7 +888,7 @@ export function stampInputFields(value: unknown, input: RecipeInput): StampInput
       }
     }
   } else {
-    // The digest of a BIDS input is the commit the files were read at; a record that names none is the usual case.
+    // The digest of a BIDS input is the commit the files were read at; a run handed none states none (see above).
     const commit = object(nemar?.dataset)?.source_commit;
     if (commit !== undefined && commit !== null) {
       if (typeof commit === "string" && SOURCE_COMMIT_RE.test(commit)) {

@@ -695,7 +695,7 @@ const handle = makeComputeApp();
 
 describe("the routes", () => {
   beforeAll(async () => {
-    fx = await startLifecycleFixture({ withD1: true });
+    fx = await startLifecycleFixture({ withD1: true, githubTags: true });
   }, 120_000);
 
   beforeEach(async () => {

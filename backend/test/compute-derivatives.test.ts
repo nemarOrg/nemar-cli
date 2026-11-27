@@ -18,7 +18,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Miniflare } from "miniflare";
-import { findRecipe, recipeRequiredOutputs } from "../../shared/compute-recipes";
+import {
+  RECIPE_SOURCE_COMMIT_FLAG,
+  findRecipe,
+  recipeArguments,
+  recipeRequiredOutputs,
+} from "../../shared/compute-recipes";
 import {
   SERVING_INDEX_CONTAINER_PATH,
   resultsLauncherKey,
@@ -46,7 +51,13 @@ import {
   runComputeDerivativesCron,
   syncDerivatives,
 } from "../src/services/compute-derivatives";
-import { dispatchPipelineJob, syncPipelineStamps } from "../src/services/compute-pipeline";
+import {
+  dispatchPipelineJob,
+  recipeJobSpec,
+  servingIndexForRun,
+  sourceCommitForRun,
+  syncPipelineStamps,
+} from "../src/services/compute-pipeline";
 import { recordKey, sha256Hex } from "../src/services/compute-records";
 import {
   ComputeS3Error,
@@ -64,7 +75,12 @@ import {
   seedComputeUsers,
 } from "./helpers/compute-app";
 import { HARNESS_BUCKETS } from "./helpers/compute-harness";
-import { type LifecycleFixture, startLifecycleFixture } from "./helpers/compute-lifecycle-fixture";
+import {
+  type LifecycleFixture,
+  RUNTIME_IMAGE,
+  RUNTIME_IMAGE_DIGEST,
+  startLifecycleFixture,
+} from "./helpers/compute-lifecycle-fixture";
 import {
   fundPipelines,
   recipeRecord,
@@ -430,16 +446,26 @@ async function zarrJob(o: ZarrJobOptions = {}): Promise<Made> {
   return { id, jobId: r.jobId, stampId: r.stampId, version, files };
 }
 
-/** A BIDS run (Tapis) of `nemar-floor`, finished the same way. */
-async function bidsJob(over: { sourceCommit?: string; stampDigest?: string } = {}): Promise<Made> {
+/**
+ * A BIDS run (Tapis) of `nemar-floor`, finished the same way. `sourceCommit` is the commit the record states: by
+ * default the one the dispatcher handed it (`--source-commit`, the tag's, `COMMIT`; ADR 0143), as nemar-process
+ * writes it; null is a record that states none.
+ */
+async function bidsJob(
+  over: { id?: string; sourceCommit?: string | null; stampDigest?: string } = {},
+): Promise<Made> {
   const env = envOf();
   await seedPipelinesAccount(env, { reuse: true });
   await fundPipelines(env);
-  const id = await dataset();
+  const id = over.id ?? (await dataset());
   const r = await dispatch(env, id);
   if (!r.ok) throw new Error(`not dispatched: ${r.code}`);
   const record = recipeRecord({
-    dataset: { id, version: r.version, source_commit: over.sourceCommit ?? SOURCE },
+    dataset: {
+      id,
+      version: r.version,
+      source_commit: over.sourceCommit === undefined ? COMMIT : over.sourceCommit,
+    },
   });
   const files = await finishJob(env, r.jobId, id, record, tableOf(), 1);
   const sync = await syncPipelineStamps(env);
@@ -450,6 +476,35 @@ async function bidsJob(over: { sourceCommit?: string; stampDigest?: string } = {
       .run();
   }
   return { id, jobId: r.jobId, stampId: r.stampId, version: r.version, files };
+}
+
+/** The arguments with every `--source-commit` and its value taken out. */
+const withoutSourceCommit = (args: readonly string[]): string[] => {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--source-commit") i++;
+    else out.push(args[i] as string);
+  }
+  return out;
+};
+
+/**
+ * Rewrite a job's RECORDED specification (what the dispatcher wrote before the job existed) and the digest the
+ * job row keeps of it, as a case needs a specification the dispatcher would have written otherwise.
+ */
+async function rewriteSpec(
+  env: Bindings,
+  jobId: string,
+  change: (spec: { args: string[]; serving_index?: unknown }) => void,
+): Promise<void> {
+  const key = recordKey(jobId, "spec.json");
+  const spec = JSON.parse((await (await fx.harness.records.get(key))?.text()) as string);
+  change(spec);
+  const bytes = enc(JSON.stringify(spec));
+  await fx.harness.records.put(key, bytes);
+  await env.DB.prepare("UPDATE compute_jobs SET spec_digest = ?1 WHERE id = ?2")
+    .bind(await sha256Hex(bytes), jobId)
+    .run();
 }
 
 // --- Reads -----------------------------------------------------------------------------------------------------
@@ -1235,6 +1290,32 @@ describe("every keying check of the ADR, each failed alone", () => {
   test("a spec with --recording is a subset run (recording_subset)", () =>
     expectUnkeyable(() => zarrJob({ recording: true }), "recording_subset"));
 
+  /** A BIDS run whose recorded specification hands `handed` as --source-commit and whose record states `stated`. */
+  async function bidsHanded(handed: string[], stated: string): Promise<Made> {
+    const made = await bidsJob({ sourceCommit: stated });
+    await rewriteSpec(envOf(), made.jobId, (spec) => {
+      spec.args = [
+        ...withoutSourceCommit(spec.args),
+        ...handed.flatMap((c) => ["--source-commit", c]),
+      ];
+    });
+    return made;
+  }
+
+  test("a BIDS record that states another commit than the dispatcher handed is digest_mismatch (MUTATION: trust the record's git: digest)", () =>
+    expectUnkeyable(() => bidsHanded([COMMIT], SOURCE), "digest_mismatch"));
+
+  test("a BIDS specification that hands two commits is digest_mismatch, even when the record states one of them", () =>
+    expectUnkeyable(() => bidsHanded([SOURCE, COMMIT], SOURCE), "digest_mismatch"));
+
+  test("a BIDS record that states the commit it was handed is keyed by it", async () => {
+    const env = envOf();
+    const made = await bidsHanded([COMMIT], COMMIT);
+    expect(await syncAll(env)).toMatchObject({ created: 1, derivative_unkeyable: {}, errored: 0 });
+    expect((await one(env)).input_digest).toBe(`git:${COMMIT}`);
+    expect((await one(env)).stamp_id).toBe(made.stampId);
+  });
+
   test("a recording that ended out_of_memory is transient, and so are internal_error, disk_error and time_budget (transient_failure)", async () => {
     for (const code of ["out_of_memory", "internal_error", "disk_error", "time_budget"]) {
       await fx.reset();
@@ -1325,7 +1406,14 @@ describe("every keying check of the ADR, each failed alone", () => {
 
   test("a bids stamp whose input digest is a sha256: one is key_invalid, field input_digest", () =>
     expectUnkeyable(
-      () => bidsJob({ stampDigest: `sha256:${"4".repeat(64)}` }),
+      async () => {
+        const made = await bidsJob({ stampDigest: `sha256:${"4".repeat(64)}` });
+        // A specification from before the dispatcher handed a commit: only the key's own validator can refuse it.
+        await rewriteSpec(envOf(), made.jobId, (spec) => {
+          spec.args = withoutSourceCommit(spec.args);
+        });
+        return made;
+      },
       "key_invalid",
       "input_digest",
     ));
@@ -1336,7 +1424,8 @@ describe("every keying check of the ADR, each failed alone", () => {
     const result = await syncAll(env);
     expect(result).toMatchObject({ created: 1, stored: 1, errored: 0 });
     const row = await one(env);
-    expect(row.input_digest).toBe(`git:${SOURCE}`);
+    // The commit the dispatcher handed the run, the tag's (ADR 0143), which its record states.
+    expect(row.input_digest).toBe(`git:${COMMIT}`);
     expect(row.key).toBe(await keyOfStamp(env, made.stampId));
     const description = JSON.parse(
       (await (await derivatives.get(`d/${row.key}/derivative.json`))?.text()) as string,
@@ -2149,6 +2238,62 @@ describe("what an administrator reads and sends", () => {
   });
 });
 
+describe("a derivative the store decided not to keep reads the same in the grid, the coverage and the run", () => {
+  /** What the three read-only views say of one dataset's floor run, with no stamp sync before them. */
+  async function views(env: Bindings, id: string, stampId: number) {
+    const path = `/compute/pipeline/grid?recipe=nemar-floor&dataset=${id}`;
+    const grid = await call("GET", path, "admin", undefined, env);
+    const coverage = await call("GET", "/compute/pipeline/coverage", "admin", undefined, env);
+    const run = await call("GET", `/compute/pipeline/runs/${stampId}`, "admin", undefined, env);
+    expect([grid.status, coverage.status, run.status]).toEqual([200, 200, 200]);
+    const row = (grid.body.rows as Record<string, unknown>[])[0] as {
+      cells: Record<string, { mark: string; counts: unknown; reconciled: boolean }>;
+    };
+    const card = (coverage.body.recipes as Record<string, unknown>[]).find(
+      (r) => r.recipe === "nemar-floor",
+    ) as { covered: number; complete: number };
+    const stored = (run.body.checkpoints as Record<string, unknown>[]).find(
+      (c) => c.checkpoint === "stored",
+    ) as { mark: string; counts: unknown; reconciled: boolean };
+    const cell = row.cells.stored as { mark: string; counts: unknown; reconciled: boolean };
+    return { cell, stored, covered: card.covered, complete: card.complete };
+  }
+
+  test("a run skipped for good (digest_mismatch) reads stored skipped in the grid and the run, and is not complete, right after the store's pass (MUTATION: leave the stored row to the next stamp sync; count complete from the last checkpoint alone)", async () => {
+    const env = envOf();
+    // Every recording passed, but the record states another commit than the dispatcher handed the run: the store
+    // can never key it, whatever later passes find.
+    const made = await bidsJob({ sourceCommit: SOURCE });
+    const before = await views(env, made.id, made.stampId);
+    expect([before.cell.mark, before.stored.mark]).toEqual(["pending", "pending"]);
+    // Undecided, the run is complete by its last checkpoint: the store may still keep it.
+    expect([before.covered, before.complete]).toEqual([1, 1]);
+
+    expect(await syncAll(env)).toMatchObject({
+      derivative_unkeyable: { digest_mismatch: 1 },
+      created: 0,
+      errored: 0,
+    });
+    // No stamp sync between the store's pass and the reads: every view reads the decision.
+    const after = await views(env, made.id, made.stampId);
+    const skipped = { passed: 0, failed: 0, skipped: 2, total: 2 };
+    expect(after.cell).toMatchObject({ mark: "skipped", counts: skipped, reconciled: true });
+    expect(after.stored).toMatchObject({ mark: "skipped", counts: skipped, reconciled: true });
+    expect([after.covered, after.complete]).toEqual([1, 0]);
+  });
+
+  test("a run whose derivative is stored stays complete, and its stored cell reads passed at once", async () => {
+    const env = envOf();
+    const made = await bidsJob();
+    expect(await syncAll(env)).toMatchObject({ created: 1, stored: 1, errored: 0 });
+    const after = await views(env, made.id, made.stampId);
+    const kept = { passed: 2, failed: 0, skipped: 0, total: 2 };
+    expect(after.cell).toMatchObject({ mark: "passed", counts: kept, reconciled: true });
+    expect(after.stored).toMatchObject({ mark: "passed", counts: kept, reconciled: true });
+    expect([after.covered, after.complete]).toEqual([1, 1]);
+  });
+});
+
 describe("an anonymous dataset has no derivative", () => {
   test("an anonymous dataset is never keyed, so no description can carry a version identifier that does not resolve (MUTATION: drop the eligibility term of the scan)", async () => {
     const env = envOf();
@@ -2285,9 +2430,12 @@ async function icaBidsJob(
     servingIndex?: "flag" | "equals";
     /** What the dispatcher recorded of the serving index (ADR 0141), and the arguments it added. */
     recorded?: { serving_index: unknown; args: string[] };
+    /** The dataset, when the case made it; and the commit the record states (see `bidsJob`). */
+    id?: string;
+    sourceCommit?: string | null;
   } = {},
 ): Promise<Made> {
-  const made = await bidsJob();
+  const made = await bidsJob({ id: o.id, sourceCommit: o.sourceCommit });
   const env = envOf();
   const floor = findRecipe("nemar-floor") as NonNullable<ReturnType<typeof findRecipe>>;
   const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
@@ -2321,25 +2469,19 @@ async function icaBidsJob(
   }
   await fx.harness.results.put(manifestKey, enc(JSON.stringify(manifest)));
   if (o.servingIndex !== undefined || o.recorded !== undefined) {
-    const key = recordKey(made.jobId, "spec.json");
-    const spec = JSON.parse((await (await fx.harness.records.get(key))?.text()) as string);
-    if (o.recorded !== undefined) {
-      spec.serving_index = o.recorded.serving_index;
-      spec.args = [...spec.args, ...o.recorded.args];
-    } else {
-      spec.args =
-        o.servingIndex === "flag"
-          ? [...spec.args, "--serving-index", "/data/serving/index.json"]
-          : [...spec.args, "--serving-index=/data/serving/index.json"];
-    }
-    const bytes = enc(JSON.stringify(spec));
-    await fx.harness.records.put(key, bytes);
-    await sql(
-      env,
-      "UPDATE compute_jobs SET spec_digest = ?1 WHERE id = ?2",
-      await sha256Hex(bytes),
-      made.jobId,
-    );
+    await rewriteSpec(env, made.jobId, (spec) => {
+      if (o.recorded !== undefined) {
+        // What the dispatcher would have recorded for nemar-ica: the archive's own arguments, then exactly the
+        // ones the case names (a commit the floor's dispatch handed is replaced, never doubled).
+        spec.serving_index = o.recorded.serving_index;
+        spec.args = [...withoutSourceCommit(spec.args), ...o.recorded.args];
+      } else {
+        spec.args =
+          o.servingIndex === "flag"
+            ? [...spec.args, "--serving-index", "/data/serving/index.json"]
+            : [...spec.args, "--serving-index=/data/serving/index.json"];
+      }
+    });
   }
   return made;
 }
@@ -2425,8 +2567,10 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
 
   test("a run the dispatcher staged an index for is keyed by the recorded digest (MUTATION: key it none; read the digest from anything but the specification)", async () => {
     const env = envOf();
+    // The record states the commit the arguments hand the run, as nemar-process writes it.
     const made = await icaBidsJob({
       recorded: { serving_index: { sha256: STAGED_HEX, size: 812 }, args: STAGED_ARGS },
+      sourceCommit: COMMIT40,
     });
     expect(await syncAll(env)).toMatchObject({ created: 1, stored: 1, errored: 0 });
     const row = (await one(env)) as Der & { serving_index: string | null };
@@ -2448,6 +2592,73 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
     };
     expect(row.key).toBe(await derivativeKey({ ...fields, serving_index: `sha256:${STAGED_HEX}` }));
     expect(row.key).not.toBe(await derivativeKey({ ...fields, serving_index: "none" }));
+  });
+
+  test("a run the dispatcher staged no index for is handed the tag's commit, so its stamp keys none and is stored (on007823 in the local run of 2026-11-27; MUTATION: hand --source-commit only with a staged index)", async () => {
+    const env = envOf();
+    const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
+    const id = await dataset();
+    // The serving index was built from another commit than the tag's: the dispatcher stages none.
+    github.index(id, { source_commit: SOURCE, store_count: 0, stores: [] });
+    // The dispatch's order (ADR 0143): the tag's commit first, then the index built from it.
+    const commit = await sourceCommitForRun(env, ica, "bids", id, "v1.0.0");
+    if (commit.kind !== "commit") throw new Error(`no commit: ${commit.kind}`);
+    const decided = await servingIndexForRun(env, ica, "bids", id, "v1.0.0", commit.commit);
+    if (decided.kind !== "run") throw new Error(`not run: ${decided.kind}`);
+    expect(decided.servingIndex).toMatchObject({ staged: false, reason: "source_commit_differs" });
+    const image = { ref: RUNTIME_IMAGE, digest: RUNTIME_IMAGE_DIGEST };
+    const spec = recipeJobSpec(ica, {
+      datasetId: id,
+      tag: "v1.0.0",
+      input: "bids",
+      image,
+      env: { ENVIRONMENT: "development" },
+      sourceCommit: commit.commit,
+      servingIndex: decided.servingIndex,
+    });
+    const base = recipeArguments({ datasetId: id, tag: "v1.0.0", imageDigest: image.digest });
+    expect(spec.args.slice(0, base.length)).toEqual(base);
+    const added = spec.args.slice(base.length);
+    // The recipe records the commit it is handed (nemar-process `identity.source_commit`), and none without one.
+    const at = added.indexOf(RECIPE_SOURCE_COMMIT_FLAG);
+    const handed = at < 0 ? null : (added[at + 1] ?? null);
+    expect(handed).toBe(COMMIT);
+    const made = await icaBidsJob({
+      id,
+      sourceCommit: handed,
+      recorded: { serving_index: spec.serving_index, args: added },
+    });
+    expect(await syncAll(env)).toMatchObject({
+      created: 1,
+      stored: 1,
+      derivative_unkeyable: {},
+      errored: 0,
+    });
+    const row = (await one(env)) as Der & { serving_index: string | null };
+    expect([row.serving_index, row.input_digest, row.state]).toEqual([
+      "none",
+      `git:${COMMIT}`,
+      "stored",
+    ]);
+    const stamp = await env.DB.prepare(
+      "SELECT version, recipe_version, engine FROM compute_pipeline_stamps WHERE id = ?1",
+    )
+      .bind(made.stampId)
+      .first<Record<string, string>>();
+    expect(row.key).toBe(
+      await derivativeKey({
+        dataset: id,
+        version: stamp?.version as string,
+        recipe: "nemar-ica",
+        recipe_version: stamp?.recipe_version as string,
+        engine: stamp?.engine as string,
+        input: "bids",
+        profile: "archive",
+        input_digest: `git:${COMMIT}`,
+        serving_index: "none",
+      }),
+    );
+    expect(await skipWord(env, made.stampId)).toBeUndefined();
   });
 
   test("a run recorded with no index staged is keyed none, and the word does not reach the key", async () => {

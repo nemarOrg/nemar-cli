@@ -777,11 +777,12 @@ describe("the bounds are literal", () => {
 // --- (d) Where the check does not run ------------------------------------------------------------------------------------
 
 describe("the check runs for a Zarr recipe on the newest version of a ready copy and nowhere else", () => {
-  test("a BIDS recipe makes no GitHub call and no index read, and its argument vector is the one it was (MUTATION: check every recipe)", async () => {
+  test("a BIDS recipe asks GitHub only for its tag's commit (ADR 0143), reads no index and asks no compare, and its vector is the archive's own and that commit (MUTATION: check every recipe)", async () => {
     const env = devEnv();
     await seedPipelinesAccount(env);
     await fundPipelines(env);
     await seedEegDataset(env, ID);
+    github.tag(ID, "v1.0.0", T);
     const dry = await call(
       "/compute/pipeline/run",
       { recipe: "nemar-floor", dataset: ID, dry_run: true },
@@ -789,19 +790,26 @@ describe("the check runs for a Zarr recipe on the newest version of a ready copy
     );
     expect(dry.status).toBe(200);
     expect(dry.body.would_dispatch).toHaveLength(1);
+    // The dry run reads nothing outside D1 and the configuration.
+    expect(github.log).toEqual([]);
     const live = await call("/compute/pipeline/run", { recipe: "nemar-floor", dataset: ID }, env);
     expect(live.status).toBe(201);
-    expect(github.log).toEqual([]);
+    expect(github.log.map((r) => r.path)).toEqual([
+      `/repos/nemarDatasets/${ID}/commits/refs/tags/v1.0.0`,
+    ]);
+    expect(indexRequests()).toEqual([]);
     const recipe = findRecipe("nemar-floor") as NonNullable<ReturnType<typeof findRecipe>>;
     const args = await argsOf(live.body.results[0].job_id);
-    expect(args).toEqual(
-      recipeArguments({
+    expect(args).toEqual([
+      ...recipeArguments({
         datasetId: ID,
         tag: "v1.0.0",
         imageDigest: args[args.indexOf("--image-digest") + 1] as string,
       }),
-    );
-    for (const flag of ["--source-commit", "--tag-commit", "--commit-equivalence"]) {
+      "--source-commit",
+      T,
+    ]);
+    for (const flag of ["--tag-commit", "--commit-equivalence", "--zarr-base"]) {
       expect(args).not.toContain(flag);
     }
     expect(recipe.inputs).toContain("bids");

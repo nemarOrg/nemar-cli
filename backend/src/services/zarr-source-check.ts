@@ -402,6 +402,34 @@ export async function tagCommit(
   return { ok: false, reason: "tag_absent" };
 }
 
+/** Why the commit of a version's tag is not known: no such tag, or a fault of GitHub or its credentials. */
+export type VersionTagCommitReason =
+  | "tag_absent"
+  | "github_unreadable"
+  | "token_mint_failed"
+  | "no_github_credentials";
+
+/**
+ * The commit of a dataset version's tag (the data-plane tag, `v1.0.2`), read for every Worker-dispatched run of the
+ * archive (ADR 0143), or why it is not known: `tag_absent` when GitHub answers that the repository has no such tag,
+ * a fault's word otherwise. One tag lookup (`tagCommit`'s two requests at most), with `githubAccess`'s credentials.
+ * Never throws: a throw is GitHub's, `github_unreadable`.
+ */
+export async function versionTagCommit(
+  env: Bindings,
+  datasetId: string,
+  tag: string,
+): Promise<{ ok: true; commit: string } | { ok: false; reason: VersionTagCommitReason }> {
+  try {
+    const access = await githubAccess(env);
+    if (!access.ok) return { ok: false, reason: access.reason };
+    const tagged = await tagCommit(datasetId, tag, access);
+    return tagged.ok ? { ok: true, commit: tagged.commit } : { ok: false, reason: tagged.reason };
+  } catch {
+    return { ok: false, reason: "github_unreadable" };
+  }
+}
+
 // --- The compare ------------------------------------------------------------------------------------------
 
 /**

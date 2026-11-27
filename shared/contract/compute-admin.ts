@@ -606,6 +606,17 @@ export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
    * without the index (`runs_without_index_after` says when).
    */
   serving_index_deferred: 503,
+  /**
+   * A run of the archive whose version's tag commit GitHub could not give (a fault, or no credentials; ADR 0143):
+   * nothing is dispatched, a `refused` stamp records the deferral, and a later pass tries again. A run of the
+   * archive is never dispatched without its commit, so the deferral has no end but the fault's.
+   */
+  source_commit_deferred: 503,
+  /**
+   * A run of the archive whose version has no tag in the dataset's repository (ADR 0143): refused with nothing
+   * written, because a run without its commit could never be keyed; an administrator restores the tag.
+   */
+  version_tag_absent: 409,
   /** The runners switch is off (portable compute): the status is the runner protocol's, declared once. */
   runners_disabled: RUNNER_REFUSAL_STATUS.runners_disabled,
   /**
@@ -650,7 +661,7 @@ export const ComputePipelineResultSchema = z
     blocked_by: z.array(z.string()).optional(),
     /**
      * A Zarr source refusal's reason (`zarr_source_mismatch`, `zarr_source_unverifiable`), or the fault of a
-     * `serving_index_deferred`: a fixed word.
+     * `serving_index_deferred` or a `source_commit_deferred`: a fixed word.
      */
     reason: z.string().optional(),
     /** `serving_index_deferred` only: when the run goes ahead without the index, 24 hours after its first deferral. */
@@ -924,8 +935,9 @@ const byStatus = z.record(z.unknown());
 /**
  * A recipe's coverage over the eligible datasets: `covered` is a succeeded run at the dataset's newest
  * version with the registry's current recipe version (any engine, any input); `complete` is covered with
- * every recording passed at the last declared checkpoint; `covered_any_version` is covered at any recipe
- * version.
+ * every recording passed at the last declared checkpoint and, once the derivative store has decided the run,
+ * every recording stored (a derivative it skipped for good or lost is not complete); `covered_any_version` is
+ * covered at any recipe version.
  */
 export const ComputePipelineRecipeSummarySchema = z
   .object({

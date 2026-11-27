@@ -91,7 +91,7 @@ const server = Bun.serve({
 const base = `http://127.0.0.1:${server.port}`;
 
 beforeAll(async () => {
-  fx = await startLifecycleFixture();
+  fx = await startLifecycleFixture({ githubTags: true });
   access = startAccessStandin();
   previousAccessUrl = (globalThis as { NEMAR_ACCESS_ATTRIBUTES_URL?: string })
     .NEMAR_ACCESS_ATTRIBUTES_URL;

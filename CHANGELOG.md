@@ -18,9 +18,29 @@ earlier releases are described only by their generated notes.
 ### Changed
 
 - **nemar-ica is no longer a placeholder: an administrator can run it (owner decision of 2026-11-27).**
-  `nemar admin compute pipeline run nemar-ica` (with `--dataset`, or `--eligible` and `--limit`, and `--dry-run`) is no longer refused with `recipe_placeholder`; it goes through every other check a run has, on Tapis only, and stages the serving index first (ADR 0141), so a GitHub or index fault defers it (`serving_index_deferred`).
+  `nemar admin compute pipeline run nemar-ica` (with `--dataset`, or `--eligible` and `--limit`, and `--dry-run`) is no longer refused with `recipe_placeholder`; it goes through every other check a run has, on Tapis only, reads its tag's commit and stages the serving index first (ADR 0143, ADR 0141), so a GitHub or index fault defers it (`source_commit_deferred`, `serving_index_deferred`).
   It is still never run by the daily dispatcher (`autoDispatch` is false), still runs on Tapis only, and still needs the owner's compute switches, the Tapis configuration and a funded GPU pool.
   The pipeline grid and coverage now report it with `placeholder: false`, so the admin page no longer says it is a placeholder.
+
+### Fixed
+
+- **Every Worker-dispatched run of the archive is handed its version's tag commit, so its derivative can be stored (ADR 0143).**
+  The dispatcher now reads the commit of the version's tag on GitHub at every `bids` dispatch, of every recipe (`nemar-floor` included), and hands it as `--source-commit`; the run's record states it and its derivative is keyed by `git:` and that commit.
+  Before, only a nemar-ica run with a staged serving index got a commit, so every other run of the archive was skipped for good by the derivative store (`no_input_digest`).
+  A run whose commit GitHub cannot give is deferred (`source_commit_deferred`, 503, a refused stamp; the next pass tries again), and a version whose tag is missing from its repository is refused (`version_tag_absent`, 409, nothing written).
+  A missing or unusable GitHub credential stops a run over the queue; one repository GitHub cannot answer, or a missing tag, is passed over, and a run tries up to ten datasets past its room so such datasets never fill it.
+  The derivative store also refuses to key a BIDS stamp whose stated commit is not the one its specification handed (`digest_mismatch`).
+- **A derivative the store decides not to keep reads the same in the pipeline grid, the coverage and a run's detail.**
+  The derivative store's pass now resolves the `stored` checkpoint of each run it decided, so the read-only views no longer show it pending until the next stamp sync.
+  The coverage's `complete` no longer counts a run whose derivative was skipped for good or lost.
+
+## 0.10.49 - 2026-11-27
+
+### Changed
+
+- **Automatic denial runs in shadow mode in production (ADR 0139 amendment).**
+  An eligible review fail gets its confirming run (Sonnet 5.5 at max), and an agreement is recorded as `would_deny`; nothing is denied and no depositor is mailed.
+  The administrators' daily digest lists the `would_deny` requests; past 25 agreements in a day they are recorded as `capped`. An administrator may review a `would_deny` commit again with `start --again`.
 
 ## 0.10.48 - 2026-11-27
 
