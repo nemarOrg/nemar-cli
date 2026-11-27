@@ -187,5 +187,95 @@
     "status": 200,
     "file": "20-openalex-openalex-dataset.json",
     "fetched_at": "2026-11-25T19:18:51.474Z"
+  },
+  {
+    "case": "osf-url-sa",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.17605%2Fosf.io%2Frmafj",
+    "url": "https://api.datacite.org/dois/10.17605%2Fosf.io%2Frmafj",
+    "status": 404,
+    "file": "21-datacite-osf-rmafj.json",
+    "fetched_at": "2026-11-27T12:38:55Z"
+  },
+  {
+    "case": "osf-url-sa",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/rmafj/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/rmafj/?embed=license",
+    "status": 200,
+    "file": "22-osf-osf-rmafj.json",
+    "fetched_at": "2026-11-27T12:38:56Z"
+  },
+  {
+    "case": "osf-url-by",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.17605%2Fosf.io%2Fj3s7g",
+    "url": "https://api.datacite.org/dois/10.17605%2Fosf.io%2Fj3s7g",
+    "status": 404,
+    "file": "23-datacite-osf-j3s7g.json",
+    "fetched_at": "2026-11-27T12:38:57Z"
+  },
+  {
+    "case": "osf-url-by",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/j3s7g/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/j3s7g/?embed=license",
+    "status": 200,
+    "file": "24-osf-osf-j3s7g.json",
+    "fetched_at": "2026-11-27T12:38:57Z"
+  },
+  {
+    "case": "osf-datacite-cc-by",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.17605%2Fosf.io%2Fwpkrz",
+    "url": "https://api.datacite.org/dois/10.17605%2Fosf.io%2Fwpkrz",
+    "status": 200,
+    "file": "25-datacite-osf-cc-by.json",
+    "fetched_at": "2026-11-27T12:38:58Z"
+  },
+  {
+    "case": "osf-no-rights",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.17605%2Fosf.io%2Fj7as8",
+    "url": "https://api.datacite.org/dois/10.17605%2Fosf.io%2Fj7as8",
+    "status": 200,
+    "file": "26-datacite-osf-no-rights.json",
+    "fetched_at": "2026-11-27T12:38:59Z"
+  },
+  {
+    "case": "osf-no-rights",
+    "registry": "osf",
+    "method": "GET",
+    "path": "/v2/nodes/j7as8/?embed=license",
+    "url": "https://api.osf.io/v2/nodes/j7as8/?embed=license",
+    "status": 200,
+    "file": "27-osf-osf-no-rights.json",
+    "fetched_at": "2026-11-27T12:38:59Z"
+  },
+  {
+    "case": "psycharchives-cc-by",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.23668%2Fpsycharchives.22830",
+    "url": "https://api.datacite.org/dois/10.23668%2Fpsycharchives.22830",
+    "status": 200,
+    "file": "28-datacite-psycharchives-cc-by.json",
+    "fetched_at": "2026-11-27T12:39:00Z"
+  },
+  {
+    "case": "psycharchives-other",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.23668%2Fpsycharchives.22842",
+    "url": "https://api.datacite.org/dois/10.23668%2Fpsycharchives.22842",
+    "status": 200,
+    "file": "29-datacite-psycharchives-other.json",
+    "fetched_at": "2026-11-27T12:39:00Z"
   }
 ]
