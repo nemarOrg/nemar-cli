@@ -75,6 +75,12 @@ The `repo` alias of `dataset` is load-bearing: the nemarDatasets/.github `approv
 The alias may be removed only after all three name `dataset`.
 `test/admin-write-flag.unit.test.ts` holds the list and fails on a group that is not on it.
 
+## Amendment 2026-11-26 (#2348): approve-publication.yml no longer depends on the `repo` alias
+
+The nemarDatasets/.github `approve-publication.yml` no longer probes `nemar admin repo --help` and no longer falls back to `nemar admin publish approve`; it calls `nemar admin dataset publish approve` directly.
+Of the three callers the previous paragraph names, two still use `repo`: the website's publication queue and the docs.nemar.org pages.
+The alias may be removed once those two name `dataset`.
+
 ## Receipts
 
 - Owner decisions of 2026-11-21 on the admin tree.
