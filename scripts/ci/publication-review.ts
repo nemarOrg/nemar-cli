@@ -118,9 +118,10 @@ export interface ModelCallShape {
 
 /** The review's own call. */
 export const REVIEW_CALL: ModelCallShape = {
-  // TEST BRANCH ONLY: max effort, with the confirming run's streamed budget and deadline.
+  // TEST BRANCH ONLY: max effort, streamed, with Haiku 5.5's full 128,000-token output (thinking
+  // counts toward it; 64,000 truncated the first canary) and the confirming run's deadline.
   effort: PUBLICATION_REVIEW_EFFORT,
-  maxTokens: CONFIRM_MAX_TOKENS,
+  maxTokens: 128_000,
   deadlineMs: CONFIRM_DEADLINE_MS,
 };
 
