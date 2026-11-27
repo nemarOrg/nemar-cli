@@ -1250,12 +1250,18 @@ export async function storePublicationReviewResult(
 export type AfterStore = (env: Bindings, reviewId: number) => Promise<void>;
 
 /**
- * Whether a report was made on the model and effort its row asks for: a first run on the review's
- * model (the parser already allows no other for it), a confirming run on {@link CONFIRMING_MODEL}
- * at {@link CONFIRMING_EFFORT}, recorded as its one call.
+ * Whether a report was made on the model and effort its row asks for: a first run on one of the
+ * review's models but never in the confirming run's exact shape ({@link CONFIRMING_MODEL} at
+ * {@link CONFIRMING_EFFORT}), so a confirming report cannot pass as a first run; a confirming run
+ * in that shape, recorded as its one call.
  */
 function reportFitsRow(report: PublicationReviewReport, row: PublicationReviewRow): boolean {
-  if (row.confirmOf === null) return isOneOf(PUBLICATION_REVIEW_MODELS, report.model);
+  if (row.confirmOf === null) {
+    const confirmingShape = (report.record?.models ?? []).some(
+      (c) => c.model === CONFIRMING_MODEL && c.effort === CONFIRMING_EFFORT,
+    );
+    return isOneOf(PUBLICATION_REVIEW_MODELS, report.model) && !confirmingShape;
+  }
   const calls = report.record?.models ?? [];
   return (
     report.model === CONFIRMING_MODEL &&

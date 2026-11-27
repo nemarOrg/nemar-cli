@@ -843,7 +843,11 @@ describe("the output schema and the assembled report", () => {
     expect(assemblePublicationReport(output(), facts(), "claude-sonnet-5-5").model).toBe(
       "claude-sonnet-5-5",
     );
-    expect([...PUBLICATION_REVIEW_MODELS]).toEqual(["claude-haiku-5-5"]);
+    expect([...PUBLICATION_REVIEW_MODELS]).toEqual([
+      "claude-haiku-5-5",
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+    ]);
     expect(PUBLICATION_REVIEW_MODEL).toBe("claude-haiku-5-5");
   });
 });

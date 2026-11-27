@@ -509,8 +509,16 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
     ]);
     expect([...PUBLICATION_DECLINE_DETAILS]).toEqual(["depositor_limit", "platform_limit"]);
     expect([...PUBLICATION_OUTCOMES]).toEqual(["pass", "fail", "action_required"]);
-    expect([...PUBLICATION_REVIEW_MODELS]).toEqual(["claude-haiku-5-5"]);
-    expect([...CALIBRATION_MODELS]).toEqual(["claude-haiku-5-5", "claude-sonnet-5-5"]);
+    expect([...PUBLICATION_REVIEW_MODELS]).toEqual([
+      "claude-haiku-5-5",
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+    ]);
+    expect([...CALIBRATION_MODELS]).toEqual([
+      "claude-haiku-5-5",
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+    ]);
     expect([...PUBLICATION_REPORT_ERRORS]).toEqual([
       "not_an_object",
       "unknown_key",
@@ -696,10 +704,11 @@ describe("the parser refuses what the job must never send", () => {
     // Version 2 carries the fifth answer and the record; a version-1 body that says 2 is refused.
     expect(refusal(reportBody({ v: 2 }))).toBe("unknown_key");
     expect(refusal(reportBody({ v: "1" }))).toBe("bad_version");
-    expect(refusal(reportBody({ model: "claude-sonnet-5-5" }))).toBe("bad_model");
-    expect(
-      refusal(reportBody({ model: "claude-sonnet-5-5" }), { models: CALIBRATION_MODELS }),
-    ).toBe("accepted");
+    expect(refusal(reportBody({ model: "claude-haiku-4-5" }))).toBe("bad_model");
+    expect(refusal(reportBody({ model: "claude-haiku-4-5" }), { models: CALIBRATION_MODELS })).toBe(
+      "bad_model",
+    );
+    expect(refusal(reportBody({ model: "claude-sonnet-5-5" }))).toBe("accepted");
     // Even the calibration cannot name a model outside its own list, by cast or otherwise.
     expect(refusal(reportBody({ model: "gpt-x" }), { models: ["gpt-x"] })).toBe("bad_model");
     expect(refusal(reportBody({ steering: "false" }))).toBe("bad_steering");

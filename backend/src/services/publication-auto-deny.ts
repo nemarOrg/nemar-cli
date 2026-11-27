@@ -37,6 +37,7 @@ import {
   type AutoDenyReasonCode,
   type AutoDenyState,
   CAPPED_STATES,
+  CONFIRMING_MODEL,
   DENIAL_MAIL_MAX_ATTEMPTS,
   DIGEST_STATES,
   type DenialMailState,
@@ -216,6 +217,12 @@ export async function autoDenyStep(env: Bindings, reviewId: number): Promise<Aft
     if (row.autoDenyState !== "none") return "not_eligible";
     const eligibility = await eligibilityOf(db, row, row, now);
     if (!eligibility.eligible) return "not_eligible";
+    // A first run made on the confirming model cannot be confirmed by it: the denial rests on two
+    // different models agreeing (ADR 0139), and the depositor's mail says so. No confirming run.
+    const firstView = rowViewOf(row, Date.now());
+    if (firstView.kind === "reported" && firstView.report?.model === CONFIRMING_MODEL) {
+      return "not_eligible";
+    }
     const started = await startConfirmingReview(env, row);
     if (started.started) return "confirming";
     // A second start of the same confirmation is not a failure of it.
