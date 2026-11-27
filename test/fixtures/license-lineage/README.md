@@ -9,7 +9,7 @@ with two edits, both recorded in `index.json` (`edited`):
   The names and ORCID iDs of third-party authors are kept as recorded.
   The other curator names in fixtures 03 and 04 are public DataCite contributor metadata of that OpenNeuro record, kept on purpose so the fixtures stay the registry's real answer.
 Resolver version 2 (epic #2182, card B4) also reads each record's title, creators and publisher from these same recordings; nothing was recorded again for it.
-Files 21 to 29 were fetched on 2026-11-27 for resolver version 3 (epic #2449, phase 3; ADR 0142 decision 3), the same way, with no edits:
+Files 21 to 32 were fetched on 2026-11-27 for resolver version 3 (epic #2449, phase 3; ADR 0142 decision 3), the same way, with no edits:
 they hold no email address, and the OSF node records were requested without their contributors.
 `index.json` lists every recording with its method, URL, HTTP status, file and fetch time;
 `stand-in.ts` serves them to the tests from a local server.
@@ -43,6 +43,10 @@ they hold no email address, and the OSF node records were requested without thei
   its `rightsList` holds `CC-BY 4.0`, `openAccess` and the SPDX CC BY 4.0 entry.
 - **PsychArchives, a license NEMAR does not recognize:** `10.23668/psycharchives.22842`;
   `Scientific Use License v1`, `restrictedAccess` and a `rightsUri` to the license's own DOI.
+- **README DOI shapes a cut-candidate rule must accept** (review of #2472):
+  a Harvard Dataverse DOI with a five-character suffix, `10.7910/DVN/29379` (CC0 Dataset);
+  a figshare collection, `10.6084/m9.figshare.c.3307977` (resourceTypeGeneral `Collection`, CC BY 3.0 US);
+  a Dryad file-level DOI, `10.5061/dryad.8pm4nv0/1` (resourceTypeGeneral `Other`, CC0).
 
 ## Recordings
 
@@ -75,6 +79,9 @@ they hold no email address, and the OSF node records were requested without thei
 | `27-osf-osf-no-rights.json` | osf-no-rights | osf | GET https://api.osf.io/v2/nodes/j7as8/?embed=license | 200 | 2026-11-27 |
 | `28-datacite-psycharchives-cc-by.json` | psycharchives-cc-by | datacite | GET https://api.datacite.org/dois/10.23668%2Fpsycharchives.22830 | 200 | 2026-11-27 |
 | `29-datacite-psycharchives-other.json` | psycharchives-other | datacite | GET https://api.datacite.org/dois/10.23668%2Fpsycharchives.22842 | 200 | 2026-11-27 |
+| `30-datacite-dataverse-cc0.json` | dataverse-cc0 | datacite | GET https://api.datacite.org/dois/10.7910%2Fdvn%2F29379 | 200 | 2026-11-27 |
+| `31-datacite-figshare-collection.json` | figshare-collection | datacite | GET https://api.datacite.org/dois/10.6084%2Fm9.figshare.c.3307977 | 200 | 2026-11-27 |
+| `32-datacite-dryad-file.json` | dryad-file | datacite | GET https://api.datacite.org/dois/10.5061%2Fdryad.8pm4nv0%2F1 | 200 | 2026-11-27 |
 
 The two OpenNeuro POSTs carry the GraphQL query recorded in `index.json` (`body`).
 

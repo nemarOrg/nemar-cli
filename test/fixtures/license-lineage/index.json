@@ -277,5 +277,35 @@
     "status": 200,
     "file": "29-datacite-psycharchives-other.json",
     "fetched_at": "2026-11-27T12:39:00Z"
+  },
+  {
+    "case": "dataverse-cc0",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.7910%2Fdvn%2F29379",
+    "url": "https://api.datacite.org/dois/10.7910%2Fdvn%2F29379",
+    "status": 200,
+    "file": "30-datacite-dataverse-cc0.json",
+    "fetched_at": "2026-11-27T13:05:51Z"
+  },
+  {
+    "case": "figshare-collection",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.6084%2Fm9.figshare.c.3307977",
+    "url": "https://api.datacite.org/dois/10.6084%2Fm9.figshare.c.3307977",
+    "status": 200,
+    "file": "31-datacite-figshare-collection.json",
+    "fetched_at": "2026-11-27T13:05:52Z"
+  },
+  {
+    "case": "dryad-file",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.5061%2Fdryad.8pm4nv0%2F1",
+    "url": "https://api.datacite.org/dois/10.5061%2Fdryad.8pm4nv0%2F1",
+    "status": 200,
+    "file": "32-datacite-dryad-file.json",
+    "fetched_at": "2026-11-27T13:06:11Z"
   }
 ]
