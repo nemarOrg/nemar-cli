@@ -15,6 +15,17 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Added
+
+- **The publication review checks that the dataset's Name follows its upstream dataset's title (owner rule of 2026-11-27; ADR 0102, 0107, 0139 and 0142, amendments of that date).**
+  A Name passes when it starts with the title of one upstream dataset source, as its registry gives it, and what follows is nothing or a closed author-year suffix (`, Lee 2019`, ` (Lee 2019)`, ` - Lee et al. 2019`, ` Lee & Kim 2019`), then optionally the submission standards' `(service:key)`.
+  A drifted Name is the fail reason `name_differs_from_upstream`; one that cannot be decided (a source or title not read) is `name_upstream_unconfirmed`, an administrator's decision with no depositor mail.
+  The job records the closed word as the evidence's optional `name_upstream`, which is never sent to the model; reports without it read as before.
+- **Automatic denial and the name.**
+  `name_differs_from_upstream` is eligible only when the model's own `name_adequate` also failed, so the confirming run checks something; `name_not_descriptive` is no longer eligible when the Name is the upstream's title.
+- **The decision card shows the name rule.**
+  A panel gives the result, a cue and the upstream titles under the registry label; a drifted Name asks the depositor with a sentence that names the rule.
+
 ## 0.10.54 - 2026-11-27
 
 ### Fixed

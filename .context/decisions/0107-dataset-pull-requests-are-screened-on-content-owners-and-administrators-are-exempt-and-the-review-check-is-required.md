@@ -479,3 +479,21 @@ With the check required, a pull request in that state could not merge without an
 - The required check's ruleset and its tooling (#1819): `backend/src/services/github/branch-protection.ts` (`REVIEW_RULESET_NAME`, `buildReviewRulesetPayload`, `ensureReviewRuleset`, `REPOSITORY_ADMIN_ROLE_ID`), `backend/src/services/pr-review-eligibility.ts` (`isReviewableRow`, `reviewIntentOf`, `automaticReviewIntent`), `backend/src/routes/admin/fleet.ts` (the review-ruleset routes), `backend/src/services/fleet-drift.ts` (`REVIEW_RULESET_MISSING`, `REVIEW_RULESET_STRAY`), `src/commands/admin.ts` (`nemar admin fleet require-review`).
 - Queue and labels: `backend/src/services/pr-review-queue.ts`, `shared/contract/pr-review-admin.ts`, `src/commands/admin-pr-reviews.ts`.
 - Tests: `backend/test/review-ruleset.test.ts`, `backend/test/review-ruleset-routes.test.ts`, `backend/test/pr-review-eligibility.test.ts`, `test/admin-fleet-require-review-cli.test.ts`, `backend/test/pr-review-exemption.test.ts`, `backend/test/pr-review-flow.test.ts`, `backend/test/pr-review-queue.test.ts`, `backend/test/pr-review-start.test.ts`, `backend/test/pr-review-edit-limit-migration.test.ts`, `test/pr-review.test.ts`, `test/pr-review-workflow.test.ts` (the budgets), `test/admin-pr-reviews-cli.test.ts`, `test/pr-reviews-render.unit.test.ts`.
+
+## Amendment 2026-11-27 (owner): a Name that follows its upstream dataset keeps the upstream's author-year
+
+The owner's rule: name drift is grounds for rejection, or a request for an update;
+a dataset derived from an upstream dataset has the upstream's name, an author-year may follow it, and the start at least is the same.
+Section 3a refuses an author-year anywhere in a dataset name; this carves out a Name that follows an upstream dataset source's title.
+
+- **What a Name that follows its upstream is.**
+  Its `Name` starts with the title of one upstream dataset source (as that source's registry gives it, through the license-lineage resolver), compared after Unicode NFKC, case folding, apostrophes removed and other punctuation as spaces, with a leading "The" or "A" kept as part of the title.
+  What follows is nothing, or a suffix of one closed grammar (`shared/name-follows-upstream.ts`): `, Surname YYYY`, ` (Surname YYYY)`, ` - Surname et al. YYYY` or ` Surname & Surname YYYY`, then optionally the submission standards' final `(service:key)`.
+  A bare-space suffix takes only the `et al.` and `&` shapes, so an ordinary title word before a year (`Motor 2019`) is never read as an author.
+- **What is carved out.**
+  The author-year inside the upstream title (nm000781's upstream title begins `Defenderfer 2019;`) and the author-year of the suffix are not a breach of the naming rule for such a Name.
+  Every other Name, and every pull request title, stays under section 3a.
+- **Where it holds today.**
+  The publication review applies the rule (ADR 0102's amendment of this date).
+  On a pull request, every suffix shape puts a space before the year, which section 3a's key never reads, so a suffix is never refused there (`test/name-follows-upstream.unit.test.ts` pins that).
+  A glued key inside an upstream title (`BNCI2014_001 ...`) is still refused when a pull request changes the Name to that title, because the pull-request review resolves no lineage; until nemarOrg/nemar-cli#2493 is built, an administrator decides such a pull request.
