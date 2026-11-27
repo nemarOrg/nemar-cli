@@ -312,6 +312,12 @@ VECTORIZE_VISIBILITY_FILTER = "1"
 # - To turn it off: remove this line and release. A Worker secret of the same name would also turn
 #   it on; there must be none.
 PUBLICATION_REVIEW_ENABLED = "1"
+# Automatic denial (ADR 0139), in shadow mode by the owner's decision of 2026-11-27: an eligible
+# fail gets its confirming run (Sonnet 5.5 at max) and an agreement is recorded as `would_deny`;
+# nothing is denied and the depositor is not mailed. Only the exact word `on` denies, and only the
+# owner changes this line, in a reviewed change that edits backend/test/auto-deny-switch-flag.test.ts.
+# The daily cap stays unset (25). To turn it off: remove this line and release.
+PUBLICATION_AUTO_DENY_MODE = "shadow"
 # Support-ticket retention (epic #1893 phase 6a, ADR 0112): days a ticket's raw record is kept
 # before the daily purge keeps only its summary. Two years in production; staging uses 30 days,
 # matching its raw-mail bucket's lifecycle rule. A missing or invalid value deletes nothing.

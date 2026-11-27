@@ -1,10 +1,11 @@
 /**
  * The automatic denial's owner switch and cap, and where they are NOT set (ADR 0139, decision 3).
  *
- * `PUBLICATION_AUTO_DENY_MODE` and `PUBLICATION_AUTO_DENY_DAILY_CAP` appear in no table of
- * `backend/wrangler-sccn.toml`. The owner sets them in a reviewed change that edits this test; a line
- * added by any other change would let an automated agent deny depositors' requests somewhere nobody
- * decided it should, and that is what this test refuses.
+ * `PUBLICATION_AUTO_DENY_MODE` is `shadow` in production `[vars]` since the owner's decision of
+ * 2026-11-27, and appears in no other table; `PUBLICATION_AUTO_DENY_DAILY_CAP` appears in none. The
+ * owner changes either in a reviewed change that edits this test; a line added by any other change
+ * would let an automated agent deny depositors' requests somewhere nobody decided it should, and
+ * that is what this test refuses.
  *
  * The test reads the real file, parses it with Bun's TOML parser and walks every table, not only
  * the vars blocks, so a name misplaced under another table fails too. It covers the file and nothing
@@ -64,8 +65,12 @@ describe("backend/wrangler-sccn.toml and the automatic denial's switches", () =>
     ]);
   });
 
-  test("neither the mode nor the cap is set in any table of the file", () => {
-    expect(pathsOfNames(SWITCH_NAMES, config)).toEqual([]);
+  test("the mode is set only in production [vars], to shadow; the cap is set nowhere (owner, 2026-11-27)", () => {
+    expect(pathsOfNames(SWITCH_NAMES, config)).toEqual(["vars.PUBLICATION_AUTO_DENY_MODE"]);
+    expect(config.vars?.PUBLICATION_AUTO_DENY_MODE).toBe("shadow");
+    expect(
+      autoDenyMode(env({ PUBLICATION_AUTO_DENY_MODE: config.vars?.PUBLICATION_AUTO_DENY_MODE })),
+    ).toBe("shadow");
   });
 
   test("the same walk finds a name that is there", () => {
