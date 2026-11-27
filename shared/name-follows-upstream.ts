@@ -34,9 +34,10 @@
  *     service-key = " (" service ":" key ")"     (service: one of NAME_SERVICES; key: no blank or parenthesis)
  *
  * A parenthesis opens exactly when one closes it. A bare-space `open` takes only `et al.` or two
- * surnames, never one. **Every surname must name one of the dataset's Authors or one of the
- * matched upstream record's creators** (as a run of their folded words), so `EEG (Replication
- * 2021)` and `EEG, Motor 2019` are not author-years. The service key is the final parenthetical the
+ * surnames, never one. **Every surname must be the family name of one of the dataset's Authors
+ * or of the matched upstream record's creators** (the part before the comma of `Family, Given`,
+ * else the last word, folded alike), so `EEG (Replication 2021)`, `EEG, Motor 2019`, and
+ * `EEG (Mark 2019)` beside the author `Kim, Mark`, are not author-years. The service key is the final parenthetical the
  * submission standards already allow after a descriptive name, for a service the resolver knows.
  *
  * **The results, closed words only** (no title and no name is ever in the result):
@@ -103,8 +104,14 @@ export const NAME_SERVICES = [
  * also touches an unrelated word (`detour`) changes nothing in a comparison.
  */
 export const SPELLING_FOLDS: readonly { variant: string; british: RegExp; american: string }[] = [
-  // colour, behaviour, labour, neighbours, favoured
-  { variant: "-our/-or", british: /^([a-z]{3,})our(s|ed|ing)?$/, american: "$1or$2" },
+  // colour, behaviour(al), neurobehavioural, colourful, favourite, honourable, labours. The stem
+  // before -our has three letters or more, and only these endings follow it, so four, hour, your,
+  // tour, pour, flour, journal, source, course and resource keep their letters.
+  {
+    variant: "-our/-or",
+    british: /^([a-z]{3,})our(al|ally|ful|ite|ites|able|ably|s|ed|ing|er|ers)?$/,
+    american: "$1or$2",
+  },
   // normalisation, organisations (before -ise, which would leave -isation half done)
   { variant: "-isation/-ization", british: /^([a-z]{3,})isation(s)?$/, american: "$1ization$2" },
   // normalise, standardised, visualising
@@ -181,13 +188,22 @@ function surnamesOf(authors: string): string[] {
     .filter((s) => s !== "");
 }
 
-/** `needle` is a run of whole words of `hay`. */
-function hasRun(hay: readonly string[], needle: readonly string[]): boolean {
-  if (needle.length === 0) return false;
-  for (let i = 0; i + needle.length <= hay.length; i++) {
-    if (needle.every((w, k) => hay[i + k] === w)) return true;
-  }
-  return false;
+/**
+ * A person's family name as folded words: the part before the comma of `Family, Given`, else the
+ * last blank-separated word (`Pat O'Brien-Smith` gives `obrien smith`).
+ */
+export function familyNameOf(person: string): string[] {
+  const comma = person.indexOf(",");
+  if (comma >= 0) return foldWords(person.slice(0, comma));
+  const parts = person.trim().split(/\s+/);
+  return foldWords(parts[parts.length - 1] ?? "");
+}
+
+/** A surname names `family` when its words end with the family name's (`van der Berg` and `Berg`). */
+function endsWithWords(surname: readonly string[], family: readonly string[]): boolean {
+  if (family.length === 0 || family.length > surname.length) return false;
+  const off = surname.length - family.length;
+  return family.every((w, k) => surname[off + k] === w);
 }
 
 /**
@@ -205,10 +221,10 @@ export function isNameSuffix(rest: string, people: readonly string[] = []): bool
   const opened = (g.open ?? "").includes("(");
   if (opened !== (g.close !== undefined)) return false;
   if (/^\s+$/.test(g.open ?? "") && !/ et al\.?$| (?:&|and) /.test(g.authors)) return false;
-  const folded = people.map(foldWords);
+  const families = people.map(familyNameOf);
   return surnamesOf(g.authors).every((s) => {
     const words = foldWords(s);
-    return folded.some((p) => hasRun(p, words));
+    return families.some((f) => endsWithWords(words, f));
   });
 }
 
