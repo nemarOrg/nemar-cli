@@ -387,6 +387,13 @@ export const ADMIN_ALERT_CATEGORIES = [
    * existed receives it.
    */
   "compute_requests",
+  /**
+   * The shared S3 bucket policy is near its size cap, is full and refused a dataset creation, or a
+   * refused creation could not be rolled back (#2497, ADR 0145). Its own category because it is an
+   * operational alert about the archive itself, not about any request an admin reviews. Opted in by
+   * default, so a stored row from before it existed receives it.
+   */
+  "storage_alerts",
 ] as const;
 
 export type AdminAlertCategory = (typeof ADMIN_ALERT_CATEGORIES)[number];
@@ -408,6 +415,7 @@ export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   identifier_sweep: true,
   support_tickets: true,
   compute_requests: true,
+  storage_alerts: true,
   news: true,
   rfcs: true,
   maintenance: true,
@@ -3700,6 +3708,61 @@ export async function sendExemplarInvariantAlertEmail(
     } catch (error) {
       console.error(
         `Failed to send exemplar-invariant alert to ${redactRecipient(adminEmail)}: ${sendFailureText(error, adminEmail)}`,
+      );
+    }
+  }
+  return delivered;
+}
+
+/**
+ * Alert admins about the shared S3 bucket policy (#2497, ADR 0145): it is
+ * above 80% of AWS's 20,480-byte cap, it is full and a dataset creation was
+ * refused, or a refused creation could not be rolled back completely.
+ * `headline` and `lines` are plain text written by `storage-policy-alert.ts`;
+ * they are escaped here.
+ */
+export async function sendStoragePolicyAlertEmail(
+  adminEmails: string[],
+  alert: { subject: string; headline: string; lines: string[] },
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<number> {
+  const items = alert.lines.map((l) => `<li>${escapeHtml(l)}</li>`).join("\n    ");
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #dc2626;">${escapeHtml(alert.headline)}</h1>
+  <ul>
+    ${items}
+  </ul>
+  <p style="color: #666; font-size: 14px;">The bucket policy carves each private dataset out of public read; see ADR 0145 for the compaction rule and its capacity. Sent at most once a day per condition.</p>
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;"><a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource</p>
+</body>
+</html>
+  `;
+  let delivered = 0;
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        alert.subject,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+      );
+      delivered++;
+    } catch (error) {
+      console.error(
+        `Failed to send storage-policy alert to ${redactRecipient(adminEmail)}: ${sendFailureText(error, adminEmail)}`,
       );
     }
   }

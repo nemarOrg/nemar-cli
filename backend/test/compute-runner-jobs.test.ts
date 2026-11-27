@@ -7,7 +7,7 @@
  *
  *  (a) the registry: `nemar-floor` reads BIDS on Tapis and the Zarr serving copy on a runner (one entry,
  *      two inputs, one table of which input runs where), is sized with `shared` as a label inside its
- *      ceilings and the queue's memory; `nemar-ica` is BIDS on Tapis only; the Zarr argument vector is exact
+ *      ceilings and the queue's memory; `nemar-ica` likewise reads both, on a GPU; the Zarr argument vector is exact
  *      and a commit is 40 lowercase hex digits or an error;
  *  (b) the policy: `runners.maxLiveJobs` defaults to 64 and 8 when the key is absent and is validated
  *      strictly when stored;
@@ -401,10 +401,14 @@ describe("the recipe registry", () => {
     expect(r?.memoryMb).toBeLessThanOrEqual(QUEUE_MAX_MEMORY_MB.shared);
   });
 
-  test("nemar-ica reads BIDS and lists Tapis only (MUTATION: nemar-ica lists runner)", () => {
+  test("nemar-ica reads BIDS on Tapis and Zarr on a runner, sized at 16384 MB with one GPU (MUTATION: leave runner out of nemar-ica)", () => {
     const r = findRecipe("nemar-ica");
-    expect([...(r?.inputs ?? [])]).toEqual(["bids"]);
-    expect([...(r?.executors ?? [])]).toEqual(["tapis"]);
+    expect([...(r?.inputs ?? [])]).toEqual(["bids", "zarr"]);
+    expect([...(r?.executors ?? [])]).toEqual(["tapis", "runner"]);
+    expect([r?.memoryMb, r?.gpus]).toEqual([16384, 1]);
+    expect(r?.memoryMb).toBeLessThanOrEqual(
+      QUEUE_MAX_MEMORY_MB[r?.partition as keyof typeof QUEUE_MAX_MEMORY_MB],
+    );
   });
 
   test("every executor a recipe lists is a word of the contract, and every recipe lists one", () => {
@@ -507,9 +511,9 @@ describe("the recipe registry", () => {
         env: production,
       }),
     ).toThrow();
-    // So is an input the recipe does not list.
+    // So is an input the recipe does not list (every registered recipe lists both, so a BIDS-only copy of one).
     expect(() =>
-      recipeJobSpec(findRecipe("nemar-ica") as never, {
+      recipeJobSpec({ ...(findRecipe("nemar-ica") as object), inputs: ["bids"] } as never, {
         datasetId: "nm000104",
         tag: "v1.0.0",
         input: "zarr",

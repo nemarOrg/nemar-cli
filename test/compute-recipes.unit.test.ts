@@ -99,12 +99,14 @@ describe("the registry", () => {
     expect(ica?.gpus).toBeGreaterThanOrEqual(1);
   });
 
-  test("nemar-floor is ONE entry for both inputs and both executors; nemar-ica reads BIDS on Tapis only", () => {
-    expect(findRecipe("nemar-floor")).toMatchObject({
-      inputs: ["bids", "zarr"],
-      executors: ["tapis", "runner"],
-    });
-    expect(findRecipe("nemar-ica")).toMatchObject({ inputs: ["bids"], executors: ["tapis"] });
+  test("nemar-floor and nemar-ica are each ONE entry for both inputs and both executors (MUTATION: leave zarr or runner out of nemar-ica)", () => {
+    for (const name of ["nemar-floor", "nemar-ica"]) {
+      expect([name, findRecipe(name)?.inputs, findRecipe(name)?.executors]).toEqual([
+        name,
+        ["bids", "zarr"],
+        ["tapis", "runner"],
+      ]);
+    }
     // The transition name is gone from the registry.
     expect(findRecipe("nemar-floor-zarr")).toBeNull();
     expect(COMPUTE_RECIPES.map((r) => r.name)).toEqual(["nemar-floor", "nemar-ica"]);
@@ -129,10 +131,14 @@ describe("the registry", () => {
     expect(RECIPE_INPUTS).toEqual(["bids", "zarr"]);
   });
 
-  test("nemar-ica is no longer a placeholder (lifted 2026-11-27): an administrator's run on Tapis only, never automatic (MUTATION: set it back)", () => {
+  test("nemar-ica is no longer a placeholder (lifted 2026-11-27): an administrator's run, BIDS on Tapis and Zarr on a runner, never automatic (MUTATION: set it back)", () => {
     const ica = findRecipe("nemar-ica");
     expect(ica?.placeholder).toBe(false);
-    expect([ica?.autoDispatch, ica?.executors, ica?.inputs]).toEqual([false, ["tapis"], ["bids"]]);
+    expect([ica?.autoDispatch, ica?.executors, ica?.inputs]).toEqual([
+      false,
+      ["tapis", "runner"],
+      ["bids", "zarr"],
+    ]);
     expect(findRecipe("nemar-floor")?.placeholder).toBeFalsy();
   });
 
@@ -213,6 +219,64 @@ describe("the registry", () => {
   });
 });
 
+/**
+ * What the image `COMPUTE_RUNTIME_IMAGE` pins (the CUDA image of nemar-process v0.1.2) reports as
+ * `nemar-recipe version`, as `test/fixtures/nemar-recipe-version.json` records it: versions, digests, inputs and
+ * checkpoints. The file is ASSEMBLED, not printed by the image (its `provenance` says how): the source output at the
+ * commit and lock the image's labels name, with the flavor and the amica15 digest read from the image's layers. The
+ * registry's tuple is a copy of it, and the inputs the registry lists are the ones the recipe says it reads.
+ */
+const IMAGE_VERSION = JSON.parse(
+  readFileSync(join(import.meta.dir, "fixtures", "nemar-recipe-version.json"), "utf8"),
+) as {
+  image: string;
+  version: {
+    eegprep: string;
+    flavor: string;
+    recipes: Record<string, string>;
+    inputs: Record<string, string[]>;
+    checkpoints: Record<string, { checkpoint: string; steps: string[] }[]>;
+  };
+};
+
+describe("the registry's tuple is the image's (portable compute card Q1z)", () => {
+  test("every recipe's version and engine equal the image's version output, and its inputs the image's (MUTATION: nemar-ica's version one step off)", () => {
+    expect(Object.keys(IMAGE_VERSION.version.recipes).sort()).toEqual(
+      COMPUTE_RECIPES.map((r) => r.name).sort(),
+    );
+    for (const recipe of COMPUTE_RECIPES) {
+      expect([recipe.name, recipe.version, recipe.engine, [...recipe.inputs]]).toEqual([
+        recipe.name,
+        IMAGE_VERSION.version.recipes[recipe.name],
+        `eegprep@${IMAGE_VERSION.version.eegprep}`,
+        IMAGE_VERSION.version.inputs[recipe.name],
+      ]);
+    }
+    // Each recipe's checkpoint map is the one the version output reports for the same recipe version.
+    for (const recipe of COMPUTE_RECIPES) {
+      expect([
+        recipe.name,
+        recipe.checkpoints.map((c) => ({ checkpoint: c.checkpoint, steps: [...c.steps] })),
+      ]).toEqual([recipe.name, IMAGE_VERSION.version.checkpoints[recipe.name]]);
+    }
+    // The version output is the CUDA image's: the one image every recipe runs on.
+    expect(IMAGE_VERSION.version.flavor).toBe("cuda");
+    expect(IMAGE_VERSION.image).toMatch(/@sha256:[0-9a-f]{64}$/);
+  });
+
+  test("nemar-ica's engine names no device: the device is the run's, not the tuple's", () => {
+    const engine = (findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>).engine;
+    expect(engine).not.toContain("device");
+    expect(engine).not.toMatch(/\b(cuda|gpu)\b/i);
+  });
+
+  test("nemar-ica asks for one GPU as a ceiling and 16384 MB, the floor's memory (MUTATION: gpus 0; memoryMb removed)", () => {
+    const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
+    expect([ica.gpus, ica.memoryMb]).toEqual([1, 16384]);
+    expect(ica.memoryMb).toBe(findRecipe("nemar-floor")?.memoryMb);
+  });
+});
+
 describe("which input runs where", () => {
   const EXECUTORS: RecipeExecutor[] = ["tapis", "runner"];
 
@@ -242,10 +306,19 @@ describe("which input runs where", () => {
   });
 
   test("a recipe runs only the inputs it lists, even on the executor that runs them", () => {
-    const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
-    expect(recipeRunsInput(ica, "bids", "tapis")).toBe(true);
-    expect(recipeRunsInput(ica, "zarr", "runner")).toBe(false);
+    // Every recipe of the registry lists both inputs now, so a synthetic entry that lists one shows the decision.
+    const bidsOnly = { inputs: ["bids"] } as const;
+    expect(recipeRunsInput(bidsOnly, "bids", "tapis")).toBe(true);
+    expect(recipeRunsInput(bidsOnly, "zarr", "runner")).toBe(false);
     expect(recipeRunsInput({ inputs: [] }, "bids", "tapis")).toBe(false);
+    // The registry: nemar-ica reads each input on the executor that runs it, and on no other.
+    const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
+    expect([
+      recipeRunsInput(ica, "bids", "tapis"),
+      recipeRunsInput(ica, "zarr", "runner"),
+      recipeRunsInput(ica, "bids", "runner"),
+      recipeRunsInput(ica, "zarr", "tapis"),
+    ]).toEqual([true, true, false, false]);
   });
 });
 
@@ -262,11 +335,11 @@ describe("where a recipe may run", () => {
     // The input decision is separate: listing an input does not make an executor list it.
     expect(recipeRunsInput(tapisOnly, "zarr", "runner")).toBe(true);
     expect(recipeRunsOn(tapisOnly, "runner")).toBe(false);
-    // The registry: nemar-floor lists both, nemar-ica Tapis only.
+    // The registry: nemar-floor and nemar-ica list both.
     const floor = findRecipe("nemar-floor") as NonNullable<ReturnType<typeof findRecipe>>;
     const ica = findRecipe("nemar-ica") as NonNullable<ReturnType<typeof findRecipe>>;
     expect([recipeRunsOn(floor, "tapis"), recipeRunsOn(floor, "runner")]).toEqual([true, true]);
-    expect([recipeRunsOn(ica, "tapis"), recipeRunsOn(ica, "runner")]).toEqual([true, false]);
+    expect([recipeRunsOn(ica, "tapis"), recipeRunsOn(ica, "runner")]).toEqual([true, true]);
   });
 });
 

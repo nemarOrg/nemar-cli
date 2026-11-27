@@ -13,7 +13,35 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
-## Unreleased
+## 0.10.55 - 2026-11-27
+
+### Fixed
+
+- **Dataset creation works again when the bucket policy is near its cap (#2497; ADR 0145).**
+  The public-by-default bucket policy had grown to 628 private carve-outs and 20,431 of AWS's 20,480 bytes, so every new dataset failed with "Failed to secure dataset storage" and left an empty dataset record and an empty GitHub repository behind.
+  The carve-out list is now compacted (a fully private decade of ids is one `?` wildcard entry, a fully private hundred one `??` entry), which takes the measured list to 223 entries and about 7 KB on the first write after deploy.
+  Creation checks the policy's headroom before claiming an id and refuses with 503 when it is full; a carve-out or S3 permission that still fails rolls the create back (repository, S3 permission and record deleted).
+  A policy written above 80% (and again above 95%) of the cap, a refused create or visibility change, and a rollback that left something behind are logged with stable tags and mailed to the admins, at most once a day per condition.
+- **A new admin mail category, `storage_alerts` (`nemar admin users email-preferences update --storage-alerts <bool>`), on by default, carries those alerts.**
+
+### Changed
+
+- **The `nemar-ica` recipe also runs on a registered runner from the dataset's Zarr copy (#2502).**
+  BIDS input still runs only on Tapis and Zarr input only on a runner; the recipe asks for 16 GB of memory, and automatic dispatch stays off.
+- **The compute tenant sweep stays quiet while Tapis is unconfigured and no Tapis job is live (#2501).**
+  It logs one info line in the weekly pass instead of an error each run; a live Tapis job or an unreadable count is still an error.
+
+### Added
+
+- **The publication review checks that the dataset's Name follows its upstream dataset's title (owner rule of 2026-11-27; ADR 0102, 0107, 0139 and 0142, amendments of that date).**
+  A Name passes when it is virtually identical to the title of one declared upstream dataset source, as its registry gives it (accents, `&`/`and`, a trailing version marker and a closed set of British spellings compare equal), and what follows is nothing or a closed suffix: a version, an author-year naming the dataset's Authors or the record's creators (`, Lee 2019`, ` (Lee et al., 2019)`, `—Lee et al. 2019`, ` (Lee & Kim, 2019)`), and a known service's `(service:key)`.
+  A drifted Name is the fail reason `name_differs_from_upstream`; one that cannot be decided (a source or title not read, or an upstream not fixed to the declared version, such as a version-less reference, a Zenodo concept DOI or an OSF project, which may have been renamed) is `name_upstream_unconfirmed`, an administrator's decision with no depositor mail. README candidates never count.
+  Cached DOI records are re-keyed for the new latest-version flag, so each is fetched again once after deploy.
+  The Worker now accepts the closed word as the evidence's optional `name_upstream`, which is never sent to the model; reports without it read as before, and the job starts emitting it in a later release.
+- **Automatic denial and the name.**
+  `name_differs_from_upstream` is eligible only when the model's own `name_adequate` also failed, so the confirming run checks something; `name_not_descriptive` is no longer eligible when the Name is a declared upstream's title.
+- **The decision card shows the name rule.**
+  A panel gives the result, a cue and the upstream titles under the registry label; a drifted Name asks the depositor with a sentence that names the rule.
 
 ## 0.10.54 - 2026-11-27
 

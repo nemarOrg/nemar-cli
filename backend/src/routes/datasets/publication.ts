@@ -45,6 +45,7 @@ import {
   approvalInFlightSql,
 } from "../../services/approval-dispatch";
 import { isValidDatasetId } from "../../services/datasetId";
+import { testS3EndpointOverride } from "../../services/environment";
 import { isExemplarPublishAllowed } from "../../services/exemplar";
 import {
   checkWorkflowExists,
@@ -77,6 +78,7 @@ import {
 } from "../../services/publication-review-view";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
+import { alertIfPolicyFull } from "../../services/storage-policy-alert";
 import { checkSubmissionGate } from "../../services/submission-gate";
 import { SUBMISSION_POLICY_URL } from "../../services/submission-minimums";
 import {
@@ -1507,10 +1509,12 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           region: c.env.AWS_REGION,
           accessKeyId: c.env.AWS_ACCESS_KEY_ID,
           secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          endpointUrl: testS3EndpointOverride(c.env),
         },
         datasetId,
       );
     } catch (s3Error) {
+      await alertIfPolicyFull(c.env, s3Error);
       const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
       console.error(`S3 policy update failed for ${datasetId}:`, s3Msg);
 
@@ -1568,11 +1572,13 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
             region: c.env.AWS_REGION,
             accessKeyId: c.env.AWS_ACCESS_KEY_ID,
             secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+            endpointUrl: testS3EndpointOverride(c.env),
           },
           datasetId,
         );
         s3Reverted = true;
       } catch (s3RevertError) {
+        await alertIfPolicyFull(c.env, s3RevertError);
         console.error(`S3 policy revert failed for ${datasetId}:`, s3RevertError);
       }
 

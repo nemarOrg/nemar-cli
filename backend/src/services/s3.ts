@@ -11,8 +11,10 @@ import { escapeXml, unescapeXml } from "../lib/escape.js";
 import {
   type BucketPolicy,
   MAX_BUCKET_POLICY_BYTES,
+  POLICY_NEAR_CAP_TAG,
   addPrivateDataset,
   isDatasetPrivate,
+  isPolicyNearCap,
   policyByteSize,
   removePrivateDataset,
 } from "./bucket-policy.js";
@@ -1663,22 +1665,49 @@ export async function getBucketPolicy(options: PresignedUrlOptions): Promise<Buc
 }
 
 /**
- * Overwrite the bucket policy with the given document.
+ * A visibility transition refused because the policy it would write is over
+ * AWS's cap (#2497, ADR 0145). Making one id of a wildcard-covered decade or
+ * hundred public expands the wildcard into explicit entries (up to about 17
+ * for a hundred), so a removal can grow the policy too. Callers with an env
+ * pass it to `alertIfPolicyFull` (storage-policy-alert.ts).
  */
-async function putBucketPolicy(options: PresignedUrlOptions, policy: BucketPolicy): Promise<void> {
+export class BucketPolicyFullError extends Error {
+  constructor(
+    message: string,
+    readonly bytes: number,
+  ) {
+    super(message);
+    this.name = "BucketPolicyFullError";
+  }
+}
+
+/** Overwrite the bucket policy; returns the written document's size in bytes. */
+async function putBucketPolicy(
+  options: PresignedUrlOptions,
+  policy: BucketPolicy,
+): Promise<number> {
   const size = policyByteSize(policy);
   if (size > MAX_BUCKET_POLICY_BYTES) {
-    // Should be unreachable in the deny-list model (the policy scales with the
-    // small private set), but guard so we fail loudly rather than let AWS
-    // reject the PUT with an opaque MalformedPolicy error.
+    // Reached in production on 2026-11-27 (#2497): the private set grew to
+    // 628 entries. The policy is now compacted (bucket-policy.ts), and the
+    // create route checks headroom before claiming an id; this guard still
+    // fails loudly rather than letting AWS reject the PUT with an opaque
+    // MalformedPolicy error.
     throw new Error(
       `Bucket policy would be ${size} bytes, exceeding the ${MAX_BUCKET_POLICY_BYTES}-byte limit`,
     );
   }
 
-  const { bucket, region } = options;
+  const { bucket, region, endpointUrl } = options;
   const aws = createS3Client(options);
-  const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
+  // Same test-only origin override `getBucketPolicy` honors; callers pass it
+  // only through `testS3EndpointOverride`, so production always writes to the
+  // real bucket host.
+  const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
+    /\/+$/,
+    "",
+  );
+  const url = `${origin}/?policy`;
 
   const signed = await aws.sign(url, {
     method: "PUT",
@@ -1691,6 +1720,13 @@ async function putBucketPolicy(options: PresignedUrlOptions, policy: BucketPolic
     const errorText = await response.text();
     throw new Error(`Failed to update bucket policy: HTTP ${response.status} - ${errorText}`);
   }
+  if (isPolicyNearCap(size)) {
+    console.error(
+      `${POLICY_NEAR_CAP_TAG} bucket ${bucket} policy is ${size} of ${MAX_BUCKET_POLICY_BYTES} bytes ` +
+        `(${Math.round((size / MAX_BUCKET_POLICY_BYTES) * 100)}%); new private datasets will be refused at the cap (#2497)`,
+    );
+  }
+  return size;
 }
 
 /**
@@ -1706,7 +1742,7 @@ async function transitionDatasetVisibility(
   options: PresignedUrlOptions,
   datasetId: string,
   makePrivate: boolean,
-): Promise<void> {
+): Promise<number | null> {
   if (!isValidDatasetId(datasetId)) {
     throw new Error(`Invalid dataset ID for bucket policy: "${datasetId}"`);
   }
@@ -1721,14 +1757,27 @@ async function transitionDatasetVisibility(
     // rewrite (and the concurrent-write race it would invite) on idempotent
     // calls, e.g. deleting an already-public dataset.
     if (isDatasetPrivate(current, bucket, datasetId) === makePrivate) {
-      return;
+      return null;
     }
 
     const next = makePrivate
       ? addPrivateDataset(current, bucket, datasetId)
       : removePrivateDataset(current, bucket, datasetId);
+    // Price the write before making it: a removal from a covered decade or
+    // hundred expands the wildcard and can push the policy over the cap.
+    const nextBytes = policyByteSize(next);
+    if (nextBytes > MAX_BUCKET_POLICY_BYTES) {
+      const cause = makePrivate
+        ? ""
+        : " (its wildcard carve-out expands into the ids it still covers)";
+      throw new BucketPolicyFullError(
+        `Bucket policy full: making ${datasetId} ${makePrivate ? "private" : "public"} would write ${nextBytes} of ${MAX_BUCKET_POLICY_BYTES} bytes${cause}; free space in the bucket policy first (#2497, ADR 0145)`,
+        nextBytes,
+      );
+    }
+    let written: number;
     try {
-      await putBucketPolicy(options, next);
+      written = await putBucketPolicy(options, next);
     } catch (putErr) {
       const msg = putErr instanceof Error ? putErr.message : String(putErr);
       throw new Error(
@@ -1741,7 +1790,7 @@ async function transitionDatasetVisibility(
     const verifyPolicy = await getBucketPolicy(options);
     lastSeen = isDatasetPrivate(verifyPolicy, bucket, datasetId);
     if (lastSeen === makePrivate) {
-      return;
+      return written;
     }
     console.warn(
       `[s3] Bucket-policy ${makePrivate ? "private" : "public"} transition for ${datasetId} ` +
@@ -1765,8 +1814,10 @@ async function transitionDatasetVisibility(
 export async function markDatasetPrivate(
   options: PresignedUrlOptions,
   datasetId: string,
-): Promise<void> {
-  await transitionDatasetVisibility(options, datasetId, true);
+): Promise<number | null> {
+  // The written policy's size, or null when no write was needed; callers pass
+  // it to `notifyIfPolicyNearCap` (storage-policy-alert.ts, #2497).
+  return await transitionDatasetVisibility(options, datasetId, true);
 }
 
 /**

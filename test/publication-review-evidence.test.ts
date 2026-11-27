@@ -85,7 +85,7 @@ import {
 } from "../shared/publication-review";
 import { fence } from "../shared/untrusted-text";
 import { type StandInMessage, replyFor, standInMessage } from "./helpers/anthropic-sse";
-import { emptyInputs } from "./helpers/review-inputs";
+import { emptyInputs, fullInputs } from "./helpers/review-inputs";
 
 let root: string;
 const GIT_ENV = {
@@ -1695,6 +1695,13 @@ describe("before the scan step is deployed: every report the job posts parses (A
     // DESCRIPTION's Version is the one key not shown.
     expect(report.evidence.description_keys_not_shown).toBe(1);
     expect(report.evidence.description_keys_not_shown_names).toEqual(["Version"]);
+  });
+
+  test("until the job half deploys, the job emits no name word and its report reads as today", async () => {
+    const report = await production(newDataset("name-not-yet"), fullInputs());
+    expect("name_upstream" in report.evidence).toBe(false);
+    expect(reportReasons(report).map((r) => r.code)).not.toContain("name_differs_from_upstream");
+    expect(reportReasons(report).map((r) => r.code)).not.toContain("name_upstream_unconfirmed");
   });
 });
 

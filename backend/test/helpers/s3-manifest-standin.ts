@@ -20,7 +20,10 @@
  *  - `GET /?policy` answers whatever `setBucketPolicy` last set, mirroring
  *    `getBucketPolicy`'s target (`?policy` on the bucket root, not a keyed
  *    object) -- `null` (the default) answers 404, the same as an S3 bucket
- *    with no policy attached.
+ *    with no policy attached;
+ *  - `PUT /?policy` replaces that document (204), or answers the status set
+ *    by `setPolicyPutStatus` without storing anything, so a test can drive
+ *    the carve-out write to success or to failure (#2497).
  *
  * Every request is logged with the headers that matter, so a test asserts
  * on what was actually sent and answered rather than on what the code under
@@ -84,6 +87,11 @@ export interface S3ManifestStandin {
    *  it with `buildPublicAccessPolicy`/`addPrivateDataset` the same way
    *  production code does. */
   setBucketPolicy(policy: unknown | null): void;
+  /** The parsed document `PUT /?policy` last stored (or `setBucketPolicy` set). */
+  getBucketPolicy(): unknown | null;
+  /** Make `PUT /?policy` answer this status and store nothing; `null` (the
+   *  default) accepts the write. */
+  setPolicyPutStatus(status: number | null): void;
   stop(): void;
 }
 
@@ -97,10 +105,11 @@ export function startS3ManifestStandin(): S3ManifestStandin {
   const objects = new Map<string, StandinObject>();
   const log: StandinRequest[] = [];
   let bucketPolicy: string | null = null;
+  let policyPutStatus: number | null = null;
 
   const server: Server = Bun.serve({
     port: 0,
-    fetch(req) {
+    async fetch(req) {
       const url = new URL(req.url);
       const path = decodeURIComponent(url.pathname);
       const ifNoneMatch = req.headers.get("if-none-match");
@@ -117,6 +126,17 @@ export function startS3ManifestStandin(): S3ManifestStandin {
 
       // GET /?policy is not a keyed object: `getBucketPolicy` always reads
       // the bucket root's policy sub-resource, never a path under it.
+      if (path === "/" && url.searchParams.has("policy") && req.method === "PUT") {
+        if (policyPutStatus !== null) {
+          entry.status = policyPutStatus;
+          return new Response("<Error><Code>InternalError</Code></Error>", {
+            status: policyPutStatus,
+          });
+        }
+        bucketPolicy = await req.text();
+        entry.status = 204;
+        return new Response(null, { status: 204 });
+      }
       if (path === "/" && url.searchParams.has("policy")) {
         if (bucketPolicy === null) {
           entry.status = 404;
@@ -212,6 +232,12 @@ export function startS3ManifestStandin(): S3ManifestStandin {
     objects,
     setBucketPolicy(policy) {
       bucketPolicy = policy === null ? null : JSON.stringify(policy);
+    },
+    getBucketPolicy() {
+      return bucketPolicy === null ? null : JSON.parse(bucketPolicy);
+    },
+    setPolicyPutStatus(status) {
+      policyPutStatus = status;
     },
     put(path, body, opts) {
       const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;

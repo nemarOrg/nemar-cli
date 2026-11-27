@@ -248,8 +248,8 @@ const RECIPE_ENGINE = "eegprep@0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3";
  * The recipes. `nemar-floor` annotates every EEG recording of a dataset and runs on a CPU partition: on
  * Tapis over the dataset's files (`bids`) and on a runner over its Zarr serving copy (`zarr`), one entry for
  * both (plan D12). On a runner the partition is a SIZING LABEL only (ADR 0121, decision 6): `shared`'s
- * ceilings apply, nothing is submitted to it and no service unit is estimated. `nemar-ica` needs a GPU and
- * stays out of the daily dispatcher until the 20-dataset pilot has run.
+ * ceilings apply, nothing is submitted to it and no service unit is estimated. `nemar-ica` reads both inputs
+ * the same way, on a GPU partition, and stays out of the daily dispatcher until the 20-dataset pilot has run.
  *
  * THE VERSIONS AND THE ENGINE ARE COPIES. Their authoritative sources are in nemarOrg/nemar-process:
  * each recipe's `RECIPE_VERSION` in `recipes/nemar_process/{nemar_floor,nemar_ica}/steps.py` (a
@@ -297,10 +297,19 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     partition: "gpu-shared",
     nodes: 1,
     cores: 10,
+    // The floor's memory: a runner job without it would run unbounded under Apptainer on a shared workstation.
+    // It is recipe-wide, so it is also what a BIDS job on Tapis asks `gpu-shared` for (`submitMemoryForQueue`),
+    // in place of the gpus x 94208 MB default; Tapis is parked (card S3c), and card SZ revises the value.
+    memoryMb: 16384,
+    // On a runner one GPU is a ceiling the runner may leave unused (the recipe's device is `auto`).
     gpus: 1,
     minutes: 720,
-    inputs: Object.freeze(["bids"] as const),
-    executors: Object.freeze(["tapis"] as const),
+    // Zarr is registered after PX-11 (a store's declared electrode positions reach eegprep) and PZ (owner Q50 A,
+    // P20). On both inputs the decomposition reads fully preprocessed data, and on Zarr its record names the store
+    // it read by content digest. The browser multiplies the serving copy by `_servingunmixing.tsv` and does no
+    // preprocessing (ADR 0137, decisions 5 and 9).
+    inputs: Object.freeze(["bids", "zarr"] as const),
+    executors: Object.freeze(["tapis", "runner"] as const),
     // An administrator's run only: the daily dispatcher never runs it. No longer a placeholder (2026-11-27).
     autoDispatch: false,
     placeholder: false,

@@ -39,6 +39,7 @@ import {
   markDatasetPrivate,
   markDatasetPublic,
 } from "./s3.js";
+import { alertIfPolicyFull, notifyIfPolicyNearCap } from "./storage-policy-alert";
 
 export type VisibilityTransitionResult =
   | {
@@ -73,10 +74,15 @@ async function setDatasetPublicity(
   datasetId: string,
   visibility: "public" | "private",
 ): Promise<void> {
-  if (visibility === "public") {
-    await markDatasetPublic(s3Options(env), datasetId);
-  } else {
-    await markDatasetPrivate(s3Options(env), datasetId);
+  try {
+    if (visibility === "public") {
+      await markDatasetPublic(s3Options(env), datasetId);
+    } else {
+      await notifyIfPolicyNearCap(env, await markDatasetPrivate(s3Options(env), datasetId));
+    }
+  } catch (err) {
+    await alertIfPolicyFull(env, err);
+    throw err;
   }
 }
 

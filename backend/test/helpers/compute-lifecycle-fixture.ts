@@ -288,6 +288,8 @@ export async function makeJob(
     source?: "cli" | "web" | "pipeline";
     account?: Parameters<typeof seedUser>[1];
     env?: Bindings;
+    /** Who runs it (ADR 0121); `runner` needs `source: "pipeline"` and makes a job with no hold. */
+    executor?: "tapis" | "runner";
   } = {},
 ): Promise<MadeJob> {
   const env = over.env ?? fx.env();
@@ -299,6 +301,7 @@ export async function makeJob(
     appId: "nemar-launch",
     appVersion: "1.0.0",
     spec: launchableSpec(over.spec),
+    ...(over.executor === undefined ? {} : { executor: over.executor }),
   });
   if (!result.ok) throw new Error(`could not make a job: ${result.code}`);
   if (!result.recordsWritten) throw new Error("the job's records were not written");

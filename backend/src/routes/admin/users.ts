@@ -1983,6 +1983,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     support_tickets: z.boolean().optional(),
     /** Epic #2021 phase D1 (ADR 0118): a person asked for compute access. */
     compute_requests: z.boolean().optional(),
+    /** #2497 (ADR 0145): bucket-policy near-cap, full and incomplete-rollback alerts. */
+    storage_alerts: z.boolean().optional(),
     /** Epic #2260 (ADR 0132): the community categories a person may turn off. */
     news: z.boolean().optional(),
     rfcs: z.boolean().optional(),

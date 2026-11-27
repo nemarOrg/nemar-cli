@@ -155,14 +155,24 @@ describe("what may deny", () => {
       "license_inconsistent",
       "name_not_descriptive",
     ]);
-    expect([...AUTO_DENY_CODES]).toEqual([...AUTO_DENY_FINDING_CODES, "steering_attempt"]);
-    expect([...AUTO_DENY_REASON_CODES]).toEqual(["question_failed", "steering_attempt"]);
+    expect([...AUTO_DENY_CODES]).toEqual([
+      ...AUTO_DENY_FINDING_CODES,
+      "steering_attempt",
+      "name_differs_from_upstream",
+    ]);
+    expect([...AUTO_DENY_REASON_CODES]).toEqual([
+      "question_failed",
+      "steering_attempt",
+      "name_differs_from_upstream",
+    ]);
   });
 
   test("no screen, lineage or infrastructure reason is ever an eligible reason", () => {
     for (const code of AUTO_DENY_REASON_CODES) {
       expect(code.startsWith("identifier_screen")).toBe(false);
       expect(code).not.toBe("license_lineage_unconfirmed");
+      // The name rule's undecided word is NEMAR's failure to read a record: never a denial.
+      expect(code).not.toBe("name_upstream_unconfirmed");
       expect(code.startsWith("review_")).toBe(false);
     }
     for (const code of ["source_license_conflict", "provenance_unclear", "evidence_incomplete"]) {
