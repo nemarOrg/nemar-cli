@@ -5,7 +5,11 @@
  * the real report parser's and the reasons the real table's.
  */
 
-import type { CardDetail, ServedMetadata } from "../../backend/src/services/decision-card";
+import type {
+  CardDetail,
+  GateFacts,
+  ServedMetadata,
+} from "../../backend/src/services/decision-card";
 import { v3PublicationReport } from "../../backend/test/helpers/publication-review";
 import type { ReasonView } from "../../shared/contract/publication-review-admin";
 import { LICENSE_MATCHER_VERSION } from "../../shared/license-file";
@@ -125,3 +129,6 @@ export const SNAPSHOT: ServedMetadata = {
     declared_licenses: [],
   },
 };
+
+/** The approval's own gates as a clean request has them: the screened commit current, no run. */
+export const GATE_CLEAR: GateFacts = { head: "current", approvalInFlight: false };

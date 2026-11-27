@@ -245,19 +245,23 @@ describe("the real command against the real backend", () => {
 });
 
 describe("the stand-ins record what they were sent", () => {
-  test("the GitHub stand-in records the gate's one read, made with the Worker's own token", async () => {
+  test("the GitHub stand-in records the card's read and the gate's, made with the Worker's own token", async () => {
     seedGolden(h.db);
 
     await h.cli(["admin", "dataset", "publish", "approve", DATASET, "--resume", "--yes"]);
 
+    // Two reads of main: the decision card's head check, in the review detail `approve` prints
+    // first (ADR 0142, decision 4), and the gate's own. Both with the Worker's credential.
     const reads = h.github.seen.filter((c) => c.path.endsWith("/git/ref/heads/main"));
-    expect(reads).toHaveLength(1);
-    expect(reads[0]).toMatchObject({
-      method: "GET",
-      path: `/repos/nemarDatasets/${DATASET}/git/ref/heads/main`,
-      // The Worker's credential, not the administrator's API key.
-      token: WORKER_GITHUB_TOKEN,
-    });
+    expect(reads).toHaveLength(2);
+    for (const read of reads) {
+      expect(read).toMatchObject({
+        method: "GET",
+        path: `/repos/nemarDatasets/${DATASET}/git/ref/heads/main`,
+        // The Worker's credential, not the administrator's API key.
+        token: WORKER_GITHUB_TOKEN,
+      });
+    }
     expect(h.github.seen.some((c) => c.token === ADMIN_KEY)).toBe(false);
   });
 

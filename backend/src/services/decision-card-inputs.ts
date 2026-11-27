@@ -19,9 +19,11 @@
  */
 
 import type { DecisionCard } from "../../../shared/contract/decision-card.js";
+import { permissionBasisOf } from "../../../shared/license-permission.js";
 import { ENRICHMENT_SOURCE_RE } from "../../../shared/publication-review.js";
 import { README_CANDIDATES } from "../../../shared/readme-candidates.js";
 import type { Bindings } from "../types/bindings.js";
+import { approvalInFlightSql } from "./approval-dispatch.js";
 import {
   type CardDetail,
   type DecisionCardInput,
@@ -31,9 +33,12 @@ import {
   cardLineageOf,
   parseServedMetadata,
 } from "./decision-card.js";
+import type { GateFacts } from "./decision-card.js";
 import { getDatasetsToken } from "./github-auth.js";
-import { getFileContent } from "./github.js";
+import { LOOKUP_ONCE, getFileContent } from "./github/contents.js";
+import { verifyScreenHead } from "./identifier-screen.js";
 import { resolveWorkerLineage } from "./license-lineage-cache.js";
+import { coveringPermission } from "./license-permission.js";
 import { enrichmentFieldsOf } from "./publication-review-inputs.js";
 import { errorWords } from "./publication-review-log.js";
 import { extractRepoName } from "./repo-metadata.js";
@@ -64,11 +69,17 @@ async function readRoot(
 ): Promise<{ description: string | null; readme: string | null } | null> {
   try {
     const token = await getDatasetsToken(env);
-    const description = await getFileContent(repo, "dataset_description.json", token, ref);
+    const description = await getFileContent(
+      repo,
+      "dataset_description.json",
+      token,
+      ref,
+      LOOKUP_ONCE,
+    );
     let readme: string | null = null;
     if (wantReadme) {
       for (const name of README_CANDIDATES) {
-        readme = await getFileContent(repo, name, token, ref);
+        readme = await getFileContent(repo, name, token, ref, LOOKUP_ONCE);
         if (readme !== null) break;
       }
     }
@@ -77,6 +88,34 @@ async function readRoot(
     console.error(`[decision-card] repository read failed (${errorWords(err)})`);
     return null;
   }
+}
+
+/**
+ * What the approval's own gates read that the detail does not: whether the screened commit is still
+ * `main`, by the approval path's own check (`verifyScreenHead`; a lookup that fails is
+ * `unverified`, as the gate refuses it), and whether an approval run holds the request right now
+ * (`approvalInFlightSql`, the dispatch claim's own test).
+ */
+async function gateFactsOf(env: Bindings, detail: CardDetail): Promise<GateFacts> {
+  const r = await env.DB.prepare(
+    `SELECT identifier_screen_status, identifier_screen_report, identifier_screen_ack_at,
+            identifier_screen_ack_by, CASE WHEN ${approvalInFlightSql()} THEN 1 ELSE 0 END AS in_flight
+       FROM publication_requests WHERE id = ?`,
+  )
+    .bind(detail.request_id)
+    .first<{
+      identifier_screen_status: string | null;
+      identifier_screen_report: string | null;
+      identifier_screen_ack_at: string | null;
+      identifier_screen_ack_by: number | null;
+      in_flight: number;
+    }>();
+  if (!r) return { head: "unverified", approvalInFlight: false };
+  if (detail.screen_gate === "exempt")
+    return { head: "exempt", approvalInFlight: r.in_flight === 1 };
+  const outcome = await verifyScreenHead(env, detail.dataset_id, r);
+  const head = outcome.ok ? "current" : outcome.refusal.gate === "stale" ? "stale" : "unverified";
+  return { head, approvalInFlight: r.in_flight === 1 };
 }
 
 /** The card's inputs for one request's detail. Throws only when a D1 read fails. */
@@ -94,6 +133,7 @@ export async function decisionCardInputs(
           .bind(review.id)
           .first<{ served_metadata: string | null; auto_deny_state: string | null }>();
   const snapshot = parseServedMetadata(row?.served_metadata ?? null);
+  const gate = await gateFactsOf(env, detail);
 
   const lineageOutcome = review?.evidence?.lineage?.outcome ?? snapshot?.lineage?.outcome ?? null;
   const needsFresh = lineageOutcome === "unresolved";
@@ -104,6 +144,8 @@ export async function decisionCardInputs(
       snapshot,
       current: null,
       freshLineage: null,
+      freshCovered: false,
+      gate,
     };
   }
 
@@ -139,24 +181,34 @@ export async function decisionCardInputs(
   }
 
   // Resolved again for the card (ADR 0142 decision 3): never from a read that failed.
-  const freshLineage =
+  const fresh =
     needsFresh && root !== null
-      ? cardLineageOf(
-          await resolveWorkerLineage({
-            datasetDescription: root.description,
-            nemarMetadata: dataset?.enrichment_json ?? null,
-            attestationUpstreamSource: upstreamSourceOf(dataset?.attestation ?? null),
-            readme: root.readme,
-          }),
-        )
+      ? await resolveWorkerLineage({
+          datasetDescription: root.description,
+          nemarMetadata: dataset?.enrichment_json ?? null,
+          attestationUpstreamSource: upstreamSourceOf(dataset?.attestation ?? null),
+          readme: root.readme,
+        })
       : null;
+  // A recorded permission counts for the fresher lineage only when it covers that lineage's own
+  // basis (`permissionCovers`), never because it covered the review's.
+  const freshCovered =
+    fresh !== null &&
+    (await coveringPermission(
+      db,
+      detail.dataset_id,
+      detail.request_id,
+      permissionBasisOf(fresh),
+    )) !== null;
 
   return {
     detail,
     autoDenyState: row?.auto_deny_state ?? null,
     snapshot,
     current,
-    freshLineage,
+    freshLineage: fresh === null ? null : cardLineageOf(fresh),
+    freshCovered,
+    gate,
   };
 }
 

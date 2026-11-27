@@ -11,8 +11,16 @@
  *
  * Mutation checks (each applied, run, and restored from a copy; each turned a named test red):
  *   - `license_file_differs` made amber ("a LICENSE that names another license is red");
- *   - `redistribution_prohibited` without the permission condition ("redistribution with a recorded
- *     permission is not red");
+ *   - `needs_permission` ignoring the recorded permission (three tests, "needs_permission and
+ *     share-alike covered by a recorded permission are green" among them);
+ *   - `redistribution_prohibited` exempted by a permission ("redistribution stays red even with a
+ *     recorded permission");
+ *   - the fresher lineage covered by the review's permission ("the review's permission never covers
+ *     the card's fresher lineage");
+ *   - the head check removed from the door and the tiers ("a screened commit that is no longer
+ *     main ... never suggests approve"; also the route test in backend/test/decision-card.test.ts);
+ *   - the request-status conditions removed ("only a requested request, or a stopped approval with
+ *     nothing published, suggests approve");
  *   - the `cue !== "red"` of `approvalWouldPass` removed ("a red cue never suggests approve, even
  *     with every gate clear");
  *   - the `d.reasons.length === 0` of `approvalWouldPass` removed, alone and together with the
@@ -34,6 +42,7 @@ import {
   LICENSE_CUE_RULES,
   NOT_AS_REVIEWED_NOTE,
   NOT_REVIEWED_NOTE,
+  PERMITTED_GREEN_REASON,
   SERVED_METADATA_MAX,
   type ServedMetadata,
   approvalWouldPass,
@@ -50,15 +59,18 @@ import {
   DECISION_ACTIONS,
   DEPOSITOR_TEXT_LABEL,
   MODEL_TEXT_LABEL,
+  REGISTRY_TEXT_LABEL,
 } from "../shared/contract/decision-card";
 import { LICENSE_MATCHER_VERSION } from "../shared/license-file";
 import { AUTO_DENY_STATES, AUTO_DENY_STATE_COPY } from "../shared/publication-auto-deny";
 import { REASON_CODES, type ReasonCode } from "../shared/publication-review";
-import { ID, SNAPSHOT, detailOf, reasonView } from "./helpers/decision-card-fixtures";
+import { GATE_CLEAR, ID, SNAPSHOT, detailOf, reasonView } from "./helpers/decision-card-fixtures";
 
 const card = (detail: CardDetail, o: Partial<Parameters<typeof buildDecisionCard>[0]> = {}) =>
   buildDecisionCard({
     detail,
+    freshCovered: false,
+    gate: GATE_CLEAR,
     autoDenyState: "none",
     snapshot: SNAPSHOT,
     current: null,
@@ -72,9 +84,8 @@ const GREEN: CueFacts = {
   field: "CC-BY-4.0",
   file: { state: "matches", spdx: "CC-BY-4.0", additions: false, expression: null },
   matcher: LICENSE_MATCHER_VERSION,
-  outcomes: ["compatible"],
+  lineages: [{ outcome: "compatible", covered: false }],
   credited: false,
-  permission: false,
   enrichmentLicense: "CC-BY-4.0",
 };
 
@@ -104,16 +115,21 @@ describe("the license cue, rule by rule", () => {
       "red",
       "license_file_differs",
     ],
-    ["needs_permission is red", { outcomes: ["needs_permission"] }, "red", "needs_permission"],
+    [
+      "needs_permission is red",
+      { lineages: [{ outcome: "needs_permission", covered: false }] },
+      "red",
+      "needs_permission",
+    ],
     [
       "a share-alike mismatch is red",
-      { outcomes: ["share_alike_mismatch"] },
+      { lineages: [{ outcome: "share_alike_mismatch", covered: false }] },
       "red",
       "share_alike_mismatch",
     ],
     [
       "redistribution_prohibited without a recorded permission is red",
-      { outcomes: ["redistribution_prohibited"] },
+      { lineages: [{ outcome: "redistribution_prohibited", covered: false }] },
       "red",
       "redistribution_prohibited",
     ],
@@ -160,16 +176,21 @@ describe("the license cue, rule by rule", () => {
       "amber",
       "license_file_not_identified",
     ],
-    ["an unresolved lineage is amber", { outcomes: ["unresolved"] }, "amber", "lineage_unresolved"],
+    [
+      "an unresolved lineage is amber",
+      { lineages: [{ outcome: "unresolved", covered: false }] },
+      "amber",
+      "lineage_unresolved",
+    ],
     [
       "a source that is a publication is amber",
-      { outcomes: ["source_is_publication"] },
+      { lineages: [{ outcome: "source_is_publication", covered: false }] },
       "amber",
       "source_is_publication",
     ],
     [
       "an uncredited attribution source is amber",
-      { outcomes: ["compatible_attribution"], credited: false },
+      { lineages: [{ outcome: "compatible_attribution", covered: false }], credited: false },
       "amber",
       "uncredited_attribution",
     ],
@@ -193,15 +214,41 @@ describe("the license cue, rule by rule", () => {
     expect(LICENSE_CUE_RULES.map((r) => r.code).filter((c) => !named.has(c))).toEqual([]);
   });
 
-  test("redistribution with a recorded permission is not red", () => {
-    expect(
-      licenseCueOf({ ...GREEN, outcomes: ["redistribution_prohibited"], permission: true }).cue,
-    ).toBe("green");
+  test("redistribution stays red even with a recorded permission (lead ruling)", () => {
+    const got = licenseCueOf({
+      ...GREEN,
+      lineages: [{ outcome: "redistribution_prohibited", covered: true }],
+    });
+    expect(got.cue).toBe("red");
+    expect(got.reason).toBe(reasonOf("redistribution_prohibited"));
+  });
+
+  test("needs_permission and share-alike covered by a recorded permission are green, and say so", () => {
+    for (const outcome of ["needs_permission", "share_alike_mismatch"] as const) {
+      const got = licenseCueOf({ ...GREEN, lineages: [{ outcome, covered: true }] });
+      expect(got).toEqual({ cue: "green", reason: PERMITTED_GREEN_REASON, reasons: [] });
+    }
+  });
+
+  test("a fresher outcome the recorded permission does not cover still counts against the cue", () => {
+    const got = licenseCueOf({
+      ...GREEN,
+      lineages: [
+        { outcome: "needs_permission", covered: true },
+        { outcome: "share_alike_mismatch", covered: false },
+      ],
+    });
+    expect(got.cue).toBe("red");
+    expect(got.reason).toBe(reasonOf("share_alike_mismatch"));
   });
 
   test("a credited attribution source, and a matching enrichment, stay green", () => {
     expect(
-      licenseCueOf({ ...GREEN, outcomes: ["compatible_attribution"], credited: true }).cue,
+      licenseCueOf({
+        ...GREEN,
+        lineages: [{ outcome: "compatible_attribution", covered: false }],
+        credited: true,
+      }).cue,
     ).toBe("green");
     expect(licenseCueOf({ ...GREEN, enrichmentLicense: "CC BY 4.0" }).cue).toBe("green");
   });
@@ -219,10 +266,47 @@ describe("the license cue, rule by rule", () => {
   });
 
   test("a fresher lineage adds a reason and never removes the review's own", () => {
-    const got = licenseCueOf({ ...GREEN, outcomes: ["unresolved", "compatible"] });
+    const got = licenseCueOf({
+      ...GREEN,
+      lineages: [
+        { outcome: "unresolved", covered: false },
+        { outcome: "compatible", covered: false },
+      ],
+    });
     expect(got.cue).toBe("amber");
-    const worse = licenseCueOf({ ...GREEN, outcomes: ["unresolved", "needs_permission"] });
+    const worse = licenseCueOf({
+      ...GREEN,
+      lineages: [
+        { outcome: "unresolved", covered: false },
+        { outcome: "needs_permission", covered: false },
+      ],
+    });
     expect(worse.cue).toBe("red");
+  });
+
+  test("through the builder: the review's permission never covers the card's fresher lineage", () => {
+    const d = detailOf(
+      {
+        license_permission: {
+          recorded_at: "2026-11-26 10:00:00",
+          recorded_by: "admin",
+          ticket_id: 412,
+          line: "A license permission is on record.",
+        },
+      },
+      { lineage: { outcome: "unresolved", credited: false, resolved_at: "2026-11-20 09:00:00" } },
+    );
+    const fresh = {
+      outcome: "needs_permission" as const,
+      credited: false,
+      resolved_at: "2026-11-27T13:00:00.000Z",
+      declared_licenses: [],
+    };
+    const uncoveredCard = card(d, { freshLineage: fresh, freshCovered: false });
+    expect(uncoveredCard.license.cue).toBe("red");
+    expect(uncoveredCard.license.fresh_lineage?.permission_covers).toBe(false);
+    const coveredCard = card(d, { freshLineage: fresh, freshCovered: true });
+    expect(coveredCard.license.cue).toBe("amber");
   });
 
   test("through the builder: the review's facts, the snapshot's field and the record's matcher", () => {
@@ -269,9 +353,10 @@ describe("the next action", () => {
           autoDenyState: null,
           freshBetter: false,
           unresolved: false,
+          ...GATE_CLEAR,
         }),
       ).not.toBe("approve");
-      expect(approvalWouldPass(d, "green")).toBe(false);
+      expect(approvalWouldPass(d, "green", GATE_CLEAR)).toBe(false);
       visited++;
     }
     expect(visited).toBe(REASON_CODES.length);
@@ -293,10 +378,39 @@ describe("the next action", () => {
   test("a red cue never suggests approve, even with every gate clear", () => {
     const d = detailOf({}, { license_file: { ...file("matches_other"), spdx: "MIT" } });
     expect(d.reasons).toEqual([]);
-    expect(card(d).next_action.action).toBe("ask_depositor");
+    expect(card(d).next_action.action).toBe("administrator_reads");
     // The door itself refuses a red cue, whatever the tiers before it decided.
-    expect(approvalWouldPass(clean, "red")).toBe(false);
-    expect(approvalWouldPass(clean, "amber")).toBe(true);
+    expect(approvalWouldPass(clean, "red", GATE_CLEAR)).toBe(false);
+    expect(approvalWouldPass(clean, "amber", GATE_CLEAR)).toBe(true);
+  });
+
+  test("a screened commit that is no longer main, or could not be checked, never suggests approve", () => {
+    for (const head of ["stale", "unverified"] as const) {
+      const c = card(clean, { gate: { head, approvalInFlight: false } });
+      expect(c.next_action.action).toBe("rerun_screen");
+      expect(c.identifier_screen.head).toBe(head);
+      expect(c.identifier_screen.head_line).not.toBeNull();
+      expect(approvalWouldPass(clean, "green", { head, approvalInFlight: false })).toBe(false);
+    }
+    expect(card(clean).identifier_screen.head_line).toBeNull();
+  });
+
+  test("only a requested request, or a stopped approval with nothing published, suggests approve", () => {
+    const stopped = detailOf({ request_status: "approving" });
+    expect(card(stopped).next_action.action).toBe("approve");
+    const running = card(stopped, { gate: { head: "current", approvalInFlight: true } });
+    expect(running.next_action.action).toBe("wait");
+    expect(approvalWouldPass(stopped, "green", { head: "current", approvalInFlight: true })).toBe(
+      false,
+    );
+    const publishing = detailOf({ request_status: "approving", started_publishing: true });
+    expect(card(publishing).next_action.action).toBe("administrator_reads");
+    expect(approvalWouldPass(publishing, "green", GATE_CLEAR)).toBe(false);
+    for (const status of ["published", "denied"]) {
+      const over = detailOf({ request_status: status });
+      expect(card(over).next_action.action).toBe("administrator_reads");
+      expect(approvalWouldPass(over, "green", GATE_CLEAR)).toBe(false);
+    }
   });
 
   const tiers: Array<[string, ReasonCode[], string]> = [
@@ -307,7 +421,15 @@ describe("the next action", () => {
     ["a review running: wait", ["review_running"], "wait"],
     ["a failed question: deny", ["question_failed"], "deny"],
     ["steering: deny", ["steering_attempt"], "deny"],
-    ["text withheld: the depositor", ["text_withheld"], "ask_depositor"],
+    ["text withheld: an administrator reads", ["text_withheld"], "administrator_reads"],
+    ["an unknown question: an administrator reads", ["question_unknown"], "administrator_reads"],
+    [
+      "BIDS unconcluded: an administrator reads",
+      ["bids_unconcluded_at_review"],
+      "administrator_reads",
+    ],
+    ["a DOI state: an administrator reads", ["doi_state_unexpected"], "administrator_reads"],
+    ["a version missing: the depositor", ["version_missing"], "ask_depositor"],
     [
       "a lineage that needs evidence: record the permission",
       ["license_lineage_unconfirmed"],
@@ -346,7 +468,7 @@ describe("the next action", () => {
         line: AUTO_DENY_STATE_COPY[state as "would_deny"].statement,
       });
     }
-    expect(card(d, { autoDenyState: "disagreed" }).next_action.action).toBe("ask_depositor");
+    expect(card(d, { autoDenyState: "disagreed" }).next_action.action).toBe("administrator_reads");
     expect(card(d, { autoDenyState: "none" }).auto_deny).toBeNull();
     expect(card(d, { autoDenyState: "a word from elsewhere" }).auto_deny).toBeNull();
   });
@@ -366,7 +488,11 @@ describe("the next action", () => {
     expect(c.next_action.action).toBe("review_again");
     expect(c.next_action.command).toBe(`nemar admin dataset publish start ${ID} --again`);
     expect(c.license.lineage?.resolved_at).toBe("2026-11-20 09:00:00");
-    expect(c.license.fresh_lineage).toEqual(fresh);
+    expect(c.license.fresh_lineage).toEqual({
+      ...fresh,
+      declared_licenses: { label: REGISTRY_TEXT_LABEL, licenses: fresh.declared_licenses },
+      permission_covers: false,
+    });
     // Never raises: the review's unresolved still stands as amber.
     expect(c.license.cue).toBe("amber");
     // Still unresolved now: the depositor is asked for a link.

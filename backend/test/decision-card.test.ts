@@ -14,7 +14,8 @@
  *
  * Mutation checks (each applied, run, and restored from a copy): drop `served_metadata = ?` from
  * the serve's UPDATE ("the serve keeps what it served") and drop the `needsFresh` resolution
- * ("an unresolved lineage is resolved again for the card") each turn a named test red.
+ * ("an unresolved lineage is resolved again for the card") each turn a named test red, and so does
+ * reading every head check as current ("a commit pushed after the screen is stale").
  */
 
 import { describe, expect, test } from "bun:test";
@@ -224,5 +225,41 @@ describe("the lineage resolved again for the card", () => {
       "dataset_description.json",
       "README.md",
     ]);
+  });
+});
+
+describe("the approval's own gates on the card", () => {
+  test("a commit pushed after the screen is stale: the card never suggests approve", async () => {
+    const pushed = "e".repeat(40);
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET, head: pushed });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      head: pushed,
+      state: "reported",
+      report: v3PublicationReport({ head: pushed }),
+    });
+    const c = await card();
+    expect(c.identifier_screen.head).toBe("stale");
+    expect(c.identifier_screen.head_line).toContain("no longer the repository's main branch");
+    expect(c.next_action.action).toBe("rerun_screen");
+  });
+
+  test("an approval run holding the request: the card says wait, never approve", async () => {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      state: "reported",
+      report: v3PublicationReport(),
+    });
+    h.db.run(
+      `UPDATE publication_requests SET status = 'approving', approval_requested_by = 1,
+              approval_dispatched_at = datetime('now') WHERE id = ?`,
+      [requestId],
+    );
+    const c = await card();
+    expect(c.identifier_screen.head).toBe("current");
+    expect(c.next_action.action).toBe("wait");
   });
 });

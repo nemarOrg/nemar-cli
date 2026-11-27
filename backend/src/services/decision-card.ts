@@ -14,7 +14,8 @@
  *     remove one (ADR 0142 decision 3: it never raises the stored verdict).
  *  2. **The next action never says approve while a gate withholds approval**:
  *     {@link approvalWouldPass} is the only door to `approve`, and it asks for no reason at all, an
- *     identifier screen that is clear or exempt, a request that is not blocked, and no red cue.
+ *     identifier screen that is clear or exempt and read the current `main`, a request that is
+ *     `requested` (or a stopped approval), and no red cue.
  *  3. **The words are web-safe** (ADR 0102, Phase 4 amendment): every sentence here names no
  *     terminal; `next_action.command` is a terminal's text and the one field a page never prints.
  *  4. **Whose words are whose**: the dataset's fields, a model's note and a registry's license text
@@ -37,12 +38,15 @@ import {
   DEPOSITOR_TEXT_LABEL,
   type DecisionAction,
   type DecisionCard,
+  type HeadCheck,
   type LicenseCue,
   MODEL_TEXT_LABEL,
+  REGISTRY_TEXT_LABEL,
 } from "../../../shared/contract/decision-card.js";
 import type { PublicationReviewDetail } from "../../../shared/contract/publication-review-admin.js";
 import { LICENSE_FILE_STATES, type LicenseFileFact } from "../../../shared/license-file.js";
 import {
+  ACTION_REQUIRED_OUTCOMES,
   LINEAGE_OUTCOMES,
   type LineageOutcome,
   type LineageResult,
@@ -175,8 +179,19 @@ export function cardDescriptionOf(text: string | null, anonymous: boolean): Card
   };
 }
 
-/** A lineage result as the card shows it: the outcome, the credit, the time and what sources declare. */
-export function cardLineageOf(result: LineageResult): CardLineage {
+/**
+ * A lineage as the snapshot stores it and the card's inputs carry it: the outcome, the credit, the
+ * time and what the sources' registries declare (`id: text`).
+ */
+export interface ServedLineage {
+  outcome: LineageOutcome;
+  credited: boolean;
+  resolved_at: string | null;
+  declared_licenses: string[];
+}
+
+/** A lineage result as the card keeps it. */
+export function cardLineageOf(result: LineageResult): ServedLineage {
   const declared: string[] = [];
   for (const s of result.sources) {
     for (const d of s.declared_licenses ?? []) {
@@ -214,7 +229,7 @@ export interface ServedMetadata {
   enrichment: CardEnrichment | null;
   enrichment_source: string | null;
   dataset_description: CardDescription | null;
-  lineage: CardLineage | null;
+  lineage: ServedLineage | null;
 }
 
 /** The snapshot as the column stores it, or null when it would not fit (the serve still goes on). */
@@ -263,7 +278,7 @@ function readDescription(v: unknown): CardDescription | null | undefined {
   return { name: v.name, license: v.license, authors };
 }
 
-function readLineage(v: unknown): CardLineage | null | undefined {
+function readLineage(v: unknown): ServedLineage | null | undefined {
   if (v === null) return null;
   if (!isRecord(v)) return undefined;
   const declared = strings(v.declared_licenses);
@@ -325,10 +340,12 @@ export interface CueFacts {
   /** The review's LICENSE identification, or null (no version-3 review). */
   file: LicenseFileFact | null;
   matcher: string | null;
-  /** The review's lineage outcome and the card's fresher one, when there are. */
-  outcomes: LineageOutcome[];
+  /**
+   * The review's lineage and the card's fresher one, when there are, each with whether a recorded
+   * license permission covers it (`permissionCovers`, through `coveringPermission`).
+   */
+  lineages: Array<{ outcome: LineageOutcome; covered: boolean }>;
   credited: boolean;
-  permission: boolean;
   enrichmentLicense: string | null;
 }
 
@@ -345,6 +362,14 @@ const recognized = (text: string | null): boolean => {
 };
 
 const fileIs = (f: CueFacts, state: LicenseFileFact["state"]) => f.file?.state === state;
+
+/** Some lineage has the outcome (covered or not). */
+const hasOutcome = (f: CueFacts, outcome: LineageOutcome) =>
+  f.lineages.some((l) => l.outcome === outcome);
+
+/** Some lineage has the outcome and no recorded permission covers it. */
+const uncovered = (f: CueFacts, outcome: LineageOutcome) =>
+  f.lineages.some((l) => l.outcome === outcome && !l.covered);
 
 /** Two license texts that both normalize and name different licenses (or versions of one). */
 function licensesDisagree(a: string | null, b: string | null): boolean {
@@ -375,21 +400,24 @@ export const LICENSE_CUE_RULES: readonly CueRule[] = [
   {
     code: "needs_permission",
     cue: "red",
-    applies: (f) => f.outcomes.includes("needs_permission"),
+    applies: (f) => uncovered(f, "needs_permission"),
     reason: "The upstream data's license needs its authors' permission for this copy.",
   },
   {
     code: "share_alike_mismatch",
     cue: "red",
-    applies: (f) => f.outcomes.includes("share_alike_mismatch"),
+    applies: (f) => uncovered(f, "share_alike_mismatch"),
     reason:
       "The upstream data's share-alike license does not permit this copy under the dataset's license.",
   },
   {
     code: "redistribution_prohibited",
     cue: "red",
-    applies: (f) => f.outcomes.includes("redistribution_prohibited") && !f.permission,
-    reason: "The upstream data's license prohibits redistribution, and no permission is on record.",
+    // Red even with a recorded permission (lead ruling of 2026-11-27): the repository's data use
+    // agreement may bind more than the authors, so a person decides every time.
+    applies: (f) => hasOutcome(f, "redistribution_prohibited"),
+    reason:
+      "The upstream data's license prohibits redistribution; an administrator decides even with a recorded permission.",
   },
   {
     code: "matcher_unavailable",
@@ -440,20 +468,20 @@ export const LICENSE_CUE_RULES: readonly CueRule[] = [
   {
     code: "lineage_unresolved",
     cue: "amber",
-    applies: (f) => f.outcomes.includes("unresolved"),
+    applies: (f) => hasOutcome(f, "unresolved"),
     reason: "The upstream data's license could not be read.",
   },
   {
     code: "source_is_publication",
     cue: "amber",
-    applies: (f) => f.outcomes.includes("source_is_publication"),
+    applies: (f) => hasOutcome(f, "source_is_publication"),
     reason:
       "The declared upstream source is a publication, not a dataset, so its license does not settle the data's.",
   },
   {
     code: "uncredited_attribution",
     cue: "amber",
-    applies: (f) => f.outcomes.includes("compatible_attribution") && !f.credited,
+    applies: (f) => hasOutcome(f, "compatible_attribution") && !f.credited,
     reason:
       "The upstream data's license requires attribution, and SourceDatasets does not credit the source.",
   },
@@ -469,6 +497,10 @@ export const LICENSE_CUE_RULES: readonly CueRule[] = [
 export const GREEN_REASON =
   "The License field, the LICENSE file and the upstream data's license agree.";
 
+/** The sentence of a green cue that a recorded license permission made green. */
+export const PERMITTED_GREEN_REASON =
+  "The License field and the LICENSE file agree, and a recorded license permission covers the upstream data's license.";
+
 /** The cue and its reasons, from the table. */
 export function licenseCueOf(f: CueFacts): { cue: LicenseCue; reason: string; reasons: string[] } {
   const standing = LICENSE_CUE_RULES.filter((r) => r.applies(f));
@@ -476,7 +508,14 @@ export function licenseCueOf(f: CueFacts): { cue: LicenseCue; reason: string; re
   const amber = standing.filter((r) => r.cue === "amber");
   const reasons = [...red, ...amber].map((r) => r.reason);
   const cue: LicenseCue = red.length > 0 ? "red" : amber.length > 0 ? "amber" : "green";
-  return { cue, reason: reasons[0] ?? GREEN_REASON, reasons };
+  const permitted = f.lineages.some(
+    (l) => l.covered && (ACTION_REQUIRED_OUTCOMES as readonly string[]).includes(l.outcome),
+  );
+  return {
+    cue,
+    reason: reasons[0] ?? (permitted ? PERMITTED_GREEN_REASON : GREEN_REASON),
+    reasons,
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -496,6 +535,8 @@ export const ACTION_SENTENCE: Record<DecisionAction, string> = {
   record_license_permission:
     "Record the license permission when the evidence from the original authors arrives at support; until then the request waits.",
   ask_depositor: "Ask the depositor to fix what the reasons name: only the depositor can cure it.",
+  administrator_reads:
+    "Read the review and the dataset and decide: no rule settles what the reasons leave open, and the depositor cannot cure it alone.",
   deny: "Deny the request with the reasons shown.",
 };
 
@@ -513,6 +554,7 @@ export const ACTION_COMMAND: Record<DecisionAction, string> = {
   review_again: `${COMMAND_START} --again`,
   record_license_permission: COMMAND_PERMISSION,
   ask_depositor: COMMAND_NEXT,
+  administrator_reads: COMMAND_SHOW,
   deny: COMMAND_DENY,
 };
 
@@ -540,20 +582,41 @@ const REVIEW_FAIL: readonly ReasonCode[] = [
   "stored_verdict_fail",
   "bids_failed_at_review",
 ];
+/** Reasons an administrator settles by reading: no rule decides them, and no depositor fix alone does. */
+const ADMINISTRATOR_READS: readonly ReasonCode[] = [
+  "doi_state_unexpected",
+  "text_withheld",
+  "question_unknown",
+  "bids_unconcluded_at_review",
+];
 /** The automatic-denial states in which a confirming run agreed that the request fails. */
 const AUTO_DENY_AGREED: readonly string[] = ["would_deny", "capped"];
 
+/** What the approval's own gates read beyond the detail. */
+export interface GateFacts {
+  /** `verifyScreenHead`: the screened commit is still `main` (or the dataset is exempt). */
+  head: HeadCheck;
+  /** An approval run holds the request right now (`approvalInFlightSql`). */
+  approvalInFlight: boolean;
+}
+
 /**
  * The approval gate would accept an approval with no override and no acknowledgment owed: no
- * reason stands, the identifier screen is clear (or the dataset is exempt), the request is not
- * blocked, and the license cue is not red. The one door to `approve`.
+ * reason stands; the identifier screen is clear (or the dataset is exempt) and read the current
+ * `main`; the request is `requested`, or `approving` with no run holding it and nothing published
+ * yet (a stopped run, which the gates take as a fresh approval); it is not blocked; and the license
+ * cue is not red. The one door to `approve`.
  */
-export function approvalWouldPass(d: CardDetail, cue: LicenseCue): boolean {
+export function approvalWouldPass(d: CardDetail, cue: LicenseCue, g: GateFacts): boolean {
+  const open =
+    d.request_status === "requested" ||
+    (d.request_status === "approving" && !g.approvalInFlight && !d.started_publishing);
   return (
+    open &&
     d.reasons.length === 0 &&
     (d.screen_gate === "clear" || d.screen_gate === "exempt") &&
+    (g.head === "current" || g.head === "exempt") &&
     (d.block_reason === null || d.block_reason === undefined) &&
-    d.request_status !== "blocked" &&
     cue !== "red"
   );
 }
@@ -561,7 +624,12 @@ export function approvalWouldPass(d: CardDetail, cue: LicenseCue): boolean {
 /** The one suggested action, from the closed list, by the first tier that applies. */
 export function nextActionOf(
   d: CardDetail,
-  o: { cue: LicenseCue; autoDenyState: string | null; freshBetter: boolean; unresolved: boolean },
+  o: {
+    cue: LicenseCue;
+    autoDenyState: string | null;
+    freshBetter: boolean;
+    unresolved: boolean;
+  } & GateFacts,
 ): DecisionAction {
   const codes = new Set(d.reasons.map((r) => r.code));
   const any = (list: readonly ReasonCode[]) => list.some((c) => codes.has(c));
@@ -573,8 +641,20 @@ export function nextActionOf(
   ) {
     return "ask_depositor";
   }
+  if (d.request_status === "approving" && o.approvalInFlight) return "wait";
+  if (d.request_status !== "requested" && d.request_status !== "approving") {
+    return "administrator_reads";
+  }
+  if (d.request_status === "approving" && d.started_publishing) return "administrator_reads";
   if (any(SCREEN_WAIT) || d.screen_gate === "wait") return "wait";
-  if (any(SCREEN_RERUN) || d.screen_gate === "rerun") return "rerun_screen";
+  if (
+    any(SCREEN_RERUN) ||
+    d.screen_gate === "rerun" ||
+    o.head === "stale" ||
+    o.head === "unverified"
+  ) {
+    return "rerun_screen";
+  }
   if (any(REVIEW_WAIT)) return "wait";
   if (any(REVIEW_START)) return "start_review";
   if (o.freshBetter) return "review_again";
@@ -587,14 +667,16 @@ export function nextActionOf(
   if (codes.has("license_lineage_unconfirmed")) {
     return o.unresolved ? "ask_depositor" : "record_license_permission";
   }
+  if (any(ADMINISTRATOR_READS)) return "administrator_reads";
   const left = [...codes].filter((c) => c !== "identifier_screen_needs_acknowledgment");
-  if (left.length > 0 || o.cue === "red") return "ask_depositor";
+  if (left.length > 0) return "ask_depositor";
+  if (o.cue === "red") return "administrator_reads";
   if (codes.has("identifier_screen_needs_acknowledgment") || d.screen_gate === "acknowledge") {
     return "acknowledge_screen";
   }
   // Every tier above has passed; the door still asks on its own, so a tier removed by mistake
   // never lets `approve` through.
-  return approvalWouldPass(d, o.cue) ? "approve" : "ask_depositor";
+  return approvalWouldPass(d, o.cue, o) ? "approve" : "administrator_reads";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -664,7 +746,11 @@ export interface DecisionCardInput {
   /** What NEMAR holds now, for a review without a snapshot; null when not read. */
   current: Pick<ServedMetadata, "enrichment" | "enrichment_source" | "dataset_description"> | null;
   /** The lineage resolved again for the card, or null when it was not. */
-  freshLineage: CardLineage | null;
+  freshLineage: ServedLineage | null;
+  /** A recorded license permission covers the fresher lineage's basis. */
+  freshCovered: boolean;
+  /** The approval's own gates beyond the detail. */
+  gate: GateFacts;
 }
 
 /** Why the fields are not as reviewed: a review that predates the snapshot, or no review served. */
@@ -703,7 +789,10 @@ function licenseFileOf(detail: CardDetail): LicenseFileFact | null {
 }
 
 /** The review's own lineage: its recorded outcome, with what the served sources declared. */
-function reviewLineageOf(detail: CardDetail, snapshot: ServedMetadata | null): CardLineage | null {
+function reviewLineageOf(
+  detail: CardDetail,
+  snapshot: ServedMetadata | null,
+): ServedLineage | null {
   const recorded = detail.review?.evidence?.lineage ?? null;
   if (recorded === null) return snapshot?.lineage ?? null;
   return {
@@ -715,7 +804,10 @@ function reviewLineageOf(detail: CardDetail, snapshot: ServedMetadata | null): C
 }
 
 /** The fresher lineage resolves what the review read unresolved, and needs no action itself. */
-export function freshIsBetter(review: CardLineage | null, fresh: CardLineage | null): boolean {
+export function freshIsBetter(
+  review: Pick<ServedLineage, "outcome"> | null,
+  fresh: Pick<ServedLineage, "outcome"> | null,
+): boolean {
   if (review === null || fresh === null || review.outcome !== "unresolved") return false;
   return (
     fresh.outcome === "compatible" ||
@@ -725,6 +817,27 @@ export function freshIsBetter(review: CardLineage | null, fresh: CardLineage | n
   );
 }
 
+/** A kept lineage as the card shows it, its registry text under its label. */
+function labeledLineage(l: ServedLineage, covered: boolean): CardLineage {
+  return {
+    outcome: l.outcome,
+    credited: l.credited,
+    resolved_at: l.resolved_at,
+    declared_licenses: { label: REGISTRY_TEXT_LABEL, licenses: l.declared_licenses },
+    permission_covers: covered,
+  };
+}
+
+/** The head check in words; null when the screened commit is current. */
+export const HEAD_LINE: Record<HeadCheck, string | null> = {
+  current: null,
+  exempt: "Sandbox datasets are not screened.",
+  stale:
+    "The screened commit is no longer the repository's main branch, so the screen must run again before an approval.",
+  unverified:
+    "Whether the screened commit is still the repository's main branch could not be checked, so an approval would be refused until it can be.",
+};
+
 function licensePanelOf(input: DecisionCardInput, metadata: CardMetadata): CardLicensePanel {
   const { detail, snapshot, freshLineage } = input;
   const evidence = detail.review?.evidence ?? null;
@@ -732,10 +845,15 @@ function licensePanelOf(input: DecisionCardInput, metadata: CardMetadata): CardL
   const matcher = detail.review?.reproducibility?.license_matcher ?? null;
   const lineage = reviewLineageOf(detail, snapshot);
   const field = metadata.dataset_description?.license ?? null;
-  const outcomes = [lineage, freshLineage]
-    .filter((l): l is CardLineage => l !== null)
-    .map((l) => l.outcome);
+  // The detail's permission is the one covering the review's own basis (`derivePublicationReview`);
+  // the fresher lineage is covered only by a permission that covers its own (decision-card-inputs).
   const permission = detail.license_permission !== null && detail.license_permission !== undefined;
+  const lineages = [
+    ...(lineage === null ? [] : [{ outcome: lineage.outcome, covered: permission }]),
+    ...(freshLineage === null
+      ? []
+      : [{ outcome: freshLineage.outcome, covered: input.freshCovered }]),
+  ];
   const fieldPresent =
     evidence !== null
       ? evidence.license_field
@@ -747,18 +865,17 @@ function licensePanelOf(input: DecisionCardInput, metadata: CardMetadata): CardL
     field,
     file,
     matcher,
-    outcomes,
+    lineages,
     credited: (lineage?.credited ?? false) || (freshLineage?.credited ?? false),
-    permission,
     enrichmentLicense: metadata.enrichment?.license ?? null,
   });
   return {
     ...cue,
-    field,
+    field: field === null ? null : { label: DEPOSITOR_TEXT_LABEL, text: field },
     license_file: file,
     matcher,
-    lineage,
-    fresh_lineage: freshLineage,
+    lineage: lineage === null ? null : labeledLineage(lineage, permission),
+    fresh_lineage: freshLineage === null ? null : labeledLineage(freshLineage, input.freshCovered),
     permission_recorded: permission,
   };
 }
@@ -797,6 +914,7 @@ export function buildDecisionCard(input: DecisionCardInput): DecisionCard {
     autoDenyState: input.autoDenyState,
     freshBetter: freshIsBetter(license.lineage, license.fresh_lineage),
     unresolved: license.lineage?.outcome === "unresolved",
+    ...input.gate,
   });
   const next: CardNextAction = {
     action,
@@ -812,6 +930,8 @@ export function buildDecisionCard(input: DecisionCardInput): DecisionCard {
     identifier_screen: {
       headline: detail.identifier_screen.headline,
       tone: detail.identifier_screen.tone,
+      head: input.gate.head,
+      head_line: HEAD_LINE[input.gate.head],
     },
     auto_deny: autoDenyOf(input.autoDenyState),
     next_action: next,

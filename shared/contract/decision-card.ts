@@ -32,6 +32,8 @@ export type LicenseCue = (typeof LICENSE_CUES)[number];
  * The suggested next action, one closed word (ADR 0142, decision 4). `approve` only when the
  * approval gate would accept the approval with no override and no acknowledgment still owed; no
  * action suggests an override, which is the administrator's own act (ADR 0102, section 8).
+ * `administrator_reads` (ADR 0142, amendment of 2026-11-27) is for a reason no rule settles and
+ * the depositor cannot be asked to cure: the administrator reads the review and decides.
  */
 export const DECISION_ACTIONS = [
   "approve",
@@ -42,6 +44,7 @@ export const DECISION_ACTIONS = [
   "review_again",
   "record_license_permission",
   "ask_depositor",
+  "administrator_reads",
   "deny",
 ] as const;
 export type DecisionAction = (typeof DECISION_ACTIONS)[number];
@@ -103,14 +106,22 @@ export interface CardMetadata {
   anonymous: boolean;
 }
 
+/** Text that is not NEMAR's, carried with the label that says whose it is. */
+export interface LabeledText {
+  label: string;
+  text: string;
+}
+
 /** One lineage as the card shows it: the review's own, or the card's fresher one. */
 export interface CardLineage {
   outcome: LineageOutcome;
   /** `SourceDatasets` declares an upstream source. */
   credited: boolean;
   resolved_at: string | null;
-  /** Each license a source's registry declares, `id: text`; labeled {@link REGISTRY_TEXT_LABEL}. */
-  declared_licenses: string[];
+  /** Each license a source's registry declares, `id: text`, under {@link REGISTRY_TEXT_LABEL}. */
+  declared_licenses: { label: string; licenses: string[] };
+  /** A recorded license permission covers this lineage's outcome and sources. */
+  permission_covers: boolean;
 }
 
 /** The license panel (ADR 0142, decision 4). */
@@ -120,8 +131,8 @@ export interface CardLicensePanel {
   reason: string;
   /** Every reason that stands, red first, in the cue table's order; empty when green. */
   reasons: string[];
-  /** `dataset_description.json`'s `License`, or null when there is none or it could not be read. */
-  field: string | null;
+  /** `dataset_description.json`'s `License` under {@link DEPOSITOR_TEXT_LABEL}, or null when there is none or it could not be read. */
+  field: LabeledText | null;
   /** The review's LICENSE identification (a version-3 review), or null. */
   license_file: LicenseFileFact | null;
   /** The license matcher the review recorded, or null. */
@@ -185,6 +196,10 @@ export interface CardNextAction {
   command: string;
 }
 
+/** Whether the screened commit is still the repository's `main`. */
+export const HEAD_CHECKS = ["current", "stale", "unverified", "exempt"] as const;
+export type HeadCheck = (typeof HEAD_CHECKS)[number];
+
 /** The decision card. */
 export interface DecisionCard {
   v: typeof DECISION_CARD_VERSION;
@@ -193,8 +208,18 @@ export interface DecisionCard {
   authors: CardAuthors;
   /** The four questions, in the vocabulary's order; empty without a readable report. */
   questions: CardQuestion[];
-  /** The identifier screen's headline and tone, as `describeScreen` words them. */
-  identifier_screen: { headline: string; tone: "ok" | "note" | "warn" | "stop" };
+  /**
+   * The identifier screen's headline and tone, as `describeScreen` words them, and whether the
+   * screened commit is still `main` (`verifyScreenHead`, the approval's own check): `current`,
+   * `stale`, `unverified` (the check could not be made) or `exempt`; `head_line` says the last
+   * three in words and is null for `current`.
+   */
+  identifier_screen: {
+    headline: string;
+    tone: "ok" | "note" | "warn" | "stop";
+    head: HeadCheck;
+    head_line: string | null;
+  };
   /** Null when the automatic denial has not acted on the review in force. */
   auto_deny: CardAutoDeny | null;
   next_action: CardNextAction;

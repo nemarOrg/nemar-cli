@@ -26,9 +26,11 @@ import {
   ACTION_COMMAND,
   ACTION_SENTENCE,
   GREEN_REASON,
+  HEAD_LINE,
   LICENSE_CUE_RULES,
   NOT_AS_REVIEWED_NOTE,
   NOT_REVIEWED_NOTE,
+  PERMITTED_GREEN_REASON,
   buildDecisionCard,
 } from "../backend/src/services/decision-card";
 import { EXEMPT_SCREEN_DESCRIPTION } from "../backend/src/services/identifier-screen-stored";
@@ -84,7 +86,7 @@ import {
   parsePublicationReviewReport,
 } from "../shared/publication-review";
 import { MINIMUM_FAILURES } from "../shared/submission-minimums";
-import { SNAPSHOT, detailOf, reasonView } from "./helpers/decision-card-fixtures";
+import { GATE_CLEAR, SNAPSHOT, detailOf, reasonView } from "./helpers/decision-card-fixtures";
 import { terminalFlaws } from "./helpers/terminal-words";
 
 const ID = "nm000123";
@@ -478,6 +480,10 @@ describe("the decision card's words", () => {
     const texts: Array<[string, string]> = [
       ...LICENSE_CUE_RULES.map((r): [string, string] => [`cue ${r.code}`, r.reason]),
       ["cue green", GREEN_REASON],
+      ["cue green with a permission", PERMITTED_GREEN_REASON],
+      ...Object.entries(HEAD_LINE)
+        .filter((e): e is [string, string] => e[1] !== null)
+        .map(([k, v]): [string, string] => [`head ${k}`, v]),
       ...DECISION_ACTIONS.map((a): [string, string] => [`action ${a}`, ACTION_SENTENCE[a]]),
       ["not as reviewed", NOT_AS_REVIEWED_NOTE],
       ["not reviewed", NOT_REVIEWED_NOTE],
@@ -510,6 +516,8 @@ describe("the decision card's words", () => {
     for (const code of REASON_CODES) {
       const card = buildDecisionCard({
         detail: detailOf({ reasons: [reasonView(code)] }),
+        freshCovered: false,
+        gate: GATE_CLEAR,
         autoDenyState: "would_deny",
         snapshot: SNAPSHOT,
         current: null,
