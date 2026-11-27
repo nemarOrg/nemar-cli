@@ -1174,7 +1174,7 @@ Where section 8 says a reported review is never started again, this is the later
 ## Amendment 2026-11-27 (owner, epic #2449): ADR 0142 identifies LICENSE
 
 ADR 0142 partially supersedes section 3's LICENSE bullet and section 5's lowering rule for a cut LICENSE.
-The review job identifies the root LICENSE with a pinned askalono release; for a conclusive identification the model receives only the text left over after the matched license, under the same pre-send rules and cap,
+The review job identifies the root LICENSE with a pinned ScanCode toolkit release; for a conclusive identification the model receives only the text left over after the matched license, under the same pre-send rules and cap,
 and a LICENSE that matches the `License` field no longer lowers `authors_and_license` to `unknown`.
 Every other LICENSE state keeps the rule above.
 ADR 0142 is the later text.

@@ -24,50 +24,68 @@ One description key is withheld from the model in 34 of the 37 reviews, and the 
 
 ## Decision
 
-### 1. The review job identifies LICENSE with askalono, pinned
+### 1. The review job identifies LICENSE with ScanCode, pinned
 
-- **The matcher is askalono 0.5.0** (Rust, Apache-2.0, `github.com/jpeddicord/askalono`), the release of 2024-10-22 and the project's last: the repository is archived.
-  The job uses the release asset `askalono-Linux.zip`, a static `x86_64-unknown-linux-musl` binary, never a build of our own and never a version the dispatch payload names.
-  - Zip SHA-256: `8a007355b700137b48e7e39aab5d083acb9a0926f20c064ab4476b1624390e52` (3,152,240 bytes).
-  - Extracted `askalono` SHA-256: `2870cbd60c2edb3ff4514e595fe39fcd5c735828b1ded1a0371f5c56da0704d6` (6,359,440 bytes).
-- **Where it is pinned.**
-  `.github/dataset-workflows/run-publication-review.yml` downloads the zip and refuses it unless both digests match constants in that file,
-  and the review script checks the binary's digest again against its own constant from nemar-cli `main` before it runs it.
-  A missing binary or a digest mismatch is never a pass and never a denial: the identification is `unreadable` and the matcher word is `unavailable`,
-  and LICENSE is handled as ADR 0102 handled it.
-- **Its license data.**
-  The binary embeds a cache built from the `spdx/license-list-data` submodule at the 0.5.0 tag, commit `7bd3f753d70c065dbf270598cc9736169b29835d`:
-  the build of 2022-05-17 whose `licenseListVersion` is `65dd995`, two builds after tag v3.17.
-  The embedded cache is a default feature, so the `--cache` flag and any cache file in the working directory are ignored.
-- **The matcher version the review records** is `askalono-0.5.0+spdx-65dd995`, the release and the `licenseListVersion` the data declares.
+- **The matcher is ScanCode toolkit 32.5.0** (nexB, Apache-2.0, `github.com/aboutcode-org/scancode-toolkit`), the release of 2026-01-15 and the latest on PyPI on 2026-11-27.
+  Its license database (the licenses and detection rules, including every CC license and variant) ships inside the release, and it maps them to SPDX license list 3.27.
+- **The matcher version the review records** is `scancode-32.5.0+spdx-3.27`: the toolkit release, which also versions its license database, and the SPDX list version that `scancode --version` prints.
   It joins ADR 0139 decision 9's record and every surface that prints it.
-- **How askalono scores.**
-  It normalizes both texts (Unicode, punctuation, whitespace, case, URLs, and it drops title lines and copyright statements),
-  takes the set of word bigrams of each, and scores their Sørensen-Dice coefficient, 0 to 1; it reports the best-scoring license.
-  With `--optimize` it also finds the line range that holds a license inside a longer file (`containing`, with its own score).
-  The CLI reports nothing under 0.8; the library's default threshold is 0.9.
-  The job runs `askalono --format json identify --optimize LICENSE` with a timeout, on the file the job already holds, and reads the JSON.
-- **The threshold is 0.95**, on the score of the match used (the whole-file score, or the `containing` score when only a span matched).
-  Reasons: a bigram Dice approximation on the pinned SPDX texts puts sibling CC 4.0 licenses at 0.964 to 0.979 of each other
-  (CC-BY-4.0 against CC-BY-NC-4.0 is 0.979), so no threshold separates siblings and the best-match choice does that;
-  a CC-BY-4.0 text with one added "non-commercial purposes only" sentence scores 0.996, so no threshold catches an added restriction either, and the additions rule below does;
-  0.95 sits above both askalono defaults, so a weak match is never conclusive, and leaves room for a reformatted copy of a real license.
-  Phase 1 measures askalono's own scores on the 37 reviewed LICENSE files and the SPDX texts and records them in its pull request; a change of threshold is a reviewed code change.
+- **How it is installed.**
+  uv only, never pip.
+  nemar-cli carries a hashed requirements file for Linux x86_64 and Python 3.12 (`uv pip compile --generate-hashes`; 80 packages),
+  and `.github/dataset-workflows/run-publication-review.yml` installs it with `uv pip install --require-hashes` into a fresh environment, never at a version the dispatch payload names.
+  The file pins `pluggy` below 1.6: measured, ScanCode 32.5.0 with the `pluggy` 1.7 that its own requirements admit fails at start (`did not find any 'pre_scan' hooks`).
+  The install is fresh on every run, with no Actions cache, because a cache is writable from other workflows of the repository.
+  A failed install or a hash mismatch is never a pass and never a denial: the identification is `unreadable`, the matcher word is `unavailable`, and LICENSE is handled as ADR 0102 handled it.
+- **Its cost.**
+  The download is about 153 MB (the ScanCode wheel is 126 MB), and the environment is about 667 MB installed, 573 MB of it the license index.
+  A cold install took 20 seconds on a laptop, so 30 to 60 seconds is the estimate on a GitHub runner; one file scans in about 5 seconds, start-up included.
+- **How the job runs it.**
+  `scancode --license --license-text --license-text-diagnostics --copyright --processes 1 --timeout 120 --json <out> LICENSE`, on the file the job already holds, then it reads the JSON.
+  A depositor reproduces it with
+  `uv tool run --python 3.12 --from scancode-toolkit==32.5.0 --with "pluggy<1.6" scancode --license --license-text --license-text-diagnostics --copyright --json-pp - LICENSE`.
+- **What ScanCode reports, measured on 2026-11-27** (texts from SPDX license-list-data `main` and creativecommons.org `legalcode.txt`):
+
+  | File | Detected expression | Score / coverage of the license's match | Unmatched text |
+  | --- | --- | --- | --- |
+  | CC-BY-4.0, CC-BY-SA-4.0, CC-BY-NC-4.0, CC-BY-NC-SA-4.0, CC0-1.0 (creativecommons.org) | each its own identifier | 100 / 100, exact (`1-hash`) | none |
+  | the same five (SPDX texts) | each its own identifier | 100 / 100, or 98.8 and 98.88 for the two non-commercial texts (`3-seq`) | none |
+  | CC-BY-4.0 with "This dataset may be used for non-commercial purposes only." inside it | `CC-BY-4.0 AND LicenseRef-scancode-proprietary-license` | 99.61 / 100 | the ten words, bracketed, and a second match on that line |
+  | the same line appended at the end | the same | 100 / 100 | a second match on that line |
+  | CC-BY-4.0 with a permission, a citation or a nonsense sentence inside it | `CC-BY-4.0` | 99.57 to 99.92 / 100 | each word, bracketed |
+  | CC-BY-4.0 with a citation sentence appended | `CC-BY-4.0` | 100 / 100 | the line is outside the match (lines 1 to 395 of 397) |
+  | CC-BY-4.0 with one word added ("may NOT satisfy") | `CC-BY-4.0` | 99.96 / 100 | `[NOT]` |
+  | CC-BY-4.0 under a "Copyright 2024 Example Lab" line | `CC-BY-4.0` | 100 / 100 | none; line 1 is a copyright statement |
+  | "This dataset is licensed under CC BY 4.0, https://creativecommons.org/licenses/by/4.0/" | `CC-BY-4.0` | 100 / 100 | none |
+  | NEMAR's generated CC-BY-4.0 notice (`generateLicenseText`) | `CC-BY-4.0` | 68.75 / 68.75 for the title and URL, 100 / 100 for the sentence | none, but "See the URL above for the full license text." is outside every match |
+  | NEMAR's generated CC0-1.0 notice | `CC0-1.0` | 84.62 / 100 and 100 / 100 | `[Public] [Domain]`, and public-domain clues |
+  | the first 200 lines of CC-BY-4.0 | `LicenseRef-scancode-free-unknown AND (CC-BY-4.0 AND LicenseRef-scancode-unknown)` | the longest match is not CC-BY-4.0 | not applicable |
+  | one line of prose with no license | none | none | not applicable |
+
+  Siblings are told apart, and the score alone never reveals an added restriction (99.57 for a permission sentence); the bracketed and uncovered text does.
+- **The decision rule.**
+  - `P` is the license of the longest match (`matched_length`) in the file.
+    When there is no match, or `P` is a `LicenseRef-scancode-*` term rather than an SPDX-listed identifier, the state is `unrecognized`.
+  - The identification is conclusive when some match of `P` has `score` at least 95 and `match_coverage` at least 95.
+    The lowest real full text measured is 98.8, and a notice that names its license scores 100; a weaker match is `unrecognized`.
+    A change of threshold is a reviewed code change.
+  - A conclusive `P` that equals the `License` field after normalization (`shared/license-lineage.ts`) is `matches`; one that differs is `matches_other`.
+    When the field does not normalize, the two cannot be compared: the state is `unrecognized`, and `spdx` still names `P`.
+  - A LICENSE that is byte for byte NEMAR's own generated notice for the field's license (`generateLicenseText`, line endings normalized) is `matches` with no additions,
+    because ScanCode leaves its last line outside every match and reads its CC0 title as a public-domain clue.
 - **The identification is a closed fact**, `license_file: {state, spdx, additions}`:
-  - `matches`: askalono's best match is at or above the threshold, and it is the license the `License` field names after normalization (`shared/license-lineage.ts`);
-  - `matches_other`: the match is at or above the threshold and the field normalizes to a different license;
-  - `unrecognized`: no match at or above the threshold, or a match while the field does not normalize, so the two cannot be compared (then `spdx` still names the file's license);
+  - `matches`, `matches_other` and `unrecognized` as above;
   - `absent`: no LICENSE file;
   - `annexed`: LICENSE is an annexed link or pointer rather than text in git;
-  - `unreadable`: the job could not read it in full, it is not UTF-8, the matcher failed or timed out, or the matcher is unavailable.
-  `spdx` is the matched SPDX identifier or null; `additions` is a boolean, false unless the state is `matches` or `matches_other`.
-- **Additions.**
-  The job aligns the file with the matched license's text from the same license-list build askalono embeds
-  (`json/details/<id>.json` of license-list-data at commit `7bd3f753`; the source archive at that commit, 37,121,421 bytes, SHA-256 `22e61a9d486ee1f8561ee3cc0ada7286133e677439487a8a49867d6ebc69a4f7`, pinned and checked like the binary),
-  as a word diff over text normalized the same way.
-  Text outside the matched line range and text inside it that the template does not contain is leftover;
-  copyright lines, title lines, whitespace and punctuation are dropped from it.
-  Any leftover sets `additions`, with no minimum length, because a false `additions` costs only a model read and the old lowering, which is the safe direction.
+  - `unreadable`: the job could not read it in full, it is not UTF-8, ScanCode reported a scan error or timed out, or the matcher is unavailable.
+  `spdx` is `P` or null; `additions` is a boolean, false unless the state is `matches` or `matches_other`.
+- **Additions** are set by any of:
+  - a bracketed (unmatched) token in the `matched_text_diagnostics` of a match of `P`;
+  - a match of any other license, except a `LicenseRef-scancode-unknown-license-reference` match on lines that a match of `P` also covers (the "licensed under the" of a notice);
+  - a license clue;
+  - a line that no match covers, unless it is blank, only punctuation, or a copyright statement ScanCode reports (`--copyright`).
+  The leftover text is those tokens, the matched text of those other matches and clues, and those lines.
+  There is no minimum length, because a false `additions` costs only a model read, which is the safe direction.
 - **What the model receives.**
   The platform facts carry `license_file` and the matcher version.
   For a conclusive identification (`matches` or `matches_other`) the model receives only the leftover text, not the license, as the `license` document:
@@ -132,33 +150,37 @@ A docs.nemar.org page, `/platform/license-check`, explains the check to deposito
 - A dataset that ships the real text of the license it declares no longer loses `authors_and_license` to the cap; epic #2449's gate is at most 8 of the 37 compared requests `unknown` on it after re-review.
 - An added restriction cannot hide inside a high score: it is leftover, and the model reads exactly it.
 - A license file that contradicts the field is red and needs a person; it never denies on its own.
-- The review job downloads two pinned artifacts (about 3 MB and 37 MB) before the model call, and a failed download degrades to ADR 0102's handling rather than failing the review.
+- The review job installs about 153 MB of pinned packages before the model call, which adds an estimated 30 to 60 seconds, and a failed install degrades to ADR 0102's handling rather than failing the review.
 - The administrator reads one card, license first, and the suggested action is computed once.
-- Obligations: two releases in order (decision 2); the threshold measurement in Phase 1; the docs page, outlined here:
+- Obligations: two releases in order (decision 2); the hashed requirements file and its refresh when ScanCode is bumped; the docs page, outlined here:
   1. What a depositor sees: the file identification, its three-color cue and reason, and that a file contradicting `License` needs a person, never an automatic denial.
   2. Why the full license text is fine to ship, and that added terms are read and judged.
-  3. The matcher and its version (`askalono-0.5.0+spdx-65dd995`), the threshold and what `additions` means.
-  4. How to reproduce: download the pinned askalono release, check its SHA-256, run `askalono --format json identify --optimize LICENSE`; or run `nemar dataset license-check`.
+  3. The matcher and its version (`scancode-32.5.0+spdx-3.27`), the threshold, and what `additions` means, with the measured table above.
+  4. How to reproduce: the `uv tool run` command of decision 1, or `nemar dataset license-check`.
   5. The lineage outcomes, osf.io sources, and what to send for `needs_permission`.
 
 ## Open risks
 
-- askalono is archived, so its license data stays at May 2022: a license published after it is `unrecognized` (amber), and a fix means a new pinned matcher in a new ADR or amendment.
-- The threshold rests on an approximation of askalono's scoring until Phase 1 measures the real scores.
-- The source archive is a GitHub codeload tarball; its bytes were identical on two downloads, but GitHub does not promise that forever, and a change fails the digest (degrading safely) until the pin is refreshed.
-- A LICENSE that is a one-line notice ("licensed under CC BY 4.0") is usually `unrecognized`; it keeps ADR 0102's handling, which is cheap for a short file.
-- The release binary has no `--diff` (built without diagnostics), so the alignment is ours: a small piece of make inside a take.
+- ScanCode's results above were measured on macOS arm64; Phase 1 repeats them on a GitHub runner, adds the 37 reviewed LICENSE files, and records both in its pull request.
+- The install size and time on a runner are estimates from wheel sizes and one laptop install, not a runner measurement.
+- ScanCode reports line ranges, not token offsets, so text before a match on the line where it starts (a notice's "This dataset is" before "licensed under") is not leftover.
+- The `pluggy` pin works around a dependency the release does not cap; a later ScanCode release may need a different pin, which the hashed file makes a reviewed change.
+- ScanCode looks for libmagic on the host and warns when it uses the system copy; a LICENSE is read as text either way.
+- A new SPDX license reaches the review only with a new ScanCode release and a reviewed bump of the pin.
 
 ## Alternatives considered
 
-- **Vendored SPDX texts with a matcher of our own**: rejected; normalization and scoring are what askalono already does and is known for, and we would own their correctness and drift (take, not make).
-  askalono is an established implementation, used widely to detect license files, small, and a static binary with no runtime to install.
-- **licensee** (Ruby): rejected; it needs a Ruby runtime in the job, and its corpus is choosealicense.com's, which leaves out the non-commercial and no-derivatives CC licenses that matter most here.
+- **askalono** (Rust, a pinned release binary): rejected on 2026-11-27.
+  Its repository is archived, its last release (0.5.0, 2024) embeds SPDX data from May 2022,
+  and it scores one bigram similarity, which puts the CC 4.0 siblings within 0.96 to 0.98 of each other, so it does not separate them, and it reports no unmatched text.
+- **licensee** (Ruby): rejected; it needs a Ruby runtime in the job, and its curated corpus, choosealicense.com's, leaves out the non-commercial and no-derivatives CC licenses that matter most here.
+- **Vendored SPDX texts with a matcher of our own**: rejected; normalization, matching and the rules for notices are what ScanCode already does and maintains (take, not make), and we would own their correctness and drift.
 - **Model only, with a larger LICENSE cap**: rejected; it spends the cap on boilerplate, an identification would differ between runs and models, and the decisive fact (which license this is) should be a platform fact, not a model's.
 
 ## Receipts
 
 - Epic nemarOrg/nemar-cli#2449, issue #2450; the 37-review measurement in the epic.
-- askalono 0.5.0 release and source at tag 0.5.0 (`cli/src/identify.rs` MIN_SCORE 0.8, `src/strategy.rs` default 0.9, `src/ngram.rs` Dice, `cli/build.rs` embedded cache, `.gitmodules`).
-- `spdx/license-list-data` commit `7bd3f753`, compared with tag v3.17 (two builds ahead).
+- ScanCode toolkit 32.5.0 on PyPI (wheels of 2026-01-15), `scancode --version` (SPDX License list version 3.27), and the measurement of 2026-11-27 above, run outside every repository.
+- askalono 0.5.0 (archived; `.gitmodules` pins `spdx/license-list-data` at commit `7bd3f753`, two builds after v3.17).
+- `src/lib/license.ts` (`generateLicenseText`).
 - ADR 0102 sections 2, 3 and 5; ADR 0139 decisions 1, 7 and 9; ADR 0093.
