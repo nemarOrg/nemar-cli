@@ -35,9 +35,11 @@ import {
 } from "../lib/api/publish.js";
 import { type ConfirmResult, YES_OPTION, confirm } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
+import { decisionCardLines } from "../lib/decision-card-display.js";
 import {
   NON_PRODUCTION_NOTE,
   reviewDetailLines,
+  reviewHeaderLines,
   startedSentence,
 } from "../lib/publication-review-display.js";
 import { startAllCandidates } from "../lib/publication-review-queue.js";
@@ -55,11 +57,15 @@ export function registerReviewCommands(group: Command): void {
       "after",
       `
 Description:
-  Read the review of the dataset's active publication request: its identifier
-  screen, then the review's outcome with every reason it is not a pass and what
-  clears it, the four questions it asked, the facts the platform used to lower an
-  answer, what the model found and said, the evidence it was given, what it was
-  shown, any override on record, and the command to run next.
+  Read the review of the dataset's active publication request. It opens with
+  the decision card: the suggested next action, the license panel with its
+  cue, the dataset's own fields as the review read them, the authors, each
+  question's answer with its strongest finding, the identifier screen and any
+  automatic denial. Then the identifier screen, then the review's outcome with
+  every reason it is not a pass and what clears it, the four questions it
+  asked, the facts the platform used to lower an answer, what the model found
+  and said, the evidence it was given, what it was shown, any override on
+  record, and the command to run next.
 
   The findings and the summary are written by the model, from text the depositor
   wrote, and are printed under labels that say so: they inform your decision and
@@ -84,7 +90,13 @@ Examples:
           return;
         }
         console.log();
-        for (const line of reviewDetailLines(detail)) console.log(line);
+        // Which request, then the decision card (ADR 0142, decision 4), then the review in full.
+        for (const line of reviewHeaderLines(detail)) console.log(line);
+        console.log();
+        const card = decisionCardLines(detail.decision_card);
+        for (const line of card) console.log(line);
+        if (card.length > 0) console.log();
+        for (const line of reviewDetailLines(detail, { header: false })) console.log(line);
         console.log();
       } catch (error) {
         failWith(error, spinner, "Could not read the review", undefined, { json });

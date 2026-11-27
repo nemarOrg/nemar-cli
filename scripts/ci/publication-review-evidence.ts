@@ -40,6 +40,8 @@
 import { execFileSync } from "node:child_process";
 import { formatCoverage, readerMatch } from "../../shared/identifier-readers";
 import type { FindingKind } from "../../shared/identifier-scan";
+import type { LicenseFileFact, MatcherWord } from "../../shared/license-file";
+import { type NormalizedLicense, normalizeLicense } from "../../shared/license-lineage";
 import { SEMVER } from "../../shared/pr-review";
 import {
   type BidsState,
@@ -47,6 +49,7 @@ import {
   type ClearedDocuments,
   type ClearedInputs,
   DOCUMENT_BYTE_CEILING,
+  type DescriptionKeyNotShownWord,
   type InputPreSendResult,
   LICENSE_CANDIDATES,
   MAX_COUNT,
@@ -66,6 +69,7 @@ import {
   type StructuralSummary,
   type TagState,
   type VersionShape,
+  descriptionKeysNotShownNamesOf,
   effectiveVersionOf,
   parsePublicationReviewEvidence,
 } from "../../shared/publication-review";
@@ -77,6 +81,11 @@ import {
   listTree,
   parseAnnexPointer,
 } from "../identifier-screen-ci-lib";
+import {
+  type LicenseIdentification,
+  identifyLicenseFile,
+  licenseFieldOf,
+} from "./license-file-fact";
 import { presend } from "./publication-review-presend";
 
 /** A full commit id. Every revision this module hands to git has this shape. */
@@ -596,6 +605,14 @@ export interface EvidenceParts {
    * {@link NO_INPUTS} when absent.
    */
   inputs?: EvidenceInputs;
+  /**
+   * Version 3's additions (ADR 0142, decision 2): the LICENSE identification and the closed names
+   * of the description keys not shown. Without them the block is version 2's.
+   */
+  v3?: {
+    license_file: LicenseFileFact;
+    description_keys_not_shown_names: DescriptionKeyNotShownWord[];
+  };
 }
 
 /** What the widened inputs add to the evidence block. */
@@ -642,6 +659,16 @@ function addFindingCounts(
  * and the caller reports it as `report_invalid`.
  */
 export function buildPublicationEvidence(parts: EvidenceParts): ReviewFacts {
+  const lineage = (parts.inputs ?? NO_INPUTS).lineage;
+  // A version-3 lineage always says when it was resolved (null when the resolver did not say); a
+  // version-2 one never carries the key.
+  let shapedLineage: ReviewLineage | null = null;
+  if (lineage !== null) {
+    shapedLineage =
+      parts.v3 === undefined
+        ? { outcome: lineage.outcome, credited: lineage.credited }
+        : { ...lineage, resolved_at: lineage.resolved_at ?? null };
+  }
   return parsePublicationReviewEvidence({
     head: parts.head,
     anonymous: parts.anonymous,
@@ -659,8 +686,96 @@ export function buildPublicationEvidence(parts: EvidenceParts): ReviewFacts {
     description_keys_not_shown: parts.presend.description_keys_not_shown,
     summary: parts.summary,
     inputs: (parts.inputs ?? NO_INPUTS).presend.states,
-    lineage: (parts.inputs ?? NO_INPUTS).lineage,
+    lineage: shapedLineage,
+    ...(parts.v3 ?? {}),
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// LICENSE, as the model is shown it (ADR 0142, decision 1)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What the model is told about LICENSE besides the license document: how much of the file the
+ * document holds, the `License` field's normalized license, and the matcher.
+ * - `none`: the identification is conclusive and nothing was added, so no LICENSE text is sent.
+ * - `additions_only`: conclusive with additions: the document is only the text beyond the license.
+ * - `file`: the document is the file itself (any other identification, or a conclusive one whose
+ *   longest match covers less than its whole license, where what is missing cannot be shown).
+ */
+export interface LicenseView {
+  text: "none" | "additions_only" | "file";
+  /**
+   * The `License` field, normalized (`shared/license-lineage.ts`): the closed license word, and
+   * its version when the field names one (`cc-by-4.0`, `cc0-1.0`, `cc-by`, `other`, `none`).
+   */
+  field: string;
+  matcher: MatcherWord;
+}
+
+/** A normalized version the model may be told: `4.0`, never a long run of a depositor's digits. */
+const FIELD_VERSION = /^\d{1,2}\.\d{1,2}$/;
+/** The normalized licenses a version belongs to; any other word is shown alone. */
+const VERSIONED_LICENSES: readonly NormalizedLicense[] = [
+  "cc0",
+  "cc-by",
+  "cc-by-sa",
+  "cc-by-nc",
+  "cc-by-nc-sa",
+  "cc-by-nd",
+  "cc-by-nc-nd",
+  "odc-by",
+  "odbl",
+  "pddl",
+];
+
+/** How much of LICENSE the model is sent, for one identification. */
+export function licenseTextOf(id: LicenseIdentification): LicenseView["text"] {
+  const conclusive = id.fact.state === "matches" || id.fact.state === "matches_other";
+  if (!conclusive) return "file";
+  if (!id.fact.additions) return "none";
+  return id.partial ? "file" : "additions_only";
+}
+
+/**
+ * The LICENSE document the pre-send check examines in place of the file: nothing for a conclusive
+ * file with nothing added (the document is then `absent`, which the Worker's parser accepts only
+ * beside such an identification), only the leftover text for one with additions, joined one piece
+ * to a line, and the file itself otherwise. The leftover passes the same rules and the same cap as
+ * the file would, so a cut leftover is a cut document.
+ */
+export function licenseDocumentFor(raw: RawDocument, id: LicenseIdentification): RawDocument {
+  switch (licenseTextOf(id)) {
+    case "none":
+      return { name: raw.name, state: "absent", text: null };
+    case "additions_only":
+      return { name: raw.name, state: "present", text: id.leftover.join("\n") };
+    default:
+      return raw;
+  }
+}
+
+/** The `License` field's normalized license, from the raw description. */
+export function licenseFieldView(descriptionText: string | null): LicenseView["field"] {
+  const normalized = normalizeLicense(licenseFieldOf(descriptionText));
+  const versioned =
+    normalized.version !== null &&
+    FIELD_VERSION.test(normalized.version) &&
+    VERSIONED_LICENSES.includes(normalized.license);
+  return versioned ? `${normalized.license}-${normalized.version}` : normalized.license;
+}
+
+/**
+ * The closed names of the description keys not shown, from the raw description, for a description
+ * the pre-send check sent (its count is 0 otherwise, and so are the names).
+ */
+function keysNotShownNames(
+  descriptionText: string | null,
+  state: PreSendResult["states"]["dataset_description"],
+): DescriptionKeyNotShownWord[] {
+  if (state !== "sent" && state !== "sent_cut") return [];
+  const desc = parseObject(descriptionText);
+  return desc === null ? [] : descriptionKeysNotShownNamesOf(Object.keys(desc));
 }
 
 /** The states of a README that exists and could not be read as text. */
@@ -681,6 +796,12 @@ export interface DocumentEvidenceInputs {
   summary: StructuralSummary;
   /** The widened inputs, examined by pre-send; {@link NO_INPUTS} when there are none to read. */
   inputs?: EvidenceInputs;
+  /**
+   * LICENSE's identification (`identifyReviewLicense` in the job). Without one, LICENSE is
+   * identified with no scan: `absent`, `annexed`, or `unreadable` with the matcher `unavailable`,
+   * which is what the calibration, and the job before the scan step is deployed, record.
+   */
+  licenseFile?: LicenseIdentification;
 }
 
 /**
@@ -696,7 +817,13 @@ export interface DocumentEvidenceInputs {
 export function evidenceFromDocuments(
   docs: Record<ReviewDocument, RawDocument>,
   inputs: DocumentEvidenceInputs,
-): { facts: ReviewFacts; cleared: ClearedDocuments; clearedInputs: ClearedInputs } {
+): {
+  facts: ReviewFacts;
+  cleared: ClearedDocuments;
+  clearedInputs: ClearedInputs;
+  license: LicenseView;
+  licenseFile: LicenseIdentification;
+} {
   const descriptionState = docs.dataset_description.state;
   if (descriptionState !== "present" && descriptionState !== "absent") {
     throw new PublicationEvidenceError("description_unreadable");
@@ -709,7 +836,14 @@ export function evidenceFromDocuments(
   );
   const version = versionFacts(docs.dataset_description.text);
   if (inputs.tagsText === null) throw new PublicationEvidenceError("tags_unreadable");
-  const checked = presend(docs);
+  const licenseFile =
+    inputs.licenseFile ??
+    identifyLicenseFile({
+      document: { state: docs.license.state, text: docs.license.text },
+      licenseField: licenseFieldOf(docs.dataset_description.text),
+      scan: null,
+    });
+  const checked = presend({ ...docs, license: licenseDocumentFor(docs.license, licenseFile) });
   const facts = buildPublicationEvidence({
     head: inputs.head,
     anonymous: inputs.anonymous,
@@ -727,10 +861,23 @@ export function evidenceFromDocuments(
     presend: checked,
     summary: inputs.summary,
     inputs: inputs.inputs ?? NO_INPUTS,
+    v3: {
+      license_file: licenseFile.fact,
+      description_keys_not_shown_names: keysNotShownNames(
+        docs.dataset_description.text,
+        checked.states.dataset_description,
+      ),
+    },
   });
   return {
     facts,
     cleared: checked.cleared,
     clearedInputs: (inputs.inputs ?? NO_INPUTS).presend.cleared,
+    license: {
+      text: licenseTextOf(licenseFile),
+      field: licenseFieldView(docs.dataset_description.text),
+      matcher: licenseFile.matcher,
+    },
+    licenseFile,
   };
 }

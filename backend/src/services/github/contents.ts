@@ -355,7 +355,7 @@ export async function getFileContent(
   return data.content;
 }
 
-type FetchPolicy = NonNullable<Parameters<typeof githubFetchWithRetry>[2]>;
+export type FetchPolicy = NonNullable<Parameters<typeof githubFetchWithRetry>[2]>;
 
 /**
  * How `branchExists` (and a sweep's file reads) talk to GitHub: the interactive
@@ -495,10 +495,16 @@ export async function branchExists(repo: string, branch: string, pat: string): P
  * @returns 40-character commit SHA
  * @throws {Error} If the branch ref cannot be resolved
  */
-export async function getMainBranchSha(repo: string, branch: string, pat: string): Promise<string> {
-  // retryOn404: caller knows the branch exists (e.g., we just committed to it),
+export async function getMainBranchSha(
+  repo: string,
+  branch: string,
+  pat: string,
+  /** The default retries a 404 and sleeps; a caller that must not stall passes {@link LOOKUP_ONCE}. */
+  policy: FetchPolicy = { retryOn404: true },
+): Promise<string> {
+  // retryOn404 (the default): caller knows the branch exists (e.g., we just committed to it),
   // so 404 indicates GitHub hasn't propagated the ref yet.
-  const response = await fetchBranchRef(repo, branch, pat, { retryOn404: true });
+  const response = await fetchBranchRef(repo, branch, pat, policy);
   if (!response.ok) throw await githubHttpError(response, `get ${branch} branch ref`);
   return readRefSha(response, branch);
 }

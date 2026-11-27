@@ -42,6 +42,13 @@ import {
 import { README_CANDIDATES } from "../../../shared/readme-candidates.js";
 import { AUTO_DENY_AUDIT_ACTION, readResubmissionNote } from "../../../shared/resubmission-note.js";
 import type { Bindings } from "../types/bindings.js";
+import {
+  SERVED_METADATA_VERSION,
+  cardDescriptionOf,
+  cardEnrichmentOf,
+  cardLineageOf,
+  servedMetadataJson,
+} from "./decision-card.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getFileContent } from "./github.js";
 import { resolveWorkerLineage } from "./license-lineage-cache.js";
@@ -402,19 +409,15 @@ export async function publicationReviewInputs(
   });
 
   const anonymous = request.anonymous === 1;
+  const fields = doc === null ? null : enrichmentFieldsOf(doc, anonymous);
+  const enrichmentSource =
+    typeof dataset.enrichment_updated_at === "string" &&
+    ENRICHMENT_SOURCE_RE.test(dataset.enrichment_updated_at)
+      ? dataset.enrichment_updated_at
+      : null;
   const body: ReviewInputsBody = {
     v: REVIEW_INPUTS_VERSION,
-    enrichment:
-      doc === null
-        ? null
-        : {
-            fields: enrichmentFieldsOf(doc, anonymous),
-            source:
-              typeof dataset.enrichment_updated_at === "string" &&
-              ENRICHMENT_SOURCE_RE.test(dataset.enrichment_updated_at)
-                ? dataset.enrichment_updated_at
-                : null,
-          },
+    enrichment: fields === null ? null : { fields, source: enrichmentSource },
     lineage: {
       outcome: lineage.outcome,
       target_license: lineage.target_license,
@@ -449,16 +452,28 @@ export async function publicationReviewInputs(
   // A stamp that cannot be written serves nothing, so no run is left able to make a call free.
   // The same statement keeps the lineage just served as the review's permission basis (migration
   // 0154): what a recorded license permission must match to clear the lineage reason. The latest
-  // serve is the one the job read, so each serve writes it.
+  // serve is the one the job read, so each serve writes it. So does the decision card's snapshot of
+  // the dataset's own words as served (migration 0163; ADR 0142 decision 4): the enrichment's main
+  // fields, the description's Name, License and Authors at the reviewed commit, and the lineage with
+  // what its sources declare. One too long for its column is left NULL (the card then says "not as
+  // reviewed"); the serve is never refused for it.
+  const snapshot = servedMetadataJson({
+    v: SERVED_METADATA_VERSION,
+    enrichment: cardEnrichmentOf(fields),
+    enrichment_source: enrichmentSource,
+    dataset_description: cardDescriptionOf(description, anonymous),
+    lineage: cardLineageOf(lineage),
+  });
   try {
     const stamped = await db
       .prepare(
         `UPDATE publication_reviews
-            SET inputs_served_at = COALESCE(inputs_served_at, datetime('now')), lineage_basis = ?
+            SET inputs_served_at = COALESCE(inputs_served_at, datetime('now')), lineage_basis = ?,
+                served_metadata = ?
           WHERE id = ? AND dataset_id = ? AND claimed_at IS NOT NULL
             AND state IN ('dispatched', 'unreported')`,
       )
-      .bind(JSON.stringify(permissionBasisOf(lineage)), reviewId, datasetId)
+      .bind(JSON.stringify(permissionBasisOf(lineage)), snapshot, reviewId, datasetId)
       .run();
     if ((stamped.meta.changes ?? 0) !== 1) return { kind: "not_claimed" };
   } catch (err) {

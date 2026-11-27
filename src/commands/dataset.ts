@@ -6509,6 +6509,7 @@ function licenseMatcherLines(m: ReturnType<typeof licenseMatcherOf>): string[] {
   return [
     "",
     `License file: ${m.license_file}`,
+    // TODO(#2451): say "identifies" again at deploy 3, when the scan step reaches the workflow.
     `  NEMAR's review will identify it with ScanCode (${m.version}) once that step is released. To run the same scan:`,
     ...m.commands.map((c) => `    ${c}`),
   ];

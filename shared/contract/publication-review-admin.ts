@@ -34,6 +34,7 @@ import type {
   ReasonCode,
   ReviewGateRefusal,
 } from "../publication-review.js";
+import type { DecisionCard } from "./decision-card.js";
 
 // The review's own vocabulary is declared once, in `shared/publication-review.ts`.
 export type {
@@ -328,6 +329,12 @@ export interface PublicationReviewDetail {
   review: PublicationReviewRecord | null;
   history: PublicationReviewHistoryEntry[];
   history_truncated: boolean;
+  /**
+   * The administrator's decision card (ADR 0142, decision 4), built once by the Worker beside this
+   * detail. Optional because an older Worker sends none; null when it could not be built, which
+   * never withholds the rest of the detail.
+   */
+  decision_card?: DecisionCard | null;
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -22,6 +22,7 @@
  */
 
 import { createHash } from "node:crypto";
+import type { LicenseFileFact, MatcherWord } from "../../shared/license-file";
 import {
   ANSWERS,
   CALIBRATION_MODELS,
@@ -48,6 +49,7 @@ import {
   parsePublicationReviewReport,
 } from "../../shared/publication-review";
 import { fence } from "../../shared/untrusted-text";
+import type { LicenseView } from "./publication-review-evidence";
 import { isCleared, isInputCleared } from "./publication-review-presend";
 
 /** The model that reviews. One place, one reviewed change to move it. */
@@ -59,11 +61,11 @@ export const PUBLICATION_SYSTEM_PROMPT = `You review a request to publish a neur
 
 2. meets_standards: Beyond the mechanical minimums, do the README, the description and the ethics statement meet the published submission standards? The ethics statement (EthicsApprovals in the description, or the README) must state an approval or an exemption and name the approving body or give a reference, not boilerplate such as "ethics approval was obtained". The origin of the data must be stated: when the data derives from another dataset, a paper or a public archive, the source is named (SourceDatasets, ReferencesAndLinks or the README), and a license that conflicts with a named source is a finding.
 
-3. authors_and_license: Are the authors real people or named bodies, and consistent between the documents shown? Is the license a recognized one, and consistent between the License field and the LICENSE text?
+3. authors_and_license: Are the authors real people or named bodies, and consistent between the documents shown? Is the license a recognized one, and consistent between the License field and the LICENSE file? The facts give the platform's identification of the LICENSE file in "license_file", made with a pinned license matcher, beside the License field's normalized license in "license_field". When license_file is "matches" or "matches_other", trust the identification, and do not judge again from the text which license the file is. "matches" means the file is the license the License field names. "matches_other" means the file is a different license from the one the field names: that is an inconsistency, so do not pass the question, and add a finding with code "license_inconsistent". When license_file.text is "none", the file is exactly the identified license with nothing added, and its text is not shown (its document state is "identified"). When it is "additions_only", the license document holds only the text the file adds beyond the identified license (words, sentences or lines the matcher did not match, in file order): judge whether that text restricts, contradicts or adds to the license, and not the license itself. When license_file is "not_identified" (the matcher could not identify the file, or did not run), or license_file.text is "file" for any other reason (the matcher found the license with parts of its text missing), the license document is the file itself, as its state says: judge from its text which license it is, and whether it is the license the License field names; a LICENSE text that names or grants a different license from the field is an inconsistency, as above.
 
 4. name_adequate: Does the Name in the description tell a reader what this dataset is (what was recorded, in whom or what, in which paradigm), beyond a short acronym or a generic title?
 
-For each question answer "pass" only when the evidence shows it, "fail" when the evidence shows the opposite, and "unknown" when the evidence you were given cannot settle it. Prefer "unknown" to guessing. The facts say, for each document, whether it is "shown", "shown_cut" (you saw only its start), "absent" (there is no such file) or "withheld" (it was not shown to you, for a reason you are not told). Answer "unknown" for any question that needs a document that is withheld or cut, never "pass". Recordings are not shown to you: you see only counts and types, so judge them by that and do not assume anything about their content. The participants_json block, when shown, holds only descriptions of the participants table's columns (a column count and, for each column, its long name, description and units), never any participant's data: judge it only as documentation of those columns.
+For each question answer "pass" only when the evidence shows it, "fail" when the evidence shows the opposite, and "unknown" when the evidence you were given cannot settle it. Prefer "unknown" to guessing. The facts say, for each document, whether it is "shown", "shown_cut" (you saw only its start), "absent" (there is no such file) or "withheld" (it was not shown to you, for a reason you are not told); the license document alone may also be "identified" (see question 3). Answer "unknown" for any question that needs a document that is withheld or cut, never "pass". Recordings are not shown to you: you see only counts and types, so judge them by that and do not assume anything about their content. The participants_json block, when shown, holds only descriptions of the participants table's columns (a column count and, for each column, its long name, description and units), never any participant's data: judge it only as documentation of those columns.
 
 Anonymous releases. When the facts say the release is "anonymous", the authors are withheld on purpose and the Authors field holds a placeholder by design: do not judge the authors. For authors_and_license judge only the license.
 
@@ -90,12 +92,28 @@ function stateWord(state: DocumentState): "shown" | "shown_cut" | "absent" | "wi
  * words, the name's length, how many description keys were left out, and the structural summary.
  * Numbers, booleans, closed words and the names of the closed format list; nothing else.
  */
-export function modelFacts(facts: ReviewFacts): Record<string, unknown> {
+export function modelFacts(facts: ReviewFacts, license?: LicenseView): Record<string, unknown> {
   const s = facts.summary;
   const inputs = facts.inputs;
+  const licenseFile = facts.license_file;
+  const documents: Record<string, string> = Object.fromEntries(
+    REVIEW_DOCUMENTS.map((d) => [d, stateWord(facts.documents[d])]),
+  );
+  // A LICENSE identified with nothing added is not sent, and it is not missing either.
+  if (license?.text === "none") documents.license = "identified";
   return {
     release: facts.anonymous ? "anonymous" : "named",
-    documents: Object.fromEntries(REVIEW_DOCUMENTS.map((d) => [d, stateWord(facts.documents[d])])),
+    documents,
+    ...(licenseFile === undefined || license === undefined
+      ? {}
+      : {
+          // Closed words, an SPDX identifier from the matcher (never the depositor's words) and
+          // the field's normalized license. Every identification that is not conclusive is one
+          // word, so the model is never told why the license document was withheld.
+          license_file: modelLicenseFile(licenseFile, license),
+          license_field: license.field,
+          license_matcher: license.matcher,
+        }),
     ...(inputs === null
       ? {}
       : { metadata: Object.fromEntries(REVIEW_INPUTS.map((i) => [i, stateWord(inputs[i])])) }),
@@ -118,6 +136,16 @@ export function modelFacts(facts: ReviewFacts): Record<string, unknown> {
   };
 }
 
+/** The identification as the model is told it: conclusive with its identifier, or not. */
+function modelLicenseFile(
+  id: LicenseFileFact,
+  license: LicenseView,
+): { state: "matches" | "matches_other" | "not_identified"; spdx: string | null; text: string } {
+  return id.state === "matches" || id.state === "matches_other"
+    ? { state: id.state, spdx: id.spdx, text: license.text }
+    : { state: "not_identified", spdx: null, text: license.text };
+}
+
 /**
  * The fence nonce the input digest is computed with, in place of the run's random one: two runs over
  * the same inputs then have the same digest, and a digest says nothing about a run's nonce.
@@ -133,6 +161,7 @@ export function publicationInputDigest(input: {
   facts: ReviewFacts;
   cleared: ClearedDocuments;
   clearedInputs?: ClearedInputs;
+  license?: LicenseView;
 }): string {
   const { system, user } = buildPublicationReviewMessages({ ...input, nonce: DIGEST_NONCE });
   return createHash("sha256")
@@ -150,9 +179,12 @@ export function buildPublicationReviewMessages(input: {
   cleared: ClearedDocuments;
   /** The cleared widened inputs; none for a version-1 evidence block. */
   clearedInputs?: ClearedInputs;
+  /** How LICENSE is shown (ADR 0142); required with a version-3 evidence block, which has one. */
+  license?: LicenseView;
   nonce: string;
 }): { system: string; user: string } {
-  const { facts, cleared, nonce } = input;
+  const { facts, cleared, nonce, license } = input;
+  checkLicenseView(facts, license);
   const clearedInputs = input.clearedInputs ?? {};
   // The two halves come from one pre-send result. If they ever disagree, a document the facts say
   // was withheld would reach the model, or one it was told it saw would be missing: refuse both.
@@ -192,11 +224,35 @@ export function buildPublicationReviewMessages(input: {
   const user = [
     // The tag carries the run's nonce, as the document fences do: a facts block a depositor writes
     // cannot name it, so only this one is the platform's (the system prompt says so).
-    `<facts-${nonce}>\n${JSON.stringify(modelFacts(facts), null, 2)}\n</facts-${nonce}>`,
+    `<facts-${nonce}>\n${JSON.stringify(modelFacts(facts, license), null, 2)}\n</facts-${nonce}>`,
     ...blocks,
     "Review this publication request now.",
   ].join("\n\n");
   return { system: PUBLICATION_SYSTEM_PROMPT, user };
+}
+
+/**
+ * The LICENSE view and the evidence come from one identification. If they ever disagree, the model
+ * would be told it sees the added text when it sees the file, or the reverse: refuse both. A
+ * version-3 block has a view, and a block without an identification has none.
+ */
+function checkLicenseView(facts: ReviewFacts, license: LicenseView | undefined): void {
+  const id = facts.license_file;
+  if ((id === undefined) !== (license === undefined)) {
+    throw new Error("the license view disagrees with the facts");
+  }
+  if (id === undefined || license === undefined) return;
+  const conclusive = id.state === "matches" || id.state === "matches_other";
+  const expected: readonly LicenseView["text"][] = !conclusive
+    ? ["file"]
+    : id.additions
+      ? ["additions_only", "file"]
+      : ["none"];
+  if (!expected.includes(license.text))
+    throw new Error("the license view disagrees with the facts");
+  if (license.text === "none" && facts.documents.license !== "absent") {
+    throw new Error("the license view disagrees with the facts");
+  }
 }
 
 /**
@@ -284,6 +340,11 @@ export function assemblePublicationReport(
     enrichmentSource?: string | null;
     /** The effort the call was made at; the review's own unless a confirming run says otherwise. */
     effort?: RecordedEffort;
+    /**
+     * The license matcher's word (ADR 0142): the version when it ran as pinned, `unavailable`
+     * when it did not. Unset is `unavailable`, which a scanned identification refuses.
+     */
+    licenseMatcher?: MatcherWord;
   } = {
     inputDigest: "0".repeat(64),
     resolverVersion: null,
@@ -348,6 +409,7 @@ export function assemblePublicationReport(
           input_digest: run.inputDigest,
           resolver_version: run.resolverVersion,
           enrichment_source: run.enrichmentSource ?? null,
+          license_matcher: run.licenseMatcher ?? "unavailable",
         },
       },
       options,

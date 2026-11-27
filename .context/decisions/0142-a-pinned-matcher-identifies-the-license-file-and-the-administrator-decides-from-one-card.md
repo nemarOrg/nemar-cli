@@ -260,6 +260,18 @@ Both rules apply only when every place the README writes the short DOI on its ow
 nm000746 and nm000843 carry a truncated cell, `https://doi.org/10.5281/zenodo.2231 [...]; N: 30`, beside the declared `10.5281/zenodo.22314785` (and `zenodo.236` beside `zenodo.23610719`).
 Two distinct records, one a prefix of the other, with no ellipsis right after the shorter, are both kept. Resolver `license-lineage/5`.
 
+## Amendment 2026-11-27 (lead ruling, #2455): the card's closed list, permissions and gates
+
+Decision 4 is extended by the rulings of phase 4's review (pull request #2479).
+- **A tenth next action, `administrator_reads`**: an administrator reads the review and the dataset and decides.
+  It is for a reason no rule settles and the depositor cannot cure alone: `doi_state_unexpected`, `text_withheld`, `question_unknown` and `bids_unconcluded_at_review`, a red license cue that no reason names, and a request whose approval has started publishing.
+  It suggests no override; the terminal points at `show`.
+- **A recorded license permission clears `needs_permission` and `share_alike_mismatch` on the card**: the cue is green when nothing else stands, and its reason says a recorded permission covers the upstream license.
+  `redistribution_prohibited` stays red with a permission, because a repository's data use agreement may bind more than the authors.
+  A permission counts per lineage: the card's fresher lineage is covered only when the permission covers that lineage's own basis (`permissionCovers`), never because it covered the review's.
+- **`approve` also needs the approval's own gates**: the screened commit is still `main` by the approval path's check (`verifyScreenHead`, asked by the card once and without a sleep; a stale head suggests running the screen again, and a head that could not be checked suggests waiting and looking again), and the request is `requested`, or `approving` with no approval run holding it and nothing published.
+- The dataset's License field and each source's declared licenses carry their labels in the card's JSON.
+
 ## Receipts
 
 - Epic nemarOrg/nemar-cli#2449, issue #2450; the 37-review measurement in the epic.
@@ -267,3 +279,10 @@ Two distinct records, one a prefix of the other, with no ellipsis right after th
 - askalono 0.5.0 (archived; `.gitmodules` pins `spdx/license-list-data` at commit `7bd3f753`, two builds after v3.17).
 - `src/lib/license.ts` (`generateLicenseText`).
 - ADR 0102 sections 2, 3 and 5; ADR 0139 decisions 1, 7 and 9; ADR 0093.
+
+## Amendment 2026-11-27 (seam review of #2486): two cues decision 4 did not list
+
+`administrator_reads` also covers an unresolved lineage: ADR 0139's amendment of the same day makes `unresolved` NEMAR's failure to read a registry, not the depositor's to cure, so no depositor mail is sent and the card does not ask the depositor.
+Decision 4's amber list also holds `license_file_not_identified`, for a review made before report v3, which recorded no identification.
+Until deploy 3 every review records the matcher `unavailable`; its amber line is listed last, after every reason an administrator can act on, and a LICENSE that was read whole but not scanned is not called unreadable.
+The card shows how many README DOIs the resolver dropped as cut short, which explains a lineage that names no source.

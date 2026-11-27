@@ -61,6 +61,7 @@ import {
   signIdentifierScreenCallbackToken,
   triggerIdentifierScreenRun,
 } from "./github.js";
+import type { FetchPolicy } from "./github/contents.js";
 import {
   SCREEN_REPORT_DEADLINE_MINUTES,
   type ScreenView,
@@ -986,6 +987,11 @@ export async function verifyScreenHead(
   datasetId: string,
   row: GateRow,
   pat?: string,
+  /**
+   * How the head is looked up. Left out (the approval gate), `getMainBranchSha`'s own default; the
+   * decision card passes a one-try, no-sleep policy so `show` never stalls on GitHub.
+   */
+  policy?: FetchPolicy,
 ): Promise<ScreenGateOutcome> {
   if (isScreenExempt(datasetId)) return { ok: true };
   const view = screenView(datasetId, row.identifier_screen_status, row.identifier_screen_report);
@@ -1014,7 +1020,7 @@ export async function verifyScreenHead(
   }
   let head: string;
   try {
-    head = await getMainBranchSha(datasetId, "main", token);
+    head = await getMainBranchSha(datasetId, "main", token, policy);
   } catch (err) {
     console.error(
       `[identifier-screen] gate: head lookup for ${datasetId} failed: ${errorText(err)}`,
