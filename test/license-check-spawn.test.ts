@@ -79,6 +79,7 @@ async function cli(args: string[]) {
     NEMAR_LICENSE_OPENALEX_URL: standIn.bases.openalex,
     NEMAR_LICENSE_OPENNEURO_URL: standIn.bases.openneuro,
     NEMAR_LICENSE_PHYSIONET_URL: standIn.bases.physionet,
+    NEMAR_LICENSE_OSF_URL: standIn.bases.osf,
   };
   const proc = spawn({
     cmd: [process.execPath, "run", CLI_ENTRY, ...args],
@@ -135,6 +136,25 @@ describe("nemar dataset license-check", () => {
     expect(stdout).toContain(`evidence: ${standIn.bases.datacite}/dois/10.5281%2Fzenodo.22967622`);
     expect(stdout).toContain(`Remedy: ${LINEAGE_COPY.needs_permission.remedy}`);
     expect(exitCode).toBe(2);
+  }, 30_000);
+
+  test("an osf.io source and a declared license: the outcome is the answer, no bug-report prompt", async () => {
+    // nm000712's source shape (ADR 0142 decision 3): an osf.io URL with no DataCite DOI.
+    writeDataset({
+      Name: "fixture",
+      License: "CC0",
+      SourceDatasets: [{ URL: "https://osf.io/rmafj/" }, { DOI: "10.23668/psycharchives.22842" }],
+    });
+    const { stdout, stderr, exitCode } = await licenseCheck([dataset]);
+    expect(stdout).toContain("License lineage: needs_permission");
+    expect(stdout).toContain("10.17605/osf.io/rmafj [source_datasets]: share_alike_mismatch");
+    expect(stdout).toContain(
+      'declared license: "CC-By Attribution-ShareAlike 4.0 International" <https://creativecommons.org/licenses/by-sa/4.0/legalcode>',
+    );
+    expect(stdout).toContain('declared license: "Scientific Use License v1"');
+    expect(exitCode).toBe(2);
+    expect(stderr).not.toContain("attach the log");
+    expect(standIn.misses).toEqual([]);
   }, 30_000);
 
   test("--json prints the result document; a credentialed source exits 2", async () => {
@@ -301,6 +321,36 @@ describe("nemar admin dataset publish license-lineage", () => {
     for (const line of lineageLines(result)) expect(stdout).toContain(line);
     expect(exitCode).toBe(2);
   }, 30_000);
+
+  test("unresolved and needs_permission print no bug-report prompt; a 5xx from NEMAR does", async () => {
+    for (const sources of [
+      [{ URL: "https://example.org/data" }],
+      [{ URL: "https://osf.io/j7as8" }],
+    ]) {
+      const result = await resolveLicenseLineage(
+        {
+          datasetDescription: JSON.stringify({ License: "CC0", SourceDatasets: sources }),
+          nemarMetadata: null,
+          attestationUpstreamSource: null,
+          readme: null,
+        },
+        { bases: standIn.bases },
+      );
+      expect(["unresolved", "needs_permission"]).toContain(result.outcome);
+      standIn.setApi("/admin/datasets/nm000480/license-lineage", {
+        dataset_id: "nm000480",
+        ...result,
+      });
+      const r = await cli(["admin", "dataset", "publish", "license-lineage", "nm000480"]);
+      expect(r.stdout).toContain(`License lineage: ${result.outcome}`);
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr).not.toContain("attach the log");
+    }
+    standIn.setApi("/admin/datasets/nm000480/license-lineage", { error: "Internal error" }, 500);
+    const failed = await cli(["admin", "dataset", "publish", "license-lineage", "nm000480"]);
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr).toContain("attach the log");
+  }, 60_000);
 
   test("a malformed id is refused before any request", async () => {
     const { exitCode } = await cli(["admin", "dataset", "publish", "license-lineage", "nope"]);

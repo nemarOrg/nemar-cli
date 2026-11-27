@@ -6591,5 +6591,7 @@ Examples:
     else
       for (const line of [...lineageLines(result), ...licenseMatcherLines(matcher)])
         console.log(line);
+    // Exit 2 is the outcome, the command's answer: no bug-report prompt (ADR 0142 decision 3).
+    markReportedExit();
     process.exit(lineageExitCode(result.outcome));
   });
