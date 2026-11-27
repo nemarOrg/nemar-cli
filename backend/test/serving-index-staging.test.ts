@@ -59,7 +59,10 @@ import {
   isServingIndexFault,
   stageServingIndex,
 } from "../src/services/serving-index-staging";
-import { isNemarOwnedMetadataPath } from "../src/services/zarr-source-check";
+import {
+  SERVING_INDEX_MAX_GITATTRIBUTES_FILES,
+  isNemarOwnedMetadataPath,
+} from "../src/services/zarr-source-check";
 import type { Bindings } from "../src/types/bindings";
 import {
   CALLBACK_SECRET,
@@ -1072,6 +1075,33 @@ const ON007823_GITATTRIBUTES_AT_S = [
   "",
 ].join("\n");
 
+/**
+ * Files of on007823's tree at its index's commit, as GitHub's recursive listing gave them: of its 1,537 files (none
+ * listed truncated), the top level, NEMAR's own and one recording's. Its root `.gitattributes` is its only one.
+ */
+const ON007823_TREE_AT_S = [
+  ".bidsignore",
+  ".datalad/config",
+  ".gitattributes",
+  ".github/workflows/bids-validation.yml",
+  ".github/workflows/pr-merge.yml",
+  ".github/workflows/version-check.yml",
+  ".nemar/availability-report.json",
+  ".nemar/metadata.json",
+  "CHANGES",
+  "README.md",
+  "datacite.yml",
+  "dataset_description.json",
+  "participants.json",
+  "participants.tsv",
+  "sub-CUCOV001/eeg/sub-CUCOV001_coordsystem.json",
+  "sub-CUCOV001/eeg/sub-CUCOV001_electrodes.tsv",
+  "sub-CUCOV001/eeg/sub-CUCOV001_task-COVID_channels.tsv",
+  "sub-CUCOV001/eeg/sub-CUCOV001_task-COVID_eeg.edf",
+  "sub-CUCOV001/eeg/sub-CUCOV001_task-COVID_eeg.json",
+  "sub-CUCOV001/eeg/sub-CUCOV001_task-COVID_events.tsv",
+];
+
 describe("an index built from another commit than the tag's (on007823 in the local run of 2026-11-27)", () => {
   /** on007823's delta between its tag and its index's commit, as GitHub's compare lists it, patch included. */
   const ON007823_DELTA = [
@@ -1090,7 +1120,8 @@ describe("an index built from another commit than the tag's (on007823 in the loc
     github.tag(ID, TAG, T);
     github.index(ID, indexText(S));
     github.compare(ID, T, S, { status: "ahead", behind_by: 0, ahead_by: 6, files: ON007823_DELTA });
-    // The whole file at S is read too: it turns no CR LF conversion on.
+    // Every `.gitattributes` at S is listed and read whole too (its one): it turns no CR LF conversion on.
+    github.tree(ID, S, { paths: ON007823_TREE_AT_S });
     github.contents(ID, S, ".gitattributes", ON007823_GITATTRIBUTES_AT_S);
     const decided = await servingIndexForRun(env, ica, "bids", ID, TAG, T);
     if (decided.kind !== "run" || !decided.servingIndex.staged) throw new Error("not staged");
@@ -1402,7 +1433,9 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
       github.tag(ID, TAG, T);
       github.index(ID, indexText(S));
       github.compare(ID, T, S, answer as never);
-      // Every `.gitattributes` the edit leaves at S is read whole: here on007823's own, which is clean.
+      // Every `.gitattributes` at S is listed and read whole: here the ones the edit leaves, each on007823's own,
+      // which is clean, among on007823's other files.
+      const kept: string[] = [];
       for (const file of ((answer as { files?: unknown[] }).files ?? []) as Array<{
         filename?: unknown;
         status?: unknown;
@@ -1412,9 +1445,13 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
           file.filename.split("/").at(-1) === ".gitattributes" &&
           file.status !== "removed"
         ) {
+          kept.push(file.filename);
           github.contents(ID, S, file.filename, ON007823_GITATTRIBUTES_AT_S);
         }
       }
+      github.tree(ID, S, {
+        paths: [...ON007823_TREE_AT_S.filter((path) => path !== ".gitattributes"), ...kept],
+      });
       const staged = await stageServingIndex(devEnv(), ID, T);
       if (typeof expected === "number") {
         expect(staged).toMatchObject({ staged: true, ahead: { tagCommit: T, indexCommit: S } });
@@ -1444,6 +1481,10 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
       ".nemar/new.json",
       ".nemar/old.json",
     ]);
+    // A delta that changes no `.gitattributes` lists no tree and reads no file.
+    expect(
+      github.log.filter((r) => r.path.includes("/git/trees/") || r.path.includes("/contents/")),
+    ).toEqual([]);
   });
 
   /** `count` changed paths under `.nemar/`, each 512 characters, the longest the rule takes. */
@@ -1538,6 +1579,7 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
         },
       ],
     } as never);
+    github.tree(ID, S, { paths: ON007823_TREE_AT_S });
     if (atS !== null) github.contents(ID, S, ".gitattributes", atS);
     return stageServingIndex(devEnv(), ID, T);
   }
@@ -1614,10 +1656,177 @@ describe("what an index ahead of its tag is admitted for, and the word for what 
         },
       ],
     } as never);
+    github.tree(ID, S, { paths: ["c/.gitattributes", "participants.tsv"] });
     github.contents(ID, S, "c/.gitattributes", "* annex.backend=SHA256E\n");
     expect(await stageServingIndex(devEnv(), ID, T)).toMatchObject({ staged: true });
-    const read = github.log.filter((r) => r.path.includes("/contents/")).map((r) => r.path);
-    expect(read).toEqual([`/repos/nemarDatasets/${ID}/contents/c/.gitattributes`]);
+    expect(contentReads()).toEqual(["c/.gitattributes"]);
+  });
+
+  /** The files read whole, by path, in order. */
+  const contentReads = () =>
+    github.log
+      .filter((r) => r.path.includes("/contents/"))
+      .map((r) => r.path.slice(`/repos/nemarDatasets/${ID}/contents/`.length));
+
+  /**
+   * A delta that edits `edited` to add `*.tsv binary` (admitted by its patch), with the tree at S answered as
+   * `tree` and each file of `texts` answered at S.
+   */
+  async function stagedWithTreeAtS(
+    tree: { paths: string[]; truncated?: boolean } | { http: number } | { body: unknown },
+    texts: Record<string, string>,
+    edited = "sub-01/.gitattributes",
+  ) {
+    github.tag(ID, TAG, T);
+    github.index(ID, indexText(S));
+    github.compare(ID, T, S, {
+      status: "ahead",
+      behind_by: 0,
+      files: [
+        {
+          filename: edited,
+          status: "modified",
+          patch: "@@ -1 +1,2 @@\n * annex.largefiles=nothing\n+*.tsv binary",
+        },
+      ],
+    } as never);
+    github.tree(ID, S, tree);
+    for (const [path, text] of Object.entries(texts)) github.contents(ID, S, path, text);
+    return stageServingIndex(devEnv(), ID, T);
+  }
+
+  const NESTED_TREE = {
+    paths: [
+      ".gitattributes",
+      "participants.tsv",
+      "sub-01/.gitattributes",
+      "sub-01/eeg/sub-01_task-x_events.tsv",
+    ],
+  };
+  const NESTED_EDITED = "* annex.largefiles=nothing\n*.tsv binary\n";
+
+  test("an `eol=crlf` in a .gitattributes the delta does not touch refuses an edit elsewhere: a root `* eol=crlf` under a nested `binary`, and a nested one under a root edit (MUTATION: read only the changed files; list the top level only)", async () => {
+    // The root file is unchanged; the nested edit takes `*.tsv` out of the CR LF conversion it turns on.
+    expect(
+      await stagedWithTreeAtS(NESTED_TREE, {
+        ".gitattributes": "* eol=crlf\n* annex.backend=SHA256E\n",
+        "sub-01/.gitattributes": NESTED_EDITED,
+      }),
+    ).toEqual({ staged: false, reason: "index_content_changed" });
+    expect(await servingCopies()).toEqual([]);
+    github.reset();
+    // The other way round: the nested file is unchanged, and found only by a recursive listing.
+    expect(
+      await stagedWithTreeAtS(
+        NESTED_TREE,
+        { ".gitattributes": NESTED_EDITED, "sub-01/.gitattributes": "*.tsv eol=crlf\n" },
+        ".gitattributes",
+      ),
+    ).toEqual({ staged: false, reason: "index_content_changed" });
+  });
+
+  test("with no CR LF rule anywhere the same edit is admitted, from one recursive listing, and each file is read once, the changed one too (MUTATION: read a changed file twice)", async () => {
+    expect(
+      await stagedWithTreeAtS(NESTED_TREE, {
+        ".gitattributes": "* annex.backend=SHA256E\n",
+        "sub-01/.gitattributes": NESTED_EDITED,
+      }),
+    ).toMatchObject({ staged: true, ahead: { deltaPaths: ["sub-01/.gitattributes"] } });
+    const listings = github.log.filter((r) => r.path.includes("/git/trees/"));
+    expect(listings.map((r) => [r.path, r.query])).toEqual([
+      [`/repos/nemarDatasets/${ID}/git/trees/${S}`, "recursive=1"],
+    ]);
+    expect(contentReads()).toEqual([".gitattributes", "sub-01/.gitattributes"]);
+  });
+
+  test("a listing GitHub truncates cannot show every file: index_delta_unlisted, and nothing is read (MUTATION: read what was listed)", async () => {
+    expect(
+      await stagedWithTreeAtS(
+        { ...NESTED_TREE, truncated: true },
+        { ".gitattributes": "* annex.backend=SHA256E\n", "sub-01/.gitattributes": NESTED_EDITED },
+      ),
+    ).toEqual({ staged: false, reason: "index_delta_unlisted" });
+    expect(contentReads()).toEqual([]);
+    expect(await servingCopies()).toEqual([]);
+  });
+
+  test(`${SERVING_INDEX_MAX_GITATTRIBUTES_FILES} .gitattributes files are read; one more is index_delta_unlisted, and none is read (MUTATION: drop the bound)`, async () => {
+    const atS = (count: number) => {
+      const paths = Array.from(
+        { length: count - 1 },
+        (_, i) => `d${String(i).padStart(2, "0")}/.gitattributes`,
+      );
+      return [...paths, "sub-01/.gitattributes"];
+    };
+    const texts = (paths: string[]) =>
+      Object.fromEntries(
+        paths.map((path) => [
+          path,
+          path === "sub-01/.gitattributes" ? NESTED_EDITED : "* annex.backend=SHA256E\n",
+        ]),
+      );
+    const most = atS(SERVING_INDEX_MAX_GITATTRIBUTES_FILES);
+    expect(await stagedWithTreeAtS({ paths: most }, texts(most))).toMatchObject({ staged: true });
+    expect(contentReads()).toHaveLength(SERVING_INDEX_MAX_GITATTRIBUTES_FILES);
+    github.reset();
+    const over = atS(SERVING_INDEX_MAX_GITATTRIBUTES_FILES + 1);
+    expect(await stagedWithTreeAtS({ paths: over }, texts(over))).toEqual({
+      staged: false,
+      reason: "index_delta_unlisted",
+    });
+    expect(contentReads()).toEqual([]);
+  });
+
+  test("a listing GitHub cannot answer, or answers in another shape, defers like the compare; one over its bound is index_delta_unlisted (MUTATION: admit on an unread listing)", async () => {
+    const clean = {
+      ".gitattributes": "* annex.backend=SHA256E\n",
+      "sub-01/.gitattributes": NESTED_EDITED,
+    };
+    const unread: Array<{ http: number } | { body: unknown }> = [
+      { http: 404 },
+      { http: 500 },
+      { body: { tree: [] } },
+      { body: { truncated: false } },
+      { body: { truncated: false, tree: [{ path: 7, type: "blob" }] } },
+    ];
+    for (const tree of unread) {
+      github.reset();
+      expect(await stagedWithTreeAtS(tree, clean)).toEqual({
+        staged: false,
+        reason: "github_unreadable",
+      });
+      expect(contentReads()).toEqual([]);
+    }
+    github.reset();
+    expect(
+      await stagedWithTreeAtS(
+        { body: { truncated: false, tree: [], padding: "x".repeat(8 * 1024 * 1024 + 1) } },
+        clean,
+      ),
+    ).toEqual({ staged: false, reason: "index_delta_unlisted" });
+    const env = devEnv();
+    await seedEegDataset(env, ID);
+    github.reset();
+    await stagedWithTreeAtS({ http: 502 }, clean);
+    expect(await servingIndexForRun(env, ica, "bids", ID, TAG, T)).toMatchObject({
+      kind: "deferred",
+      reason: "github_unreadable",
+    });
+    expect(await servingCopies()).toEqual([]);
+  });
+
+  test("a changed .gitattributes the listing lacks is still read, never taken as clean (MUTATION: read the listing alone)", async () => {
+    const lacking = { paths: ["participants.tsv"] };
+    expect(
+      await stagedWithTreeAtS(lacking, {
+        "sub-01/.gitattributes": `${NESTED_EDITED}*.json eol=crlf\n`,
+      }),
+    ).toEqual({ staged: false, reason: "index_content_changed" });
+    github.reset();
+    expect(await stagedWithTreeAtS(lacking, {})).toEqual({
+      staged: false,
+      reason: "github_unreadable",
+    });
   });
 
   test("an index of the tag's own commit asks no compare and records nothing admitted", async () => {

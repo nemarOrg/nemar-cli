@@ -2682,7 +2682,10 @@ describe("nemar-ica on the archive input: the key names the serving index (ADR 0
         },
       ],
     });
-    // The changed `.gitattributes` is read whole at the index's commit.
+    // Every `.gitattributes` at the index's commit is listed and read whole: here the changed one alone.
+    github.tree(id, SOURCE, {
+      paths: [".gitattributes", ".nemar/metadata.json", "participants.tsv"],
+    });
     github.contents(id, SOURCE, ".gitattributes", "* annex.backend=SHA256E\n*.tsv text eol=lf\n");
     const commit = await sourceCommitForRun(env, ica, "bids", id, "v1.0.0");
     if (commit.kind !== "commit") throw new Error(`no commit: ${commit.kind}`);
