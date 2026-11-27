@@ -304,6 +304,63 @@ describe("onboard-openneuro pins the upstream tag", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
+
+  test("an empty help capture with a tag requested fails the step; with no tag it proceeds", async () => {
+    // A `nemar` that prints nothing and fails, as a broken install would: the capture is empty
+    // and says nothing about --tag, so a requested tag must not be dropped silently.
+    const dir = mkdtempSync(join(tmpdir(), "prepare-empty-help-"));
+    try {
+      const bin = join(dir, "bin");
+      mkdirSync(bin);
+      writeFileSync(join(bin, "nemar"), "#!/bin/sh\nexit 1\n");
+      chmodSync(join(bin, "nemar"), 0o755);
+      const body = prepareStep.run as string;
+      const cut = body.indexOf('nemar admin import openneuro "$DATASET_ID"');
+      expect(cut).toBeGreaterThan(0);
+      // The step logs to /tmp; this run logs to its own directory instead.
+      const head = body.slice(0, cut).replaceAll('"/tmp/', `"${dir}/`);
+      expect(head).not.toContain('"/tmp/');
+      const script = join(dir, "prepare.sh");
+      writeFileSync(
+        script,
+        `${head}for a in "\${tag_args[@]}"; do printf 'ARG:%s\\n' "$a"; done\necho REACHED_IMPORT\n`,
+      );
+      const run = async (tag: string) => {
+        const proc = Bun.spawn(["bash", "-e", script], {
+          env: {
+            PATH: `${bin}:${process.env.PATH ?? ""}`,
+            HOME: dir,
+            DATASET_ID: "ds004362",
+            OPENNEURO_TAG: tag,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [out, err] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+        return { code: await proc.exited, out: out + err };
+      };
+
+      const tagged = await run("1.0.1");
+      expect(tagged.code).not.toBe(0);
+      expect(tagged.out).toContain("::error::The installed nemar CLI printed no help");
+      expect(tagged.out).not.toContain("REACHED_IMPORT");
+      expect(tagged.out).not.toContain("has no --tag");
+      // The reason is in the log as a CLI failure line, where the prepare reporter reads it.
+      const log = readFileSync(join(dir, "prepare-ds004362.log"), "utf-8");
+      expect(log).toStartWith("✖ nemar admin import openneuro --help printed nothing");
+
+      const untagged = await run("");
+      expect(untagged.code).toBe(0);
+      expect(untagged.out).toContain("REACHED_IMPORT");
+      expect(untagged.out).not.toContain("ARG:");
+      expect(untagged.out).not.toContain("::error::");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 // ADR 0135, phase P4: `admin import-openneuro` moved to `admin import openneuro` (0.10.40), and the
@@ -416,7 +473,7 @@ describe("onboard-openneuro calls only paths the CLI has", () => {
     // back in. The one mention allowed is the stub warning in prepare's comment.
     const oldMentions = raw.split("\n").filter((l) => l.includes("import-openneuro"));
     expect(oldMentions.map((l) => l.trim())).toEqual([
-      "# test/import-openneuro-tag-option.unit.test.ts pins in the CLI.",
+      "# test/import-openneuro-tag-option.unit.test.ts pins in the CLI. A help capture",
       "# `admin import-openneuro` is a stub that exits 1. Its help is captured for the --tag",
     ]);
     // And no command line (a script line that is not a comment) names it at all.
@@ -425,6 +482,6 @@ describe("onboard-openneuro calls only paths the CLI has", () => {
     expect(all).not.toContain("import_cmd");
     expect(all).not.toContain("Usage: nemar admin import");
     // prepare reads the help once, for --tag; copy and finalize read none.
-    expect(all.match(/nemar admin import openneuro --help/g)).toHaveLength(1);
+    expect(all.match(/\$\(nemar admin import openneuro --help/g)).toHaveLength(1);
   });
 });
