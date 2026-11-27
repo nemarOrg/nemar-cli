@@ -21,7 +21,7 @@ earlier releases are described only by their generated notes.
   Its prepare, copy and finalize steps no longer probe the installed CLI for the import path or fall back to `nemar admin import-openneuro`, the moved-command stub since 0.10.40; npm `latest` carries the new path.
   Both copies changed together: `.github/dataset-workflows/onboard-openneuro.yml` here and `.github/workflows/onboard-openneuro.yml` in nemarDatasets/.github, which stay byte-identical.
   The web-button approval workflow (`approve-publication.yml` in nemarDatasets/.github) likewise calls `nemar admin dataset publish approve` directly, without its `admin publish approve` fallback.
-  The deployed workflows run from nemarDatasets/.github, so its pull request merges in the same hour as the nemar-cli release that carries this entry.
+  The deployed workflows run from nemarDatasets/.github and npm `latest` already has both paths, so its pull request merges first, and the nemar-cli pull request that carries the authoring copy follows promptly, because the parity test compares every nemar-cli pull request with the deployed copy.
 
 ## 0.10.44 - 2026-11-26
 
