@@ -1,18 +1,101 @@
 {
+  "provenance": "Assembled, not printed by the image: the image could not be run where this was made. recipes, inputs, checkpoints, common and eegprep are `nemar-recipe version` (python -m nemar_process version) run from source at nemar-process 715f4545014f427bb099fa20c76da697fa417f45 with uv sync --frozen, the commit and uv.lock the image's labels name (org.opencontainers.image.revision; io.nemar.lock-sha256 270408b05f29da84fa5ff9c9126f9534b97c858639b7ea60a8d2abd9466c497b equals that lock's SHA-256). flavor and amica15_sha256 are read from the image's own layers (/opt/nemar/flavor and /opt/amica/amica15.sha256). python and numpy are left out: the image's differ from a source checkout's.",
   "image": "ghcr.io/nemarorg/nemar-python@sha256:3b61e40e33a446b4b8e4cc917c4a43f1531bfb11e69c1d7bc6ae0b5154fbf559",
   "source_commit": "715f4545014f427bb099fa20c76da697fa417f45",
   "version": {
-    "amica15_sha256": "ada316d3cd8819a5e506b51b48eb464eccba133b81d4efbf63f977e680bb6b1a",
-    "common": "1.0.0-b2",
-    "eegprep": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3",
-    "flavor": "cuda",
-    "inputs": {
-      "nemar-floor": ["bids", "zarr"],
-      "nemar-ica": ["bids", "zarr"]
-    },
     "recipes": {
       "nemar-floor": "1.0.0-b2",
       "nemar-ica": "1.0.0-b2"
-    }
+    },
+    "inputs": {
+      "nemar-floor": [
+        "bids",
+        "zarr"
+      ],
+      "nemar-ica": [
+        "bids",
+        "zarr"
+      ]
+    },
+    "checkpoints": {
+      "nemar-floor": [
+        {
+          "checkpoint": "import",
+          "steps": [
+            "load",
+            "signal_channels"
+          ]
+        },
+        {
+          "checkpoint": "preprocess",
+          "steps": [
+            "flatline",
+            "drift",
+            "line_noise_measure",
+            "line_noise_50",
+            "line_noise_60",
+            "qc_amplitude",
+            "bad_channels",
+            "bad_windows"
+          ]
+        },
+        {
+          "checkpoint": "quality",
+          "steps": [
+            "qc"
+          ]
+        }
+      ],
+      "nemar-ica": [
+        {
+          "checkpoint": "import",
+          "steps": [
+            "load",
+            "signal_channels"
+          ]
+        },
+        {
+          "checkpoint": "preprocess",
+          "steps": [
+            "flatline",
+            "drift",
+            "line_noise_measure",
+            "line_noise_50",
+            "line_noise_60",
+            "qc_amplitude",
+            "bad_channels",
+            "bad_windows",
+            "qc",
+            "ica_eligibility",
+            "iclabel_locations",
+            "asr",
+            "reref"
+          ]
+        },
+        {
+          "checkpoint": "ica",
+          "steps": [
+            "ica"
+          ]
+        },
+        {
+          "checkpoint": "iclabel",
+          "steps": [
+            "iclabel"
+          ]
+        },
+        {
+          "checkpoint": "quality",
+          "steps": [
+            "nemar-quality",
+            "nemar-spectrum"
+          ]
+        }
+      ]
+    },
+    "common": "1.0.0-b2",
+    "eegprep": "0.5.0+871bc7f8a03b6d925330c598e8dcd18b835614d3",
+    "flavor": "cuda",
+    "amica15_sha256": "ada316d3cd8819a5e506b51b48eb464eccba133b81d4efbf63f977e680bb6b1a"
   }
 }

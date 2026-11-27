@@ -220,9 +220,11 @@ describe("the registry", () => {
 });
 
 /**
- * What the image `COMPUTE_RUNTIME_IMAGE` pins says of itself: `nemar-recipe version` of the CUDA image of
- * nemar-process v0.1.2 (`test/fixtures/nemar-recipe-version.json`, its versions, digests and inputs). The
- * registry's tuple is a copy of it, and the inputs the registry lists are the ones the image says it reads.
+ * What the image `COMPUTE_RUNTIME_IMAGE` pins (the CUDA image of nemar-process v0.1.2) reports as
+ * `nemar-recipe version`, as `test/fixtures/nemar-recipe-version.json` records it: versions, digests, inputs and
+ * checkpoints. The file is ASSEMBLED, not printed by the image (its `provenance` says how): the source output at the
+ * commit and lock the image's labels name, with the flavor and the amica15 digest read from the image's layers. The
+ * registry's tuple is a copy of it, and the inputs the registry lists are the ones the recipe says it reads.
  */
 const IMAGE_VERSION = JSON.parse(
   readFileSync(join(import.meta.dir, "fixtures", "nemar-recipe-version.json"), "utf8"),
@@ -233,6 +235,7 @@ const IMAGE_VERSION = JSON.parse(
     flavor: string;
     recipes: Record<string, string>;
     inputs: Record<string, string[]>;
+    checkpoints: Record<string, { checkpoint: string; steps: string[] }[]>;
   };
 };
 
@@ -248,6 +251,13 @@ describe("the registry's tuple is the image's (portable compute card Q1z)", () =
         `eegprep@${IMAGE_VERSION.version.eegprep}`,
         IMAGE_VERSION.version.inputs[recipe.name],
       ]);
+    }
+    // Each recipe's checkpoint map is the one the version output reports for the same recipe version.
+    for (const recipe of COMPUTE_RECIPES) {
+      expect([
+        recipe.name,
+        recipe.checkpoints.map((c) => ({ checkpoint: c.checkpoint, steps: [...c.steps] })),
+      ]).toEqual([recipe.name, IMAGE_VERSION.version.checkpoints[recipe.name]]);
     }
     // The version output is the CUDA image's: the one image every recipe runs on.
     expect(IMAGE_VERSION.version.flavor).toBe("cuda");
