@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.6.0",
+  "schema_version": "0.6.1",
   "doc_type": "record",
   "dataset": "ds002718",
   "bids_relpath": "sub-013/eeg/sub-013_task-FaceRecognition_eeg.set",

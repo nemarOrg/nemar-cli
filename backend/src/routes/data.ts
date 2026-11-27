@@ -1781,7 +1781,7 @@ dataRoutes.get("/:datasetId/:version/records.json", (c) => {
 });
 
 /**
- * GET /<id>/metadata.json -> dataset-level neuroschema v0.6.0 document.
+ * GET /<id>/metadata.json -> dataset-level neuroschema v0.6.1 document.
  *
  * Combines the D1 catalog row, the parsed nemar_metadata.json enrichment
  * payload, and (when at least one version exists) a derived BIDS index from
