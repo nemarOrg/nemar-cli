@@ -1697,49 +1697,11 @@ describe("before the scan step is deployed: every report the job posts parses (A
     expect(report.evidence.description_keys_not_shown_names).toEqual(["Version"]);
   });
 
-  test("the name rule's word is the job's, from the whole Name and the served sources, and the model is not told it", async () => {
-    const inputs = fullInputs();
-    const [source] = inputs.lineage.sources as [(typeof inputs.lineage.sources)[number]];
-    const named = (name: string) =>
-      JSON.stringify({ ...DESCRIPTION, Name: name, SourceDatasets: [{ DOI: source.id }] });
-    // The upstream title with an author-year: it follows.
-    const follows = await production(
-      newDataset("name-follows", {
-        "dataset_description.json": named(`${source.title}, Lovelace et al. 2024`),
-      }),
-      inputs,
-    );
-    expect(follows.evidence.name_upstream).toBe("matches");
-    expect(reportReasons(follows).map((r) => r.code)).not.toContain("name_differs_from_upstream");
-    const { user } = theRequest();
-    expect(user).not.toContain("name_upstream");
-    // The title with a word appended, as nm000710's Name is: it differs, and the request fails.
-    const drifted = await production(
-      newDataset("name-drifted", {
-        "dataset_description.json": named(`${source.title} (fNIRS)`),
-      }),
-      inputs,
-    );
-    expect(drifted.evidence.name_upstream).toBe("differs");
-    expect(reportReasons(drifted)).toContainEqual({
-      code: "name_differs_from_upstream",
-      detail: null,
-    });
-    // No upstream source served: nothing to follow.
-    const none = await production(newDataset("name-none"), emptyInputs());
-    expect(none.evidence.name_upstream).toBe("not_applicable");
-    // A source whose record could not be read: an administrator decides.
-    const unread = await production(
-      newDataset("name-unread", { "dataset_description.json": named("Anything") }),
-      fullInputs({
-        lineage: {
-          ...inputs.lineage,
-          outcome: "unresolved",
-          sources: [{ ...source, title: null, status: "fetch_failed", outcome: "unresolved" }],
-        },
-      }),
-    );
-    expect(unread.evidence.name_upstream).toBe("unknown");
+  test("until the job half deploys, the job emits no name word and its report reads as today", async () => {
+    const report = await production(newDataset("name-not-yet"), fullInputs());
+    expect("name_upstream" in report.evidence).toBe(false);
+    expect(reportReasons(report).map((r) => r.code)).not.toContain("name_differs_from_upstream");
+    expect(reportReasons(report).map((r) => r.code)).not.toContain("name_upstream_unconfirmed");
   });
 });
 

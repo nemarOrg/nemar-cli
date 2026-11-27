@@ -1183,12 +1183,11 @@ describe("calibrate runs the production review over every entry and records one 
         fetchInputs: async () => emptyInputs(),
       });
       if (production.outcome !== "reported") throw new Error(`${id}: ${production.error}`);
-      // The calibration talks to no Worker, so it resolves no lineage and has no sources for the
-      // name rule to compare with; everything else is equal.
-      const expected: Record<string, unknown> = { ...production.report.evidence, lineage: null };
-      expect(expected.name_upstream, id).toBe("not_applicable");
-      Reflect.deleteProperty(expected, "name_upstream");
-      expect(evidenceOf(readEntry(dir)).facts as unknown, id).toEqual(expected);
+      // The calibration talks to no Worker, so it resolves no lineage; everything else is equal.
+      expect(evidenceOf(readEntry(dir)).facts, id).toEqual({
+        ...production.report.evidence,
+        lineage: null,
+      });
     }
     // The case the two sides used to copy separately: the README exists and could not be read, so the
     // ethics minimum that may rest on it is not recorded as failed, and the review says the text was
