@@ -256,6 +256,7 @@ Decision 3 gains two rules, and the resolver becomes `license-lineage/4` because
 ## Amendment 2026-11-27 (owner, follow-up): README DOIs cut by an ellipsis
 
 The README prefix rule of the amendment above also drops a README DOI candidate that is a strict prefix of a declared or longer README DOI when an ellipsis follows it immediately (optional whitespace between): `[...]`, `[…]`, `...` or `…`.
+Both rules apply only when every place the README writes the short DOI on its own is a cut (continued across a line break, or followed by an ellipsis); one standalone occurrence, and the short DOI is a source.
 nm000746 and nm000843 carry a truncated cell, `https://doi.org/10.5281/zenodo.2231 [...]; N: 30`, beside the declared `10.5281/zenodo.22314785` (and `zenodo.236` beside `zenodo.23610719`).
 Two distinct records, one a prefix of the other, with no ellipsis right after the shorter, are both kept. Resolver `license-lineage/5`.
 
