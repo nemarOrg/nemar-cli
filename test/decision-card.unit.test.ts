@@ -49,6 +49,7 @@ import {
   buildDecisionCard,
   cardDescriptionOf,
   cardEnrichmentOf,
+  cardLineageOf,
   licenseCueOf,
   nextActionOf,
   parseServedMetadata,
@@ -62,9 +63,57 @@ import {
   REGISTRY_TEXT_LABEL,
 } from "../shared/contract/decision-card";
 import { LICENSE_MATCHER_VERSION } from "../shared/license-file";
-import { AUTO_DENY_STATES, AUTO_DENY_STATE_COPY } from "../shared/publication-auto-deny";
+import type { LineageResult, LineageSource } from "../shared/license-lineage";
+import {
+  AUTO_DENY_CODE_COPY,
+  AUTO_DENY_STATES,
+  AUTO_DENY_STATE_COPY,
+} from "../shared/publication-auto-deny";
 import { REASON_CODES, type ReasonCode } from "../shared/publication-review";
 import { GATE_CLEAR, ID, SNAPSHOT, detailOf, reasonView } from "./helpers/decision-card-fixtures";
+
+/** nm001028's source as the resolver records it: a Zenodo journal article that holds data. */
+const PAPER_TITLE =
+  "Cross-validating models of continuous data from simulation and experiment by using linear regression and artificial neural networks";
+const SOURCE_BASE = {
+  creators: [],
+  publisher: null,
+  license_version: "4.0",
+  raw: null,
+  origin: "source_datasets",
+} as const;
+const PAPER_AND_OSF: LineageResult = {
+  outcome: "source_is_publication",
+  sources: [
+    {
+      ...SOURCE_BASE,
+      id: "10.5281/zenodo.3648065",
+      resolver: "datacite",
+      resource_type: "Text",
+      title: PAPER_TITLE,
+      license: "cc-by",
+      declared_licenses: [{ text: "Creative Commons Attribution 4.0 International", url: null }],
+      evidence_url: null,
+      status: "publication",
+      outcome: "source_is_publication",
+      registry_files: { type: "Journal article", files: 1, data_files: 1, examples: ["Data.zip"] },
+    },
+    {
+      ...SOURCE_BASE,
+      id: "10.17605/osf.io/fx4ud",
+      resolver: "osf",
+      resource_type: "Dataset",
+      title: "fNIRS mother-infant",
+      license: "cc-by",
+      declared_licenses: [{ text: "CC-By Attribution 4.0 International", url: null }],
+      evidence_url: null,
+      status: "resolved",
+      outcome: "compatible_attribution",
+      doi_registered: false,
+    },
+  ] as LineageSource[],
+  resolved_at: "2026-11-28T05:53:01.949Z",
+} as unknown as LineageResult;
 
 const card = (detail: CardDetail, o: Partial<Parameters<typeof buildDecisionCard>[0]> = {}) =>
   buildDecisionCard({
@@ -484,6 +533,9 @@ describe("the next action", () => {
       expect(c.auto_deny).toEqual({
         state,
         line: AUTO_DENY_STATE_COPY[state as "would_deny"].statement,
+        // An agreement recorded before migration 0164 kept no codes.
+        codes: [],
+        reasons: [],
       });
     }
     expect(card(d, { autoDenyState: "disagreed" }).next_action.action).toBe("administrator_reads");
@@ -606,14 +658,34 @@ describe("the dataset's own words", () => {
       version: "1.0.0",
       anonymous: false,
     });
+    // The review's facts counted no placeholder, the names flag one: the card says the larger, so
+    // its count never says fewer placeholders than the names it flags (nm001019).
     expect(c.authors).toEqual({
       names: [
         { name: "Ada Lovelace", placeholder: false },
         { name: "TBD", placeholder: true },
       ],
       count: 2,
-      placeholders: 0,
+      placeholders: 1,
     });
+  });
+
+  test("a converter's pointer to the upstream's people is a placeholder (nm001019)", () => {
+    const d = detailOf();
+    const c = card(d, {
+      snapshot: {
+        ...SNAPSHOT,
+        dataset_description: {
+          name: "Your turn, my turn. Neural synchrony during mother-infant proto-conversation.",
+          license: "CC-BY-4.0",
+          authors: ["Original Dataset Authors (see SourceDatasets)"],
+        },
+      },
+    });
+    expect(c.authors.names).toEqual([
+      { name: "Original Dataset Authors (see SourceDatasets)", placeholder: true },
+    ]);
+    expect(c.authors.placeholders).toBe(1);
   });
 
   test("a review with no snapshot shows what NEMAR holds now and says it is not as reviewed", () => {
@@ -695,6 +767,73 @@ describe("the served snapshot", () => {
       },
     };
     expect(servedMetadataJson(huge)).toBeNull();
+  });
+
+  test("the reasons an agreement named are shown, in the mail's words (migration 0164)", () => {
+    const d = detailOf();
+    for (const state of ["would_deny", "capped", "denied"]) {
+      const c = card(d, {
+        autoDenyState: state,
+        autoDenyCodes: "readme_missing_or_stub,authors_placeholder",
+      });
+      expect(c.auto_deny).toEqual({
+        state,
+        line: AUTO_DENY_STATE_COPY[state as "would_deny"].statement,
+        codes: ["readme_missing_or_stub", "authors_placeholder"],
+        reasons: [
+          AUTO_DENY_CODE_COPY.readme_missing_or_stub.statement,
+          AUTO_DENY_CODE_COPY.authors_placeholder.statement,
+        ],
+      });
+    }
+    // A stored value that is not a list of known codes shows none, never a guess.
+    expect(card(d, { autoDenyState: "would_deny", autoDenyCodes: "x,y" }).auto_deny?.codes).toEqual(
+      [],
+    );
+  });
+
+  test("the declared sources' titles, publications included, and papers with data files are kept", () => {
+    const lineage = cardLineageOf(PAPER_AND_OSF);
+    expect(lineage.source_titles).toEqual([PAPER_TITLE, "fNIRS mother-infant"]);
+    // The name rule's own titles are datasets' alone.
+    expect(lineage.upstream_titles).toEqual(["fNIRS mother-infant"]);
+    expect(lineage.paper_with_data_files).toEqual([
+      "10.5281/zenodo.3648065: the registry types this record as a journal article but it holds data files (1 of 1 files, such as Data.zip); it is still read as a publication for the license lineage, and an administrator decides.",
+    ]);
+    // The OSF node DataCite does not hold is named by its URL, never by the DOI NEMAR made.
+    expect(lineage.declared_licenses).toEqual([
+      "10.5281/zenodo.3648065: Creative Commons Attribution 4.0 International",
+      "https://osf.io/fx4ud: CC-By Attribution 4.0 International",
+    ]);
+    expect(lineage.declared_licenses.join(" ")).not.toContain("10.17605/osf.io/fx4ud");
+    // Written and read back; an older snapshot without the titles reads as not knowing them.
+    const snap: ServedMetadata = { ...SNAPSHOT, lineage };
+    expect(parseServedMetadata(servedMetadataJson(snap))).toEqual(snap);
+    expect(parseServedMetadata(servedMetadataJson(SNAPSHOT))?.lineage?.source_titles).toBe(
+      undefined,
+    );
+    expect(cardLineageOf({ ...PAPER_AND_OSF, sources: [] }).source_titles).toEqual([]);
+    // Complete only when every declared source was read with a whole title.
+    expect(lineage.source_titles_complete).toBe(true);
+    const [paper, osf] = PAPER_AND_OSF.sources;
+    const failed = { ...osf, title: null, status: "fetch_failed" } as LineageSource;
+    expect(
+      cardLineageOf({ ...PAPER_AND_OSF, sources: [paper, failed] }).source_titles_complete,
+    ).toBe(false);
+    // A long title is kept whole for the comparison (past the card's 300 characters), and one too
+    // long to keep whole leaves the list incomplete.
+    const long = { ...paper, title: `${"word ".repeat(300)}end` } as LineageSource;
+    const kept = cardLineageOf({ ...PAPER_AND_OSF, sources: [long] });
+    expect(kept.source_titles).toEqual([long.title]);
+    expect(kept.source_titles_complete).toBe(true);
+    const huge = { ...paper, title: "word ".repeat(500) } as LineageSource;
+    expect(cardLineageOf({ ...PAPER_AND_OSF, sources: [huge] }).source_titles_complete).toBe(false);
+    // The card's license panel carries the paper's line under the registry label.
+    const c = card(detailOf(), { snapshot: snap });
+    expect(c.license.lineage?.paper_with_data_files).toEqual({
+      label: REGISTRY_TEXT_LABEL,
+      lines: lineage.paper_with_data_files,
+    });
   });
 
   test("every automatic-denial state but none has a line", () => {

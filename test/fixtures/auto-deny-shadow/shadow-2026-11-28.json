@@ -1,0 +1,1304 @@
+{
+  "_about": "First-run review reports of the automatic denial's shadow run on production 0.10.58 (2026-11-28 UTC), rebuilt from `nemar admin dataset publish show --json`: questions, findings (codes, severities, questions, documents), evidence and record as stored. The model's notes and summary are replaced; nothing else is edited. auto_deny_state is what production recorded under the rule before ADR 0139's amendment of 2026-11-27 (mail reasons).",
+  "reviews": {
+    "nm000622": {
+      "review_id": 225,
+      "auto_deny_state": "disagreed",
+      "report": {
+        "v": 3,
+        "model": "claude-haiku-5-5",
+        "questions": {
+          "complete_and_honest": "unknown",
+          "meets_standards": "pass",
+          "authors_and_license": "unknown",
+          "name_adequate": "pass"
+        },
+        "findings": [
+          {
+            "question": "complete_and_honest",
+            "severity": "note",
+            "code": "steering_attempt",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "complete_and_honest",
+            "severity": "concern",
+            "code": "readme_mismatch",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "concern",
+            "code": "license_missing",
+            "document": "license",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "complete_and_honest",
+            "severity": "note",
+            "code": "evidence_incomplete",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "complete_and_honest",
+            "severity": "note",
+            "code": "other",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "evidence_incomplete",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "complete_and_honest",
+            "severity": "note",
+            "code": "other",
+            "document": "changes",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "description_incomplete",
+            "document": "participants_json",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          }
+        ],
+        "summary": "As recorded in the shadow run; the model's summary is not kept here.",
+        "steering": true,
+        "evidence": {
+          "head": "79ec3c783697799d4846888bc73329d49e498dbb",
+          "anonymous": false,
+          "version": "1.0.1",
+          "version_shape": "ok",
+          "tag": "absent",
+          "bids": "unconcluded",
+          "minimums": "met",
+          "minimum_failures": [],
+          "name_length": 94,
+          "license_field": true,
+          "authors_count": 4,
+          "placeholder_authors": 0,
+          "documents": {
+            "readme": "sent",
+            "dataset_description": "sent",
+            "changes": "sent",
+            "license": "absent",
+            "participants_json": "sent"
+          },
+          "withheld_findings": {},
+          "description_keys_shown": 11,
+          "description_keys_not_shown": 1,
+          "summary": {
+            "subjects": 3,
+            "sessions": 18,
+            "recordings": 36,
+            "datatypes": [
+              "ieeg"
+            ],
+            "formats": {
+              ".vhdr": 18,
+              ".vmrk": 18
+            },
+            "has_derivatives": false,
+            "has_sourcedata": false,
+            "has_code": true,
+            "sampling_rates_hz": [
+              250
+            ],
+            "channel_counts": [],
+            "sidecars_read": 18,
+            "sidecars_total": 18
+          },
+          "inputs": {
+            "enrichment": "sent",
+            "registry_records": "sent",
+            "lineage": "sent",
+            "coverage": "sent",
+            "resubmission_note": "absent",
+            "previous_denial": "absent"
+          },
+          "lineage": {
+            "outcome": "compatible",
+            "credited": true,
+            "resolved_at": "2026-11-28T06:01:03.409Z"
+          },
+          "description_keys_not_shown_names": [
+            "Version"
+          ],
+          "license_file": {
+            "state": "absent",
+            "spdx": null,
+            "additions": false,
+            "expression": null
+          },
+          "name_upstream": "unknown"
+        },
+        "note_answer": "not_asked",
+        "record": {
+          "prompt_version": "publication-review-prompt/3",
+          "models": [
+            {
+              "model": "claude-haiku-5-5",
+              "effort": "max"
+            }
+          ],
+          "input_digest": "413c86542e6fe22a923470cd5e105709555e2017fd5c42e2c372729e874513f4",
+          "resolver_version": "license-lineage/6",
+          "enrichment_source": "2026-11-27 14:40:59",
+          "license_matcher": "scancode-32.5.0+spdx-3.27"
+        }
+      }
+    },
+    "nm001014": {
+      "review_id": 290,
+      "auto_deny_state": "would_deny",
+      "report": {
+        "v": 3,
+        "model": "claude-haiku-5-5",
+        "questions": {
+          "complete_and_honest": "fail",
+          "meets_standards": "fail",
+          "authors_and_license": "unknown",
+          "name_adequate": "pass"
+        },
+        "findings": [
+          {
+            "question": "complete_and_honest",
+            "severity": "blocker",
+            "code": "readme_missing_or_stub",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "blocker",
+            "code": "license_missing",
+            "document": "license",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "blocker",
+            "code": "readme_missing_or_stub",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "note",
+            "code": "authors_inconsistent",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "complete_and_honest",
+            "severity": "note",
+            "code": "other",
+            "document": null,
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "evidence_incomplete",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          }
+        ],
+        "summary": "As recorded in the shadow run; the model's summary is not kept here.",
+        "steering": false,
+        "evidence": {
+          "head": "810ca84ce8ba4d479da11cfc2c787e14fad94f67",
+          "anonymous": false,
+          "version": "1.0.0",
+          "version_shape": "ok",
+          "tag": "absent",
+          "bids": "pass",
+          "minimums": "met",
+          "minimum_failures": [],
+          "name_length": 73,
+          "license_field": true,
+          "authors_count": 11,
+          "placeholder_authors": 0,
+          "documents": {
+            "readme": "sent",
+            "dataset_description": "sent",
+            "changes": "sent",
+            "license": "absent",
+            "participants_json": "absent"
+          },
+          "withheld_findings": {},
+          "description_keys_shown": 9,
+          "description_keys_not_shown": 1,
+          "summary": {
+            "subjects": 2,
+            "sessions": 3,
+            "recordings": 10,
+            "datatypes": [
+              "ieeg"
+            ],
+            "formats": {
+              ".vhdr": 5,
+              ".vmrk": 5
+            },
+            "has_derivatives": false,
+            "has_sourcedata": false,
+            "has_code": false,
+            "sampling_rates_hz": [
+              50
+            ],
+            "channel_counts": [
+              1344
+            ],
+            "sidecars_read": 5,
+            "sidecars_total": 5
+          },
+          "inputs": {
+            "enrichment": "sent",
+            "registry_records": "sent",
+            "lineage": "sent",
+            "coverage": "sent",
+            "resubmission_note": "absent",
+            "previous_denial": "absent"
+          },
+          "lineage": {
+            "outcome": "compatible",
+            "credited": true,
+            "resolved_at": "2026-11-28T05:50:55.708Z"
+          },
+          "description_keys_not_shown_names": [
+            "Version"
+          ],
+          "license_file": {
+            "state": "absent",
+            "spdx": null,
+            "additions": false,
+            "expression": null
+          },
+          "name_upstream": "matches"
+        },
+        "note_answer": "not_asked",
+        "record": {
+          "prompt_version": "publication-review-prompt/3",
+          "models": [
+            {
+              "model": "claude-haiku-5-5",
+              "effort": "max"
+            }
+          ],
+          "input_digest": "b47a758ed180029d448569a5200e2d53e327481c567de894c053acc6670dfa21",
+          "resolver_version": "license-lineage/6",
+          "enrichment_source": "2026-11-27 02:31:07",
+          "license_matcher": "scancode-32.5.0+spdx-3.27"
+        }
+      }
+    },
+    "nm001016": {
+      "review_id": 292,
+      "auto_deny_state": "would_deny",
+      "report": {
+        "v": 3,
+        "model": "claude-haiku-5-5",
+        "questions": {
+          "complete_and_honest": "fail",
+          "meets_standards": "pass",
+          "authors_and_license": "unknown",
+          "name_adequate": "pass"
+        },
+        "findings": [
+          {
+            "question": "complete_and_honest",
+            "severity": "blocker",
+            "code": "readme_missing_or_stub",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "concern",
+            "code": "license_missing",
+            "document": "license",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "note",
+            "code": "authors_inconsistent",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "evidence_incomplete",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          }
+        ],
+        "summary": "As recorded in the shadow run; the model's summary is not kept here.",
+        "steering": false,
+        "evidence": {
+          "head": "09c006e8b7e8d0ffd19eb2733bea42dbb06614f4",
+          "anonymous": false,
+          "version": "1.0.0",
+          "version_shape": "ok",
+          "tag": "absent",
+          "bids": "pass",
+          "minimums": "met",
+          "minimum_failures": [],
+          "name_length": 133,
+          "license_field": true,
+          "authors_count": 11,
+          "placeholder_authors": 0,
+          "documents": {
+            "readme": "sent",
+            "dataset_description": "sent",
+            "changes": "sent",
+            "license": "absent",
+            "participants_json": "absent"
+          },
+          "withheld_findings": {},
+          "description_keys_shown": 9,
+          "description_keys_not_shown": 1,
+          "summary": {
+            "subjects": 2,
+            "sessions": 21,
+            "recordings": 108,
+            "datatypes": [
+              "ieeg"
+            ],
+            "formats": {
+              ".vhdr": 54,
+              ".vmrk": 54
+            },
+            "has_derivatives": false,
+            "has_sourcedata": false,
+            "has_code": false,
+            "sampling_rates_hz": [
+              50
+            ],
+            "channel_counts": [
+              192
+            ],
+            "sidecars_read": 54,
+            "sidecars_total": 54
+          },
+          "inputs": {
+            "enrichment": "sent",
+            "registry_records": "sent",
+            "lineage": "sent",
+            "coverage": "sent",
+            "resubmission_note": "absent",
+            "previous_denial": "absent"
+          },
+          "lineage": {
+            "outcome": "compatible",
+            "credited": true,
+            "resolved_at": "2026-11-28T05:50:56.076Z"
+          },
+          "description_keys_not_shown_names": [
+            "Version"
+          ],
+          "license_file": {
+            "state": "absent",
+            "spdx": null,
+            "additions": false,
+            "expression": null
+          },
+          "name_upstream": "matches"
+        },
+        "note_answer": "not_asked",
+        "record": {
+          "prompt_version": "publication-review-prompt/3",
+          "models": [
+            {
+              "model": "claude-haiku-5-5",
+              "effort": "max"
+            }
+          ],
+          "input_digest": "40748a43e4ee96e8026f99c8761193a412913a8bcc77e476d29d0ad4c2bd9c11",
+          "resolver_version": "license-lineage/6",
+          "enrichment_source": "2026-11-27 02:41:57",
+          "license_matcher": "scancode-32.5.0+spdx-3.27"
+        }
+      }
+    },
+    "nm001019": {
+      "review_id": 315,
+      "auto_deny_state": "would_deny",
+      "report": {
+        "v": 3,
+        "model": "claude-haiku-5-5",
+        "questions": {
+          "complete_and_honest": "fail",
+          "meets_standards": "fail",
+          "authors_and_license": "fail",
+          "name_adequate": "pass"
+        },
+        "findings": [
+          {
+            "question": "complete_and_honest",
+            "severity": "blocker",
+            "code": "readme_missing_or_stub",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "blocker",
+            "code": "authors_placeholder",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "blocker",
+            "code": "license_missing",
+            "document": "license",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "blocker",
+            "code": "readme_missing_or_stub",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "concern",
+            "code": "provenance_unclear",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "other",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "evidence_incomplete",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          }
+        ],
+        "summary": "As recorded in the shadow run; the model's summary is not kept here.",
+        "steering": false,
+        "evidence": {
+          "head": "7efacf296d743902ee0e16dfacd244dd72bc628a",
+          "anonymous": false,
+          "version": "1.0.0",
+          "version_shape": "ok",
+          "tag": "absent",
+          "bids": "unconcluded",
+          "minimums": "met",
+          "minimum_failures": [],
+          "name_length": 77,
+          "license_field": true,
+          "authors_count": 1,
+          "placeholder_authors": 0,
+          "documents": {
+            "readme": "sent",
+            "dataset_description": "sent",
+            "changes": "sent",
+            "license": "absent",
+            "participants_json": "absent"
+          },
+          "withheld_findings": {},
+          "description_keys_shown": 9,
+          "description_keys_not_shown": 1,
+          "summary": {
+            "subjects": 132,
+            "sessions": 0,
+            "recordings": 132,
+            "datatypes": [
+              "nirs"
+            ],
+            "formats": {
+              ".snirf": 132
+            },
+            "has_derivatives": false,
+            "has_sourcedata": false,
+            "has_code": false,
+            "sampling_rates_hz": [
+              7.81
+            ],
+            "channel_counts": [
+              26,
+              28,
+              30,
+              34,
+              38,
+              40,
+              42,
+              44
+            ],
+            "sidecars_read": 64,
+            "sidecars_total": 132
+          },
+          "inputs": {
+            "enrichment": "sent",
+            "registry_records": "sent",
+            "lineage": "sent",
+            "coverage": "sent",
+            "resubmission_note": "absent",
+            "previous_denial": "absent"
+          },
+          "lineage": {
+            "outcome": "compatible_attribution",
+            "credited": true,
+            "resolved_at": "2026-11-28T06:17:10.174Z"
+          },
+          "description_keys_not_shown_names": [
+            "Version"
+          ],
+          "license_file": {
+            "state": "absent",
+            "spdx": null,
+            "additions": false,
+            "expression": null
+          },
+          "name_upstream": "matches"
+        },
+        "note_answer": "not_asked",
+        "record": {
+          "prompt_version": "publication-review-prompt/3",
+          "models": [
+            {
+              "model": "claude-haiku-5-5",
+              "effort": "max"
+            }
+          ],
+          "input_digest": "8920278b0706c4b5b7d0acf9843f283aa7aa7e446a9303eed626d593e05ec06f",
+          "resolver_version": "license-lineage/6",
+          "enrichment_source": "2026-11-27 03:00:19",
+          "license_matcher": "scancode-32.5.0+spdx-3.27"
+        }
+      }
+    },
+    "nm001028": {
+      "review_id": 295,
+      "auto_deny_state": "would_deny",
+      "report": {
+        "v": 3,
+        "model": "claude-haiku-5-5",
+        "questions": {
+          "complete_and_honest": "fail",
+          "meets_standards": "pass",
+          "authors_and_license": "pass",
+          "name_adequate": "fail"
+        },
+        "findings": [
+          {
+            "question": "complete_and_honest",
+            "severity": "blocker",
+            "code": "description_incomplete",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "name_adequate",
+            "severity": "blocker",
+            "code": "name_not_descriptive",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "provenance_unclear",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "note",
+            "code": "other",
+            "document": "license",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "evidence_incomplete",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          }
+        ],
+        "summary": "As recorded in the shadow run; the model's summary is not kept here.",
+        "steering": false,
+        "evidence": {
+          "head": "42f1e20c39cf10d9c1606332805a2b13638cc72b",
+          "anonymous": false,
+          "version": "1.0.0",
+          "version_shape": "ok",
+          "tag": "absent",
+          "bids": "pass",
+          "minimums": "met",
+          "minimum_failures": [],
+          "name_length": 131,
+          "license_field": true,
+          "authors_count": 4,
+          "placeholder_authors": 0,
+          "documents": {
+            "readme": "sent",
+            "dataset_description": "sent",
+            "changes": "sent",
+            "license": "absent",
+            "participants_json": "sent"
+          },
+          "withheld_findings": {},
+          "description_keys_shown": 9,
+          "description_keys_not_shown": 1,
+          "summary": {
+            "subjects": 31,
+            "sessions": 0,
+            "recordings": 31,
+            "datatypes": [
+              "nirs"
+            ],
+            "formats": {
+              ".snirf": 31
+            },
+            "has_derivatives": false,
+            "has_sourcedata": false,
+            "has_code": false,
+            "sampling_rates_hz": [
+              10
+            ],
+            "channel_counts": [
+              16
+            ],
+            "sidecars_read": 31,
+            "sidecars_total": 31
+          },
+          "inputs": {
+            "enrichment": "sent",
+            "registry_records": "sent",
+            "lineage": "sent",
+            "coverage": "sent",
+            "resubmission_note": "absent",
+            "previous_denial": "absent"
+          },
+          "lineage": {
+            "outcome": "source_is_publication",
+            "credited": true,
+            "resolved_at": "2026-11-28T05:53:01.949Z"
+          },
+          "description_keys_not_shown_names": [
+            "Version"
+          ],
+          "license_file": {
+            "state": "absent",
+            "spdx": null,
+            "additions": false,
+            "expression": null
+          },
+          "name_upstream": "not_applicable"
+        },
+        "note_answer": "not_asked",
+        "record": {
+          "prompt_version": "publication-review-prompt/3",
+          "models": [
+            {
+              "model": "claude-haiku-5-5",
+              "effort": "max"
+            }
+          ],
+          "input_digest": "e4f35516dbd432f10aa3458cd87ac05eb86b93e953d2dbf11bbc31b02289a1c4",
+          "resolver_version": "license-lineage/6",
+          "enrichment_source": "2026-11-27 03:47:54",
+          "license_matcher": "scancode-32.5.0+spdx-3.27"
+        }
+      }
+    },
+    "nm001032": {
+      "review_id": 299,
+      "auto_deny_state": "would_deny",
+      "report": {
+        "v": 3,
+        "model": "claude-haiku-5-5",
+        "questions": {
+          "complete_and_honest": "fail",
+          "meets_standards": "pass",
+          "authors_and_license": "unknown",
+          "name_adequate": "pass"
+        },
+        "findings": [
+          {
+            "question": "complete_and_honest",
+            "severity": "blocker",
+            "code": "description_incomplete",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "concern",
+            "code": "license_missing",
+            "document": "license",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "evidence_incomplete",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "complete_and_honest",
+            "severity": "note",
+            "code": "description_incomplete",
+            "document": "participants_json",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          }
+        ],
+        "summary": "As recorded in the shadow run; the model's summary is not kept here.",
+        "steering": false,
+        "evidence": {
+          "head": "a87061f49f9614a60ceaa8e79ddc8521834d4499",
+          "anonymous": false,
+          "version": "1.0.0",
+          "version_shape": "ok",
+          "tag": "absent",
+          "bids": "pass",
+          "minimums": "met",
+          "minimum_failures": [],
+          "name_length": 99,
+          "license_field": true,
+          "authors_count": 2,
+          "placeholder_authors": 0,
+          "documents": {
+            "readme": "sent",
+            "dataset_description": "sent",
+            "changes": "sent",
+            "license": "absent",
+            "participants_json": "absent"
+          },
+          "withheld_findings": {},
+          "description_keys_shown": 9,
+          "description_keys_not_shown": 1,
+          "summary": {
+            "subjects": 29,
+            "sessions": 0,
+            "recordings": 115,
+            "datatypes": [
+              "nirs"
+            ],
+            "formats": {
+              ".snirf": 115
+            },
+            "has_derivatives": false,
+            "has_sourcedata": false,
+            "has_code": false,
+            "sampling_rates_hz": [
+              7.81
+            ],
+            "channel_counts": [
+              40
+            ],
+            "sidecars_read": 64,
+            "sidecars_total": 115
+          },
+          "inputs": {
+            "enrichment": "sent",
+            "registry_records": "sent",
+            "lineage": "sent",
+            "coverage": "sent",
+            "resubmission_note": "absent",
+            "previous_denial": "absent"
+          },
+          "lineage": {
+            "outcome": "compatible_nc",
+            "credited": true,
+            "resolved_at": "2026-11-28T05:56:04.111Z"
+          },
+          "description_keys_not_shown_names": [
+            "Version"
+          ],
+          "license_file": {
+            "state": "absent",
+            "spdx": null,
+            "additions": false,
+            "expression": null
+          },
+          "name_upstream": "matches"
+        },
+        "note_answer": "not_asked",
+        "record": {
+          "prompt_version": "publication-review-prompt/3",
+          "models": [
+            {
+              "model": "claude-haiku-5-5",
+              "effort": "max"
+            }
+          ],
+          "input_digest": "06d0a3d2bb9456b215a512c109bc73031a8adc7a0b7be2975e04a20cebe3da02",
+          "resolver_version": "license-lineage/6",
+          "enrichment_source": "2026-11-27 04:35:02",
+          "license_matcher": "scancode-32.5.0+spdx-3.27"
+        }
+      }
+    },
+    "nm001037": {
+      "review_id": 305,
+      "auto_deny_state": "would_deny",
+      "report": {
+        "v": 3,
+        "model": "claude-haiku-5-5",
+        "questions": {
+          "complete_and_honest": "fail",
+          "meets_standards": "pass",
+          "authors_and_license": "fail",
+          "name_adequate": "pass"
+        },
+        "findings": [
+          {
+            "question": "authors_and_license",
+            "severity": "blocker",
+            "code": "authors_placeholder",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "complete_and_honest",
+            "severity": "blocker",
+            "code": "readme_missing_or_stub",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "complete_and_honest",
+            "severity": "concern",
+            "code": "evidence_incomplete",
+            "document": null,
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "concern",
+            "code": "evidence_incomplete",
+            "document": "license",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "other",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "other",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          }
+        ],
+        "summary": "As recorded in the shadow run; the model's summary is not kept here.",
+        "steering": false,
+        "evidence": {
+          "head": "8f99db0f1c9b99126363a8330b15402cb969e808",
+          "anonymous": false,
+          "version": "1.0.0",
+          "version_shape": "ok",
+          "tag": "absent",
+          "bids": "pass",
+          "minimums": "met",
+          "minimum_failures": [],
+          "name_length": 140,
+          "license_field": true,
+          "authors_count": 1,
+          "placeholder_authors": 0,
+          "documents": {
+            "readme": "sent",
+            "dataset_description": "sent",
+            "changes": "sent",
+            "license": "absent",
+            "participants_json": "absent"
+          },
+          "withheld_findings": {},
+          "description_keys_shown": 9,
+          "description_keys_not_shown": 1,
+          "summary": {
+            "subjects": 4,
+            "sessions": 4,
+            "recordings": 26,
+            "datatypes": [
+              "ieeg"
+            ],
+            "formats": {
+              ".vhdr": 13,
+              ".vmrk": 13
+            },
+            "has_derivatives": false,
+            "has_sourcedata": false,
+            "has_code": false,
+            "sampling_rates_hz": [
+              1000,
+              1525.88,
+              3051.76
+            ],
+            "channel_counts": [
+              1,
+              2
+            ],
+            "sidecars_read": 13,
+            "sidecars_total": 13
+          },
+          "inputs": {
+            "enrichment": "sent",
+            "registry_records": "sent",
+            "lineage": "sent",
+            "coverage": "sent",
+            "resubmission_note": "absent",
+            "previous_denial": "absent"
+          },
+          "lineage": {
+            "outcome": "compatible_attribution",
+            "credited": true,
+            "resolved_at": "2026-11-28T05:58:56.740Z"
+          },
+          "description_keys_not_shown_names": [
+            "Version"
+          ],
+          "license_file": {
+            "state": "absent",
+            "spdx": null,
+            "additions": false,
+            "expression": null
+          },
+          "name_upstream": "matches"
+        },
+        "note_answer": "not_asked",
+        "record": {
+          "prompt_version": "publication-review-prompt/3",
+          "models": [
+            {
+              "model": "claude-haiku-5-5",
+              "effort": "max"
+            }
+          ],
+          "input_digest": "4689674ec343012d787711e532eca35d9e4af452c0a803bccf345610c7b02a7b",
+          "resolver_version": "license-lineage/6",
+          "enrichment_source": "2026-11-27 05:17:23",
+          "license_matcher": "scancode-32.5.0+spdx-3.27"
+        }
+      }
+    },
+    "nm001039": {
+      "review_id": 48,
+      "auto_deny_state": "would_deny",
+      "report": {
+        "v": 3,
+        "model": "claude-haiku-5-5",
+        "questions": {
+          "complete_and_honest": "fail",
+          "meets_standards": "fail",
+          "authors_and_license": "fail",
+          "name_adequate": "fail"
+        },
+        "findings": [
+          {
+            "question": "authors_and_license",
+            "severity": "blocker",
+            "code": "authors_placeholder",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "complete_and_honest",
+            "severity": "blocker",
+            "code": "description_incomplete",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "name_adequate",
+            "severity": "blocker",
+            "code": "name_not_descriptive",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "blocker",
+            "code": "description_incomplete",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "concern",
+            "code": "license_missing",
+            "document": "license",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "evidence_incomplete",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "complete_and_honest",
+            "severity": "note",
+            "code": "other",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "other",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          }
+        ],
+        "summary": "As recorded in the shadow run; the model's summary is not kept here.",
+        "steering": false,
+        "evidence": {
+          "head": "174ec77ccf81e8211d5eb0d50d6c2a447bde6044",
+          "anonymous": false,
+          "version": "1.0.0",
+          "version_shape": "ok",
+          "tag": "absent",
+          "bids": "unconcluded",
+          "minimums": "met",
+          "minimum_failures": [],
+          "name_length": 38,
+          "license_field": true,
+          "authors_count": 1,
+          "placeholder_authors": 0,
+          "documents": {
+            "readme": "sent",
+            "dataset_description": "sent",
+            "changes": "sent",
+            "license": "absent",
+            "participants_json": "absent"
+          },
+          "withheld_findings": {},
+          "description_keys_shown": 9,
+          "description_keys_not_shown": 1,
+          "summary": {
+            "subjects": 2609,
+            "sessions": 0,
+            "recordings": 2609,
+            "datatypes": [
+              "nirs"
+            ],
+            "formats": {
+              ".snirf": 2609
+            },
+            "has_derivatives": false,
+            "has_sourcedata": false,
+            "has_code": false,
+            "sampling_rates_hz": [
+              10
+            ],
+            "channel_counts": [
+              128
+            ],
+            "sidecars_read": 64,
+            "sidecars_total": 2609
+          },
+          "inputs": {
+            "enrichment": "sent",
+            "registry_records": "sent",
+            "lineage": "sent",
+            "coverage": "sent",
+            "resubmission_note": "absent",
+            "previous_denial": "absent"
+          },
+          "lineage": {
+            "outcome": "compatible_attribution",
+            "credited": true,
+            "resolved_at": "2026-11-28T06:36:51.553Z"
+          },
+          "description_keys_not_shown_names": [
+            "Version"
+          ],
+          "license_file": {
+            "state": "absent",
+            "spdx": null,
+            "additions": false,
+            "expression": null
+          },
+          "name_upstream": "matches"
+        },
+        "note_answer": "not_asked",
+        "record": {
+          "prompt_version": "publication-review-prompt/3",
+          "models": [
+            {
+              "model": "claude-haiku-5-5",
+              "effort": "max"
+            }
+          ],
+          "input_digest": "30ea3fe907846fd02f655147eb2e0bbf9ae71837ef23f02995256cc1fae7a5ae",
+          "resolver_version": "license-lineage/6",
+          "enrichment_source": "2026-11-27 07:38:22",
+          "license_matcher": "scancode-32.5.0+spdx-3.27"
+        }
+      }
+    },
+    "nm001041": {
+      "review_id": 335,
+      "auto_deny_state": "would_deny",
+      "report": {
+        "v": 3,
+        "model": "claude-haiku-5-5",
+        "questions": {
+          "complete_and_honest": "fail",
+          "meets_standards": "pass",
+          "authors_and_license": "fail",
+          "name_adequate": "pass"
+        },
+        "findings": [
+          {
+            "question": "complete_and_honest",
+            "severity": "blocker",
+            "code": "description_incomplete",
+            "document": "readme",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "blocker",
+            "code": "authors_placeholder",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "authors_and_license",
+            "severity": "concern",
+            "code": "license_missing",
+            "document": "license",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "concern",
+            "code": "other",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "other",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          },
+          {
+            "question": "meets_standards",
+            "severity": "note",
+            "code": "evidence_incomplete",
+            "document": "dataset_description",
+            "note": "As recorded in the shadow run; the model's note is not kept here."
+          }
+        ],
+        "summary": "As recorded in the shadow run; the model's summary is not kept here.",
+        "steering": false,
+        "evidence": {
+          "head": "d8272171e28fd6d743e74fadbfc2275b094dfdda",
+          "anonymous": false,
+          "version": "1.0.0",
+          "version_shape": "ok",
+          "tag": "absent",
+          "bids": "unconcluded",
+          "minimums": "met",
+          "minimum_failures": [],
+          "name_length": 92,
+          "license_field": true,
+          "authors_count": 1,
+          "placeholder_authors": 0,
+          "documents": {
+            "readme": "sent",
+            "dataset_description": "sent",
+            "changes": "sent",
+            "license": "absent",
+            "participants_json": "absent"
+          },
+          "withheld_findings": {},
+          "description_keys_shown": 9,
+          "description_keys_not_shown": 1,
+          "summary": {
+            "subjects": 116,
+            "sessions": 0,
+            "recordings": 200,
+            "datatypes": [
+              "nirs"
+            ],
+            "formats": {
+              ".snirf": 200
+            },
+            "has_derivatives": false,
+            "has_sourcedata": false,
+            "has_code": false,
+            "sampling_rates_hz": [
+              7.81
+            ],
+            "channel_counts": [
+              44
+            ],
+            "sidecars_read": 64,
+            "sidecars_total": 200
+          },
+          "inputs": {
+            "enrichment": "sent",
+            "registry_records": "sent",
+            "lineage": "sent",
+            "coverage": "sent",
+            "resubmission_note": "absent",
+            "previous_denial": "absent"
+          },
+          "lineage": {
+            "outcome": "compatible_attribution",
+            "credited": true,
+            "resolved_at": "2026-11-28T06:39:30.932Z"
+          },
+          "description_keys_not_shown_names": [
+            "Version"
+          ],
+          "license_file": {
+            "state": "absent",
+            "spdx": null,
+            "additions": false,
+            "expression": null
+          },
+          "name_upstream": "matches"
+        },
+        "note_answer": "not_asked",
+        "record": {
+          "prompt_version": "publication-review-prompt/3",
+          "models": [
+            {
+              "model": "claude-haiku-5-5",
+              "effort": "max"
+            }
+          ],
+          "input_digest": "9ff1355a9adb0342ec558f806ad963139b847aaa20de9f350259ec21386ade15",
+          "resolver_version": "license-lineage/6",
+          "enrichment_source": "2026-11-27 06:00:30",
+          "license_matcher": "scancode-32.5.0+spdx-3.27"
+        }
+      }
+    }
+  }
+}

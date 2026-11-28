@@ -135,9 +135,15 @@ export async function decisionCardInputs(
     review === null
       ? null
       : await db
-          .prepare("SELECT served_metadata, auto_deny_state FROM publication_reviews WHERE id = ?")
+          .prepare(
+            "SELECT served_metadata, auto_deny_state, auto_deny_codes FROM publication_reviews WHERE id = ?",
+          )
           .bind(review.id)
-          .first<{ served_metadata: string | null; auto_deny_state: string | null }>();
+          .first<{
+            served_metadata: string | null;
+            auto_deny_state: string | null;
+            auto_deny_codes: string | null;
+          }>();
   const snapshot = parseServedMetadata(row?.served_metadata ?? null);
   const gate = await gateFactsOf(env, detail);
 
@@ -147,6 +153,7 @@ export async function decisionCardInputs(
     return {
       detail,
       autoDenyState: row?.auto_deny_state ?? null,
+      autoDenyCodes: row?.auto_deny_codes ?? null,
       snapshot,
       current: null,
       freshLineage: null,
@@ -210,6 +217,7 @@ export async function decisionCardInputs(
   return {
     detail,
     autoDenyState: row?.auto_deny_state ?? null,
+    autoDenyCodes: row?.auto_deny_codes ?? null,
     snapshot,
     current,
     freshLineage: fresh === null ? null : cardLineageOf(fresh),

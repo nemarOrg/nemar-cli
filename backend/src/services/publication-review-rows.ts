@@ -92,6 +92,11 @@ export interface PublicationReviewRow {
   /** When `autoDenyState` was written; null for `none`. */
   autoDenyAt: string | null;
   /**
+   * The codes an agreement named (migration 0164; `autoDenyCodesOf` reads them), unparsed; null
+   * for every row that recorded no agreement, and for one recorded before the column.
+   */
+  autoDenyCodes: string | null;
+  /**
    * The lineage the Worker served the review's job, as the license permission rule reads it
    * (migration 0154; `parsePermissionBasis`), unparsed; null when none was stored.
    */
@@ -112,7 +117,7 @@ export const ROW_COLUMNS =
   "detail, report, claimed_at, attempts, override_by, override_at, override_reasons, " +
   "created_at, decided_at, scanner_id, reader_versions, resolver_version, models, " +
   "prompt_version, input_digest, enrichment_source, confirm_of, auto_deny_state, auto_deny_at, " +
-  "lineage_basis, superseded_at, superseded_by, license_matcher";
+  "lineage_basis, superseded_at, superseded_by, license_matcher, auto_deny_codes";
 
 const num = (v: unknown): number => Number(v);
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
@@ -150,6 +155,7 @@ export function toRow(raw: Record<string, unknown>): PublicationReviewRow {
     confirmOf: numOrNull(raw.confirm_of),
     autoDenyState: typeof raw.auto_deny_state === "string" ? raw.auto_deny_state : "none",
     autoDenyAt: strOrNull(raw.auto_deny_at),
+    autoDenyCodes: strOrNull(raw.auto_deny_codes),
     lineageBasis: strOrNull(raw.lineage_basis),
     supersededAt: strOrNull(raw.superseded_at),
     supersededBy: numOrNull(raw.superseded_by),

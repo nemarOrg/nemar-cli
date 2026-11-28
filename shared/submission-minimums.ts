@@ -40,9 +40,18 @@ export const MIN_NAME_LENGTH = 25;
  * applies to the natural variants -- "Anonymous (blinded for review)",
  * "Anonymous Authors". An entry that opens with the word is asserting
  * anonymity, not naming a person.
+ *
+ * A converter's pointer to the upstream's people is a placeholder too (the lead's ruling of
+ * 2026-11-27, ADR 0139 as amended that day): the WHOLE entry is "Original (Dataset or Data)
+ * Authors" or "Creators", optionally followed by "(see SourceDatasets)", or is "See
+ * SourceDatasets" alone. Anchored at both ends, so an entry that goes on to name people
+ * ("Original authors: Smith J.") is a real entry. Nine datasets of the
+ * 2026-11-27 shadow run (nm001019 among them) list exactly "Original Dataset Authors (see
+ * SourceDatasets)" as their only author, which the review's model called a placeholder while this
+ * rule, and so the decision card, counted none.
  */
 const PLACEHOLDER_AUTHOR =
-  /^(n\/?a|none|tbd|todo|unknown|-+)$|^anonymous\b|^\[.*\]$|unspecified|placeholder/i;
+  /^(n\/?a|none|tbd|todo|unknown|-+)$|^anonymous\b|^\[.*\]$|unspecified|placeholder|^original\s+(dataset\s+|data\s+)?(authors?|creators?)(\s*\(\s*see\s+sourcedatasets\s*\))?\.?$|^\(?\s*see\s+sourcedatasets\s*\)?\.?$/i;
 
 /**
  * Ethics statement detection in a README: any of the conventional phrasings.

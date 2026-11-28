@@ -633,7 +633,16 @@ export function mostRestrictive(values: NormalizedLicenseValue[]): NormalizedLic
 // ---------------------------------------------------------------------------
 
 export type SourceRef =
-  | { kind: "doi"; doi: string; origin: SourceOrigin }
+  | {
+      kind: "doi";
+      doi: string;
+      origin: SourceOrigin;
+      /**
+       * The DOI is NEMAR's mapping of an `https://osf.io/<guid>` URL, not a DOI the dataset
+       * declared: unless DataCite confirms it, the source is named by its URL (`sourceLabelOf`).
+       */
+      osf_url?: true;
+    }
   | { kind: "openneuro_latest"; ds: string; origin: SourceOrigin }
   | { kind: "physionet"; slug: string; version: string | null; origin: SourceOrigin }
   | { kind: "figshare_article"; id: string; version: string | null; origin: SourceOrigin }
@@ -736,7 +745,7 @@ export function refFromIdentifier(
   const zen = ZENODO_URL.exec(t);
   if (zen) return { kind: "doi", doi: `10.5281/zenodo.${zen[1]}`, origin };
   const osf = osfDoiOfUrl(t);
-  if (osf) return { kind: "doi", doi: osf, origin };
+  if (osf) return { kind: "doi", doi: osf, origin, osf_url: true };
   const zenDoi = /zenodo\.org\/doi\/(10\.\d{4,9}\/\S+)/i.exec(t);
   if (zenDoi) return doiRef(zenDoi[1], origin);
   const fs = figshareArticleOfUrl(t);
@@ -1083,6 +1092,8 @@ export interface RegistryBases {
   osf: string;
   /** The figshare API origin; a collection's members are at `/v2/collections/<id>/articles`. */
   figshare: string;
+  /** The Zenodo API origin; a record is at `/records/<id>` (a concept id answers its latest). */
+  zenodo: string;
 }
 
 export const DEFAULT_BASES: RegistryBases = {
@@ -1093,6 +1104,7 @@ export const DEFAULT_BASES: RegistryBases = {
   physionet: "https://physionet.org",
   osf: "https://api.osf.io",
   figshare: "https://api.figshare.com",
+  zenodo: "https://zenodo.org/api",
 };
 
 /**
@@ -1142,6 +1154,173 @@ export interface SourceRecord {
    * metadata follows the latest one. Absent for every other record.
    */
   concept?: true;
+  /**
+   * The DOI is NEMAR's construction, not a registered one: an OSF node URL maps to
+   * `10.17605/osf.io/<guid>`, and DataCite did not hold it, so the record was read from OSF's API
+   * and the DOI must never be shown as the source's (`sourceLabelOf` shows the node's URL).
+   * Absent for every other record.
+   */
+  doi_registered?: false;
+  /**
+   * What a Zenodo record that its registry types as a paper holds (`zenodoFilesOf`): Zenodo's type
+   * for it and its files, so the decision card can say that a "journal article" holds data files.
+   * It never changes the record's status or outcome (ADR 0139 decision 7, amendment of
+   * 2026-11-27): an administrator decides. Absent for every other record, and when Zenodo's record
+   * could not be read.
+   */
+  registry_files?: RegistryFiles;
+}
+
+/** A paper-typed record's files, as its repository lists them (registry text, never deposit content). */
+export interface RegistryFiles {
+  /** The repository's type for the record, as it gives it (`Journal article`). */
+  type: string;
+  /** How many files the record holds. */
+  files: number;
+  /** How many of them hold data ({@link DATA_FILE_EXTENSIONS}): recordings, tables, archives. */
+  data_files: number;
+  /** The first data files' names, at most {@link MAX_REGISTRY_FILE_NAMES}. */
+  examples: string[];
+}
+
+/**
+ * File extensions that hold data: recordings, tables, arrays and archives of them. A paper's record
+ * that holds a file of one of these "holds data files"; its PDF, figures, documents and anything
+ * not listed are not counted, so the card never calls a paper's own files data.
+ */
+export const DATA_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
+  // archives
+  "zip",
+  "tar",
+  "gz",
+  "tgz",
+  "bz2",
+  "xz",
+  "7z",
+  "rar",
+  // tables and arrays
+  "csv",
+  "tsv",
+  "xls",
+  "xlsx",
+  "parquet",
+  "feather",
+  "npy",
+  "npz",
+  "pkl",
+  "pickle",
+  "h5",
+  "hdf5",
+  "hdf",
+  "mat",
+  "sav",
+  "rds",
+  "rdata",
+  "json",
+  "nwb",
+  "zarr",
+  "dat",
+  "bin",
+  "raw",
+  // electrophysiology, imaging and other recordings
+  "edf",
+  "bdf",
+  "gdf",
+  "set",
+  "fdt",
+  "vhdr",
+  "vmrk",
+  "eeg",
+  "fif",
+  "cnt",
+  "mff",
+  "xdf",
+  "snirf",
+  "nirs",
+  "nii",
+  "dcm",
+  "mef",
+  "ns5",
+  "nev",
+  "plx",
+  "smr",
+  "abf",
+  "acq",
+]);
+
+/** The most data-file names a record keeps. */
+export const MAX_REGISTRY_FILE_NAMES = 3;
+
+const ZENODO_DOI = /^10\.5281\/zenodo\.(\d+)$/;
+
+/**
+ * What a Zenodo record holds, from Zenodo's API (`/records/<id>`), or null when it could not be
+ * read or is not a record. Read only for a Zenodo DOI whose registry record is a publication.
+ */
+async function zenodoFilesOf(doi: string, o: FetchContext): Promise<RegistryFiles | null> {
+  const m = ZENODO_DOI.exec(doi);
+  if (m === null) return null;
+  // One attempt, never retried: this read only adds a note to the card, so it must not spend the
+  // lineage's budget on retries the license reads need.
+  const got = await o.getOnce(`${o.bases.zenodo}/records/${m[1]}`);
+  if (got.kind !== "ok" || !isRecord(got.body)) return null;
+  const body = got.body;
+  const meta = isRecord(body.metadata) ? body.metadata : {};
+  const rt = isRecord(meta.resource_type) ? meta.resource_type : {};
+  const type = declaredValue(rt.title) ?? declaredValue(rt.type);
+  if (type === null || !Array.isArray(body.files)) return null;
+  const names = body.files
+    .map((f) => (isRecord(f) ? declaredValue(f.key) : null))
+    .filter((n): n is string => n !== null);
+  const data = names.filter((n) => {
+    const dot = n.lastIndexOf(".");
+    return dot >= 0 && DATA_FILE_EXTENSIONS.has(n.slice(dot + 1).toLowerCase());
+  });
+  return {
+    type,
+    files: body.files.length,
+    data_files: data.length,
+    examples: data.slice(0, MAX_REGISTRY_FILE_NAMES),
+  };
+}
+
+/**
+ * A source declared as an `https://osf.io/<guid>` URL whose DOI DataCite did not confirm: DataCite
+ * answered that it does not hold it, or the lookup failed or could not be read (a failed record has
+ * no resolver), so the DOI is only NEMAR's construction and is never shown as the source's.
+ */
+export function osfRegistrationUnconfirmed(ref: SourceRef, rec: SourceRecord): boolean {
+  return (
+    ref.kind === "doi" &&
+    ref.osf_url === true &&
+    (rec.doi_registered === false || rec.resolver === null)
+  );
+}
+
+/**
+ * How a surface names a source: its id, except an OSF node whose DOI DataCite does not hold
+ * ({@link SourceRecord.doi_registered}), which is named by its URL, `https://osf.io/<guid>`, so a
+ * DOI that does not exist is never presented (nm001019: `10.17605/osf.io/fx4ud`).
+ */
+export function sourceLabelOf(s: Pick<SourceRecord, "id" | "doi_registered">): string {
+  if (s.doi_registered !== false) return s.id;
+  const m = OSF_DOI.exec(s.id);
+  return m === null ? s.id : `https://osf.io/${m[1]}`;
+}
+
+/**
+ * The card's line for a publication that holds data files ({@link SourceRecord.registry_files}),
+ * or null for any other source. Its words are the repository's type and file names (registry text).
+ */
+export function paperWithDataFilesLine(
+  s: Pick<SourceRecord, "id" | "doi_registered" | "status" | "registry_files">,
+): string | null {
+  const f = s.registry_files;
+  if (s.status !== "publication" || f === undefined || f.data_files === 0) return null;
+  const type = f.type.toLowerCase();
+  const article = /^[aeiou]/.test(type) ? "an" : "a";
+  const examples = f.examples.length > 0 ? `, such as ${f.examples.join(", ")}` : "";
+  return `${sourceLabelOf(s)}: the registry types this record as ${article} ${type} but it holds data files (${f.data_files} of ${f.files} files${examples}); it is still read as a publication for the license lineage, and an administrator decides.`;
 }
 
 /** The most creators' names a record keeps. */
@@ -1319,6 +1498,8 @@ type GetJson = (url: string, init?: RequestInit) => Promise<Fetched>;
 interface FetchContext {
   bases: RegistryBases;
   get: GetJson;
+  /** The same fetch with one attempt and no retry, counted against the same budget. */
+  getOnce: GetJson;
 }
 
 /**
@@ -1943,19 +2124,25 @@ async function resolveOsf(
   /** The DataCite record's title, creators and publisher, when it holds the DOI. */
   described: Described,
   o: FetchContext,
+  /** DataCite holds the DOI; when it does not, the DOI is NEMAR's construction from the URL. */
+  registered = true,
 ): Promise<SourceRecord> {
+  const fail = (status: SourceStatus, at: string | null): SourceRecord => ({
+    ...failedRecord(doi, status, at),
+    ...(registered ? {} : { doi_registered: false as const }),
+  });
   const url = `${o.bases.osf}/v2/nodes/${encodeURIComponent(guid)}/?embed=license`;
   const got = await o.get(url);
-  if (got.kind === "absent") return failedRecord(doi, "not_found", url);
-  if (got.kind === "failed") return failedRecord(doi, got.status, url);
+  if (got.kind === "absent") return fail("not_found", url);
+  if (got.kind === "failed") return fail(got.status, url);
   const body = got.body;
   if (!isRecord(body) || !isRecord(body.data) || !isRecord(body.data.attributes)) {
-    return failedRecord(doi, "unparseable", url);
+    return fail("unparseable", url);
   }
   const node = body.data;
   const attributes = node.attributes as Record<string, unknown>;
   const own = osfNodeLicense(node);
-  if (own === null) return failedRecord(doi, "unparseable", url);
+  if (own === null) return fail("unparseable", url);
   const type = resourceType ?? "Dataset";
   const base = {
     id: doi,
@@ -1965,13 +2152,14 @@ async function resolveOsf(
     creators: described.creators,
     publisher: described.publisher ?? "OSF",
     evidence_url: url,
+    ...(registered ? {} : { doi_registered: false as const }),
   };
   const childUrl = `${o.bases.osf}/v2/nodes/${encodeURIComponent(guid)}/children/?embed=license&page[size]=${MAX_OSF_CHILDREN}&related_counts=children`;
   const ch = await o.get(childUrl);
-  if (ch.kind === "absent") return failedRecord(doi, "not_found", childUrl);
-  if (ch.kind === "failed") return failedRecord(doi, ch.status, childUrl);
+  if (ch.kind === "absent") return fail("not_found", childUrl);
+  if (ch.kind === "failed") return fail(ch.status, childUrl);
   const cb = ch.body;
-  if (!isRecord(cb) || !Array.isArray(cb.data)) return failedRecord(doi, "unparseable", childUrl);
+  if (!isRecord(cb) || !Array.isArray(cb.data)) return fail("unparseable", childUrl);
   const next = isRecord(cb.links) ? cb.links.next : null;
   if ((next !== null && next !== undefined) || cb.data.length > MAX_OSF_CHILDREN) {
     return unknownLicense(base);
@@ -1984,7 +2172,7 @@ async function resolveOsf(
     // given) leaves the license unknown, and an administrator decides; the tree is not walked.
     if (childCountOf(child) !== 0) return unknownLicense(base);
     const lic = isRecord(child) ? osfNodeLicense(child) : null;
-    if (lic === null) return failedRecord(doi, "unparseable", childUrl);
+    if (lic === null) return fail("unparseable", childUrl);
     values.push(lic.value ?? { license: "none", version: null });
     raws.push(...lic.texts);
     entries.push(lic.declared);
@@ -2040,6 +2228,9 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
       const dataLike = isDataset || osfProject || rtg === null;
       return resolveOsf(doi, osf[1], rtg, dataLike, dataciteDescribed(a), o);
     }
+    // A Zenodo record DataCite does not type as a dataset is a publication; what Zenodo says it
+    // holds is recorded beside it, so the card can say when a "journal article" holds data files.
+    const files = isDataset ? null : await zenodoFilesOf(doi, o);
     return withLicense(
       {
         id: doi,
@@ -2048,6 +2239,7 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
         ...dataciteDescribed(a),
         evidence_url: dcUrl,
         ...(isZenodoConcept(doi, a.relatedIdentifiers) ? { concept: true as const } : {}),
+        ...(files === null ? {} : { registry_files: files }),
       },
       values,
       raws,
@@ -2057,7 +2249,7 @@ async function resolveDoiUncached(doi: string, o: FetchContext): Promise<SourceR
   }
 
   const osf = OSF_DOI.exec(doi);
-  if (osf) return resolveOsf(doi, osf[1], null, true, NOT_DESCRIBED, o);
+  if (osf) return resolveOsf(doi, osf[1], null, true, NOT_DESCRIBED, o, false);
 
   const crUrl = `${o.bases.crossref}/works/${enc}`;
   const cr = await o.get(crUrl);
@@ -2140,10 +2332,11 @@ export function isValidCachedRecord(hit: unknown): hit is SourceRecord {
 }
 
 /**
- * The cache key prefix of a DOI's record. `doi2:` since records carry the Zenodo concept flag, so
- * a record cached before it is read again rather than served without it.
+ * The cache key prefix of a DOI's record. `doi3:` since records carry whether an OSF DOI is
+ * registered and what a Zenodo paper holds (`doi2:` added the Zenodo concept flag), so a record
+ * cached before them is read again rather than served without them.
  */
-const DOI_CACHE_KEY = "doi2:";
+const DOI_CACHE_KEY = "doi3:";
 
 async function cached(
   key: string,
@@ -2377,16 +2570,18 @@ export async function resolveLicenseLineage(
 ): Promise<LineageResult> {
   const now = options.now ?? (() => new Date());
   const clock = () => Date.now();
+  const fetchArgs = {
+    timeoutMs: options.timeoutMs ?? FETCH_TIMEOUT_MS,
+    retry: options.retry ?? LINEAGE_RETRY,
+    budget: { left: options.fetchBudget ?? LINEAGE_FETCH_BUDGET },
+    sleep: options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))),
+    clock,
+    startedAt: clock(),
+  };
   const o: FetchContext = {
     bases: options.bases ?? DEFAULT_BASES,
-    get: lineageFetch({
-      timeoutMs: options.timeoutMs ?? FETCH_TIMEOUT_MS,
-      retry: options.retry ?? LINEAGE_RETRY,
-      budget: { left: options.fetchBudget ?? LINEAGE_FETCH_BUDGET },
-      sleep: options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
-      clock,
-      startedAt: clock(),
-    }),
+    get: lineageFetch(fetchArgs),
+    getOnce: lineageFetch({ ...fetchArgs, retry: NO_RETRY }),
   };
   const { states, sources: parsed } = readLineageInputs(inputs);
   const unreadable: LineageSource[] = [];
@@ -2442,6 +2637,7 @@ export async function resolveLicenseLineage(
     ...(rec.status === "resolved" && isLatestSource(refs[i], rec)
       ? { resolved_latest: true as const }
       : {}),
+    ...(osfRegistrationUnconfirmed(refs[i], rec) ? { doi_registered: false as const } : {}),
   }));
   const { kept, skipped } = dropStaleRelations(resolved, refs);
   const sources: LineageSource[] = [...kept, ...unreadable];
@@ -2548,7 +2744,7 @@ export function lineageLines(result: LineageResult): string[] {
       ? `${s.license}${s.license_version ? ` ${s.license_version}` : ""}`
       : "unknown";
     lines.push(
-      `  - ${s.id} [${s.origin}]: ${s.outcome}; license ${lic}; type ${s.resource_type ?? "unknown"}; via ${s.resolver ?? "none"}`,
+      `  - ${sourceLabelOf(s)} [${s.origin}]: ${s.outcome}; license ${lic}; type ${s.resource_type ?? "unknown"}; via ${s.resolver ?? "none"}`,
     );
     lines.push(`      ${SOURCE_STATUS_COPY[s.status].statement}`);
     lines.push(
@@ -2560,6 +2756,8 @@ export function lineageLines(result: LineageResult): string[] {
       lines.push(`      declared license: ${declaredLicenseWords(s)}`);
     }
     if (s.evidence_url) lines.push(`      evidence: ${s.evidence_url}`);
+    const paper = paperWithDataFilesLine(s);
+    if (paper !== null) lines.push(`      note: ${paper}`);
     if (s.status !== "resolved") lines.push(`      remedy: ${SOURCE_STATUS_COPY[s.status].remedy}`);
   }
   // `?? 0` and `?? fetched_at`: a Worker of resolver version 2 sends neither field.

@@ -30,6 +30,7 @@
  * ({@link restorePublicationRequest}) are here too.
  */
 
+import { nameFollowsAnySourceTitle } from "../../../shared/name-follows-upstream.js";
 import { isOneOf } from "../../../shared/pr-review.js";
 import {
   type AutoDenyCode,
@@ -44,6 +45,8 @@ import {
   type Eligibility,
   MAX_EARLIER_AUTO_DENIALS,
   type RestoreRefusal,
+  autoDenyCodesColumn,
+  autoDenyCodesOf,
   autoDenyDailyCapOf,
   autoDenyEligibility,
   autoDenyModeOf,
@@ -58,6 +61,7 @@ import {
 import { AUTO_DENY_AUDIT_ACTION } from "../../../shared/resubmission-note.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
+import { parseServedMetadata } from "./decision-card.js";
 import {
   type AutoDenyDigestRow,
   DevEmailFenceError,
@@ -168,7 +172,30 @@ async function eligibilityOf(
     requestStatus: now.request.status,
     anonymous,
     earlierAutoDenials: now.earlier,
+    nameFollowsASource: await nameFollowsASourceOf(db, first),
   });
+}
+
+/**
+ * Whether the reviewed Name follows the title of a declared source, a publication included, from
+ * the snapshot of what the first run was served (migration 0163): its `Name` and `Authors` and the
+ * declared sources' titles. Null when the snapshot, its description or its titles were not kept
+ * (a review served before the titles were, or a snapshot too long for its column), or when some
+ * declared source has no whole title on record, which protects the Name: a person decides.
+ */
+async function nameFollowsASourceOf(db: Db, first: PublicationReviewRow): Promise<boolean | null> {
+  const r = await db
+    .prepare("SELECT served_metadata FROM publication_reviews WHERE id = ?")
+    .bind(first.id)
+    .first<{ served_metadata: string | null }>();
+  const snapshot = parseServedMetadata(r?.served_metadata ?? null);
+  const titles = snapshot?.lineage?.source_titles;
+  const description = snapshot?.dataset_description ?? null;
+  if (titles === undefined || description === null || description.name === null) return null;
+  // A declared source read with no title, or a title not kept whole, could be the one the Name
+  // follows: not knowing protects the Name.
+  if (snapshot?.lineage?.source_titles_complete !== true) return null;
+  return nameFollowsAnySourceTitle(description.name, titles, description.authors);
 }
 
 /** The reasons that say the request changed, not that the reviews disagree. */
@@ -244,25 +271,36 @@ export async function autoDenyStep(env: Bindings, reviewId: number): Promise<Aft
   return decide(env, first, row);
 }
 
-/** Write a first run's word, once, while it still says `none`. */
-async function markFirst(db: Db, firstId: number, state: AutoDenyState): Promise<boolean> {
+/**
+ * Write a first run's word, once, while it still says `none`. `codes` are an agreement's codes
+ * (migration 0164), for the states that record one; null for every other state.
+ */
+async function markFirst(
+  db: Db,
+  firstId: number,
+  state: AutoDenyState,
+  codes: readonly AutoDenyCode[] | null = null,
+): Promise<boolean> {
   const r = await db
     .prepare(
-      `UPDATE publication_reviews SET auto_deny_state = ?, auto_deny_at = datetime('now')
+      `UPDATE publication_reviews SET auto_deny_state = ?, auto_deny_codes = ?,
+              auto_deny_at = datetime('now')
         WHERE id = ? AND confirm_of IS NULL AND auto_deny_state = 'none'`,
     )
-    .bind(state, firstId)
+    .bind(state, codes === null ? null : autoDenyCodesColumn(codes), firstId)
     .run();
   return (r.meta.changes ?? 0) === 1;
 }
 
 /**
- * The cap's claim: one conditional write that records `state` on the first run only while fewer
- * than `cap` first runs were recorded `denied` or `would_deny` in the last day. One statement, so
- * two claims that race cannot both take the last place.
+ * The cap's claim: one conditional write that records `state` and the agreement's codes on the
+ * first run only while fewer than `cap` first runs were recorded `denied` or `would_deny` in the
+ * last day. One statement, so two claims that race cannot both take the last place. Binds: the
+ * state, the codes (`autoDenyCodesColumn`), the id and the cap.
  */
 function claimSql(): string {
-  return `UPDATE publication_reviews SET auto_deny_state = ?, auto_deny_at = datetime('now')
+  return `UPDATE publication_reviews SET auto_deny_state = ?, auto_deny_codes = ?,
+            auto_deny_at = datetime('now')
      WHERE id = ? AND confirm_of IS NULL AND auto_deny_state = 'none'
        AND (SELECT COUNT(*) FROM publication_reviews AS c
              WHERE c.auto_deny_state IN (${sqlList(CAPPED_STATES)})
@@ -313,9 +351,12 @@ async function decide(
   const cap = autoDenyDailyCap(env);
   if (mode === "off") return "none";
   if (mode === "shadow") {
-    const claimed = await db.prepare(claimSql()).bind("would_deny", first.id, cap).run();
+    const claimed = await db
+      .prepare(claimSql())
+      .bind("would_deny", autoDenyCodesColumn(agreement.codes), first.id, cap)
+      .run();
     if ((claimed.meta.changes ?? 0) === 1) return "would_deny";
-    if (await markFirst(db, first.id, "capped")) return "capped";
+    if (await markFirst(db, first.id, "capped", agreement.codes)) return "capped";
     return ((await stateOf(db, first.id)) ?? "none") as AutoDenyState;
   }
   return denyAutomatically(env, first, confirm, agreement.codes, agreement.reasons, cap);
@@ -338,7 +379,7 @@ async function denyAutomatically(
   if (!service) {
     // Nobody to deny as: a configuration fault, which leaves the request to a person.
     console.error(`[auto-deny] review ${first.id}: the service account is missing; nothing denied`);
-    await markFirst(db, first.id, "no_service_account");
+    await markFirst(db, first.id, "no_service_account", codes);
     return "no_service_account";
   }
   const details = JSON.stringify({
@@ -388,7 +429,7 @@ async function denyAutomatically(
     },
     before: () => {
       batched = true;
-      return [db.prepare(claimSql()).bind("denied", first.id, cap)];
+      return [db.prepare(claimSql()).bind("denied", autoDenyCodesColumn(codes), first.id, cap)];
     },
     after: (requestId) => [
       db
@@ -420,7 +461,7 @@ async function denyAutomatically(
   }
   const state = await stateOf(db, first.id);
   if (state === "none") {
-    await markFirst(db, first.id, "capped");
+    await markFirst(db, first.id, "capped", codes);
     return "capped";
   }
   return (state ?? "none") as AutoDenyState;
@@ -542,6 +583,14 @@ export async function retryFailedDenialMails(env: Bindings): Promise<number> {
         .bind(first.id)
         .first<Record<string, unknown>>(),
     );
+    // The codes recorded with the denial name exactly what the first mail did; a denial recorded
+    // before migration 0164 recomputes them from the two reports, as before.
+    const stored = autoDenyCodesOf(first.autoDenyCodes);
+    if (stored !== null) {
+      await mailDepositor(env, first, confirm ?? first, stored);
+      retried++;
+      continue;
+    }
     const view = rowViewOf(first, Date.now());
     const codes = view.kind === "reported" && view.report ? eligibleCodesOf(view.report).codes : [];
     const sharedCodes =
@@ -697,7 +746,11 @@ async function digestAfterClaim(
       state,
       datasetId: review.datasetId,
       requestId: review.requestId,
-      codes: report === null ? [] : eligibleCodesOf(report).codes,
+      // An agreement's codes as recorded with it; a row without them (one that did not agree, or
+      // one recorded before migration 0164) shows what its first run's report gives now.
+      codes:
+        autoDenyCodesOf(review.autoDenyCodes) ??
+        (report === null ? [] : eligibleCodesOf(report).codes),
     });
   }
   result.rows = rows.length;
