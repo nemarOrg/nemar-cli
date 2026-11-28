@@ -808,6 +808,24 @@ describe("the shadow run's records: the mail names what is true of the dataset",
     expect(codesOf(unknown)).not.toContain("authors_placeholder");
   });
 
+  test("an undecided name rule protects the Name (name_upstream unknown)", () => {
+    const failedName = (name_upstream?: string) =>
+      parsePublicationReviewReport(
+        v3PublicationReport(
+          {
+            lineage: { outcome: "compatible", credited: true, resolved_at: null },
+            ...(name_upstream === undefined ? {} : { name_upstream }),
+          },
+          {
+            questions: { ...PASSED, name_adequate: "fail" },
+            findings: [blocker("name_adequate", "name_not_descriptive", "dataset_description")],
+          },
+        ),
+      );
+    expect(codesOf(failedName(), false)).toEqual(["name_not_descriptive"]);
+    expect(codesOf(failedName("unknown"), false)).not.toContain("name_not_descriptive");
+  });
+
   test("the converter placeholder is eligible only where the model itself failed the question", () => {
     // The first runs of the shadow run whose only author is the converter's pointer.
     for (const id of ["nm001019", "nm001037", "nm001039", "nm001041"] as const) {
