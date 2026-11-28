@@ -1,0 +1,40 @@
+{
+  "retrieved": "2026-11-27",
+  "texts": {
+    "CC-BY-4.0": {
+      "file": "cc-by-4.0.txt",
+      "url": "https://creativecommons.org/licenses/by/4.0/legalcode.txt",
+      "sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411"
+    },
+    "CC-BY-SA-4.0": {
+      "file": "cc-by-sa-4.0.txt",
+      "url": "https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt",
+      "sha256": "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5"
+    },
+    "CC-BY-NC-4.0": {
+      "file": "cc-by-nc-4.0.txt",
+      "url": "https://creativecommons.org/licenses/by-nc/4.0/legalcode.txt",
+      "sha256": "41003d4a74749c0220e33dd415042164b5a1093ed401f36277234f772d22d3d0"
+    },
+    "CC-BY-NC-SA-4.0": {
+      "file": "cc-by-nc-sa-4.0.txt",
+      "url": "https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode.txt",
+      "sha256": "e66c269d4819aaab34b49ef5220c4ddab6756f21bb5180761a4eb8561f2b7bbd"
+    },
+    "CC-BY-ND-4.0": {
+      "file": "cc-by-nd-4.0.txt",
+      "url": "https://creativecommons.org/licenses/by-nd/4.0/legalcode.txt",
+      "sha256": "9cc97638cf0185884ac800144b6246c7772f94ff2cc70686afa9574aaea4fa2b"
+    },
+    "CC-BY-NC-ND-4.0": {
+      "file": "cc-by-nc-nd-4.0.txt",
+      "url": "https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode.txt",
+      "sha256": "38762e3777f4ec00a6f769062a7c3f704fb78ce08303ecff88558da4c49cf9ea"
+    },
+    "CC0-1.0": {
+      "file": "cc0-1.0.txt",
+      "url": "https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    }
+  }
+}

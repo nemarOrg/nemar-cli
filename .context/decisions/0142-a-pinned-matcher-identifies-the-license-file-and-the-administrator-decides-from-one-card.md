@@ -317,3 +317,20 @@ The legal code's own boilerplate plays no part: the full-text match is CC-BY-NC-
 - Everything else stands: the five are `matches` with `additions`, because the header's sentences are uncovered text, exactly as the same header over CC-BY-4.0 (nm000699) was already;
   a LICENSE with the CC-BY-NC-4.0 header and text followed by the MIT License stays `unrecognized` with its compound expression.
 - The matcher version does not change: it names the ScanCode release and SPDX list, and this decision versions no parser.
+
+## Amendment 2026-11-27 (owner-approved, after 0.10.56): web-copy artifacts are not deletions
+
+Decision 1's `partial` rule (a longest match below 100% coverage sends the whole file) is narrowed, measured with ScanCode 32.5.0 on nm000677, nm000774, nm000968, nm000712, nm000924 and nm000982.
+The three CC-BY-NC-4.0 files match `cc-by-nc-4.0_23.RULE` at 98.8%: a word-by-word diff against the rule and against creativecommons.org's `legalcode.txt` shows the file lacks exactly the two `wiki.creativecommons.org/Considerations_for_licensors` and `..._licensees` links (hyperlinks on the web page) and the closing sentence "The text of the Creative Commons public licenses is dedicated to the public domain under the CC0 Public Domain Dedication.", and nothing else.
+The two CC-BY-SA-4.0 files lack the same pieces, but `cc-by-sa-4.0.SPDX.RULE` lacks them too, so they match at 100%.
+nm000982 (99.82%) has its title on line 1, matched by `cc-by-sa-4.0_68.RULE`, outside the full-text match.
+Sent whole, the files were cut at the cap, and a cut document lowers `authors_and_license` to `unknown`.
+
+- **The official texts are vendored**: `legalcode.txt` of CC-BY, CC-BY-SA, CC-BY-NC, CC-BY-NC-SA, CC-BY-ND and CC-BY-NC-ND 4.0 and of CC0-1.0, byte for byte as creativecommons.org served them on 2026-11-27, in `scripts/ci/license-texts/` with a manifest of each file's URL and SHA-256.
+  Creative Commons dedicates these texts to the public domain under CC0.
+- **When the longest match of `P` covers less than 100%**, is a full text (its `matched_length` is at least 90% of the official text's words, `FULL_TEXT_MIN_SHARE`; a notice or a fragment is not), and `P`'s text is vendored (its SHA-256 matching), the longest match's lines are diffed word by word (letters and digits, lowercased) against the whole official text, in both directions.
+  Not missing: a Considerations link or the closing CC0 sentence (`WEB_COPY_PIECES`) that the matched lines do not have, and the official title when another match of `P` outside the longest match's lines reads exactly the title's words.
+  `partial` is then false, and the diff's pieces join the leftover: each run of official words the file lacks, marked `[missing from the official text]`, and each run of words the file has that the official text does not (an insertion, a substitution, a web copy's own heading words), marked `[added beyond the official text]`, whether or not ScanCode bracketed them.
+  So the model reads the deleted and the added words instead of the file, and `additions` is set by any of them.
+- **The file is sent whole, as before,** when no official text is vendored for `P`, its SHA-256 differs, the longest match is not a full text, or the diff is too large to compute (`MAX_DIFF_CELLS`).
+- The matcher version does not change.
