@@ -633,7 +633,16 @@ export function mostRestrictive(values: NormalizedLicenseValue[]): NormalizedLic
 // ---------------------------------------------------------------------------
 
 export type SourceRef =
-  | { kind: "doi"; doi: string; origin: SourceOrigin }
+  | {
+      kind: "doi";
+      doi: string;
+      origin: SourceOrigin;
+      /**
+       * The DOI is NEMAR's mapping of an `https://osf.io/<guid>` URL, not a DOI the dataset
+       * declared: unless DataCite confirms it, the source is named by its URL (`sourceLabelOf`).
+       */
+      osf_url?: true;
+    }
   | { kind: "openneuro_latest"; ds: string; origin: SourceOrigin }
   | { kind: "physionet"; slug: string; version: string | null; origin: SourceOrigin }
   | { kind: "figshare_article"; id: string; version: string | null; origin: SourceOrigin }
@@ -736,7 +745,7 @@ export function refFromIdentifier(
   const zen = ZENODO_URL.exec(t);
   if (zen) return { kind: "doi", doi: `10.5281/zenodo.${zen[1]}`, origin };
   const osf = osfDoiOfUrl(t);
-  if (osf) return { kind: "doi", doi: osf, origin };
+  if (osf) return { kind: "doi", doi: osf, origin, osf_url: true };
   const zenDoi = /zenodo\.org\/doi\/(10\.\d{4,9}\/\S+)/i.exec(t);
   if (zenDoi) return doiRef(zenDoi[1], origin);
   const fs = figshareArticleOfUrl(t);
@@ -1168,29 +1177,75 @@ export interface RegistryFiles {
   type: string;
   /** How many files the record holds. */
   files: number;
-  /** How many of them are not a document ({@link DOCUMENT_FILE_EXTENSIONS}): data, archives, code. */
+  /** How many of them hold data ({@link DATA_FILE_EXTENSIONS}): recordings, tables, archives. */
   data_files: number;
   /** The first data files' names, at most {@link MAX_REGISTRY_FILE_NAMES}. */
   examples: string[];
 }
 
-/** File extensions a paper's own files have; any other file in a paper's record is counted as data. */
-export const DOCUMENT_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
-  "pdf",
-  "doc",
-  "docx",
-  "odt",
-  "rtf",
-  "txt",
-  "md",
-  "tex",
-  "html",
-  "htm",
-  "epub",
-  "ppt",
-  "pptx",
-  "odp",
-  "ps",
+/**
+ * File extensions that hold data: recordings, tables, arrays and archives of them. A paper's record
+ * that holds a file of one of these "holds data files"; its PDF, figures, documents and anything
+ * not listed are not counted, so the card never calls a paper's own files data.
+ */
+export const DATA_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
+  // archives
+  "zip",
+  "tar",
+  "gz",
+  "tgz",
+  "bz2",
+  "xz",
+  "7z",
+  "rar",
+  // tables and arrays
+  "csv",
+  "tsv",
+  "xls",
+  "xlsx",
+  "parquet",
+  "feather",
+  "npy",
+  "npz",
+  "pkl",
+  "pickle",
+  "h5",
+  "hdf5",
+  "hdf",
+  "mat",
+  "sav",
+  "rds",
+  "rdata",
+  "json",
+  "nwb",
+  "zarr",
+  "dat",
+  "bin",
+  "raw",
+  // electrophysiology, imaging and other recordings
+  "edf",
+  "bdf",
+  "gdf",
+  "set",
+  "fdt",
+  "vhdr",
+  "vmrk",
+  "eeg",
+  "fif",
+  "cnt",
+  "mff",
+  "xdf",
+  "snirf",
+  "nirs",
+  "nii",
+  "dcm",
+  "mef",
+  "ns5",
+  "nev",
+  "plx",
+  "smr",
+  "abf",
+  "acq",
 ]);
 
 /** The most data-file names a record keeps. */
@@ -1205,7 +1260,9 @@ const ZENODO_DOI = /^10\.5281\/zenodo\.(\d+)$/;
 async function zenodoFilesOf(doi: string, o: FetchContext): Promise<RegistryFiles | null> {
   const m = ZENODO_DOI.exec(doi);
   if (m === null) return null;
-  const got = await o.get(`${o.bases.zenodo}/records/${m[1]}`);
+  // One attempt, never retried: this read only adds a note to the card, so it must not spend the
+  // lineage's budget on retries the license reads need.
+  const got = await o.getOnce(`${o.bases.zenodo}/records/${m[1]}`);
   if (got.kind !== "ok" || !isRecord(got.body)) return null;
   const body = got.body;
   const meta = isRecord(body.metadata) ? body.metadata : {};
@@ -1217,7 +1274,7 @@ async function zenodoFilesOf(doi: string, o: FetchContext): Promise<RegistryFile
     .filter((n): n is string => n !== null);
   const data = names.filter((n) => {
     const dot = n.lastIndexOf(".");
-    return dot < 0 || !DOCUMENT_FILE_EXTENSIONS.has(n.slice(dot + 1).toLowerCase());
+    return dot >= 0 && DATA_FILE_EXTENSIONS.has(n.slice(dot + 1).toLowerCase());
   });
   return {
     type,
@@ -1225,6 +1282,19 @@ async function zenodoFilesOf(doi: string, o: FetchContext): Promise<RegistryFile
     data_files: data.length,
     examples: data.slice(0, MAX_REGISTRY_FILE_NAMES),
   };
+}
+
+/**
+ * A source declared as an `https://osf.io/<guid>` URL whose DOI DataCite did not confirm: DataCite
+ * answered that it does not hold it, or the lookup failed or could not be read (a failed record has
+ * no resolver), so the DOI is only NEMAR's construction and is never shown as the source's.
+ */
+export function osfRegistrationUnconfirmed(ref: SourceRef, rec: SourceRecord): boolean {
+  return (
+    ref.kind === "doi" &&
+    ref.osf_url === true &&
+    (rec.doi_registered === false || rec.resolver === null)
+  );
 }
 
 /**
@@ -1428,6 +1498,8 @@ type GetJson = (url: string, init?: RequestInit) => Promise<Fetched>;
 interface FetchContext {
   bases: RegistryBases;
   get: GetJson;
+  /** The same fetch with one attempt and no retry, counted against the same budget. */
+  getOnce: GetJson;
 }
 
 /**
@@ -2498,16 +2570,18 @@ export async function resolveLicenseLineage(
 ): Promise<LineageResult> {
   const now = options.now ?? (() => new Date());
   const clock = () => Date.now();
+  const fetchArgs = {
+    timeoutMs: options.timeoutMs ?? FETCH_TIMEOUT_MS,
+    retry: options.retry ?? LINEAGE_RETRY,
+    budget: { left: options.fetchBudget ?? LINEAGE_FETCH_BUDGET },
+    sleep: options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))),
+    clock,
+    startedAt: clock(),
+  };
   const o: FetchContext = {
     bases: options.bases ?? DEFAULT_BASES,
-    get: lineageFetch({
-      timeoutMs: options.timeoutMs ?? FETCH_TIMEOUT_MS,
-      retry: options.retry ?? LINEAGE_RETRY,
-      budget: { left: options.fetchBudget ?? LINEAGE_FETCH_BUDGET },
-      sleep: options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
-      clock,
-      startedAt: clock(),
-    }),
+    get: lineageFetch(fetchArgs),
+    getOnce: lineageFetch({ ...fetchArgs, retry: NO_RETRY }),
   };
   const { states, sources: parsed } = readLineageInputs(inputs);
   const unreadable: LineageSource[] = [];
@@ -2563,6 +2637,7 @@ export async function resolveLicenseLineage(
     ...(rec.status === "resolved" && isLatestSource(refs[i], rec)
       ? { resolved_latest: true as const }
       : {}),
+    ...(osfRegistrationUnconfirmed(refs[i], rec) ? { doi_registered: false as const } : {}),
   }));
   const { kept, skipped } = dropStaleRelations(resolved, refs);
   const sources: LineageSource[] = [...kept, ...unreadable];
