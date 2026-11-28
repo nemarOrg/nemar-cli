@@ -740,6 +740,25 @@ describe("a partial match against the official text (vendored legal code)", () =
     expect(id.leftover).toEqual([]);
   });
 
+  test("the full-text share is a boundary: just below it the file is sent whole, at it the text is diffed", () => {
+    const g = caseOf("gate-cc-by-nc-4.0-a");
+    const words = (officialTextOf("CC-BY-NC-4.0") as string).match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
+    // The ADR's 90%, written out: a test of the constant must not read the constant.
+    const at = Math.ceil(0.9 * words);
+    const withLength = (n: number) => {
+      const scan = copy(scanOf(g));
+      const longest = longestOf(scan);
+      longest.matched_length = n;
+      return { scan, longest };
+    };
+    const below = withLength(at - 1);
+    expect(officialTextDiff(below.scan, below.longest, "CC-BY-NC-4.0", g.text)).toBeNull();
+    expect(identify(g.text, g.field, below.scan).partial).toBe(true);
+    const atShare = withLength(at);
+    expect(officialTextDiff(atShare.scan, atShare.longest, "CC-BY-NC-4.0", g.text)).not.toBeNull();
+    expect(identify(g.text, g.field, atShare.scan).partial).toBe(false);
+  });
+
   test("an inserted sentence is shown as added, whether or not ScanCode brackets it", () => {
     const c = caseOf("gate-cc-by-nc-4.0-sentence-inserted");
     const scan = scanOf(c);
