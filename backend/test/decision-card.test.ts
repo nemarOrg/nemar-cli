@@ -126,6 +126,9 @@ describe("the snapshot of what the review was served", () => {
         credited: false,
         resolved_at: expect.any(String),
         declared_licenses: [],
+        // Every declared source's title, publications included (none here), for the automatic
+        // denial's name rule (ADR 0139, amended 2026-11-27).
+        source_titles: [],
       },
     });
     expect(JSON.stringify(snapshot)).not.toContain("never on the card");
@@ -157,6 +160,21 @@ describe("the snapshot of what the review was served", () => {
     expect(c.license.fresh_lineage).toBeNull();
     expect(c.identifier_screen.headline.length).toBeGreaterThan(0);
     expect(c.next_action.action).toBe("approve");
+    expect(c.auto_deny).toBeNull();
+
+    // An agreement recorded in shadow mode shows the reasons its mail would name (migration 0164),
+    // read from the row the card is built for.
+    h.db.run(
+      `UPDATE publication_reviews SET auto_deny_state = 'would_deny', auto_deny_at = datetime('now'),
+              auto_deny_codes = 'readme_missing_or_stub,authors_placeholder' WHERE id = ?`,
+      [reviewId],
+    );
+    const shadow = await card();
+    expect(shadow.auto_deny).toMatchObject({
+      state: "would_deny",
+      codes: ["readme_missing_or_stub", "authors_placeholder"],
+    });
+    expect(shadow.auto_deny?.reasons?.[0]).toContain("The README is missing");
   });
 
   test("an anonymous release's snapshot holds no creators and no Authors", async () => {

@@ -52,13 +52,21 @@ import {
   type LineageOutcome,
   type LineageResult,
   normalizeLicense,
+  paperWithDataFilesLine,
+  sourceLabelOf,
 } from "../../../shared/license-lineage.js";
 import {
   NAME_UPSTREAM_RESULTS,
   type NameUpstreamResult,
+  declaredSourceTitles,
   upstreamDatasetTitles,
 } from "../../../shared/name-follows-upstream.js";
-import { AUTO_DENY_STATES, AUTO_DENY_STATE_COPY } from "../../../shared/publication-auto-deny.js";
+import {
+  AUTO_DENY_CODE_COPY,
+  AUTO_DENY_STATES,
+  AUTO_DENY_STATE_COPY,
+  autoDenyCodesOf,
+} from "../../../shared/publication-auto-deny.js";
 import {
   COMMAND_ACKNOWLEDGE,
   COMMAND_APPROVE,
@@ -203,6 +211,18 @@ export interface ServedLineage {
    * compares the Name with; absent on a snapshot written before the rule, and when there is none.
    */
   upstream_titles?: string[];
+  /**
+   * The titles of every declared source read with a title, publications included
+   * (`declaredSourceTitles`), which the automatic denial compares the Name with before it calls the
+   * Name not descriptive (ADR 0139, amendment of 2026-11-27). Always written since that rule, empty
+   * when there is none; absent on a snapshot written before it, which protects the Name.
+   */
+  source_titles?: string[];
+  /**
+   * One line per source its registry types as a paper that holds data files
+   * (`paperWithDataFilesLine`); absent when there is none.
+   */
+  paper_with_data_files?: string[];
 }
 
 /** A lineage result as the card keeps it. */
@@ -213,11 +233,22 @@ export function cardLineageOf(result: LineageResult): ServedLineage {
     (t) => clean(t, MAX_TITLE),
     MAX_DECLARED,
   );
+  const sourceTitles = list(
+    declaredSourceTitles(result.sources),
+    (t) => clean(t, MAX_TITLE),
+    MAX_DECLARED,
+  );
+  const papers = list(
+    result.sources.map((s) => paperWithDataFilesLine(s)),
+    (l) => clean(l, MAX_DECLARED_ITEM * 2),
+    MAX_DECLARED,
+  );
   for (const s of result.sources) {
     for (const d of s.declared_licenses ?? []) {
       if (declared.length >= MAX_DECLARED) break;
       const text = clean(d.text ?? d.url, MAX_DECLARED_ITEM);
-      const id = clean(s.id, MAX_ITEM);
+      // An OSF node DataCite does not hold is named by its URL, never by a DOI NEMAR made up.
+      const id = clean(sourceLabelOf(s), MAX_ITEM);
       if (text !== null && id !== null) declared.push(`${id}: ${text}`);
     }
   }
@@ -233,6 +264,8 @@ export function cardLineageOf(result: LineageResult): ServedLineage {
       ? { skipped_stale_relations: result.skipped_stale_relations }
       : {}),
     ...(titles.length > 0 ? { upstream_titles: titles } : {}),
+    source_titles: sourceTitles,
+    ...(papers.length > 0 ? { paper_with_data_files: papers } : {}),
   };
 }
 
@@ -327,6 +360,10 @@ function readLineage(v: unknown): ServedLineage | null | undefined {
   }
   const titles = v.upstream_titles === undefined ? [] : strings(v.upstream_titles);
   if (titles === null) return undefined;
+  const sourceTitles = v.source_titles === undefined ? undefined : strings(v.source_titles);
+  if (sourceTitles === null) return undefined;
+  const papers = v.paper_with_data_files === undefined ? [] : strings(v.paper_with_data_files);
+  if (papers === null) return undefined;
   return {
     outcome: v.outcome as LineageOutcome,
     credited: v.credited,
@@ -335,6 +372,8 @@ function readLineage(v: unknown): ServedLineage | null | undefined {
     ...(typeof dropped === "number" && dropped > 0 ? { dropped_doi_candidates: dropped } : {}),
     ...(typeof skipped === "number" && skipped > 0 ? { skipped_stale_relations: skipped } : {}),
     ...(titles.length > 0 ? { upstream_titles: titles } : {}),
+    ...(sourceTitles !== undefined ? { source_titles: sourceTitles } : {}),
+    ...(papers.length > 0 ? { paper_with_data_files: papers } : {}),
   };
 }
 
@@ -824,6 +863,11 @@ export interface DecisionCardInput {
   detail: CardDetail;
   /** The review in force's `auto_deny_state`, as stored, or null without one. */
   autoDenyState: string | null;
+  /**
+   * The review in force's `auto_deny_codes` (migration 0164), as stored, or null: the reasons an
+   * agreement named. Optional, so a card built without it shows the state alone.
+   */
+  autoDenyCodes?: string | null;
   /** The snapshot the review's serve wrote, or null (none written, or it does not read). */
   snapshot: ServedMetadata | null;
   /** What NEMAR holds now, for a review without a snapshot; null when not read. */
@@ -892,6 +936,9 @@ function reviewLineageOf(
     ...(snapshot?.lineage?.upstream_titles
       ? { upstream_titles: snapshot.lineage.upstream_titles }
       : {}),
+    ...(snapshot?.lineage?.paper_with_data_files
+      ? { paper_with_data_files: snapshot.lineage.paper_with_data_files }
+      : {}),
   };
 }
 
@@ -918,6 +965,9 @@ function labeledLineage(l: ServedLineage, covered: boolean): CardLineage {
     declared_licenses: { label: REGISTRY_TEXT_LABEL, licenses: l.declared_licenses },
     ...(l.dropped_doi_candidates ? { dropped_doi_candidates: l.dropped_doi_candidates } : {}),
     ...(l.skipped_stale_relations ? { skipped_stale_relations: l.skipped_stale_relations } : {}),
+    ...(l.paper_with_data_files && l.paper_with_data_files.length > 0
+      ? { paper_with_data_files: { label: REGISTRY_TEXT_LABEL, lines: l.paper_with_data_files } }
+      : {}),
     permission_covers: covered,
   };
 }
@@ -981,20 +1031,33 @@ function authorsOf(detail: CardDetail, metadata: CardMetadata): CardAuthors {
     placeholder: isPlaceholderAuthor(name),
   }));
   const read = metadata.dataset_description !== null && !metadata.anonymous;
+  const flagged = read ? names.filter((n) => n.placeholder).length : null;
+  // The larger of the review's count and the names flagged now, so the count never says fewer
+  // placeholders than the names it lists (a review made before a placeholder form was recognized,
+  // nm001019's "Original Dataset Authors (see SourceDatasets)", counted none).
+  const recorded = evidence?.placeholder_authors ?? null;
   return {
     names,
     count: evidence?.authors_count ?? (read ? names.length : null),
     placeholders:
-      evidence?.placeholder_authors ?? (read ? names.filter((n) => n.placeholder).length : null),
+      recorded === null ? flagged : flagged === null ? recorded : Math.max(recorded, flagged),
   };
 }
 
-function autoDenyOf(state: string | null): DecisionCard["auto_deny"] {
+/**
+ * The automatic denial's line, and the reasons an agreement named (migration 0164): the codes and
+ * the sentences the depositor's mail says, or would say in shadow mode. No reasons for a state that
+ * records no agreement, or for one recorded before the codes were kept.
+ */
+function autoDenyOf(state: string | null, rawCodes: string | null): DecisionCard["auto_deny"] {
   if (state === null || state === "none") return null;
   if (!(AUTO_DENY_STATES as readonly string[]).includes(state)) return null;
+  const codes = autoDenyCodesOf(rawCodes) ?? [];
   return {
     state,
     line: AUTO_DENY_STATE_COPY[state as keyof typeof AUTO_DENY_STATE_COPY].statement,
+    codes,
+    reasons: codes.map((c) => AUTO_DENY_CODE_COPY[c].statement),
   };
 }
 
@@ -1058,7 +1121,7 @@ export function buildDecisionCard(input: DecisionCardInput): DecisionCard {
       head_line: HEAD_LINE[input.gate.head],
     },
     upstream_name: upstreamNameOf(input),
-    auto_deny: autoDenyOf(input.autoDenyState),
+    auto_deny: autoDenyOf(input.autoDenyState, input.autoDenyCodes ?? null),
     next_action: next,
   };
 }

@@ -128,6 +128,12 @@ export interface CardLineage {
    * why a lineage may show no source.
    */
   skipped_stale_relations?: number;
+  /**
+   * Sources the registry types as a paper that hold data files, one line each, under
+   * {@link REGISTRY_TEXT_LABEL}; absent when there is none. Still publications for the lineage: an
+   * administrator decides.
+   */
+  paper_with_data_files?: { label: string; lines: string[] };
   /** A recorded license permission covers this lineage's outcome and sources. */
   permission_covers: boolean;
 }
@@ -210,6 +216,14 @@ export interface CardAutoDeny {
   /** The stored closed word (`AUTO_DENY_STATES`), never `none`. */
   state: string;
   line: string;
+  /**
+   * The codes the two runs agreed on (`AUTO_DENY_CODES`), which the depositor's mail names or, in
+   * shadow mode, would name; empty for a state that records no agreement and for an agreement
+   * recorded before the codes were kept (migration 0164). Absent from a Worker before them.
+   */
+  codes?: string[];
+  /** The mail's sentence for each code, in the same order (`AUTO_DENY_CODE_COPY`). */
+  reasons?: string[];
 }
 
 export interface CardNextAction {

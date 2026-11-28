@@ -81,6 +81,14 @@ function lineageLine(which: string, l: CardLineage | null | undefined): string[]
   if (typeof skipped === "number" && Number.isInteger(skipped) && skipped > 0) {
     out.push(`      ${skipped} stale publication relation(s) skipped`);
   }
+  const papers = isRecord(l.paper_with_data_files) ? l.paper_with_data_files : null;
+  if (papers !== null && Array.isArray(papers.lines)) {
+    const label = typeof papers.label === "string" ? plain(papers.label) : REGISTRY_TEXT_LABEL;
+    for (const line of papers.lines) {
+      const text = plain(line);
+      if (text !== "") out.push(`      Publication with data files (${label}): ${text}`);
+    }
+  }
   return out;
 }
 
@@ -205,6 +213,15 @@ export function decisionCardLines(card: unknown): string[] {
   out.push(`  Identifier screen: ${plain(card.identifier_screen.headline)}`);
   const headLine = card.identifier_screen.head_line;
   if (typeof headLine === "string") out.push(`    ${chalk.yellow(plain(headLine))}`);
-  if (isRecord(card.auto_deny)) out.push(`  Automatic denial: ${plain(card.auto_deny.line)}`);
+  if (isRecord(card.auto_deny)) {
+    out.push(`  Automatic denial: ${plain(card.auto_deny.line)}`);
+    // The reasons the two runs agreed on: what the depositor's mail says, or would say in shadow mode.
+    const codes = Array.isArray(card.auto_deny.codes) ? card.auto_deny.codes : [];
+    const reasons = Array.isArray(card.auto_deny.reasons) ? card.auto_deny.reasons : [];
+    codes.forEach((code, i) => {
+      const reason = plain(reasons[i]);
+      out.push(`    Mail reason: ${plain(code)}${reason === "" ? "" : `: ${reason}`}`);
+    });
+  }
   return out;
 }
