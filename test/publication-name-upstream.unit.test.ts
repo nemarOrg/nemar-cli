@@ -114,7 +114,12 @@ const eligibility = (r: PublicationReviewReport) =>
     requestStatus: "requested",
     anonymous: false,
     earlierAutoDenials: 0,
+    // No declared source's title is followed, a publication's included (ADR 0139, amended 2026-11-27).
+    nameFollowsASource: false,
   });
+
+/** The context of a Name that follows no declared source's title. */
+const NO_SOURCE = { nameFollowsASource: false } as const;
 
 describe("the evidence's name word", () => {
   test("a version-3 block reads with it and without it; without it nothing changes", () => {
@@ -227,11 +232,11 @@ describe("the automatic denial (ADR 0139 as amended on 2026-11-27)", () => {
 
   test("with the model's name fail, the fact is eligible under its own reason", () => {
     // The model's code is not itself eligible, so the fact is the only eligible code.
-    expect(eligibleCodesOf(nameFailed("differs", "other"))).toEqual({
+    expect(eligibleCodesOf(nameFailed("differs", "other"), NO_SOURCE)).toEqual({
       codes: ["name_differs_from_upstream"],
       reasons: ["name_differs_from_upstream"],
     });
-    expect(eligibleCodesOf(nameFailed("differs"))).toEqual({
+    expect(eligibleCodesOf(nameFailed("differs"), NO_SOURCE)).toEqual({
       codes: ["name_not_descriptive", "name_differs_from_upstream"],
       reasons: ["question_failed", "name_differs_from_upstream"],
     });
@@ -267,9 +272,13 @@ describe("the automatic denial (ADR 0139 as amended on 2026-11-27)", () => {
 
   test("name_not_descriptive stays eligible otherwise", () => {
     for (const w of ["not_applicable", "unknown", undefined]) {
-      expect(eligibleCodesOf(nameFailed(w)).codes, String(w)).toEqual(["name_not_descriptive"]);
+      expect(eligibleCodesOf(nameFailed(w), NO_SOURCE).codes, String(w)).toEqual([
+        "name_not_descriptive",
+      ]);
     }
-    expect(eligibleCodesOf(nameFailed("differs")).codes).toContain("name_not_descriptive");
+    expect(eligibleCodesOf(nameFailed("differs"), NO_SOURCE).codes).toContain(
+      "name_not_descriptive",
+    );
   });
 
   test("a Name that follows only a README candidate shields nothing: the exception needs a declared source", () => {
@@ -281,13 +290,13 @@ describe("the automatic denial (ADR 0139 as amended on 2026-11-27)", () => {
     };
     const word = nameFollowsUpstream("Resting EEG", [candidate]);
     expect(word).toBe("not_applicable");
-    expect(eligibleCodesOf(nameFailed(word)).codes).toEqual(["name_not_descriptive"]);
+    expect(eligibleCodesOf(nameFailed(word), NO_SOURCE).codes).toEqual(["name_not_descriptive"]);
     // The same title declared in SourceDatasets is the upstream's name, and shields it.
     const declared = nameFollowsUpstream("Resting EEG", [
       { ...candidate, origin: "source_datasets" },
     ]);
     expect(declared).toBe("matches");
-    expect(eligibleCodesOf(nameFailed(declared)).codes).toEqual([]);
+    expect(eligibleCodesOf(nameFailed(declared), NO_SOURCE).codes).toEqual([]);
   });
 
   test("the exception is about the name only: another eligible finding beside it still denies", () => {
@@ -310,7 +319,7 @@ describe("the automatic denial (ADR 0139 as amended on 2026-11-27)", () => {
         },
       ],
     });
-    expect(eligibleCodesOf(r).codes).toEqual(["readme_missing_or_stub"]);
+    expect(eligibleCodesOf(r, NO_SOURCE).codes).toEqual(["readme_missing_or_stub"]);
   });
 
   test("the depositor's copy names the rule and the shapes of the suffix", () => {

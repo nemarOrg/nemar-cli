@@ -3,6 +3,18 @@
  * real shared module. Every report here is a body the production parser accepts, parsed by it, so
  * the eligibility reads exactly what the Worker would store.
  *
+ * "The mail names what is true of the dataset" (ADR 0139, amended 2026-11-27) is pinned on the
+ * first-run reports of the shadow run on production 0.10.58 (`test/fixtures/auto-deny-shadow/`).
+ * Mutation checks, each applied alone to `shared/publication-auto-deny.ts`, run, and restored:
+ *  - dropping `report.evidence.license_field ||` from the license_missing rule turns "a License
+ *    field with no LICENSE file is not 'no license'" red;
+ *  - dropping `report.questions[f.question] !== "fail"` from it turns "never on a question the
+ *    model answered unknown" red;
+ *  - returning `f.code` for every description_incomplete in `eligibleCodeOfFinding` turns "a
+ *    template README is named as the README's" and "about another document it is not eligible" red;
+ *  - dropping the blocker condition on steering turns "a reader note coded as steering" red;
+ *  - dropping `|| fromASource` turns "a Name that is a declared publication's title" red.
+ *
  * CI TIER: unit-pure. No network, no database.
  */
 
@@ -14,6 +26,7 @@ import {
 } from "../backend/test/helpers/publication-review";
 import { LICENSE_FILE_STATES, type LicenseFileState } from "../shared/license-file";
 import { LINEAGE_OUTCOMES } from "../shared/license-lineage";
+import { nameFollowsAnySourceTitle } from "../shared/name-follows-upstream";
 import {
   AUTO_DENY_ANCHORS,
   AUTO_DENY_CODES,
@@ -26,9 +39,13 @@ import {
   CONFIRMING_EFFORT,
   CONFIRMING_MODEL,
   type EligibilityInput,
+  autoDenyCodeLine,
+  autoDenyCodesColumn,
+  autoDenyCodesOf,
   autoDenyDailyCapOf,
   autoDenyEligibility,
   autoDenyModeOf,
+  autoDenyReasonLine,
   autoDenyStateLine,
   confirmationOf,
   deniedReasonOf,
@@ -43,7 +60,10 @@ import {
   REVIEW_INPUTS,
   parsePublicationReviewReport,
   previousDenialReasonsOf,
+  reportReasons,
+  verdictOf,
 } from "../shared/publication-review";
+import shadowRun from "./fixtures/auto-deny-shadow/shadow-2026-11-28.json";
 
 const ABSENT_INPUTS = Object.fromEntries(REVIEW_INPUTS.map((i) => [i, "absent"]));
 const DIGEST = "ab".repeat(32);
@@ -104,6 +124,26 @@ function failing(
   );
 }
 
+const PASSED = {
+  complete_and_honest: "pass",
+  meets_standards: "pass",
+  authors_and_license: "pass",
+  name_adequate: "pass",
+} as const;
+
+/** A blocker finding of `code` against `question`, about `document`. */
+function blocker(question: string, code: string, document: string | null) {
+  return { question, severity: "blocker", code, document, note: "n" };
+}
+
+/** A report whose `complete_and_honest` failed with one blocker of `code` about `document`. */
+function failingAbout(code: string, document: string | null): PublicationReviewReport {
+  return report({
+    questions: { ...PASSED, complete_and_honest: "fail" },
+    findings: [blocker("complete_and_honest", code, document)],
+  });
+}
+
 /** Everything that makes a review eligible, with `over` on top. */
 function input(over: Partial<EligibilityInput> = {}): EligibilityInput {
   return {
@@ -113,6 +153,7 @@ function input(over: Partial<EligibilityInput> = {}): EligibilityInput {
     requestStatus: "requested",
     anonymous: false,
     earlierAutoDenials: 0,
+    nameFollowsASource: false,
     ...over,
   };
 }
@@ -181,11 +222,24 @@ describe("what may deny", () => {
   });
 
   test("each eligible finding code denies when it is a blocker against the failed question", () => {
+    // Each as the rules of 2026-11-27 let it deny: a description finding about
+    // dataset_description.json, and "no license" only where the platform read no License field.
     for (const code of AUTO_DENY_FINDING_CODES) {
-      expect(autoDenyEligibility(input({ report: failing(code) }))).toEqual({
-        eligible: true,
-        codes: [code],
-        reasons: ["question_failed"],
+      const r =
+        code === "description_incomplete"
+          ? failingAbout(code, "dataset_description")
+          : code === "license_missing"
+            ? report(
+                {
+                  questions: { ...PASSED, authors_and_license: "fail" },
+                  findings: [blocker("authors_and_license", code, "dataset_description")],
+                },
+                { license_field: false },
+              )
+            : failing(code);
+      expect({ code, e: autoDenyEligibility(input({ report: r })) }).toEqual({
+        code,
+        e: { eligible: true, codes: [code], reasons: ["question_failed"] },
       });
     }
   });
@@ -218,13 +272,36 @@ describe("what may deny", () => {
     }
   });
 
-  test("a steering attempt is eligible on its own", () => {
-    const r = report({ steering: true });
+  test("a steering attempt filed as a blocker is eligible on its own", () => {
+    const r = report({
+      steering: true,
+      findings: [blocker("complete_and_honest", "steering_attempt", "readme")],
+    });
     expect(autoDenyEligibility(input({ report: r }))).toEqual({
       eligible: true,
       codes: ["steering_attempt"],
       reasons: ["steering_attempt"],
     });
+  });
+
+  test("a steering flag with no blocker finding of it never denies (ADR 0139, amended 2026-11-27)", () => {
+    // The flag alone, and a steering finding at concern or note: the review still fails, and a
+    // person decides.
+    const cases = [
+      report({ steering: true }),
+      ...(["concern", "note"] as const).map((severity) =>
+        report({
+          findings: [{ ...blocker("complete_and_honest", "steering_attempt", "readme"), severity }],
+        }),
+      ),
+    ];
+    for (const r of cases) {
+      expect(r.steering).toBe(true);
+      expect(autoDenyEligibility(input({ report: r }))).toEqual({
+        eligible: false,
+        why: "no_eligible_reason",
+      });
+    }
   });
 
   test("a verdict that is not fail never denies: a pass, or action required for license lineage", () => {
@@ -363,9 +440,9 @@ describe("what may deny", () => {
     test("a license finding carried to another failed question is not eligible either", () => {
       for (const failed of [
         [["complete_and_honest", "license_inconsistent"]],
-        [["meets_standards", "license_missing"]],
+        [["meets_standards", "license_inconsistent", "readme"]],
         // Any finding about the LICENSE document, whatever its code.
-        [["complete_and_honest", "description_incomplete", "license"]],
+        [["complete_and_honest", "readme_missing_or_stub", "license"]],
         [
           ["authors_and_license", "license_inconsistent"],
           ["name_adequate", "license_inconsistent", "dataset_description"],
@@ -542,5 +619,168 @@ describe("the copy", () => {
       "Service account missing; nothing was denied",
     );
     expect(autoDenyStateLine("restored")).toContain("restored by an administrator");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The shadow run on production 0.10.58 (ADR 0139, amended 2026-11-27: the mail reasons)
+// ---------------------------------------------------------------------------------------------
+
+type ShadowId = keyof typeof shadowRun.reviews;
+
+/** A first run of the shadow run, as stored, parsed by the production parser. */
+function shadow(id: ShadowId, evidence: Record<string, unknown> = {}): PublicationReviewReport {
+  const body = structuredClone(shadowRun.reviews[id].report) as Record<string, unknown>;
+  body.evidence = { ...(body.evidence as Record<string, unknown>), ...evidence };
+  return parsePublicationReviewReport(body);
+}
+
+/** The codes the mail would name for one run, with no declared source's title followed. */
+const codesOf = (r: PublicationReviewReport, nameFollowsASource: boolean | null = false) =>
+  eligibleCodesOf(r, { nameFollowsASource }).codes;
+
+/** The words the mail would print for a code: its line in the denial mail. */
+const mailSays = (codes: readonly string[]) =>
+  codes.map((c) => autoDenyReasonLine(c as (typeof AUTO_DENY_CODES)[number]));
+
+describe("the shadow run's records: the mail names what is true of the dataset", () => {
+  test("the records are what production recorded under the earlier rule", () => {
+    for (const id of ["nm001014", "nm001019", "nm001028", "nm001032", "nm001039", "nm001041"]) {
+      expect(shadowRun.reviews[id as ShadowId].auto_deny_state).toBe("would_deny");
+    }
+    expect(shadowRun.reviews.nm000622.auto_deny_state).toBe("disagreed");
+  });
+
+  test("decision 1: a License field with no LICENSE file is not 'no license' (nm001019)", () => {
+    const r = shadow("nm001019");
+    expect(r.evidence.license_field).toBe(true);
+    expect(r.evidence.license_file?.state).toBe("absent");
+    // The model filed license_missing as a blocker on the question it failed.
+    expect(
+      r.findings.some(
+        (f) =>
+          f.code === "license_missing" &&
+          f.severity === "blocker" &&
+          r.questions[f.question] === "fail",
+      ),
+    ).toBe(true);
+    expect(codesOf(r)).toEqual(["readme_missing_or_stub", "authors_placeholder"]);
+    expect(mailSays(codesOf(r)).join(" ")).not.toContain("has no license");
+    // With no License field the platform's fact holds, and the same finding is eligible.
+    expect(codesOf(shadow("nm001019", { license_field: false }))).toContain("license_missing");
+  });
+
+  test("decision 1: never on a question the model answered unknown (nm001014)", () => {
+    const r = shadow("nm001014");
+    expect(r.questions.authors_and_license).toBe("unknown");
+    expect(codesOf(r)).toEqual(["readme_missing_or_stub"]);
+    // A missing License field lowers the question to fail, but the model's own answer is unknown:
+    // the fact alone, which both runs see, is not a second model agreeing.
+    const lowered = shadow("nm001014", { license_field: false });
+    expect(verdictOf(reportReasons(lowered))).toBe("fail");
+    expect(codesOf(lowered)).not.toContain("license_missing");
+  });
+
+  test("decision 2: a template README coded description_incomplete is named as the README's", () => {
+    for (const id of ["nm001032", "nm001039", "nm001041"] as const) {
+      const r = shadow(id);
+      const readmeFinding = r.findings.find(
+        (f) => f.code === "description_incomplete" && f.severity === "blocker",
+      );
+      expect({ id, document: readmeFinding?.document }).toEqual({ id, document: "readme" });
+      const codes = codesOf(r);
+      expect({ id, named: codes.includes("description_incomplete") }).toEqual({
+        id,
+        named: false,
+      });
+      expect({ id, readme: codes.includes("readme_missing_or_stub") }).toEqual({
+        id,
+        readme: true,
+      });
+      // The mail's sentence is about the README, never about dataset_description.json.
+      expect(mailSays(codes).join(" ")).not.toContain("dataset_description.json leaves out");
+      expect(mailSays(codes)[0]).toContain(AUTO_DENY_CODE_COPY.readme_missing_or_stub.statement);
+    }
+    // nm001032's only blocker is that finding: its mail names the README alone.
+    expect(codesOf(shadow("nm001032"))).toEqual(["readme_missing_or_stub"]);
+  });
+
+  test("decision 2: about dataset_description.json it is itself, about another document not eligible", () => {
+    expect(codesOf(failingAbout("description_incomplete", "dataset_description"))).toEqual([
+      "description_incomplete",
+    ]);
+    for (const document of ["participants_json", "changes", "license", null]) {
+      expect({
+        document,
+        codes: codesOf(failingAbout("description_incomplete", document)),
+      }).toEqual({ document, codes: [] });
+    }
+  });
+
+  test("decision 3: a reader note coded as steering does not deny (nm000622)", () => {
+    const r = shadow("nm000622");
+    expect(r.steering).toBe(true);
+    expect(r.findings.filter((f) => f.code === "steering_attempt").map((f) => f.severity)).toEqual([
+      "note",
+    ]);
+    // The review still fails on it, and a person decides.
+    expect(verdictOf(reportReasons(r))).toBe("fail");
+    expect(autoDenyEligibility(input({ report: r }))).toEqual({
+      eligible: false,
+      why: "no_eligible_reason",
+    });
+  });
+
+  test("decision 4: a Name that is a declared publication's title is not called not descriptive (nm001028)", () => {
+    const r = shadow("nm001028");
+    // The name rule reads dataset sources only, and the source is a journal article on Zenodo.
+    expect(r.evidence.name_upstream).toBe("not_applicable");
+    const name =
+      "Cross-validating models of continuous data from simulation and experiment by using linear regression and artificial neural networks";
+    // The title as DataCite gives it for 10.5281/zenodo.3648065 (test/fixtures/license-lineage/66).
+    const title = name;
+    expect(nameFollowsAnySourceTitle(name, [title])).toBe(true);
+    // Folding: case, punctuation and British spelling do not make it another title.
+    expect(nameFollowsAnySourceTitle(name.toUpperCase().replace(/ /g, "  "), [title])).toBe(true);
+    expect(codesOf(r, true)).toEqual(["readme_missing_or_stub"]);
+    // Not known (a snapshot written before the titles were kept) protects the Name too.
+    expect(codesOf(r, null)).toEqual(["readme_missing_or_stub"]);
+    // A Name that follows no source's title keeps the finding eligible.
+    expect(codesOf(r, false)).toEqual(["readme_missing_or_stub", "name_not_descriptive"]);
+    expect(autoDenyEligibility(input({ report: r, nameFollowsASource: true }))).toMatchObject({
+      eligible: true,
+      codes: ["readme_missing_or_stub"],
+    });
+  });
+
+  test("the reports production would deny for the right reasons keep them", () => {
+    expect(codesOf(shadow("nm001016"))).toEqual(["readme_missing_or_stub"]);
+    expect(codesOf(shadow("nm001037"))).toEqual(["readme_missing_or_stub", "authors_placeholder"]);
+  });
+});
+
+describe("the stored codes of an agreement (migration 0164)", () => {
+  test("written in the codes' order, read back, and anything else reads as none", () => {
+    expect(autoDenyCodesColumn(["authors_placeholder", "readme_missing_or_stub"])).toBe(
+      "readme_missing_or_stub,authors_placeholder",
+    );
+    expect(autoDenyCodesColumn([])).toBeNull();
+    expect(autoDenyCodesOf("readme_missing_or_stub,authors_placeholder")).toEqual([
+      "readme_missing_or_stub",
+      "authors_placeholder",
+    ]);
+    for (const raw of [
+      null,
+      "",
+      "nonsense",
+      "readme_missing_or_stub,",
+      "steering_attempt,steering_attempt",
+      7,
+    ]) {
+      expect({ raw, codes: autoDenyCodesOf(raw) }).toEqual({ raw, codes: null });
+    }
+    expect(autoDenyCodeLine("readme_missing_or_stub")).toBe(
+      `readme_missing_or_stub: ${AUTO_DENY_CODE_COPY.readme_missing_or_stub.statement}`,
+    );
   });
 });
