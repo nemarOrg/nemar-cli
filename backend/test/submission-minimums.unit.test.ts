@@ -70,10 +70,12 @@ describe("evaluateSubmissionMinimums", () => {
     // close variants.
     for (const entry of [
       "Original Dataset Authors (see SourceDatasets)",
+      "original dataset authors (see sourcedatasets).",
+      "Original Dataset Authors",
       "Original authors",
-      "The original data creators",
-      "Authors of the upstream dataset (see SourceDatasets)",
+      "Original Data Creators (see SourceDatasets)",
       "See SourceDatasets",
+      "(see SourceDatasets)",
     ]) {
       expect({ entry, placeholder: isPlaceholderAuthor(entry) }).toEqual({
         entry,
@@ -84,7 +86,15 @@ describe("evaluateSubmissionMinimums", () => {
       expect(reasons[0]).toContain("Authors");
     }
     // A person whose name merely starts like it is a person.
-    for (const entry of ["Originale, Maria", "Origin, Ann", "Sourcedatasets Lab"]) {
+    // Anchored at both ends: an entry that goes on to name people is a real entry.
+    for (const entry of [
+      "Originale, Maria",
+      "Origin, Ann",
+      "Sourcedatasets Lab",
+      "Original authors: Smith J.",
+      "Original Dataset Authors: Lee, Kim (see SourceDatasets)",
+      "Smith J. (see SourceDatasets)",
+    ]) {
       expect({ entry, placeholder: isPlaceholderAuthor(entry) }).toEqual({
         entry,
         placeholder: false,
