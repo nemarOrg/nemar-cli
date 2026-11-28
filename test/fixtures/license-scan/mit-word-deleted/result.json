@@ -1,0 +1,62 @@
+{
+  "headers": [
+    {
+      "tool_name": "scancode-toolkit",
+      "tool_version": "32.5.0",
+      "extra_data": {
+        "spdx_license_list_version": "3.27",
+        "system_environment": {
+          "operating_system": "linux",
+          "python_version": "3.12.16 (main, Nov 24 2026, 05:00:45) [GCC 12.2.0]"
+        }
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "LICENSE",
+      "type": "file",
+      "detected_license_expression_spdx": "MIT",
+      "license_detections": [
+        {
+          "license_expression_spdx": "MIT",
+          "matches": [
+            {
+              "license_expression_spdx": "MIT",
+              "start_line": 1,
+              "end_line": 1,
+              "score": 100.0,
+              "matched_length": 2,
+              "match_coverage": 100.0,
+              "matcher": "2-aho",
+              "rule_identifier": "mit_14.RULE",
+              "matched_text": "MIT License",
+              "matched_text_diagnostics": "MIT License"
+            },
+            {
+              "license_expression_spdx": "MIT",
+              "start_line": 5,
+              "end_line": 21,
+              "score": 99.38,
+              "matched_length": 160,
+              "match_coverage": 99.38,
+              "matcher": "3-seq",
+              "rule_identifier": "mit.LICENSE",
+              "matched_text": "Permission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.",
+              "matched_text_diagnostics": "Permission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+            }
+          ]
+        }
+      ],
+      "license_clues": [],
+      "copyrights": [
+        {
+          "copyright": "Copyright (c) 2024 Example Lab",
+          "start_line": 3,
+          "end_line": 3
+        }
+      ],
+      "scan_errors": []
+    }
+  ]
+}

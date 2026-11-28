@@ -1,0 +1,44 @@
+{
+  "headers": [
+    {
+      "tool_name": "scancode-toolkit",
+      "tool_version": "32.5.0",
+      "extra_data": {
+        "spdx_license_list_version": "3.27",
+        "system_environment": {
+          "operating_system": "linux",
+          "python_version": "3.12.16 (main, Nov 24 2026, 05:00:45) [GCC 12.2.0]"
+        }
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "LICENSE",
+      "type": "file",
+      "detected_license_expression_spdx": "CC-BY-4.0",
+      "license_detections": [
+        {
+          "license_expression_spdx": "CC-BY-4.0",
+          "matches": [
+            {
+              "license_expression_spdx": "CC-BY-4.0",
+              "start_line": 1,
+              "end_line": 1,
+              "score": 97.56,
+              "matched_length": 40,
+              "match_coverage": 97.56,
+              "matcher": "3-seq",
+              "rule_identifier": "cc-by-4.0_7.RULE",
+              "matched_text": "This work is licensed under the Creative Commons Attribution 4.0 International License. To view a of this license, visit http://creativecommons.org/licenses/by/4.0/ or send a letter to Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.",
+              "matched_text_diagnostics": "This work is licensed under the Creative Commons Attribution 4.0 International License. To view a of this license, visit http://creativecommons.org/licenses/by/4.0/ or send a letter to Creative Commons, PO Box 1866, Mountain View, CA 94042, USA."
+            }
+          ]
+        }
+      ],
+      "license_clues": [],
+      "copyrights": [],
+      "scan_errors": []
+    }
+  ]
+}

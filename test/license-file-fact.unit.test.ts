@@ -22,16 +22,23 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ADDED_MARK,
+  FULL_TEXT_MIN_SHARE,
   type LicenseDocument,
+  MISSING_MARK,
   SCAN_FILES,
   SCAN_OUTPUT_MAX_BYTES,
   type ScanFile,
+  type ScanMatch,
   type ScanOutput,
+  WEB_COPY_PIECES,
   compareLicenseField,
   identifyLicenseFile,
   isCompound,
   licenseFieldOf,
   main,
+  officialTextDiff,
+  officialTextOf,
   parseScanResult,
   readScanOutput,
   subsumedLicenses,
@@ -277,7 +284,11 @@ describe("a deleted clause sets additions", () => {
     expect(longest?.match_coverage).toBeGreaterThanOrEqual(MIN_MATCH_COVERAGE);
     const id = identify(c.text, "CC-BY-4.0", scan);
     expect(id.fact).toMatchObject({ state: "matches", additions: true });
-    expect(id.partial).toBe(true);
+    // CC-BY-4.0's official text is vendored, so the deleted words are shown, not the file.
+    expect(id.partial).toBe(false);
+    expect(id.leftover).toEqual([
+      `${MISSING_MARK} b. Any arrangements, understandings, or agreements regarding the Licensed Material not stated herein are separate from and independent of the terms and conditions of this Public License`,
+    ]);
   });
 
   test("a whole section deleted falls below the threshold: unrecognized", () => {
@@ -594,6 +605,232 @@ describe("subsumption, position by position (hand-built matches on a hand-writte
     expect(subsumed(text, at("CC-BY-4.0", 1, "distributed under CC-BY-"), "CC-BY-NC-4.0,")).toBe(
       false,
     );
+  });
+});
+
+describe("a partial match against the official text (vendored legal code)", () => {
+  const longestOf = (scan: ScanFile) =>
+    [...scan.matches].sort((a, b) => b.matched_length - a.matched_length)[0] as ScanMatch;
+
+  test("every vendored text is the one its manifest names, by SHA-256", () => {
+    for (const spdx of [
+      "CC-BY-4.0",
+      "CC-BY-SA-4.0",
+      "CC-BY-NC-4.0",
+      "CC-BY-NC-SA-4.0",
+      "CC-BY-ND-4.0",
+      "CC-BY-NC-ND-4.0",
+      "CC0-1.0",
+    ]) {
+      expect(officialTextOf(spdx), spdx).not.toBeNull();
+    }
+    expect(officialTextOf("MIT")).toBeNull();
+  });
+
+  test("the NEMAR-headed web copy of CC-BY-NC-4.0 lacks only the web-copy pieces: not partial", () => {
+    const g = caseOf("gate-cc-by-nc-4.0-a");
+    const scan = scanOf(g);
+    expect(longestOf(scan).match_coverage).toBe(98.8);
+    expect(officialTextDiff(scan, longestOf(scan), "CC-BY-NC-4.0", g.text)).toEqual([
+      // The web copy titles the license "Creative Commons Attribution-NonCommercial ..."
+      { line: 6, text: `${ADDED_MARK} Creative Commons` },
+    ]);
+    const id = identify(g.text, g.field, scan);
+    expect(id.partial).toBe(false);
+    expect(id.fact).toEqual({
+      state: "matches",
+      spdx: "CC-BY-NC-4.0",
+      additions: true,
+      expression: null,
+    });
+    // Only the header is leftover: nothing of the license, and nothing marked missing.
+    expect(id.leftover.join("\n")).not.toContain(MISSING_MARK);
+    expect(id.leftover.join("\n").length).toBeLessThan(400);
+  });
+
+  test("a title matched by a separate rule of the license, outside the full text, is not missing", () => {
+    const d = caseOf("deed-and-cc-by-sa-4.0");
+    const scan = scanOf(d);
+    const longest = longestOf(scan);
+    expect([longest.start_line, longest.match_coverage]).toEqual([24, 99.82]);
+    expect(officialTextDiff(scan, longest, "CC-BY-SA-4.0", d.text)).toEqual([]);
+    // Without that separate match, the title is missing, and is shown as such.
+    const noTitle = copy(scan);
+    noTitle.matches = noTitle.matches.filter((m) => m.start_line !== 1);
+    expect(officialTextDiff(noTitle, longest, "CC-BY-SA-4.0", d.text)).toEqual([
+      { line: 24, text: `${MISSING_MARK} Attribution-ShareAlike 4.0 International` },
+    ]);
+    const id = identify(d.text, d.field, scan);
+    expect(id.partial).toBe(false);
+    expect(id.leftover.join("\n")).not.toContain(MISSING_MARK);
+  });
+
+  test("a clause deleted from the web copy of CC-BY-NC-4.0 is shown as missing words", () => {
+    const c = caseOf("gate-cc-by-nc-4.0-clause-deleted");
+    const scan = scanOf(c);
+    expect(longestOf(scan).match_coverage).toBe(97.29);
+    const id = identify(c.text, c.field, scan);
+    expect(id.partial).toBe(false);
+    expect(id.fact.additions).toBe(true);
+    expect(id.leftover.filter((l) => l.startsWith(MISSING_MARK))).toEqual([
+      `${MISSING_MARK} For the avoidance of doubt, this Public License does not, and shall not be interpreted to, reduce, limit, restrict, or impose conditions on any use of the Licensed Material that could lawfully be made without permission under this Public License`,
+    ]);
+  });
+
+  test("a license with no official text vendored stays partial, so the file is sent", () => {
+    const m = caseOf("mit-word-deleted");
+    const scan = scanOf(m);
+    expect(longestOf(scan).match_coverage).toBeLessThan(100);
+    expect(officialTextDiff(scan, longestOf(scan), "MIT", m.text)).toBeNull();
+    const id = identify(m.text, m.field, scan);
+    expect(id.partial).toBe(true);
+    expect(id.fact.additions).toBe(true);
+  });
+
+  test("an official text whose SHA-256 differs from the manifest is not used", () => {
+    const dir = mkdtempSync(join(tmpdir(), "license-texts-"));
+    try {
+      const official = officialTextOf("CC-BY-NC-4.0") as string;
+      writeFileSync(join(dir, "cc-by-nc-4.0.txt"), official.replace("Licensor", "Licenser"));
+      writeFileSync(
+        join(dir, "manifest.json"),
+        readFileSync(
+          join(import.meta.dir, "..", "scripts", "ci", "license-texts", "manifest.json"),
+        ),
+      );
+      expect(officialTextOf("CC-BY-NC-4.0", dir)).toBeNull();
+      const g = caseOf("gate-cc-by-nc-4.0-a");
+      const scan = scanOf(g);
+      expect(officialTextDiff(scan, longestOf(scan), "CC-BY-NC-4.0", g.text, { dir })).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the closed list is exactly the two Considerations links and the CC0 sentence", () => {
+    expect(WEB_COPY_PIECES).toEqual([
+      "wiki creativecommons org considerations for licensors",
+      "wiki creativecommons org considerations for licensees",
+      "the text of the creative commons public licenses is dedicated to the public domain under the cc0 public domain dedication",
+    ]);
+    // Each piece is a whole run of words of every vendored 4.0 text, once.
+    for (const spdx of [
+      "CC-BY-4.0",
+      "CC-BY-SA-4.0",
+      "CC-BY-NC-4.0",
+      "CC-BY-NC-SA-4.0",
+      "CC-BY-ND-4.0",
+      "CC-BY-NC-ND-4.0",
+    ]) {
+      const words = ` ${((officialTextOf(spdx) as string).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).join(" ")} `;
+      for (const piece of WEB_COPY_PIECES) {
+        expect(words.split(` ${piece} `).length - 1, `${spdx}: ${piece}`).toBe(1);
+      }
+    }
+  });
+
+  test(`a short notice is not a full text: below ${FULL_TEXT_MIN_SHARE * 100}% of the official words, the file is sent whole`, () => {
+    const n = caseOf("short-notice-word-deleted");
+    const scan = scanOf(n);
+    const longest = longestOf(scan);
+    expect([longest.match_coverage, longest.matched_length]).toEqual([97.56, 40]);
+    expect(officialTextDiff(scan, longest, "CC-BY-4.0", n.text)).toBeNull();
+    const id = identify(n.text, n.field, scan);
+    expect(id.partial).toBe(true);
+    expect(id.leftover).toEqual([]);
+  });
+
+  test("the full-text share is a boundary: just below it the file is sent whole, at it the text is diffed", () => {
+    const g = caseOf("gate-cc-by-nc-4.0-a");
+    const words = (officialTextOf("CC-BY-NC-4.0") as string).match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
+    // The ADR's 90%, written out: a test of the constant must not read the constant.
+    const at = Math.ceil(0.9 * words);
+    const withLength = (n: number) => {
+      const scan = copy(scanOf(g));
+      const longest = longestOf(scan);
+      longest.matched_length = n;
+      return { scan, longest };
+    };
+    const below = withLength(at - 1);
+    expect(officialTextDiff(below.scan, below.longest, "CC-BY-NC-4.0", g.text)).toBeNull();
+    expect(identify(g.text, g.field, below.scan).partial).toBe(true);
+    const atShare = withLength(at);
+    expect(officialTextDiff(atShare.scan, atShare.longest, "CC-BY-NC-4.0", g.text)).not.toBeNull();
+    expect(identify(g.text, g.field, atShare.scan).partial).toBe(false);
+  });
+
+  test("an inserted sentence is shown as added, whether or not ScanCode brackets it", () => {
+    const c = caseOf("gate-cc-by-nc-4.0-sentence-inserted");
+    const scan = scanOf(c);
+    expect(longestOf(scan).match_coverage).toBe(98.8);
+    const pieces = officialTextDiff(scan, longestOf(scan), "CC-BY-NC-4.0", c.text) ?? [];
+    expect(pieces.map((x) => x.text)).toEqual([
+      `${ADDED_MARK} Creative Commons`,
+      `${ADDED_MARK} Every quokka xylophonist owes the zephyr guild a marmalade tithe`,
+    ]);
+    const id = identify(c.text, c.field, scan);
+    expect(id.partial).toBe(false);
+    expect(id.leftover).toContain(
+      `${ADDED_MARK} Every quokka xylophonist owes the zephyr guild a marmalade tithe`,
+    );
+  });
+
+  test("a substituted clause is shown as both the missing and the added words", () => {
+    const c = caseOf("gate-cc-by-nc-4.0-clause-substituted");
+    const scan = scanOf(c);
+    expect(longestOf(scan).match_coverage).toBe(98.68);
+    const id = identify(c.text, c.field, scan);
+    expect(id.partial).toBe(false);
+    expect(id.leftover).toContain(`${MISSING_MARK} NonCommercial purposes only`);
+    expect(id.leftover).toContain(`${ADDED_MARK} any purpose whatsoever`);
+  });
+
+  // The next two edit the real file and keep its real scan (ScanCode's lines still hold): they
+  // are cases of the diff, not of ScanCode.
+  test("a deletion next to a closed-list piece is reported, and the piece is not", () => {
+    const g = caseOf("gate-cc-by-nc-4.0-a");
+    const scan = scanOf(g);
+    const edited = g.text.replace("Creative Commons may be contacted at creativecommons.org.", "");
+    expect(edited).not.toBe(g.text);
+    expect(
+      (officialTextDiff(scan, longestOf(scan), "CC-BY-NC-4.0", edited) ?? [])
+        .map((x) => x.text)
+        .filter((t) => t.startsWith(MISSING_MARK)),
+    ).toEqual([`${MISSING_MARK} Creative Commons may be contacted at creativecommons.org`]);
+  });
+
+  test("two paragraphs in the wrong order are reported", () => {
+    const g = caseOf("gate-cc-by-nc-4.0-a");
+    const lines = g.text.split("\n");
+    const a = lines.findIndex((l) =>
+      l.includes("For the avoidance of doubt, this Public License does not"),
+    );
+    const b = lines.findIndex((l) =>
+      l.includes("No term or condition of this Public License will be waived"),
+    );
+    expect(a > 0 && b > 0 && a !== b).toBe(true);
+    [lines[a], lines[b]] = [lines[b] as string, lines[a] as string];
+    const pieces =
+      officialTextDiff(scanOf(g), longestOf(scanOf(g)), "CC-BY-NC-4.0", lines.join("\n")) ?? [];
+    expect(pieces.some((x) => x.text.startsWith(MISSING_MARK))).toBe(true);
+    expect(pieces.filter((x) => x.text.startsWith(ADDED_MARK)).length).toBeGreaterThan(1);
+  });
+
+  test("a diff larger than its table limit is not computed: the file is sent whole", () => {
+    const g = caseOf("gate-cc-by-nc-4.0-clause-substituted");
+    const scan = scanOf(g);
+    const limits = { maxDiffCells: 1000 };
+    expect(officialTextDiff(scan, longestOf(scan), "CC-BY-NC-4.0", g.text, limits)).toBeNull();
+    // With the job's limit, the same diff is computed.
+    expect(officialTextDiff(scan, longestOf(scan), "CC-BY-NC-4.0", g.text)).not.toBeNull();
+    const id = identifyLicenseFile({
+      document: present(g.text),
+      licenseField: g.field,
+      scan: ran(scan),
+      officialTexts: limits,
+    });
+    expect(id.partial).toBe(true);
+    expect(id.fact.additions).toBe(true);
   });
 });
 
