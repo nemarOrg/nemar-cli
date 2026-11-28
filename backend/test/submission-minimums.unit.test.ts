@@ -6,7 +6,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { MIN_NAME_LENGTH, evaluateSubmissionMinimums } from "../src/services/submission-minimums";
+import {
+  MIN_NAME_LENGTH,
+  evaluateSubmissionMinimums,
+  isPlaceholderAuthor,
+} from "../src/services/submission-minimums";
 import { freshDb } from "./helpers/d1";
 
 const GOOD_NAME = "Auditory cortex EEG during natural speech comprehension";
@@ -58,6 +62,33 @@ describe("evaluateSubmissionMinimums", () => {
       const reasons = evaluateSubmissionMinimums(desc({ Authors: authors }), null);
       expect(reasons).toHaveLength(1);
       expect(reasons[0]).toContain("Authors");
+    }
+  });
+
+  test("a converter's pointer to the upstream's people names nobody (ADR 0139, amended 2026-11-27)", () => {
+    // The exact entry of nine datasets of the 2026-11-28 shadow run (nm001019 among them), and its
+    // close variants.
+    for (const entry of [
+      "Original Dataset Authors (see SourceDatasets)",
+      "Original authors",
+      "The original data creators",
+      "Authors of the upstream dataset (see SourceDatasets)",
+      "See SourceDatasets",
+    ]) {
+      expect({ entry, placeholder: isPlaceholderAuthor(entry) }).toEqual({
+        entry,
+        placeholder: true,
+      });
+      const reasons = evaluateSubmissionMinimums(desc({ Authors: [entry] }), null);
+      expect(reasons).toHaveLength(1);
+      expect(reasons[0]).toContain("Authors");
+    }
+    // A person whose name merely starts like it is a person.
+    for (const entry of ["Originale, Maria", "Origin, Ann", "Sourcedatasets Lab"]) {
+      expect({ entry, placeholder: isPlaceholderAuthor(entry) }).toEqual({
+        entry,
+        placeholder: false,
+      });
     }
   });
 
