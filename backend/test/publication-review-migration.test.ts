@@ -121,6 +121,8 @@ describe("0098 publication_reviews: columns", () => {
     license_matcher: { type: "TEXT", notnull: 0, dflt: null },
     // Migration 0163: what the review was served, for the decision card (ADR 0142, decision 4).
     served_metadata: { type: "TEXT", notnull: 0, dflt: null },
+    // Migration 0164: the codes an automatic denial's agreement named (ADR 0139, amended 2026-11-27).
+    auto_deny_codes: { type: "TEXT", notnull: 0, dflt: null },
   };
 
   test("exactly the declared columns, types, NOT NULLs and defaults", () => {
@@ -611,6 +613,7 @@ describe("the row module", () => {
         "confirmOf",
         "autoDenyState",
         "autoDenyAt",
+        "autoDenyCodes",
         "lineageBasis",
         "licenseMatcher",
       ].sort(),
