@@ -337,14 +337,16 @@ Sent whole, the files were cut at the cap, and a cut document lowers `authors_an
 
 ADR 0139's amendment of the same date settles the automatic denial's mail reasons; decisions 3 and 4 gain the parts the card and the lineage own.
 
-- **Decision 3: an OSF node DataCite does not hold is named by its URL.**
-  The resolver maps `https://osf.io/<guid>` to `10.17605/osf.io/<guid>` to look it up; when DataCite answers that it does not hold the DOI, the record is marked `doi_registered: false` and every surface names it `https://osf.io/<guid>` (`sourceLabelOf`): the card's declared licenses, `lineageLines` and the review's registry records.
+- **Decision 3: an OSF node declared as a URL is named by its URL unless DataCite confirms its DOI.**
+  The resolver maps `https://osf.io/<guid>` to `10.17605/osf.io/<guid>` to look it up; when DataCite answers that it does not hold the DOI, or the lookup fails or cannot be read, the source is marked `doi_registered: false` and every surface names it `https://osf.io/<guid>` (`sourceLabelOf`): the card's declared licenses, `lineageLines` and the review's registry records.
+  A DOI the dataset itself declared keeps its name.
   The record's `id`, the cache key and the permission basis keep the DOI form, so nothing a permission or a cache matched changes.
   nm001019's `10.17605/osf.io/fx4ud` does not exist; the model had read it as an OSF-issued DOI the README disagreed with.
 - **Decision 3: a Zenodo record its registry types as a paper records what it holds.**
-  For a Zenodo DOI whose DataCite record is not a `Dataset`, the resolver reads Zenodo's record (`/api/records/<id>`, which answers a concept id with its latest version) and keeps its type and files (`registry_files`: Zenodo's type, the file count, the count of files that are not documents, and up to three of their names).
+  For a Zenodo DOI whose DataCite record is not a `Dataset`, the resolver reads Zenodo's record (`/api/records/<id>`, which answers a concept id with its latest version) and keeps its type and files (`registry_files`: Zenodo's type, the file count, the count of files with a data extension (`DATA_FILE_EXTENSIONS`: recordings, tables, arrays and archives; never a PDF, a figure or a document), and up to three of their names).
+  The read is one attempt, never retried, so it never spends the lineage's fetch budget on retries the license reads need.
   The record stays a publication and its outcome is unchanged; a record that cannot be read records nothing.
-  The DOI cache key becomes `doi3:`, so records cached without these fields are read again.
+  The DOI cache key becomes `doi3:`, so records cached without these fields are read again (a one-time refetch of every cached DOI after deploy).
 - **Decision 4: the license panel says when a paper holds data files.**
   The served snapshot keeps one line per such source (`paper_with_data_files`), and the card's lineage carries it under the registry label: "the registry types this record as a journal article but it holds data files (N of M files, such as ...); it is still read as a publication for the license lineage, and an administrator decides" (nm001028's `10.5281/zenodo.3648065` holds one `Data.zip`; nm000661's `10.5281/zenodo.6529724` holds 35 `.mat` files).
   The cue is unchanged: `source_is_publication` stays amber.
