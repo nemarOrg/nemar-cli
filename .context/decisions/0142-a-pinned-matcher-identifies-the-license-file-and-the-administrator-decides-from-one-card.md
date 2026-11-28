@@ -300,3 +300,20 @@ The next action gains three rules, each below a running screen or review and abo
 `name_differs_from_upstream` asks the depositor, in a sentence that names the rule ("it should be the upstream dataset's title, as its registry gives it, and a version and an author-year naming the dataset's authors may follow it"), unless a review fail or an agreed denial already says deny;
 `name_upstream_unconfirmed` is `administrator_reads`;
 and a fail of `name_adequate` alone on a Name that follows a declared upstream's title is set aside: the card says `administrator_reads`, not deny, unless something else decides.
+
+## Amendment 2026-11-27 (epic gate of #2449): a notice rule that ends inside the license's own identifier
+
+Decision 1's compound and additions rules gain one exception, measured with ScanCode 32.5.0 on the LICENSE files of nm000677, nm000774, nm000968, nm000712 and nm000924 (fixtures `gate-*` in `test/fixtures/license-scan/`).
+Each opens with a NEMAR header ("The source release is distributed under CC-BY-NC-4.0, and this dataset is distributed under the same licence.") and then the full legal code.
+ScanCode's `cc-by-4.0_64.RULE`, a license notice whose text is "distributed under CC-BY", matches the first words of "distributed under CC-BY-NC-4.0" (its matched text is `distributed under CC-BY-`),
+while a match of the declared license covers `CC-BY-NC-4.0,` on the same line; the file's expression becomes `(CC-BY-NC-4.0 AND CC-BY-4.0) AND CC-BY-NC-4.0`, and the compound rule made it `unrecognized`.
+The legal code's own boilerplate plays no part: the full-text match is CC-BY-NC-4.0 (98.8, `3-seq`) or CC-BY-SA-4.0 (100) alone.
+
+- **A match of another SPDX-listed license is subsumed by `P`** when it lies on one line, its span and the span of a match of `P` on that line are each found there exactly once,
+  and it begins before that match of `P` and ends strictly inside it: it read part of `P`'s identifier and nothing beyond it.
+  A match that ends where `P`'s span ends or after it, spans several lines, or cannot be placed is never subsumed.
+- An identifier all of whose matches are subsumed is not another license for the compound rule, when every operator of the expression is `AND` (an `OR` or `WITH` is ScanCode's choice, which no position undoes),
+  and its matches are not leftover.
+- Everything else stands: the five are `matches` with `additions`, because the header's sentences are uncovered text, exactly as the same header over CC-BY-4.0 (nm000699) was already;
+  a LICENSE with the CC-BY-NC-4.0 header and text followed by the MIT License stays `unrecognized` with its compound expression.
+- The matcher version does not change: it names the ScanCode release and SPDX list, and this decision versions no parser.

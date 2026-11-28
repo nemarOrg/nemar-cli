@@ -447,15 +447,22 @@ function fact(
  * Whether ScanCode's file expression joins `p` with another license. `p` joined by `AND` only to
  * `LicenseRef-scancode-*` terms is not: those are additions (the measured rider gives
  * `CC-BY-4.0 AND LicenseRef-scancode-proprietary-license`). An expression that does not name `p`
- * at all is compound too.
+ * at all is compound too. An identifier in `subsumed` ({@link subsumedLicenses}) is not another
+ * license when every operator is `AND`: an `OR` or `WITH` is ScanCode's choice, which no match's
+ * position can undo.
  */
-export function isCompound(expression: string | null, p: string): boolean {
+export function isCompound(
+  expression: string | null,
+  p: string,
+  subsumed: ReadonlySet<string> = new Set(),
+): boolean {
   if (expression === null) return false;
   const tokens = expression.replace(/[()]/g, " ").split(/\s+/).filter(Boolean);
   const ops = tokens.filter((t) => OPERATORS.has(t.toUpperCase()));
   const ids = tokens.filter((t) => !OPERATORS.has(t.toUpperCase()));
   if (!ids.includes(p)) return true;
-  const others = ids.filter((t) => t !== p);
+  const allAnd = ops.every((o) => o.toUpperCase() === "AND");
+  const others = ids.filter((t) => t !== p && !(allAnd && subsumed.has(t)));
   if (others.length === 0) return false;
   return !(
     others.every((t) => SCANCODE_REF.test(t)) && ops.every((o) => o.toUpperCase() === "AND")
@@ -476,7 +483,8 @@ const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
  * - the text on a `p` match's first line before its span, and on its last line after it (the
  *   diagnostics are the span itself; the matched text is whole lines), unless only punctuation;
  * - the matched text of a match of any other license, except an unknown-license-reference match
- *   whose lines a `p` match also covers (the "licensed under the" of a notice);
+ *   whose lines a `p` match also covers (the "licensed under the" of a notice) and a license
+ *   {@link subsumedLicenses} by `p`;
  * - the matched text of each license clue;
  * - each line no match covers, unless it is blank, only punctuation, or nothing but a copyright
  *   statement ScanCode reported.
@@ -493,8 +501,10 @@ export function leftoverOf(scan: ScanFile, p: string, text: string): string[] {
     }
   }
   for (const edge of spanEdges(own, lines)) out.push(edge);
+  const subsumed = subsumedLicenses(scan, p, text);
   for (const m of scan.matches) {
     if (m.license_expression_spdx === p) continue;
+    if (subsumed.has(m.license_expression_spdx)) continue;
     if (m.license_expression_spdx === UNKNOWN_REFERENCE) {
       let covered = true;
       for (let l = m.start_line; l <= m.end_line; l++) if (!ownCovers(l)) covered = false;
@@ -531,6 +541,62 @@ export function leftoverOf(scan: ScanFile, p: string, text: string): string[] {
 
 /** The diagnostics without their brackets: the text of the span as the file has it. */
 const unbracket = (s: string) => s.replace(/[[\]]/g, "");
+
+/**
+ * Where a match's span lies in its one line, as `[begin, end)`, or null when the match spans
+ * several lines or its span is not found exactly once in the line (the safe direction: it is then
+ * never subsumed).
+ */
+function spanInLine(m: ScanMatch, lines: string[]): [number, number] | null {
+  if (m.start_line !== m.end_line) return null;
+  const line = lines[m.start_line - 1] ?? "";
+  const needle = unbracket(m.matched_text_diagnostics).trim();
+  if (needle === "") return null;
+  const at = line.indexOf(needle);
+  if (at < 0 || line.indexOf(needle, at + 1) >= 0) return null;
+  return [at, at + needle.length];
+}
+
+/**
+ * Whether a match of another license is a cut-short reading of `p`'s own identifier (ADR 0142,
+ * amendment of 2026-11-27, "a notice rule that ends inside `p`'s identifier"). ScanCode's
+ * `cc-by-4.0_64.RULE` ("distributed under CC-BY") matches the first words of "distributed under
+ * CC-BY-NC-4.0", and a match of `p` covers the identifier itself on the same line. The match is
+ * subsumed when it lies on one line, both spans are found there exactly once, and it ends strictly
+ * inside the span of a match of `p` that begins after it: it read part of `p`'s identifier and
+ * nothing beyond it. A match that ends where `p`'s span ends or after it, or on another line, or
+ * that is itself a full text, is never subsumed.
+ */
+function isSubsumedBy(m: ScanMatch, own: ScanMatch[], lines: string[]): boolean {
+  const span = spanInLine(m, lines);
+  if (span === null) return false;
+  const [begin, end] = span;
+  return own.some((o) => {
+    if (o.start_line !== m.start_line) return false;
+    const ownSpan = spanInLine(o, lines);
+    if (ownSpan === null) return false;
+    const [ownBegin, ownEnd] = ownSpan;
+    return begin < ownBegin && ownBegin < end && end < ownEnd;
+  });
+}
+
+/**
+ * The SPDX-listed identifiers other than `p` whose every match {@link isSubsumedBy} a match of
+ * `p`: ScanCode's expression names them, but the file holds no text of theirs.
+ */
+export function subsumedLicenses(scan: ScanFile, p: string, text: string): Set<string> {
+  const lines = linesOf(text);
+  const own = scan.matches.filter((m) => m.license_expression_spdx === p);
+  const byId = new Map<string, ScanMatch[]>();
+  for (const m of scan.matches) {
+    const id = m.license_expression_spdx;
+    if (id === p || !SPDX_ID.test(id)) continue;
+    byId.set(id, [...(byId.get(id) ?? []), m]);
+  }
+  const out = new Set<string>();
+  for (const [id, ms] of byId) if (ms.every((m) => isSubsumedBy(m, own, lines))) out.add(id);
+  return out;
+}
 
 /**
  * The lead-ins a notice may have before its span that are not leftover, whitespace-collapsed and
@@ -698,7 +764,9 @@ export function identifyLicenseFile(inputs: IdentifyInputs): LicenseIdentificati
     return done(fact("unrecognized"), matcher);
   }
   const expression = result.detected_license_expression_spdx;
-  if (isCompound(expression, p)) return done(fact("unrecognized", p, expression), matcher);
+  if (isCompound(expression, p, subsumedLicenses(result, p, text))) {
+    return done(fact("unrecognized", p, expression), matcher);
+  }
   const compared = compareLicenseField(licenseField, p);
   if (compared === "incomparable") return done(fact("unrecognized", p), matcher);
   const leftover = leftoverOf(result, p, text);
