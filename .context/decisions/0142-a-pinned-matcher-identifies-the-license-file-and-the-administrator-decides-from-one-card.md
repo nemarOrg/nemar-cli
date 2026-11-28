@@ -212,8 +212,6 @@ A docs.nemar.org page, `/platform/license-check`, explains the check to deposito
 
 - ScanCode's results above were measured on macOS arm64; Phase 1 repeats them on a GitHub runner, adds the 37 reviewed LICENSE files, and records both in its pull request.
 - The install size and time on a runner are estimates from wheel sizes and one laptop install, not a runner measurement.
-- ScanCode reports line ranges, not token offsets, so text before a match on the line where it starts (a notice's "This dataset is" before "licensed under"), or after a match on the line where it ends, is not leftover.
-  Phase 1 tries to close it by comparing each match's `matched_text` with its lines; if that is not exact, the gap stays and the docs page says so.
 - The `pluggy` pin works around a dependency the release does not cap; a later ScanCode release may need a different pin, which the hashed file makes a reviewed change.
 - ScanCode looks for libmagic on the host and warns when it uses the system copy; a LICENSE is read as text either way.
 - A new SPDX license reaches the review only with a new ScanCode release and a reviewed bump of the pin.
