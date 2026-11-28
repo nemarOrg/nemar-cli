@@ -16,6 +16,7 @@ Files 36 to 42 were fetched on 2026-11-27 for resolver version 5 (ADR 0139 decis
 Files 43 to 61 were fetched on 2026-11-27 for the review of resolver version 5 from the figshare and OSF APIs and DataCite, the same way, with no edits; they hold no email address.
 The OSF children lists (45, 47 to 49, 52, 55, 57) were fetched again the same day with `related_counts=children`, so each child says how many children it has.
 Files 62 to 65 were fetched on 2026-11-27 for resolver version 6, the same way, with no edits; they hold no email address.
+Files 66 to 68 were fetched on 2026-11-28 (UTC) from DataCite and Zenodo's API for the record of what a Zenodo paper holds, the same way (the Zenodo record of a concept id followed to its latest version), with no edits; they hold no email address.
 `index.json` lists every recording with its method, URL, HTTP status, file and fetch time;
 `stand-in.ts` serves them to the tests from a local server.
 
@@ -70,6 +71,8 @@ Files 62 to 65 were fetched on 2026-11-27 for resolver version 6, the same way, 
   figshare's API gives `defined_type_name` `dataset`, CC BY 4.0 and the DOI `10.1371/journal.pone.0211710`, which PLOS figshare datasets share with their article.
   That DOI is a `journal-article` on Crossref (DataCite answers 404), the paper nm000830's enrichment still lists as IsDerivedFrom.
 - **Genuine publications in data repositories:** `10.5281/zenodo.6529724` (`JournalArticle`, nm000661's source) and `10.6084/m9.figshare.28309157` (`JournalArticle`, resourceType `Journal contribution`).
+- **Zenodo papers that hold data files:** Zenodo types `10.5281/zenodo.6529724` and `10.5281/zenodo.3648065` (nm001028's source; DataCite `Text`, resourceType `Journal article`) as journal articles, and they hold 35 `.mat` files and one `Data.zip`;
+  they stay publications, and the card says what they hold.
 
 ## Recordings
 
@@ -138,6 +141,9 @@ Files 62 to 65 were fetched on 2026-11-27 for resolver version 6, the same way, 
 | `63-figshare-article-7708514-v1.json` | figshare-article-url | figshare | GET https://api.figshare.com/v2/articles/7708514/versions/1 | 200 | 2026-11-27 |
 | `64-datacite-plos-article-0211710.json` | stale-paper-relation | datacite | GET https://api.datacite.org/dois/10.1371%2Fjournal.pone.0211710 | 404 | 2026-11-27 |
 | `65-crossref-plos-article-0211710.json` | stale-paper-relation | crossref | GET https://api.crossref.org/works/10.1371%2Fjournal.pone.0211710 | 200 | 2026-11-27 |
+| `66-datacite-zenodo-journal-article-3648065.json` | zenodo-paper-with-data | datacite | GET https://api.datacite.org/dois/10.5281%2Fzenodo.3648065 | 200 | 2026-11-28 |
+| `67-zenodo-zenodo-journal-article-3648065.json` | zenodo-paper-with-data | zenodo | GET https://zenodo.org/api/records/3648065 | 200 | 2026-11-28 |
+| `68-zenodo-zenodo-journal-article-6529724.json` | zenodo-paper-with-data | zenodo | GET https://zenodo.org/api/records/6529724 | 200 | 2026-11-28 |
 
 The two OpenNeuro POSTs carry the GraphQL query recorded in `index.json` (`body`).
 
@@ -149,3 +155,4 @@ The two OpenNeuro POSTs carry the GraphQL query recorded in `index.json` (`body`
 - OpenNeuro dataset metadata comes from datasets released under CC0 (the recorded `License` value).
 - The PhysioNet API records are public project metadata, kept here as test evidence of the license names and access policies.
 - The OSF API node records are public project metadata, kept here as test evidence of the license each node declares.
+- The Zenodo API records are public record metadata (CC0, as Zenodo states for its metadata), kept here as test evidence of a record's type and files.

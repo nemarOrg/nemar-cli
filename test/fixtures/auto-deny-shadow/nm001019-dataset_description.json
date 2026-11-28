@@ -1,0 +1,23 @@
+{
+  "Name": "Your turn, my turn. Neural synchrony during mother-infant proto-conversation.",
+  "BIDSVersion": "1.10.0",
+  "DatasetType": "raw",
+  "License": "CC-BY-4.0",
+  "Version": "1.0.0",
+  "Authors": [
+    "Original Dataset Authors (see SourceDatasets)"
+  ],
+  "EthicsApprovals": [
+    "Ethics The local Ethics Committee approved the study (reference no. 00352). The local Ethics Committee approved the study (reference no. 00352). (europepmc:PMC9985967 (doi:10.1098/rstb.2021.0488))"
+  ],
+  "ReferencesAndLinks": [
+    "https://osf.io/fx4ud",
+    "https://doi.org/10.1098/rstb.2021.0488"
+  ],
+  "SourceDatasets": [
+    {
+      "URL": "https://osf.io/fx4ud"
+    }
+  ],
+  "HowToAcknowledge": "Please cite the original data release and associated publication listed in SourceDatasets and ReferencesAndLinks."
+}

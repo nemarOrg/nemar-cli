@@ -20,8 +20,16 @@
  * `name_differs_from_upstream` is eligible only in a run whose model also failed `name_adequate`:
  * the fact is the same in both runs, so on its own their agreement would check nothing, and
  * decision 1 asks a second model to agree. A `name_not_descriptive` finding is eligible except when
- * the Name follows the upstream's title (`name_upstream` is `matches`): the name then came from the
- * upstream, not from the depositor, and a person decides.
+ * the Name follows the upstream's title (`name_upstream` is `matches`), or the title of any declared
+ * source, a publication included ({@link EligibilityInput.nameFollowsASource}): the name then came
+ * from a source, not from the depositor, and a person decides.
+ *
+ * **The mail names what is true of the dataset** (the lead's rulings of 2026-11-27, ADR 0139 as
+ * amended that day, from the shadow run on production 0.10.58, and its review). Every finding is
+ * eligible only against a question the model itself failed. `license_missing` is eligible only when
+ * the platform found no `License` field; a missing LICENSE file beside a License field is not "no
+ * license". README codes are said only of the README and only where the evidence supports them
+ * ({@link eligibleCodeOfFinding}). `steering_attempt` is eligible only from a blocker finding.
  */
 
 import {
@@ -173,6 +181,12 @@ export interface EligibilityInput {
   anonymous: boolean;
   /** The dataset's EARLIER requests with `auto_denied = 1`. */
   earlierAutoDenials: number;
+  /**
+   * The Name follows the title of a declared source, a publication included
+   * (`nameFollowsAnySourceTitle`, from the snapshot of what the review was served); null when that
+   * could not be read, which protects the Name as a match does.
+   */
+  nameFollowsASource: boolean | null;
 }
 
 export type Eligibility =
@@ -216,15 +230,54 @@ export function nameFromUpstream(report: PublicationReviewReport): boolean {
   return report.evidence.name_upstream === "matches";
 }
 
+/** What the eligibility reads besides the report: the platform's other facts about the request. */
+export interface EligibilityContext {
+  /** {@link EligibilityInput.nameFollowsASource}; absent or null protects the Name. */
+  nameFollowsASource?: boolean | null;
+}
+
 /**
- * The eligible codes a report gives by itself: `steering_attempt` when it steered;
- * `name_differs_from_upstream` when that reason stands and the model itself failed `name_adequate`;
- * and every blocker finding of {@link AUTO_DENY_FINDING_CODES} against a question it failed, except,
- * while {@link licenseFileDiffers}, one against `authors_and_license` or one about the license under
- * any question ({@link isAboutTheLicense}), and except `name_not_descriptive` while
- * {@link nameFromUpstream}. Empty when its derived verdict is not `fail`.
+ * The eligible code a blocker finding stands for in `report`, or null when it stands for none.
+ * README codes are said only of the README and only where the platform's evidence supports them:
+ * a `readme_missing_or_stub` finding about the README (or about no document); a
+ * `description_incomplete` finding about the README only when the evidence records no README
+ * (`documents.readme` is `absent`), named as `readme_missing_or_stub`, since the platform has no
+ * fact for a README that exists but says too little; about `dataset_description.json` it is itself;
+ * about any other document, or none, it is not eligible.
  */
-export function eligibleCodesOf(report: PublicationReviewReport): {
+export function eligibleCodeOfFinding(
+  f: PublicationReviewReport["findings"][number],
+  report: PublicationReviewReport,
+): AutoDenyFindingCode | null {
+  if (!isOneOf(AUTO_DENY_FINDING_CODES, f.code)) return null;
+  if (f.code === "readme_missing_or_stub") {
+    return f.document === "readme" || f.document === null ? f.code : null;
+  }
+  if (f.code !== "description_incomplete") return f.code;
+  if (f.document === "dataset_description") return "description_incomplete";
+  if (f.document === "readme" && report.evidence.documents.readme === "absent") {
+    return "readme_missing_or_stub";
+  }
+  return null;
+}
+
+/**
+ * The eligible codes a report gives by itself: `steering_attempt` when a blocker finding of that
+ * code stands; `name_differs_from_upstream` when that reason stands and the model itself failed
+ * `name_adequate`; and the code of every blocker finding ({@link eligibleCodeOfFinding}) against a
+ * question THE MODEL ITSELF failed (`report.questions`, never an answer a platform fact lowered:
+ * both runs see the same fact, so their agreement on it would check nothing), except, while
+ * {@link licenseFileDiffers}, one against `authors_and_license` or one about the license under any
+ * question ({@link isAboutTheLicense}); except `license_missing` unless the platform found no
+ * `License` field; and except `name_not_descriptive` while {@link nameFromUpstream}, while the name
+ * rule could not decide (`name_upstream` is `unknown`), or while the Name follows a declared
+ * source's title or that is not known (`context.nameFollowsASource` not `false`). Empty when its
+ * derived verdict is not `fail`.
+ */
+export function eligibleCodesOf(
+  report: PublicationReviewReport,
+  context: EligibilityContext = {},
+): {
   codes: AutoDenyCode[];
   reasons: AutoDenyReasonCode[];
 } {
@@ -232,15 +285,22 @@ export function eligibleCodesOf(report: PublicationReviewReport): {
   if (verdictOf(reasons) !== "fail") return { codes: [], reasons: [] };
   const codes = new Set<AutoDenyCode>();
   const under = new Set<AutoDenyReasonCode>();
-  if (reasons.some((r) => r.code === "steering_attempt")) {
+  // A steering attempt denies only when a model filed it as a blocker: a note about a reader's
+  // instruction (nm000622's README telling readers how to count) sets the report's flag too.
+  if (
+    reasons.some((r) => r.code === "steering_attempt") &&
+    report.findings.some((f) => f.code === "steering_attempt" && f.severity === "blocker")
+  ) {
     codes.add("steering_attempt");
     under.add("steering_attempt");
   }
+  // The questions the model itself failed, and that still fail after the facts.
   const failed = new Set(
-    reasons.filter((r) => r.code === "question_failed").map((r) => r.detail ?? ""),
+    reasons
+      .filter((r) => r.code === "question_failed")
+      .map((r) => r.detail ?? "")
+      .filter((q) => isOneOf(QUESTIONS, q) && report.questions[q] === "fail"),
   );
-  // The model's own answer, never one a fact lowered (`answersOf`): the name fact must not be what
-  // makes the model's question fail, or the two runs' agreement would again check nothing.
   if (
     reasons.some((r) => r.code === "name_differs_from_upstream") &&
     report.questions.name_adequate === "fail"
@@ -250,18 +310,21 @@ export function eligibleCodesOf(report: PublicationReviewReport): {
   }
   const differs = licenseFileDiffers(report);
   if (differs) failed.delete("authors_and_license" satisfies Question);
-  const fromUpstream = nameFromUpstream(report);
+  const nameProtected =
+    nameFromUpstream(report) ||
+    report.evidence.name_upstream === "unknown" ||
+    context.nameFollowsASource !== false;
   for (const f of report.findings) {
+    if (f.severity !== "blocker" || !failed.has(f.question)) continue;
     if (differs && isAboutTheLicense(f)) continue;
-    if (fromUpstream && f.code === "name_not_descriptive") continue;
-    if (
-      f.severity === "blocker" &&
-      failed.has(f.question) &&
-      isOneOf(AUTO_DENY_FINDING_CODES, f.code)
-    ) {
-      codes.add(f.code);
-      under.add("question_failed");
-    }
+    const code = eligibleCodeOfFinding(f, report);
+    if (code === null) continue;
+    // "The dataset has no license" is said only when the platform read no License field: a missing
+    // LICENSE file beside a License field is not it (nm001019).
+    if (code === "license_missing" && report.evidence.license_field) continue;
+    if (code === "name_not_descriptive" && nameProtected) continue;
+    codes.add(code);
+    under.add("question_failed");
   }
   return {
     codes: AUTO_DENY_CODES.filter((c) => codes.has(c)),
@@ -275,7 +338,9 @@ export function autoDenyEligibility(input: EligibilityInput): Eligibility {
   if (input.report === null) return { eligible: false, why: "unreadable" };
   if (verdictOf(reportReasons(input.report)) !== "fail")
     return { eligible: false, why: "not_fail" };
-  const { codes, reasons } = eligibleCodesOf(input.report);
+  const { codes, reasons } = eligibleCodesOf(input.report, {
+    nameFollowsASource: input.nameFollowsASource,
+  });
   if (codes.length === 0) return { eligible: false, why: "no_eligible_reason" };
   if (!input.current) return { eligible: false, why: "not_current" };
   if (input.requestStatus !== "requested") return { eligible: false, why: "not_requested" };
@@ -321,6 +386,31 @@ export function confirmationOf(
 /** `denied_reason` of an automatic denial: the reason codes, comma-joined (`previousDenialReasonsOf` reads it). */
 export function deniedReasonOf(reasons: readonly AutoDenyReasonCode[]): string {
   return reasons.join(",");
+}
+
+/**
+ * `auto_deny_codes` of a first run (migration 0164): the eligible codes both runs agreed on, which
+ * the depositor's mail names (or would name, in shadow mode), comma-joined in
+ * {@link AUTO_DENY_CODES} order. Written with the state of an agreement, so an administrator reads
+ * the exact reasons later even when the rule has changed since.
+ */
+export function autoDenyCodesColumn(codes: readonly AutoDenyCode[]): string | null {
+  const list = AUTO_DENY_CODES.filter((c) => codes.includes(c));
+  return list.length === 0 ? null : list.join(",");
+}
+
+/** The stored codes read back: null for NULL and for anything that is not a list of known codes. */
+export function autoDenyCodesOf(raw: unknown): AutoDenyCode[] | null {
+  if (typeof raw !== "string" || raw === "") return null;
+  const words = raw.split(",");
+  if (!words.every((w) => isOneOf(AUTO_DENY_CODES, w))) return null;
+  const list = AUTO_DENY_CODES.filter((c) => words.includes(c));
+  return list.length === words.length ? list : null;
+}
+
+/** A stored code as an administrator reads it: the code and the sentence the mail says. */
+export function autoDenyCodeLine(code: AutoDenyCode): string {
+  return `${code}: ${AUTO_DENY_CODE_COPY[code].statement}`;
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -166,6 +166,38 @@ describe("the decision card in show", () => {
     expect(decisionCardLines(card).join("\n")).not.toContain("stale publication");
   });
 
+  test("a publication that holds data files is said under the registry label", () => {
+    const card = fixtureCard() as unknown as { license: { lineage: Record<string, unknown> } };
+    const line =
+      "10.5281/zenodo.3648065: the registry types this record as a journal article but it holds data files (1 of 1 files, such as Data.zip); it is still read as a publication for the license lineage, and an administrator decides.";
+    card.license.lineage = {
+      ...card.license.lineage,
+      paper_with_data_files: { label: "as the source's registry declares it", lines: [line] },
+    };
+    expect(decisionCardLines(card)).toContain(
+      `      Publication with data files (as the source's registry declares it): ${line}`,
+    );
+  });
+
+  test("the reasons an agreement named are printed under the automatic denial (shadow mode)", () => {
+    const card = fixtureCard() as unknown as { auto_deny: Record<string, unknown> };
+    card.auto_deny = {
+      state: "would_deny",
+      line: "Would deny (shadow mode).",
+      codes: ["readme_missing_or_stub", "authors_placeholder"],
+      reasons: [
+        "The README is missing, or is a stub that does not describe the dataset.",
+        "The authors are placeholders, not the people who made the dataset.",
+      ],
+    };
+    const lines = decisionCardLines(card);
+    expect(lines.slice(-3)).toEqual([
+      "  Automatic denial: Would deny (shadow mode).",
+      "    Mail reason: readme_missing_or_stub: The README is missing, or is a stub that does not describe the dataset.",
+      "    Mail reason: authors_placeholder: The authors are placeholders, not the people who made the dataset.",
+    ]);
+  });
+
   test("the card keeps the resolver's count of skipped stale relations", () => {
     const base = {
       outcome: "unresolved" as const,

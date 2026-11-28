@@ -268,6 +268,53 @@ export function upstreamDatasetTitles(sources: readonly UpstreamTitleSource[]): 
 }
 
 /**
+ * The titles of every declared source whose record was read with a title, a publication's
+ * included, each once, in the lineage's order (the lead's ruling of 2026-11-27, ADR 0139 as amended
+ * that day). A Name that follows one of them came from a source, so the automatic denial never
+ * calls it not descriptive (`shared/publication-auto-deny.ts`); the name rule's own result still
+ * reads dataset sources only ({@link nameFollowsUpstream}).
+ */
+export function declaredSourceTitles(sources: readonly UpstreamTitleSource[]): string[] {
+  const out: string[] = [];
+  for (const s of sources) {
+    if (!isDeclared(s) || (s.status !== "resolved" && s.status !== "publication")) continue;
+    const t = s.title !== null && foldWords(s.title).length > 0 ? s.title : null;
+    if (t !== null && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+/**
+ * Every declared source was read with a title ({@link declaredSourceTitles} then lists them all).
+ * When one was not (its record not read, or read with no title), a Name that follows it cannot be
+ * ruled out, so the automatic denial protects the Name.
+ */
+export function declaredSourceTitlesComplete(sources: readonly UpstreamTitleSource[]): boolean {
+  return sources
+    .filter(isDeclared)
+    .every(
+      (s) =>
+        (s.status === "resolved" || s.status === "publication") &&
+        s.title !== null &&
+        foldWords(s.title).length > 0,
+    );
+}
+
+/**
+ * Whether `name` follows any of `titles` ({@link followsTitle}, the name rule's folding and suffix
+ * grammar, with the dataset's `authors` as the people an author-year may name). A Name equal to a
+ * title, after folding, follows it.
+ */
+export function nameFollowsAnySourceTitle(
+  name: string,
+  titles: readonly string[],
+  authors: readonly string[] = [],
+): boolean {
+  if (foldWords(name).length === 0) return false;
+  return titles.some((t) => followsTitle(name, t, authors));
+}
+
+/**
  * Whether `name` follows one declared upstream dataset source's title (the file header has the
  * rule and the results). `name` is the `Name` of `dataset_description.json` (null when it could
  * not be read); `sources` are the lineage's sources as the resolver returned them; `authors` the

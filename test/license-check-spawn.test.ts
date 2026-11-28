@@ -81,6 +81,7 @@ async function cli(args: string[]) {
     NEMAR_LICENSE_PHYSIONET_URL: standIn.bases.physionet,
     NEMAR_LICENSE_OSF_URL: standIn.bases.osf,
     NEMAR_LICENSE_FIGSHARE_URL: standIn.bases.figshare,
+    NEMAR_LICENSE_ZENODO_URL: standIn.bases.zenodo,
   };
   const proc = spawn({
     cmd: [process.execPath, "run", CLI_ENTRY, ...args],
@@ -148,7 +149,9 @@ describe("nemar dataset license-check", () => {
     });
     const { stdout, stderr, exitCode } = await licenseCheck([dataset]);
     expect(stdout).toContain("License lineage: needs_permission");
-    expect(stdout).toContain("10.17605/osf.io/rmafj [source_datasets]: share_alike_mismatch");
+    // DataCite holds no DOI for the node, so it is named by its URL (ADR 0139, amended 2026-11-27).
+    expect(stdout).toContain("https://osf.io/rmafj [source_datasets]: share_alike_mismatch");
+    expect(stdout).not.toContain("10.17605/osf.io/rmafj");
     expect(stdout).toContain(
       'declared license: "CC-By Attribution-ShareAlike 4.0 International" <https://creativecommons.org/licenses/by-sa/4.0/legalcode>',
     );

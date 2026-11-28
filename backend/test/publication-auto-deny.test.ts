@@ -60,6 +60,8 @@ interface BodyOptions {
   head?: string;
   /** The failed question's blocker codes; empty for a report that passes. */
   blockers?: string[];
+  /** The document the blockers are about; the README when omitted. */
+  document?: string;
   steering?: boolean;
   lineage?: { outcome: string; credited: boolean } | null;
 }
@@ -92,7 +94,7 @@ function reportBody(o: BodyOptions = {}): Record<string, unknown> {
       question: "complete_and_honest",
       severity: "blocker",
       code,
-      document: "readme",
+      document: o.document ?? "readme",
       note: NOTE_SENTINEL,
     })),
     steering: o.steering ?? false,
@@ -255,7 +257,12 @@ describe("the mode", () => {
       expect(adminMails(calls)).toHaveLength(0);
 
       await confirmRun(firstId, confirmingBody());
-      expect(h.review(firstId)).toMatchObject({ auto_deny_state: "would_deny" });
+      // The codes the mail would name are recorded with it (migration 0164).
+      expect(h.review(firstId)).toMatchObject({
+        auto_deny_state: "would_deny",
+        auto_deny_codes: "readme_missing_or_stub",
+      });
+      expect(h.review(Number(confirm?.id)).auto_deny_codes).toBeNull();
       expect(h.review(firstId).auto_deny_at).not.toBeNull();
       expect(h.requestRow(requestId)).toMatchObject({ status: "requested", auto_denied: 0 });
       expect(auditRows(AUTO_DENY_AUDIT_ACTION)).toHaveLength(0);
@@ -295,7 +302,10 @@ describe("on: a confirmed fail denies, as nemarAdmin, and says so", () => {
         denied_by: serviceId,
         denied_reason: "question_failed",
       });
-      expect(h.review(firstId)).toMatchObject({ auto_deny_state: "denied" });
+      expect(h.review(firstId)).toMatchObject({
+        auto_deny_state: "denied",
+        auto_deny_codes: "readme_missing_or_stub",
+      });
       expect(h.review(confirmId)).toMatchObject({
         state: "reported",
         verdict: "fail",
@@ -382,12 +392,15 @@ describe("on: a confirmed fail denies, as nemarAdmin, and says so", () => {
     await accounts();
     h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
     await withFakeResend(async () => {
-      const { requestId, firstId } = await firstRun({ blockers: [], steering: true });
-      await confirmRun(firstId, confirmingBody({ blockers: [], steering: true }));
+      // A blocker finding of the code: the flag alone does not deny (ADR 0139, amended 2026-11-27).
+      const steer = { blockers: ["steering_attempt"], steering: true };
+      const { requestId, firstId } = await firstRun(steer);
+      await confirmRun(firstId, confirmingBody(steer));
       expect(h.requestRow(requestId)).toMatchObject({
         status: "denied",
         denied_reason: "steering_attempt",
       });
+      expect(h.review(firstId).auto_deny_codes).toBe("steering_attempt");
     });
   });
 
@@ -562,6 +575,20 @@ describe("never eligible: no confirming run is started", () => {
     ],
     // ADR 0139: two different models must agree; the confirming model cannot confirm itself.
     ["a fail made on the confirming model itself", { model: CONFIRMING_MODEL, effort: "high" }],
+    // ADR 0139, amended 2026-11-27: the steering flag with no blocker finding of it (nm000622).
+    ["a steering flag with no blocker finding of it", { blockers: [], steering: true }],
+    // A License field is set (the harness's evidence), so "no license" is not true (nm001019).
+    ["license_missing beside a License field", { blockers: ["license_missing"] }],
+    // About the README it is named as the README's (below); about another document, not at all.
+    [
+      "description_incomplete about a document the copy does not name",
+      { blockers: ["description_incomplete"], document: "participants_json" },
+    ],
+    // No snapshot of the served sources' titles: the Name is protected, a person decides.
+    [
+      "name_not_descriptive with no record of the sources' titles",
+      { blockers: ["name_not_descriptive"] },
+    ],
   ];
   for (const [name, o] of cases) {
     test(name, async () => {
@@ -617,6 +644,86 @@ describe("never eligible: no confirming run is started", () => {
   });
 });
 
+describe("the mail names what is true of the dataset (ADR 0139, amended 2026-11-27)", () => {
+  test("a README coded description_incomplete while the README exists never denies (nm001032)", async () => {
+    await accounts();
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    await withFakeResend(async (calls) => {
+      const { requestId, firstId } = await firstRun({ blockers: ["description_incomplete"] });
+      // The platform has no fact that a README which exists is a stub: no confirming run.
+      expect(confirmOf(firstId)).toBeNull();
+      expect(h.requestRow(requestId).status).toBe("requested");
+      expect(depositorMails(calls)).toHaveLength(0);
+    });
+  });
+
+  /** A first run whose served snapshot holds `name`, `titles` as the declared sources' titles. */
+  async function firstRunServed(
+    name: string,
+    titles: string[] | undefined,
+    complete = true,
+  ): Promise<FirstRun> {
+    const { requestId, userId } = seedScreenedRequest(h.db, {
+      datasetId: PROD_DATASET,
+      mailed: false,
+    });
+    const firstId = seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      state: "dispatched",
+      claimed: true,
+    });
+    h.db.run(
+      "UPDATE publication_reviews SET inputs_served_at = datetime('now'), served_metadata = ? WHERE id = ?",
+      [
+        JSON.stringify({
+          v: 1,
+          enrichment: null,
+          enrichment_source: null,
+          dataset_description: { name, license: "CC-BY-4.0", authors: ["Ada Lovelace"] },
+          lineage: {
+            outcome: "source_is_publication",
+            credited: true,
+            resolved_at: null,
+            declared_licenses: [],
+            ...(titles === undefined
+              ? {}
+              : { source_titles: titles, source_titles_complete: complete }),
+          },
+        }),
+        firstId,
+      ],
+    );
+    const res = await h.result(firstId, {
+      outcome: "reported",
+      report: reportBody({ blockers: ["name_not_descriptive"] }),
+    });
+    expect(res.status).toBe(200);
+    return { requestId, userId, firstId, status: res.status };
+  }
+
+  test("a Name that is a declared publication's title is never called not descriptive (nm001028)", async () => {
+    await accounts();
+    h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
+    const title =
+      "Cross-validating models of continuous data from simulation and experiment by using linear regression and artificial neural networks";
+    await withFakeResend(async () => {
+      // The Name is the paper's title, as the name rule folds it: no confirming run.
+      const same = await firstRunServed(title.toLowerCase(), [title]);
+      expect(confirmOf(same.firstId)).toBeNull();
+      // A snapshot written before the titles were kept protects it too.
+      const before = await firstRunServed("EEG", undefined);
+      expect(confirmOf(before.firstId)).toBeNull();
+      // A declared source read with no whole title could be the one it follows: protected.
+      const incomplete = await firstRunServed("EEG", [title], false);
+      expect(confirmOf(incomplete.firstId)).toBeNull();
+      // A Name that follows no declared source's title is eligible as before.
+      const other = await firstRunServed("EEG", [title]);
+      expect(confirmOf(other.firstId)).not.toBeNull();
+    });
+  });
+});
+
 describe("the daily cap", () => {
   test("past the cap, the request stays and the administrators' mail says recommended: deny", async () => {
     await accounts();
@@ -625,6 +732,7 @@ describe("the daily cap", () => {
       const { requestId, firstId } = await firstRun();
       await confirmRun(firstId, confirmingBody());
       expect(h.review(firstId).auto_deny_state).toBe("capped");
+      expect(h.review(firstId).auto_deny_codes).toBe("readme_missing_or_stub");
       expect(h.requestRow(requestId)).toMatchObject({ status: "requested", auto_denied: 0 });
       expect(auditRows(AUTO_DENY_AUDIT_ACTION)).toHaveLength(0);
       expect(depositorMails(calls)).toHaveLength(0);
