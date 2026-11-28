@@ -29,6 +29,7 @@
  * nemarDatasets/.github runs it). Exit 0 when it printed a fact, 2 for bad arguments.
  */
 
+import { createHash } from "node:crypto";
 import {
   constants,
   closeSync,
@@ -490,6 +491,15 @@ const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
  *   statement ScanCode reported.
  */
 export function leftoverOf(scan: ScanFile, p: string, text: string): string[] {
+  return leftoverEntries(scan, p, text).map((o) => o.text);
+}
+
+/** {@link leftoverOf}, each piece with the line it is on. */
+function leftoverEntries(
+  scan: ScanFile,
+  p: string,
+  text: string,
+): { line: number; text: string }[] {
   const lines = linesOf(text);
   const out: { line: number; text: string }[] = [];
   const own = scan.matches.filter((m) => m.license_expression_spdx === p);
@@ -536,7 +546,7 @@ export function leftoverOf(scan: ScanFile, p: string, text: string): string[] {
     if (covered.has(n) || exempt.has(n) || ONLY_PUNCTUATION.test(line)) return;
     out.push({ line: n, text: line });
   });
-  return out.sort((a, b) => a.line - b.line).map((o) => o.text);
+  return out.sort((a, b) => a.line - b.line);
 }
 
 /** The diagnostics without their brackets: the text of the span as the file has it. */
@@ -692,6 +702,205 @@ export function linesAreInText(scan: ScanFile, text: string): boolean {
   );
 }
 
+// ---------------------------------------------------------------------------------------------
+// The official text: what a partial match lacks (ADR 0142, amendment "web-copy artifacts")
+// ---------------------------------------------------------------------------------------------
+
+/** The vendored official texts: `license-texts/manifest.json` names each file and its SHA-256. */
+export const OFFICIAL_TEXTS_DIR = join(import.meta.dir, "license-texts");
+
+/** The mark on a leftover piece that is official text the file lacks, not text the file has. */
+export const MISSING_MARK = "[missing from the official text]";
+
+/**
+ * The pieces of an official Creative Commons 4.0 text that a copy of its web page drops, as
+ * tokens: the two links that are hyperlinks on the page, and the closing sentence that says the
+ * text is CC0. None of them is a term of the license. A file without them, and without anything
+ * else of the official text, is the whole license.
+ */
+export const WEB_COPY_PIECES: readonly string[] = [
+  "wiki creativecommons org considerations for licensors",
+  "wiki creativecommons org considerations for licensees",
+  "the text of the creative commons public licenses is dedicated to the public domain under the cc0 public domain dedication",
+];
+
+/** The largest diff computed, in cells of its table; a larger one is not computed. */
+const MAX_DIFF_CELLS = 16_000_000;
+
+interface Token {
+  word: string;
+  start: number;
+  end: number;
+}
+
+/** A text's words, lowercased, with their offsets: punctuation and layout are not words. */
+function tokensOf(text: string): Token[] {
+  const out: Token[] = [];
+  for (const m of text.matchAll(/[\p{L}\p{N}]+/gu)) {
+    const start = m.index ?? 0;
+    out.push({ word: m[0].toLowerCase(), start, end: start + m[0].length });
+  }
+  return out;
+}
+
+/** The official text of `spdx`, or null when none is vendored or its SHA-256 differs. */
+export function officialTextOf(spdx: string, dir: string = OFFICIAL_TEXTS_DIR): string | null {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as {
+      texts?: Record<string, { file?: unknown; sha256?: unknown }>;
+    };
+    const entry = manifest.texts?.[spdx];
+    if (entry === undefined || typeof entry.file !== "string" || typeof entry.sha256 !== "string")
+      return null;
+    if (!/^[a-z0-9.-]+\.txt$/.test(entry.file)) return null;
+    const bytes = readFileSync(join(dir, entry.file));
+    if (createHash("sha256").update(bytes).digest("hex") !== entry.sha256) return null;
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** Where `piece` (space-separated words) starts in `tokens`, every occurrence. */
+function occurrences(tokens: Token[], piece: string[]): number[] {
+  const out: number[] = [];
+  for (let i = 0; i + piece.length <= tokens.length; i++) {
+    if (piece.every((w, k) => tokens[i + k]?.word === w)) out.push(i);
+  }
+  return out;
+}
+
+/**
+ * The indexes of `a` that are not in a longest common subsequence of `a` and `b`, each with the
+ * index of `b` it falls before, or null when the table would exceed {@link MAX_DIFF_CELLS}.
+ */
+function unmatched(a: string[], b: string[]): { at: number; before: number }[] | null {
+  let lo = 0;
+  while (lo < a.length && lo < b.length && a[lo] === b[lo]) lo++;
+  let ea = a.length;
+  let eb = b.length;
+  while (ea > lo && eb > lo && a[ea - 1] === b[eb - 1]) {
+    ea--;
+    eb--;
+  }
+  const n = ea - lo;
+  const m = eb - lo;
+  if ((n + 1) * (m + 1) > MAX_DIFF_CELLS || n > 65_535 || m > 65_535) return null;
+  // table[i][j]: the longest common subsequence of a[lo+i..ea) and b[lo+j..eb).
+  const w = m + 1;
+  const table = new Uint16Array((n + 1) * w);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      table[i * w + j] =
+        a[lo + i] === b[lo + j]
+          ? (table[(i + 1) * w + j + 1] as number) + 1
+          : Math.max(table[(i + 1) * w + j] as number, table[i * w + j + 1] as number);
+    }
+  }
+  const out: { at: number; before: number }[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n) {
+    if (j < m && a[lo + i] === b[lo + j]) {
+      i++;
+      j++;
+    } else if (j < m && (table[i * w + j + 1] as number) >= (table[(i + 1) * w + j] as number)) {
+      j++;
+    } else {
+      out.push({ at: lo + i, before: lo + j });
+      i++;
+    }
+  }
+  return out;
+}
+
+/**
+ * What the file lacks of `p`'s official text, as leftover pieces marked {@link MISSING_MARK} on the
+ * line where each is missing, or null when it cannot be computed (no official text is vendored
+ * for `p`, or the diff is too large). The longest match's lines are compared with the whole
+ * official text, word by word. Not missing: a {@link WEB_COPY_PIECES} piece, and the official
+ * title (its first line) when another match of `p` outside the longest match's lines reads exactly
+ * the title's words. Text the file has beyond the official text is not this function's: ScanCode's
+ * diagnostics and {@link leftoverOf} report it.
+ */
+export function missingFromOfficial(
+  scan: ScanFile,
+  longest: ScanMatch,
+  p: string,
+  text: string,
+  dir: string = OFFICIAL_TEXTS_DIR,
+): { line: number; text: string }[] | null {
+  const official = officialTextOf(p, dir);
+  if (official === null) return null;
+  const off = tokensOf(official);
+  const lines = linesOf(text);
+  const spanLines = lines.slice(longest.start_line - 1, longest.end_line);
+  // The file offset of each span line, to map a word back to its line.
+  const lineStarts: number[] = [];
+  let offset = 0;
+  for (const l of spanLines) {
+    lineStarts.push(offset);
+    offset += l.length + 1;
+  }
+  const dep = tokensOf(spanLines.join("\n"));
+  const lineOfToken = (k: number): number => {
+    const at = dep[k]?.start ?? offset;
+    let idx = 0;
+    while (idx + 1 < lineStarts.length && (lineStarts[idx + 1] as number) <= at) idx++;
+    return longest.start_line + idx;
+  };
+
+  const ignored = new Set<number>();
+  const ignore = (piece: string[]) => {
+    for (const start of occurrences(off, piece)) {
+      for (let k = 0; k < piece.length; k++) ignored.add(start + k);
+    }
+  };
+  for (const piece of WEB_COPY_PIECES) ignore(piece.split(" "));
+  const titleLine = official.split("\n").find((l) => l.trim() !== "") ?? "";
+  const title = tokensOf(titleLine).map((t) => t.word);
+  const titleElsewhere = scan.matches.some(
+    (m) =>
+      m !== longest &&
+      m.license_expression_spdx === p &&
+      (m.end_line < longest.start_line || m.start_line > longest.end_line) &&
+      tokensOf(m.matched_text)
+        .map((t) => t.word)
+        .join(" ") === title.join(" "),
+  );
+  if (titleElsewhere && title.length > 0 && occurrences(off, title)[0] === 0) {
+    for (let k = 0; k < title.length; k++) ignored.add(k);
+  }
+
+  const kept = off.map((t, k) => ({ t, k })).filter(({ k }) => !ignored.has(k));
+  const gaps = unmatched(
+    kept.map(({ t }) => t.word),
+    dep.map((t) => t.word),
+  );
+  if (gaps === null) return null;
+  // Consecutive unmatched words, falling before the same file word, are one missing piece.
+  const pieces: { line: number; text: string }[] = [];
+  let run: { first: number; last: number; before: number } | null = null;
+  const flush = () => {
+    if (run === null) return;
+    const first = kept[run.first]?.t as Token;
+    const last = kept[run.last]?.t as Token;
+    const words = official.slice(first.start, last.end).replace(/\s+/g, " ").trim();
+    pieces.push({ line: lineOfToken(run.before), text: `${MISSING_MARK} ${words}` });
+    run = null;
+  };
+  for (const g of gaps) {
+    if (run !== null && g.at === run.last + 1 && g.before === run.before) {
+      run.last = g.at;
+    } else {
+      flush();
+      run = { first: g.at, last: g.at, before: g.before };
+    }
+  }
+  flush();
+  return pieces;
+}
+
 /** The longest match by `matched_length`; the first of equals, in ScanCode's order. */
 function longestMatch(matches: ScanMatch[]): ScanMatch | null {
   let best: ScanMatch | null = null;
@@ -769,9 +978,19 @@ export function identifyLicenseFile(inputs: IdentifyInputs): LicenseIdentificati
   }
   const compared = compareLicenseField(licenseField, p);
   if (compared === "incomparable") return done(fact("unrecognized", p), matcher);
-  const leftover = leftoverOf(result, p, text);
-  // A deleted clause leaves no text behind to show; coverage below 100 is the only sign of it.
-  const partial = longest.match_coverage < 100;
+  // A deleted clause leaves no text behind to show; coverage below 100 is the only sign of it,
+  // unless the official text is vendored: then what the file lacks is computed and shown.
+  let partial = longest.match_coverage < 100;
+  const entries = leftoverEntries(result, p, text);
+  if (partial) {
+    const missing = missingFromOfficial(result, longest, p, text);
+    if (missing !== null) {
+      partial = false;
+      entries.push(...missing);
+      entries.sort((a, b) => a.line - b.line);
+    }
+  }
+  const leftover = entries.map((o) => o.text);
   return done(
     {
       state: compared === "match" ? "matches" : "matches_other",

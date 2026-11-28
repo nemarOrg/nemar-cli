@@ -23,15 +23,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type LicenseDocument,
+  MISSING_MARK,
   SCAN_FILES,
   SCAN_OUTPUT_MAX_BYTES,
   type ScanFile,
+  type ScanMatch,
   type ScanOutput,
+  WEB_COPY_PIECES,
   compareLicenseField,
   identifyLicenseFile,
   isCompound,
   licenseFieldOf,
   main,
+  missingFromOfficial,
+  officialTextOf,
   parseScanResult,
   readScanOutput,
   subsumedLicenses,
@@ -277,7 +282,11 @@ describe("a deleted clause sets additions", () => {
     expect(longest?.match_coverage).toBeGreaterThanOrEqual(MIN_MATCH_COVERAGE);
     const id = identify(c.text, "CC-BY-4.0", scan);
     expect(id.fact).toMatchObject({ state: "matches", additions: true });
-    expect(id.partial).toBe(true);
+    // CC-BY-4.0's official text is vendored, so the deleted words are shown, not the file.
+    expect(id.partial).toBe(false);
+    expect(id.leftover).toEqual([
+      `${MISSING_MARK} b. Any arrangements, understandings, or agreements regarding the Licensed Material not stated herein are separate from and independent of the terms and conditions of this Public License`,
+    ]);
   });
 
   test("a whole section deleted falls below the threshold: unrecognized", () => {
@@ -593,6 +602,113 @@ describe("subsumption, position by position (hand-built matches on a hand-writte
     const text = "distributed under CC-BY-NC-4.0, distributed under CC-BY-";
     expect(subsumed(text, at("CC-BY-4.0", 1, "distributed under CC-BY-"), "CC-BY-NC-4.0,")).toBe(
       false,
+    );
+  });
+});
+
+describe("a partial match against the official text (vendored legal code)", () => {
+  const longestOf = (scan: ScanFile) =>
+    [...scan.matches].sort((a, b) => b.matched_length - a.matched_length)[0] as ScanMatch;
+
+  test("every vendored text is the one its manifest names, by SHA-256", () => {
+    for (const spdx of [
+      "CC-BY-4.0",
+      "CC-BY-SA-4.0",
+      "CC-BY-NC-4.0",
+      "CC-BY-NC-SA-4.0",
+      "CC-BY-ND-4.0",
+      "CC-BY-NC-ND-4.0",
+      "CC0-1.0",
+    ]) {
+      expect(officialTextOf(spdx), spdx).not.toBeNull();
+    }
+    expect(officialTextOf("MIT")).toBeNull();
+  });
+
+  test("the NEMAR-headed web copy of CC-BY-NC-4.0 lacks only the web-copy pieces: not partial", () => {
+    const g = caseOf("gate-cc-by-nc-4.0-a");
+    const scan = scanOf(g);
+    expect(longestOf(scan).match_coverage).toBe(98.8);
+    expect(missingFromOfficial(scan, longestOf(scan), "CC-BY-NC-4.0", g.text)).toEqual([]);
+    const id = identify(g.text, g.field, scan);
+    expect(id.partial).toBe(false);
+    expect(id.fact).toEqual({
+      state: "matches",
+      spdx: "CC-BY-NC-4.0",
+      additions: true,
+      expression: null,
+    });
+    // Only the header is leftover: nothing of the license, and nothing marked missing.
+    expect(id.leftover.join("\n")).not.toContain(MISSING_MARK);
+    expect(id.leftover.join("\n").length).toBeLessThan(400);
+  });
+
+  test("a title matched by a separate rule of the license, outside the full text, is not missing", () => {
+    const d = caseOf("deed-and-cc-by-sa-4.0");
+    const scan = scanOf(d);
+    const longest = longestOf(scan);
+    expect([longest.start_line, longest.match_coverage]).toEqual([24, 99.82]);
+    expect(missingFromOfficial(scan, longest, "CC-BY-SA-4.0", d.text)).toEqual([]);
+    // Without that separate match, the title is missing, and is shown as such.
+    const noTitle = copy(scan);
+    noTitle.matches = noTitle.matches.filter((m) => m.start_line !== 1);
+    expect(missingFromOfficial(noTitle, longest, "CC-BY-SA-4.0", d.text)).toEqual([
+      { line: 24, text: `${MISSING_MARK} Attribution-ShareAlike 4.0 International` },
+    ]);
+    const id = identify(d.text, d.field, scan);
+    expect(id.partial).toBe(false);
+    expect(id.leftover.join("\n")).not.toContain(MISSING_MARK);
+  });
+
+  test("a clause deleted from the web copy of CC-BY-NC-4.0 is shown as missing words", () => {
+    const c = caseOf("gate-cc-by-nc-4.0-clause-deleted");
+    const scan = scanOf(c);
+    expect(longestOf(scan).match_coverage).toBe(97.29);
+    const id = identify(c.text, c.field, scan);
+    expect(id.partial).toBe(false);
+    expect(id.fact.additions).toBe(true);
+    expect(id.leftover.filter((l) => l.startsWith(MISSING_MARK))).toEqual([
+      `${MISSING_MARK} For the avoidance of doubt, this Public License does not, and shall not be interpreted to, reduce, limit, restrict, or impose conditions on any use of the Licensed Material that could lawfully be made without permission under this Public License`,
+    ]);
+  });
+
+  test("a license with no official text vendored stays partial, so the file is sent", () => {
+    const m = caseOf("mit-word-deleted");
+    const scan = scanOf(m);
+    expect(longestOf(scan).match_coverage).toBeLessThan(100);
+    expect(missingFromOfficial(scan, longestOf(scan), "MIT", m.text)).toBeNull();
+    const id = identify(m.text, m.field, scan);
+    expect(id.partial).toBe(true);
+    expect(id.fact.additions).toBe(true);
+  });
+
+  test("an official text whose SHA-256 differs from the manifest is not used", () => {
+    const dir = mkdtempSync(join(tmpdir(), "license-texts-"));
+    try {
+      const official = officialTextOf("CC-BY-NC-4.0") as string;
+      writeFileSync(join(dir, "cc-by-nc-4.0.txt"), official.replace("Licensor", "Licenser"));
+      writeFileSync(
+        join(dir, "manifest.json"),
+        readFileSync(
+          join(import.meta.dir, "..", "scripts", "ci", "license-texts", "manifest.json"),
+        ),
+      );
+      expect(officialTextOf("CC-BY-NC-4.0", dir)).toBeNull();
+      const g = caseOf("gate-cc-by-nc-4.0-a");
+      const scan = scanOf(g);
+      expect(missingFromOfficial(scan, longestOf(scan), "CC-BY-NC-4.0", g.text, dir)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the closed list is the two Considerations links and the CC0 sentence, nothing more", () => {
+    expect(WEB_COPY_PIECES).toHaveLength(3);
+    const nc = officialTextOf("CC-BY-NC-4.0") as string;
+    expect(nc).toContain("wiki.creativecommons.org/Considerations_for_licensors");
+    expect(nc).toContain("wiki.creativecommons.org/Considerations_for_licensees");
+    expect(nc.replace(/\s+/g, " ")).toContain(
+      "The text of the Creative Commons public licenses is dedicated to the public domain under the CC0 Public Domain Dedication.",
     );
   });
 });

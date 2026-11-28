@@ -34,6 +34,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
+import { MISSING_MARK } from "../scripts/ci/license-file-fact";
 import {
   CALLBACK_ORIGINS,
   MAX_TOKENS,
@@ -1567,17 +1568,54 @@ describe("LICENSE's identification (ADR 0142) decides what the model is sent", (
     expect(report.evidence.documents.license).toBe("sent");
   });
 
-  test("a match that covers less than its whole license sends the whole file", async () => {
-    const ds = licensed("license-scan-partial", "clause-deleted");
+  test("a partial match of a license with no official text sends the whole file", async () => {
+    const ds = licensed("license-scan-partial", "mit-word-deleted");
+    const { license, facts, report, res } = await run(ds, {
+      licenseScanDir: scanDirFor(ds, "mit-word-deleted"),
+      scanOptions: { resultOwnerUid: UID },
+    });
+    expect(res.licenseFile?.partial).toBe(true);
+    expect(facts.license_file).toEqual({ state: "matches", spdx: "MIT", text: "file" });
+    expect(license).toBe(fixture("mit-word-deleted").license);
+    expect(report.evidence.documents.license).toBe("sent");
+    expect(report.evidence.license_file?.additions).toBe(true);
+  });
+
+  test("a deleted clause of a vendored license is sent as the missing words, not the file", async () => {
+    const ds = licensed("license-scan-clause", "clause-deleted");
     const { license, facts, report, res } = await run(ds, {
       licenseScanDir: scanDirFor(ds, "clause-deleted"),
       scanOptions: { resultOwnerUid: UID },
     });
-    expect(res.licenseFile?.partial).toBe(true);
-    expect(facts.license_file).toEqual({ state: "matches", spdx: "CC-BY-4.0", text: "file" });
-    expect(license?.startsWith(fixture("clause-deleted").license.slice(0, 200))).toBe(true);
-    expect(report.evidence.documents.license).toBe("sent_cut");
+    expect(res.licenseFile?.partial).toBe(false);
+    expect(facts.license_file).toEqual({
+      state: "matches",
+      spdx: "CC-BY-4.0",
+      text: "additions_only",
+    });
+    expect(license).toBe(res.licenseFile?.leftover.join("\n"));
+    expect(license).toContain(`${MISSING_MARK} b. Any arrangements, understandings, or agreements`);
+    expect(license).not.toContain("Attribution 4.0 International");
+    expect(report.evidence.documents.license).toBe("sent");
     expect(report.evidence.license_file?.additions).toBe(true);
+  });
+
+  test("a NEMAR-headed web copy of CC-BY-NC-4.0 sends only the header, never cut", async () => {
+    const ds = licensed("license-scan-web-copy", "gate-cc-by-nc-4.0-a");
+    const { license, facts, report, res } = await run(ds, {
+      licenseScanDir: scanDirFor(ds, "gate-cc-by-nc-4.0-a"),
+      scanOptions: { resultOwnerUid: UID },
+    });
+    expect(res.licenseFile?.partial).toBe(false);
+    expect(facts.license_file).toEqual({
+      state: "matches",
+      spdx: "CC-BY-NC-4.0",
+      text: "additions_only",
+    });
+    expect(license).toContain("The full text of");
+    expect(license).not.toContain(MISSING_MARK);
+    expect(license?.length ?? 0).toBeLessThan(400);
+    expect(report.evidence.documents.license).toBe("sent");
   });
 
   test("another license than the field's sends no text, and lowers authors_and_license", async () => {

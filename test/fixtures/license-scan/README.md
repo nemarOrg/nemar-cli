@@ -22,3 +22,10 @@ The seventh is the first of them with the MIT License text appended.
 Their `result.json` is ScanCode toolkit 32.5.0's output for that exact `LICENSE`, scanned with the workflow's options (`SCANCODE_ARGS`) from `scripts/ci/scancode-requirements.txt` in a `linux/amd64` `python:3.12.16-slim-bookworm` container,
 then trimmed with `jq` to the fields the parser reads (plus `matcher` and `rule_identifier`); no value was edited.
 The same container reproduced the runner's `cc-by-nc-4.0/result.json` `files` exactly, and the redaction left every match's rule, lines and score unchanged.
+
+## The partial-match cases (2026-11-27)
+
+`deed-and-cc-by-sa-4.0`, `gate-cc-by-nc-4.0-clause-deleted` and `mit-word-deleted` were scanned the same way as the NEMAR-header cases.
+`deed-and-cc-by-sa-4.0` is nm000982's root LICENSE unchanged (the CC deed's summary, then the legal code; it names no dataset).
+`gate-cc-by-nc-4.0-clause-deleted` is `gate-cc-by-nc-4.0-a` with the sentence of Section 8(a) ("For the avoidance of doubt, this Public License does not, ...") deleted.
+`mit-word-deleted` is the MIT License text of `header-cc-by-nc-4.0-and-mit` with ", merge" deleted.
