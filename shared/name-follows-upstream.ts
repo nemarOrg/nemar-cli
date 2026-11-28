@@ -285,6 +285,22 @@ export function declaredSourceTitles(sources: readonly UpstreamTitleSource[]): s
 }
 
 /**
+ * Every declared source was read with a title ({@link declaredSourceTitles} then lists them all).
+ * When one was not (its record not read, or read with no title), a Name that follows it cannot be
+ * ruled out, so the automatic denial protects the Name.
+ */
+export function declaredSourceTitlesComplete(sources: readonly UpstreamTitleSource[]): boolean {
+  return sources
+    .filter(isDeclared)
+    .every(
+      (s) =>
+        (s.status === "resolved" || s.status === "publication") &&
+        s.title !== null &&
+        foldWords(s.title).length > 0,
+    );
+}
+
+/**
  * Whether `name` follows any of `titles` ({@link followsTitle}, the name rule's folding and suffix
  * grammar, with the dataset's `authors` as the people an author-year may name). A Name equal to a
  * title, after folding, follows it.

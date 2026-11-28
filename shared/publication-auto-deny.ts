@@ -25,12 +25,11 @@
  * from a source, not from the depositor, and a person decides.
  *
  * **The mail names what is true of the dataset** (the lead's rulings of 2026-11-27, ADR 0139 as
- * amended that day, from the shadow run on production 0.10.58). `license_missing` is eligible only
- * when the platform found no `License` field and the model itself failed the question; a missing
- * LICENSE file beside a License field is not "no license". A `description_incomplete` finding is
- * eligible only about a document the copy names: about the README it is named as the README's
- * (`readme_missing_or_stub`), about `dataset_description.json` as itself, and about any other
- * document not at all. `steering_attempt` is eligible only from a blocker finding of that code.
+ * amended that day, from the shadow run on production 0.10.58, and its review). Every finding is
+ * eligible only against a question the model itself failed. `license_missing` is eligible only when
+ * the platform found no `License` field; a missing LICENSE file beside a License field is not "no
+ * license". README codes are said only of the README and only where the evidence supports them
+ * ({@link eligibleCodeOfFinding}). `steering_attempt` is eligible only from a blocker finding.
  */
 
 import {
@@ -238,18 +237,27 @@ export interface EligibilityContext {
 }
 
 /**
- * The eligible code a blocker finding stands for, or null when it stands for none. A
- * `description_incomplete` finding is named by the document it is about, since the copy names one:
- * the README's (`readme_missing_or_stub`, whose sentence and remedy are about the README), or
- * `dataset_description.json`'s own; about any other document, or none, it is not eligible.
+ * The eligible code a blocker finding stands for in `report`, or null when it stands for none.
+ * README codes are said only of the README and only where the platform's evidence supports them:
+ * a `readme_missing_or_stub` finding about the README (or about no document); a
+ * `description_incomplete` finding about the README only when the evidence records no README
+ * (`documents.readme` is `absent`), named as `readme_missing_or_stub`, since the platform has no
+ * fact for a README that exists but says too little; about `dataset_description.json` it is itself;
+ * about any other document, or none, it is not eligible.
  */
 export function eligibleCodeOfFinding(
   f: PublicationReviewReport["findings"][number],
+  report: PublicationReviewReport,
 ): AutoDenyFindingCode | null {
   if (!isOneOf(AUTO_DENY_FINDING_CODES, f.code)) return null;
+  if (f.code === "readme_missing_or_stub") {
+    return f.document === "readme" || f.document === null ? f.code : null;
+  }
   if (f.code !== "description_incomplete") return f.code;
-  if (f.document === "readme") return "readme_missing_or_stub";
   if (f.document === "dataset_description") return "description_incomplete";
+  if (f.document === "readme" && report.evidence.documents.readme === "absent") {
+    return "readme_missing_or_stub";
+  }
   return null;
 }
 
@@ -257,12 +265,14 @@ export function eligibleCodeOfFinding(
  * The eligible codes a report gives by itself: `steering_attempt` when a blocker finding of that
  * code stands; `name_differs_from_upstream` when that reason stands and the model itself failed
  * `name_adequate`; and the code of every blocker finding ({@link eligibleCodeOfFinding}) against a
- * question it failed, except, while {@link licenseFileDiffers}, one against `authors_and_license`
- * or one about the license under any question ({@link isAboutTheLicense}); except
- * `license_missing` unless the platform found no `License` field and the model's own answer to the
- * finding's question is `fail`; and except `name_not_descriptive` while {@link nameFromUpstream},
- * or while the Name follows a declared source's title or that is not known
- * (`context.nameFollowsASource` not `false`). Empty when its derived verdict is not `fail`.
+ * question THE MODEL ITSELF failed (`report.questions`, never an answer a platform fact lowered:
+ * both runs see the same fact, so their agreement on it would check nothing), except, while
+ * {@link licenseFileDiffers}, one against `authors_and_license` or one about the license under any
+ * question ({@link isAboutTheLicense}); except `license_missing` unless the platform found no
+ * `License` field; and except `name_not_descriptive` while {@link nameFromUpstream}, while the name
+ * rule could not decide (`name_upstream` is `unknown`), or while the Name follows a declared
+ * source's title or that is not known (`context.nameFollowsASource` not `false`). Empty when its
+ * derived verdict is not `fail`.
  */
 export function eligibleCodesOf(
   report: PublicationReviewReport,
@@ -284,11 +294,13 @@ export function eligibleCodesOf(
     codes.add("steering_attempt");
     under.add("steering_attempt");
   }
+  // The questions the model itself failed, and that still fail after the facts.
   const failed = new Set(
-    reasons.filter((r) => r.code === "question_failed").map((r) => r.detail ?? ""),
+    reasons
+      .filter((r) => r.code === "question_failed")
+      .map((r) => r.detail ?? "")
+      .filter((q) => isOneOf(QUESTIONS, q) && report.questions[q] === "fail"),
   );
-  // The model's own answer, never one a fact lowered (`answersOf`): the name fact must not be what
-  // makes the model's question fail, or the two runs' agreement would again check nothing.
   if (
     reasons.some((r) => r.code === "name_differs_from_upstream") &&
     report.questions.name_adequate === "fail"
@@ -298,23 +310,19 @@ export function eligibleCodesOf(
   }
   const differs = licenseFileDiffers(report);
   if (differs) failed.delete("authors_and_license" satisfies Question);
-  const fromUpstream = nameFromUpstream(report);
-  const fromASource = context.nameFollowsASource !== false;
+  const nameProtected =
+    nameFromUpstream(report) ||
+    report.evidence.name_upstream === "unknown" ||
+    context.nameFollowsASource !== false;
   for (const f of report.findings) {
     if (f.severity !== "blocker" || !failed.has(f.question)) continue;
     if (differs && isAboutTheLicense(f)) continue;
-    const code = eligibleCodeOfFinding(f);
+    const code = eligibleCodeOfFinding(f, report);
     if (code === null) continue;
-    // "The dataset has no license" is said only when the platform read no License field, and only
-    // beside the model's own fail: a missing LICENSE file beside a License field is not it
-    // (nm001019), nor is a question the model answered unknown (nm001014).
-    if (
-      code === "license_missing" &&
-      (report.evidence.license_field || report.questions[f.question] !== "fail")
-    ) {
-      continue;
-    }
-    if (code === "name_not_descriptive" && (fromUpstream || fromASource)) continue;
+    // "The dataset has no license" is said only when the platform read no License field: a missing
+    // LICENSE file beside a License field is not it (nm001019).
+    if (code === "license_missing" && report.evidence.license_field) continue;
+    if (code === "name_not_descriptive" && nameProtected) continue;
     codes.add(code);
     under.add("question_failed");
   }

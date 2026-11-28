@@ -271,11 +271,13 @@ describe("the automatic denial (ADR 0139 as amended on 2026-11-27)", () => {
   });
 
   test("name_not_descriptive stays eligible otherwise", () => {
-    for (const w of ["not_applicable", "unknown", undefined]) {
+    for (const w of ["not_applicable", undefined]) {
       expect(eligibleCodesOf(nameFailed(w), NO_SOURCE).codes, String(w)).toEqual([
         "name_not_descriptive",
       ]);
     }
+    // A name rule that could not decide protects the Name (ADR 0139, amended 2026-11-27).
+    expect(eligibleCodesOf(nameFailed("unknown"), NO_SOURCE).codes).toEqual([]);
     expect(eligibleCodesOf(nameFailed("differs"), NO_SOURCE).codes).toContain(
       "name_not_descriptive",
     );

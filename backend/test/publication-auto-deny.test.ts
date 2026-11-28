@@ -645,23 +645,24 @@ describe("never eligible: no confirming run is started", () => {
 });
 
 describe("the mail names what is true of the dataset (ADR 0139, amended 2026-11-27)", () => {
-  test("a template README coded description_incomplete is denied as the README's", async () => {
+  test("a README coded description_incomplete while the README exists never denies (nm001032)", async () => {
     await accounts();
     h.envOverrides = { PUBLICATION_AUTO_DENY_MODE: "on" };
     await withFakeResend(async (calls) => {
-      const body = { blockers: ["description_incomplete"] };
-      const { requestId, firstId } = await firstRun(body);
-      await confirmRun(firstId, confirmingBody(body));
-      expect(h.requestRow(requestId)).toMatchObject({ status: "denied" });
-      expect(h.review(firstId).auto_deny_codes).toBe("readme_missing_or_stub");
-      const mail = textOf(depositorMails(calls)[0]?.html ?? "");
-      expect(mail).toContain("The README is missing, or is a stub");
-      expect(mail).not.toContain("dataset_description.json leaves out");
+      const { requestId, firstId } = await firstRun({ blockers: ["description_incomplete"] });
+      // The platform has no fact that a README which exists is a stub: no confirming run.
+      expect(confirmOf(firstId)).toBeNull();
+      expect(h.requestRow(requestId).status).toBe("requested");
+      expect(depositorMails(calls)).toHaveLength(0);
     });
   });
 
   /** A first run whose served snapshot holds `name`, `titles` as the declared sources' titles. */
-  async function firstRunServed(name: string, titles: string[] | undefined): Promise<FirstRun> {
+  async function firstRunServed(
+    name: string,
+    titles: string[] | undefined,
+    complete = true,
+  ): Promise<FirstRun> {
     const { requestId, userId } = seedScreenedRequest(h.db, {
       datasetId: PROD_DATASET,
       mailed: false,
@@ -685,7 +686,9 @@ describe("the mail names what is true of the dataset (ADR 0139, amended 2026-11-
             credited: true,
             resolved_at: null,
             declared_licenses: [],
-            ...(titles === undefined ? {} : { source_titles: titles }),
+            ...(titles === undefined
+              ? {}
+              : { source_titles: titles, source_titles_complete: complete }),
           },
         }),
         firstId,
@@ -711,6 +714,9 @@ describe("the mail names what is true of the dataset (ADR 0139, amended 2026-11-
       // A snapshot written before the titles were kept protects it too.
       const before = await firstRunServed("EEG", undefined);
       expect(confirmOf(before.firstId)).toBeNull();
+      // A declared source read with no whole title could be the one it follows: protected.
+      const incomplete = await firstRunServed("EEG", [title], false);
+      expect(confirmOf(incomplete.firstId)).toBeNull();
       // A Name that follows no declared source's title is eligible as before.
       const other = await firstRunServed("EEG", [title]);
       expect(confirmOf(other.firstId)).not.toBeNull();

@@ -180,8 +180,8 @@ async function eligibilityOf(
  * Whether the reviewed Name follows the title of a declared source, a publication included, from
  * the snapshot of what the first run was served (migration 0163): its `Name` and `Authors` and the
  * declared sources' titles. Null when the snapshot, its description or its titles were not kept
- * (a review served before the titles were, or a snapshot too long for its column), which protects
- * the Name: a person decides.
+ * (a review served before the titles were, or a snapshot too long for its column), or when some
+ * declared source has no whole title on record, which protects the Name: a person decides.
  */
 async function nameFollowsASourceOf(db: Db, first: PublicationReviewRow): Promise<boolean | null> {
   const r = await db
@@ -192,6 +192,9 @@ async function nameFollowsASourceOf(db: Db, first: PublicationReviewRow): Promis
   const titles = snapshot?.lineage?.source_titles;
   const description = snapshot?.dataset_description ?? null;
   if (titles === undefined || description === null || description.name === null) return null;
+  // A declared source read with no title, or a title not kept whole, could be the one the Name
+  // follows: not knowing protects the Name.
+  if (snapshot?.lineage?.source_titles_complete !== true) return null;
   return nameFollowsAnySourceTitle(description.name, titles, description.authors);
 }
 

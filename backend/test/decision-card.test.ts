@@ -129,6 +129,7 @@ describe("the snapshot of what the review was served", () => {
         // Every declared source's title, publications included (none here), for the automatic
         // denial's name rule (ADR 0139, amended 2026-11-27).
         source_titles: [],
+        source_titles_complete: true,
       },
     });
     expect(JSON.stringify(snapshot)).not.toContain("never on the card");

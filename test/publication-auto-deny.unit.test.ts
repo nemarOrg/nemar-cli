@@ -6,24 +6,27 @@
  * "The mail names what is true of the dataset" (ADR 0139, amended 2026-11-27) is pinned on the
  * first-run reports of the shadow run on production 0.10.58 (`test/fixtures/auto-deny-shadow/`).
  * Mutation checks, each applied alone to `shared/publication-auto-deny.ts`, run, and restored:
- *  - dropping `report.evidence.license_field ||` from the license_missing rule turns "a License
+ *  - dropping the `report.evidence.license_field` condition of license_missing turns "a License
  *    field with no LICENSE file is not 'no license'" red;
- *  - dropping `report.questions[f.question] !== "fail"` from it turns "never on a question the
- *    model answered unknown" red;
- *  - returning `f.code` for every description_incomplete in `eligibleCodeOfFinding` turns "a
- *    template README is named as the README's" and "about another document it is not eligible" red;
+ *  - dropping the model's-own-fail filter on `failed` turns "every finding needs the model's own
+ *    fail" red;
+ *  - dropping the `documents.readme === "absent"` condition, or the document check on a native
+ *    readme_missing_or_stub, turns the decision 2 tests red;
  *  - dropping the blocker condition on steering turns "a reader note coded as steering" red;
- *  - dropping `|| fromASource` turns "a Name that is a declared publication's title" red.
+ *  - dropping `name_upstream === "unknown"` or the any-source protection turns the name tests red.
  *
  * CI TIER: unit-pure. No network, no database.
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   evidenceFor,
   goodPublicationReport,
   v3PublicationReport,
 } from "../backend/test/helpers/publication-review";
+import { descriptionFacts } from "../scripts/ci/publication-review-evidence";
 import { LICENSE_FILE_STATES, type LicenseFileState } from "../shared/license-file";
 import { LINEAGE_OUTCOMES } from "../shared/license-lineage";
 import { nameFollowsAnySourceTitle } from "../shared/name-follows-upstream";
@@ -58,6 +61,7 @@ import {
   type PublicationReviewReport,
   REASON_CODES,
   REVIEW_INPUTS,
+  answersOf,
   parsePublicationReviewReport,
   previousDenialReasonsOf,
   reportReasons,
@@ -442,7 +446,7 @@ describe("what may deny", () => {
         [["complete_and_honest", "license_inconsistent"]],
         [["meets_standards", "license_inconsistent", "readme"]],
         // Any finding about the LICENSE document, whatever its code.
-        [["complete_and_honest", "readme_missing_or_stub", "license"]],
+        [["complete_and_honest", "ethics_statement_missing", "license"]],
         [
           ["authors_and_license", "license_inconsistent"],
           ["name_adequate", "license_inconsistent", "dataset_description"],
@@ -681,28 +685,40 @@ describe("the shadow run's records: the mail names what is true of the dataset",
     expect(codesOf(lowered)).not.toContain("license_missing");
   });
 
-  test("decision 2: a template README coded description_incomplete is named as the README's", () => {
+  test("decision 2: a README description_incomplete is not eligible while the README exists", () => {
+    // nm001032, nm001039 and nm001041: the model coded a template README description_incomplete.
+    // The platform has no fact that a README which exists says too little, so the finding is not
+    // eligible on the model's word; nm001032, whose only blocker it is, goes to a person.
     for (const id of ["nm001032", "nm001039", "nm001041"] as const) {
       const r = shadow(id);
-      const readmeFinding = r.findings.find(
+      expect(r.evidence.documents.readme).toBe("sent");
+      const finding = r.findings.find(
         (f) => f.code === "description_incomplete" && f.severity === "blocker",
       );
-      expect({ id, document: readmeFinding?.document }).toEqual({ id, document: "readme" });
+      expect({ id, document: finding?.document }).toEqual({ id, document: "readme" });
       const codes = codesOf(r);
-      expect({ id, named: codes.includes("description_incomplete") }).toEqual({
-        id,
-        named: false,
-      });
       expect({ id, readme: codes.includes("readme_missing_or_stub") }).toEqual({
         id,
-        readme: true,
+        readme: false,
       });
-      // The mail's sentence is about the README, never about dataset_description.json.
+      expect(codes).not.toContain("description_incomplete");
       expect(mailSays(codes).join(" ")).not.toContain("dataset_description.json leaves out");
-      expect(mailSays(codes)[0]).toContain(AUTO_DENY_CODE_COPY.readme_missing_or_stub.statement);
     }
-    // nm001032's only blocker is that finding: its mail names the README alone.
-    expect(codesOf(shadow("nm001032"))).toEqual(["readme_missing_or_stub"]);
+    expect(codesOf(shadow("nm001032"))).toEqual([]);
+    // A substantial README lacking a detail, with the README sent: not eligible.
+    expect(codesOf(failingAbout("description_incomplete", "readme"))).toEqual([]);
+  });
+
+  test("decision 2: with no README on record the finding is named as the README's", () => {
+    const r = report(
+      {
+        questions: { ...PASSED, complete_and_honest: "fail" },
+        findings: [blocker("complete_and_honest", "description_incomplete", "readme")],
+      },
+      { documents: { ...(evidenceFor().documents as Record<string, string>), readme: "absent" } },
+    );
+    expect(codesOf(r)).toEqual(["readme_missing_or_stub"]);
+    expect(mailSays(codesOf(r))[0]).toContain(AUTO_DENY_CODE_COPY.readme_missing_or_stub.statement);
   });
 
   test("decision 2: about dataset_description.json it is itself, about another document not eligible", () => {
@@ -714,6 +730,90 @@ describe("the shadow run's records: the mail names what is true of the dataset",
         document,
         codes: codesOf(failingAbout("description_incomplete", document)),
       }).toEqual({ document, codes: [] });
+    }
+  });
+
+  test("decision 2: readme_missing_or_stub is said only of the README", () => {
+    expect(codesOf(failingAbout("readme_missing_or_stub", "readme"))).toEqual([
+      "readme_missing_or_stub",
+    ]);
+    expect(codesOf(failingAbout("readme_missing_or_stub", null))).toEqual([
+      "readme_missing_or_stub",
+    ]);
+    for (const document of ["dataset_description", "changes", "participants_json"]) {
+      expect({
+        document,
+        codes: codesOf(failingAbout("readme_missing_or_stub", document)),
+      }).toEqual({ document, codes: [] });
+    }
+  });
+
+  test("every finding needs the model's own fail, never one a platform fact lowered", () => {
+    // The model passed authors_and_license with a placeholder blocker (the parser makes that
+    // unknown), and the platform's placeholder fact lowered it to fail: not eligible.
+    const r = report(
+      {
+        questions: { ...PASSED, authors_and_license: "pass" },
+        findings: [blocker("authors_and_license", "authors_placeholder", "dataset_description")],
+      },
+      { authors_count: 1, placeholder_authors: 1 },
+    );
+    expect(r.questions.authors_and_license).toBe("unknown");
+    expect(verdictOf(reportReasons(r))).toBe("fail");
+    expect(codesOf(r)).toEqual([]);
+    // The same finding beside the model's own fail is eligible.
+    const own = report(
+      {
+        questions: { ...PASSED, authors_and_license: "fail" },
+        findings: [blocker("authors_and_license", "authors_placeholder", "dataset_description")],
+      },
+      { authors_count: 1, placeholder_authors: 1 },
+    );
+    expect(codesOf(own)).toEqual(["authors_placeholder"]);
+  });
+
+  test("end to end: nm001019's own dataset_description.json gives the placeholder fact", () => {
+    // The file as the review job read it at the reviewed commit; its only author is the converter's
+    // pointer, which the stored evidence (made before the rule) counted as no placeholder.
+    const text = readFileSync(
+      join(import.meta.dir, "fixtures/auto-deny-shadow/nm001019-dataset_description.json"),
+      "utf-8",
+    );
+    expect(shadowRun.reviews.nm001019.report.evidence.placeholder_authors).toBe(0);
+    const facts = descriptionFacts(text, null, false, { readmeUnread: true });
+    expect(facts).toMatchObject({ authors_count: 1, placeholder_authors: 1, minimums: "failed" });
+    expect(facts.minimum_failures).toContain("authors_missing");
+    // The job's facts in the stored report: the parser accepts them, the platform now agrees with
+    // the model's placeholder blocker, and that blocker (the model failed the question) is eligible.
+    const r = shadow("nm001019", facts);
+    expect(answersOf(r).answers.authors_and_license).toBe("fail");
+    expect(reportReasons(r).map((x) => x.code)).toContain("submission_minimum_failed");
+    expect(codesOf(r)).toContain("authors_placeholder");
+    expect(codesOf(r)).not.toContain("license_missing");
+    // Had the model answered unknown, the fact alone lowers the question to fail, and nothing on it
+    // is eligible: the fact is the same in both runs.
+    const body = structuredClone(shadowRun.reviews.nm001019.report) as Record<string, unknown>;
+    body.questions = {
+      ...(body.questions as Record<string, string>),
+      authors_and_license: "unknown",
+    };
+    body.findings = (body.findings as Array<Record<string, unknown>>).filter(
+      (f) => f.question !== "authors_and_license",
+    );
+    body.evidence = { ...(body.evidence as Record<string, unknown>), ...facts };
+    const unknown = parsePublicationReviewReport(body);
+    expect(answersOf(unknown).notes).toContainEqual(
+      expect.objectContaining({ question: "authors_and_license", fact: "placeholder_author" }),
+    );
+    expect(codesOf(unknown)).not.toContain("authors_placeholder");
+  });
+
+  test("the converter placeholder is eligible only where the model itself failed the question", () => {
+    // The first runs of the shadow run whose only author is the converter's pointer.
+    for (const id of ["nm001019", "nm001037", "nm001039", "nm001041"] as const) {
+      const r = shadow(id);
+      expect(r.questions.authors_and_license).toBe("fail");
+      expect({ id, e: codesOf(r).includes("authors_placeholder") }).toEqual({ id, e: true });
     }
   });
 
@@ -742,14 +842,15 @@ describe("the shadow run's records: the mail names what is true of the dataset",
     expect(nameFollowsAnySourceTitle(name, [title])).toBe(true);
     // Folding: case, punctuation and British spelling do not make it another title.
     expect(nameFollowsAnySourceTitle(name.toUpperCase().replace(/ /g, "  "), [title])).toBe(true);
-    expect(codesOf(r, true)).toEqual(["readme_missing_or_stub"]);
+    // Its README finding is description_incomplete about a README that exists: not eligible.
+    expect(codesOf(r, true)).toEqual([]);
     // Not known (a snapshot written before the titles were kept) protects the Name too.
-    expect(codesOf(r, null)).toEqual(["readme_missing_or_stub"]);
+    expect(codesOf(r, null)).toEqual([]);
     // A Name that follows no source's title keeps the finding eligible.
-    expect(codesOf(r, false)).toEqual(["readme_missing_or_stub", "name_not_descriptive"]);
-    expect(autoDenyEligibility(input({ report: r, nameFollowsASource: true }))).toMatchObject({
-      eligible: true,
-      codes: ["readme_missing_or_stub"],
+    expect(codesOf(r, false)).toEqual(["name_not_descriptive"]);
+    expect(autoDenyEligibility(input({ report: r, nameFollowsASource: true }))).toEqual({
+      eligible: false,
+      why: "no_eligible_reason",
     });
   });
 

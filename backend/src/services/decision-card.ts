@@ -59,6 +59,7 @@ import {
   NAME_UPSTREAM_RESULTS,
   type NameUpstreamResult,
   declaredSourceTitles,
+  declaredSourceTitlesComplete,
   upstreamDatasetTitles,
 } from "../../../shared/name-follows-upstream.js";
 import {
@@ -95,6 +96,8 @@ export type CardDetail = Omit<PublicationReviewDetail, "decision_card">;
 const MAX_ITEMS = 30;
 const MAX_ITEM = 150;
 const MAX_TITLE = 300;
+/** The longest declared-source title kept whole for the automatic denial's name comparison. */
+const MAX_SOURCE_TITLE = 2000;
 const MAX_LICENSE = 200;
 const MAX_DECLARED = 10;
 const MAX_DECLARED_ITEM = 200;
@@ -219,6 +222,12 @@ export interface ServedLineage {
    */
   source_titles?: string[];
   /**
+   * Every declared source was read with a whole title (`declaredSourceTitlesComplete`, and none
+   * cut to fit): only then can the automatic denial rule out that the Name follows one. Absent on a
+   * snapshot written before it, which protects the Name.
+   */
+  source_titles_complete?: boolean;
+  /**
    * One line per source its registry types as a paper that holds data files
    * (`paperWithDataFilesLine`); absent when there is none.
    */
@@ -233,11 +242,16 @@ export function cardLineageOf(result: LineageResult): ServedLineage {
     (t) => clean(t, MAX_TITLE),
     MAX_DECLARED,
   );
-  const sourceTitles = list(
-    declaredSourceTitles(result.sources),
-    (t) => clean(t, MAX_TITLE),
-    MAX_DECLARED,
-  );
+  // Whole titles, for the automatic denial's comparison: a title cut to fit, or more titles than
+  // are kept, leaves the list incomplete, which protects the Name.
+  const allTitles = declaredSourceTitles(result.sources);
+  const sourceTitles: string[] = [];
+  let titlesWhole = allTitles.length <= MAX_DECLARED;
+  for (const t of allTitles.slice(0, MAX_DECLARED)) {
+    const c = cleanText(t, MAX_SOURCE_TITLE);
+    if (c === null || c.cut) titlesWhole = false;
+    else sourceTitles.push(c.text);
+  }
   const papers = list(
     result.sources.map((s) => paperWithDataFilesLine(s)),
     (l) => clean(l, MAX_DECLARED_ITEM * 2),
@@ -265,6 +279,7 @@ export function cardLineageOf(result: LineageResult): ServedLineage {
       : {}),
     ...(titles.length > 0 ? { upstream_titles: titles } : {}),
     source_titles: sourceTitles,
+    source_titles_complete: titlesWhole && declaredSourceTitlesComplete(result.sources),
     ...(papers.length > 0 ? { paper_with_data_files: papers } : {}),
   };
 }
@@ -362,6 +377,8 @@ function readLineage(v: unknown): ServedLineage | null | undefined {
   if (titles === null) return undefined;
   const sourceTitles = v.source_titles === undefined ? undefined : strings(v.source_titles);
   if (sourceTitles === null) return undefined;
+  const complete = v.source_titles_complete;
+  if (complete !== undefined && typeof complete !== "boolean") return undefined;
   const papers = v.paper_with_data_files === undefined ? [] : strings(v.paper_with_data_files);
   if (papers === null) return undefined;
   return {
@@ -373,6 +390,7 @@ function readLineage(v: unknown): ServedLineage | null | undefined {
     ...(typeof skipped === "number" && skipped > 0 ? { skipped_stale_relations: skipped } : {}),
     ...(titles.length > 0 ? { upstream_titles: titles } : {}),
     ...(sourceTitles !== undefined ? { source_titles: sourceTitles } : {}),
+    ...(typeof complete === "boolean" ? { source_titles_complete: complete } : {}),
     ...(papers.length > 0 ? { paper_with_data_files: papers } : {}),
   };
 }

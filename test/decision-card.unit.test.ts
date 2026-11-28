@@ -813,6 +813,21 @@ describe("the served snapshot", () => {
       undefined,
     );
     expect(cardLineageOf({ ...PAPER_AND_OSF, sources: [] }).source_titles).toEqual([]);
+    // Complete only when every declared source was read with a whole title.
+    expect(lineage.source_titles_complete).toBe(true);
+    const [paper, osf] = PAPER_AND_OSF.sources;
+    const failed = { ...osf, title: null, status: "fetch_failed" } as LineageSource;
+    expect(
+      cardLineageOf({ ...PAPER_AND_OSF, sources: [paper, failed] }).source_titles_complete,
+    ).toBe(false);
+    // A long title is kept whole for the comparison (past the card's 300 characters), and one too
+    // long to keep whole leaves the list incomplete.
+    const long = { ...paper, title: `${"word ".repeat(300)}end` } as LineageSource;
+    const kept = cardLineageOf({ ...PAPER_AND_OSF, sources: [long] });
+    expect(kept.source_titles).toEqual([long.title]);
+    expect(kept.source_titles_complete).toBe(true);
+    const huge = { ...paper, title: "word ".repeat(500) } as LineageSource;
+    expect(cardLineageOf({ ...PAPER_AND_OSF, sources: [huge] }).source_titles_complete).toBe(false);
     // The card's license panel carries the paper's line under the registry label.
     const c = card(detailOf(), { snapshot: snap });
     expect(c.license.lineage?.paper_with_data_files).toEqual({
