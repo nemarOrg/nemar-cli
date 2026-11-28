@@ -13,6 +13,30 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+### Fixed
+
+- **The automatic denial's mail names only reasons that are true of the dataset (ADR 0139 and 0142, amendments of 2026-11-27, from the shadow run on production 0.10.58).**
+  In the shadow run, agreed denials would have told depositors things that were false or about the wrong document.
+  `license_missing` ("The dataset has no license") now denies only when the platform read no `License` field and the model itself failed the question; nm001019 has `License: CC-BY-4.0` and no LICENSE file.
+  A `description_incomplete` finding about the README (a template README, nm001032, nm001039, nm001041) is named with the README's sentence (`readme_missing_or_stub`), one about `dataset_description.json` keeps its own, and one about any other document never denies.
+  `steering_attempt` denies only from a blocker finding of that code; a note about a reader's instruction (nm000622) does not.
+  `name_not_descriptive` never denies a Name that follows the title of any declared source, a publication included (nm001028's Name is its Zenodo journal article's title); the served snapshot now keeps those titles, and a review without them protects the Name.
+- **A converter's author placeholder is a placeholder.**
+  "Original Dataset Authors (see SourceDatasets)" (the only author of nine datasets in the shadow run) and similar entries are now placeholders, so the review's facts, the decision card and the model agree; the card's count is never below the names it flags.
+  As with every placeholder, a named request whose only author is one now fails ADR 0026's Authors minimum.
+- **An OSF source is named by its URL when DataCite does not hold its DOI.**
+  NEMAR maps `https://osf.io/<guid>` to `10.17605/osf.io/<guid>` to look it up; when DataCite does not hold it (nm001019's `10.17605/osf.io/fx4ud`), the card, `license-check`, `publish license-lineage` and the review's registry records show `https://osf.io/<guid>` instead of a DOI that does not exist.
+
+### Added
+
+- **Shadow-mode agreements record the reasons their mail would name (migration 0164, `publication_reviews.auto_deny_codes`).**
+  The codes both runs agreed on are written with `would_deny`, `capped`, `denied` and `no_service_account`, shown in `nemar admin dataset publish show` and on the decision card's automatic-denial line with the mail's sentences, and used by the daily digest and the mail retry.
+- **The decision card says when a source typed as a paper holds data files.**
+  For a Zenodo record its registry types as a publication, the resolver reads Zenodo's record and keeps its type and files; the card's license panel then says "the registry types this record as a journal article but it holds data files" (nm001028's `10.5281/zenodo.3648065` holds `Data.zip`).
+  The source stays a publication for the lineage, and nothing automatic changes: an administrator decides.
+
 ## 0.10.58 - 2026-11-27
 
 ### Added

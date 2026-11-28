@@ -239,3 +239,29 @@ So decision 1 gains two conditions:
 
 `name_upstream_unconfirmed` never denies and mails nobody: it is NEMAR's failure to read a record, or an upstream renamed since the copy, which only a person can judge, as `unresolved` is in decision 7.
 The depositor's copy (`AUTO_DENY_CODE_COPY.name_differs_from_upstream`) names the rule and the suffix shapes; its docs anchor, `#automatic-denial-name-differs-from-upstream`, is added to the submission standards page with the website's next release.
+
+## Amendment 2026-11-27 (lead, shadow run on 0.10.58): the mail names what is true of the dataset
+
+The shadow run of 40 requests on production 0.10.58 recorded agreements whose denial mail would have stated a reason that was false or about the wrong document.
+Before the owner switches `PUBLICATION_AUTO_DENY_MODE` from `shadow` to `on`, decision 1's eligibility and decision 4's mail gain these rules (`shared/publication-auto-deny.ts`; fixtures from the run's first-run reports in `test/fixtures/auto-deny-shadow/`):
+
+- **`license_missing` is eligible only when the platform found no `License` field** (`license_field` false, the fact `license_field_missing`) **and the model's own answer to the finding's question is `fail`.**
+  A model's word alone never denies on it, and neither does a question the model answered `unknown` that the fact lowered.
+  nm001019 declares `License: CC-BY-4.0` and has no LICENSE file; its `license_missing` blocker would have mailed "The dataset has no license".
+  nm001014's sits on a question the model answered `unknown`.
+- **A `description_incomplete` finding is named by the document it is about.**
+  About the README it is eligible under the README's code and sentence (`readme_missing_or_stub`: "The README is missing, or is a stub that does not describe the dataset", with the remedy to write a README that says what was recorded, from whom, how, and how the files are organized), because that is what the finding says of a template README (nm001032, nm001039, nm001041).
+  About `dataset_description.json` it keeps its own sentence.
+  About any other document, or none, it is not eligible: the copy names `dataset_description.json` and would misdirect the depositor.
+  Mapping, not dropping, was chosen because the README sentence and remedy are accurate for a template README, and dropping would leave those requests to an administrator for no gain in accuracy; a confirming run's README finding under either code agrees with the first run's.
+- **`steering_attempt` is eligible only from a blocker finding of that code.**
+  The report's `steering` flag is also set by a finding at `note` or `concern` (nm000622: the README tells readers how to count participants), and that still fails the review, but a person decides.
+- **`name_not_descriptive` is protected whenever the Name follows the title of any declared source, a publication included**, by the name rule's folding and suffix grammar (`nameFollowsAnySourceTitle`, `shared/name-follows-upstream.ts`).
+  nm001028's Name is the exact title of `10.5281/zenodo.3648065`, which its registry types as a journal article, so the name rule's `name_upstream` is `not_applicable` and did not protect it.
+  The served snapshot (migration 0163) keeps every declared source's title as `source_titles`; the Worker reads the first run's snapshot, and a snapshot without them (one written before this rule, or one too long for its column) protects the Name.
+- **Placeholder authors**: "Original Dataset Authors (see SourceDatasets)", the only author of nine datasets in the run, and entries that open with "Original (dataset or data) authors" or "creators" or that say "see SourceDatasets", are placeholders in `isPlaceholderAuthor` (ADR 0026's rule), so the evidence's `placeholder_authors`, the decision card and the model agree.
+  As for every placeholder, a named request whose only author is one fails the Authors minimum.
+- **The agreed codes are stored** (migration 0164, `publication_reviews.auto_deny_codes`): written on the first run in the statement that records `would_deny`, `capped`, `denied` or `no_service_account`, so an administrator reads in shadow mode exactly the reasons the mail would name, even after the rule changes.
+  `nemar admin dataset publish show` and the decision card's automatic-denial line print each code with its mail sentence; the digest and the mail's retry read them, and recompute from the reports only for a row recorded before the column.
+- **An OSF source DataCite does not hold is named by its URL** (ADR 0142's amendment of this date): decision 7's lineage never presents `10.17605/osf.io/<guid>` as a registered DOI when it is NEMAR's construction from `https://osf.io/<guid>` (nm001019's `10.17605/osf.io/fx4ud` does not exist), and the review's registry records name the URL too.
+- **A Zenodo record typed as a paper that holds data files** keeps decision 7's classification: it is a publication for the lineage, its outcome is unchanged and nothing automatic widens; the resolver records Zenodo's type and files on the source, and the decision card says so (ADR 0142's amendment of this date).

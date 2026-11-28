@@ -332,3 +332,21 @@ Sent whole, the files were cut at the cap, and a cut document lowers `authors_an
   So the model reads the deleted and the added words instead of the file, and `additions` is set by any of them.
 - **The file is sent whole, as before,** when no official text is vendored for `P`, its SHA-256 differs, the longest match is not a full text, or the diff is too large to compute (`MAX_DIFF_CELLS`).
 - The matcher version does not change.
+
+## Amendment 2026-11-27 (lead, shadow run on 0.10.58): what the card says of sources, authors and the denial
+
+ADR 0139's amendment of the same date settles the automatic denial's mail reasons; decisions 3 and 4 gain the parts the card and the lineage own.
+
+- **Decision 3: an OSF node DataCite does not hold is named by its URL.**
+  The resolver maps `https://osf.io/<guid>` to `10.17605/osf.io/<guid>` to look it up; when DataCite answers that it does not hold the DOI, the record is marked `doi_registered: false` and every surface names it `https://osf.io/<guid>` (`sourceLabelOf`): the card's declared licenses, `lineageLines` and the review's registry records.
+  The record's `id`, the cache key and the permission basis keep the DOI form, so nothing a permission or a cache matched changes.
+  nm001019's `10.17605/osf.io/fx4ud` does not exist; the model had read it as an OSF-issued DOI the README disagreed with.
+- **Decision 3: a Zenodo record its registry types as a paper records what it holds.**
+  For a Zenodo DOI whose DataCite record is not a `Dataset`, the resolver reads Zenodo's record (`/api/records/<id>`, which answers a concept id with its latest version) and keeps its type and files (`registry_files`: Zenodo's type, the file count, the count of files that are not documents, and up to three of their names).
+  The record stays a publication and its outcome is unchanged; a record that cannot be read records nothing.
+  The DOI cache key becomes `doi3:`, so records cached without these fields are read again.
+- **Decision 4: the license panel says when a paper holds data files.**
+  The served snapshot keeps one line per such source (`paper_with_data_files`), and the card's lineage carries it under the registry label: "the registry types this record as a journal article but it holds data files (N of M files, such as ...); it is still read as a publication for the license lineage, and an administrator decides" (nm001028's `10.5281/zenodo.3648065` holds one `Data.zip`; nm000661's `10.5281/zenodo.6529724` holds 35 `.mat` files).
+  The cue is unchanged: `source_is_publication` stays amber.
+- **Decision 4: authors.** The placeholder count is the larger of the review's count and the names the card flags now, so it never says fewer placeholders than the names it lists (a review made before a placeholder form was recognized counted none).
+- **Decision 4: the automatic-denial line carries the agreed codes** (`auto_deny.codes`, and the mail's sentence for each in `auto_deny.reasons`), read from migration 0164's column; empty for a state that records no agreement and for one recorded before the column.
