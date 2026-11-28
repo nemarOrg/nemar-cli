@@ -328,10 +328,9 @@ Sent whole, the files were cut at the cap, and a cut document lowers `authors_an
 
 - **The official texts are vendored**: `legalcode.txt` of CC-BY, CC-BY-SA, CC-BY-NC, CC-BY-NC-SA, CC-BY-ND and CC-BY-NC-ND 4.0 and of CC0-1.0, byte for byte as creativecommons.org served them on 2026-11-27, in `scripts/ci/license-texts/` with a manifest of each file's URL and SHA-256.
   Creative Commons dedicates these texts to the public domain under CC0.
-- **When the longest match of `P` covers less than 100%** and `P`'s text is vendored (its SHA-256 matching), the longest match's lines are diffed word by word (letters and digits, lowercased) against the whole official text.
-  Not missing: the two Considerations links, the closing CC0 sentence (`WEB_COPY_PIECES`), and the official title when another match of `P` outside the longest match's lines reads exactly the title's words.
-  When nothing else is missing, the match is whole: `partial` is false, and `additions` comes only from the leftover.
-  When anything else is missing, `partial` is false too, and each missing run of official text is a leftover piece marked `[missing from the official text]`, so the model reads the deleted words beside the added ones instead of the file.
-- **The file is sent whole, as before,** when no official text is vendored for `P`, its SHA-256 differs, or the diff is too large to compute.
-- Words the file has beyond the official text are not judged by this diff; ScanCode's diagnostics and the leftover rule report them as before.
+- **When the longest match of `P` covers less than 100%**, is a full text (its `matched_length` is at least 90% of the official text's words, `FULL_TEXT_MIN_SHARE`; a notice or a fragment is not), and `P`'s text is vendored (its SHA-256 matching), the longest match's lines are diffed word by word (letters and digits, lowercased) against the whole official text, in both directions.
+  Not missing: a Considerations link or the closing CC0 sentence (`WEB_COPY_PIECES`) that the matched lines do not have, and the official title when another match of `P` outside the longest match's lines reads exactly the title's words.
+  `partial` is then false, and the diff's pieces join the leftover: each run of official words the file lacks, marked `[missing from the official text]`, and each run of words the file has that the official text does not (an insertion, a substitution, a web copy's own heading words), marked `[added beyond the official text]`, whether or not ScanCode bracketed them.
+  So the model reads the deleted and the added words instead of the file, and `additions` is set by any of them.
+- **The file is sent whole, as before,** when no official text is vendored for `P`, its SHA-256 differs, the longest match is not a full text, or the diff is too large to compute (`MAX_DIFF_CELLS`).
 - The matcher version does not change.
