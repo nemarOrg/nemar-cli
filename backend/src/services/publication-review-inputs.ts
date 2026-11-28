@@ -24,6 +24,7 @@
  * never what it found. No finding kind and no finding count leaves this module.
  */
 
+import { sourceLabelOf } from "../../../shared/license-lineage.js";
 import { permissionBasisOf } from "../../../shared/license-permission.js";
 import { CONFIRMING_EFFORT, CONFIRMING_MODEL } from "../../../shared/publication-auto-deny.js";
 import {
@@ -422,7 +423,9 @@ export async function publicationReviewInputs(
       outcome: lineage.outcome,
       target_license: lineage.target_license,
       sources: lineage.sources.slice(0, MAX_INPUT_SOURCES).map((s) => ({
-        id: s.id,
+        // An OSF node DataCite does not hold is named by its URL: the review must not read a DOI
+        // NEMAR constructed as one the registry issued (nm001019).
+        id: sourceLabelOf(s),
         resolver: s.resolver,
         resource_type: s.resource_type,
         title: s.title,

@@ -6459,6 +6459,7 @@ function licenseCheckBases(): RegistryBases {
     physionet: env.NEMAR_LICENSE_PHYSIONET_URL || DEFAULT_BASES.physionet,
     osf: env.NEMAR_LICENSE_OSF_URL || DEFAULT_BASES.osf,
     figshare: env.NEMAR_LICENSE_FIGSHARE_URL || DEFAULT_BASES.figshare,
+    zenodo: env.NEMAR_LICENSE_ZENODO_URL || DEFAULT_BASES.zenodo,
   };
 }
 

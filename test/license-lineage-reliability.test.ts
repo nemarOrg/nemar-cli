@@ -32,7 +32,9 @@ import {
   mapCache,
   normalizeLicense,
   osfDoiOfUrl,
+  paperWithDataFilesLine,
   resolveLicenseLineage,
+  sourceLabelOf,
 } from "../shared/license-lineage";
 import { type StandIn, startStandIn } from "./fixtures/license-lineage/stand-in";
 
@@ -1092,6 +1094,76 @@ describe("data containers are data; publications stay publications", () => {
       status: "publication",
     });
     expect(standIn.misses).toEqual([]);
+  });
+
+  test("a Zenodo journal article that holds data files says so, and stays a publication (nm001028)", async () => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "doi:10.5281/zenodo.3648065" }]));
+    expect(r.outcome).toBe("source_is_publication");
+    const s = r.sources[0];
+    expect(s).toMatchObject({
+      id: "10.5281/zenodo.3648065",
+      resolver: "datacite",
+      resource_type: "Text",
+      status: "publication",
+      outcome: "source_is_publication",
+      registry_files: { type: "Journal article", files: 1, data_files: 1, examples: ["Data.zip"] },
+    });
+    expect(paperWithDataFilesLine(s)).toBe(
+      "10.5281/zenodo.3648065: the registry types this record as a journal article but it holds data files (1 of 1 files, such as Data.zip); it is still read as a publication for the license lineage, and an administrator decides.",
+    );
+    expect(lineageLines(r).join("\n")).toContain("but it holds data files");
+    // nm000661's source holds 35 .mat files; the outcome is the same.
+    const other = await run(inputs("CC-BY-4.0", [{ DOI: "10.5281/zenodo.6529724" }]));
+    expect(other.outcome).toBe("source_is_publication");
+    expect(other.sources[0].registry_files).toMatchObject({ files: 35, data_files: 35 });
+    expect(other.sources[0].registry_files?.examples).toHaveLength(3);
+    expect(standIn.misses).toEqual([]);
+  });
+
+  test("a Zenodo record that cannot be read records nothing and changes nothing", async () => {
+    standIn.override("zenodo /records/3648065", { status: 503 });
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.5281/zenodo.3648065" }]), {
+      retry: NO_RETRY,
+    });
+    expect(r.outcome).toBe("source_is_publication");
+    expect(r.sources[0].status).toBe("publication");
+    expect(r.sources[0]).not.toHaveProperty("registry_files");
+    expect(paperWithDataFilesLine(r.sources[0])).toBeNull();
+  });
+
+  test("a paper whose files are all documents, and a dataset, are not called papers with data", () => {
+    const base = { id: "10.5281/zenodo.1", doi_registered: undefined } as const;
+    const docs = { type: "Journal article", files: 2, data_files: 0, examples: [] };
+    expect(
+      paperWithDataFilesLine({ ...base, status: "publication", registry_files: docs }),
+    ).toBeNull();
+    const data = { ...docs, data_files: 1, examples: ["a.zip"] };
+    expect(
+      paperWithDataFilesLine({ ...base, status: "resolved", registry_files: data }),
+    ).toBeNull();
+    expect(paperWithDataFilesLine({ ...base, status: "publication" })).toBeNull();
+  });
+
+  test("an OSF node DataCite does not hold is named by its URL, never by a DOI that does not exist (nm001019)", async () => {
+    const r = await run(inputs("CC-BY-SA-4.0", [{ URL: "https://osf.io/rmafj" }]));
+    expect(standIn.requests).toContain("GET datacite /dois/10.17605/osf.io/rmafj?");
+    expect(r.sources[0]).toMatchObject({ id: "10.17605/osf.io/rmafj", doi_registered: false });
+    expect(sourceLabelOf(r.sources[0])).toBe("https://osf.io/rmafj");
+    const printed = lineageLines(r).join("\n");
+    expect(printed).toContain("  - https://osf.io/rmafj [source_datasets]");
+    expect(printed).not.toContain("- 10.17605/osf.io/rmafj");
+    // A failed read of the node says the same.
+    standIn.override("osf /v2/nodes/rmafj", { status: 401 });
+    const failed = await run(inputs("CC0", [{ URL: "https://osf.io/rmafj/" }]), {
+      retry: NO_RETRY,
+    });
+    expect(sourceLabelOf(failed.sources[0])).toBe("https://osf.io/rmafj");
+  });
+
+  test("an OSF DOI DataCite holds keeps its DOI", async () => {
+    const r = await run(inputs("CC-BY-4.0", [{ DOI: "10.17605/osf.io/wpkrz" }]));
+    expect(r.sources[0]).not.toHaveProperty("doi_registered");
+    expect(sourceLabelOf(r.sources[0])).toBe("10.17605/osf.io/wpkrz");
   });
 
   test("only an OSF DOI registered as a Project is a project; only PLOS components have a parent", () => {

@@ -637,5 +637,35 @@
     "status": 200,
     "file": "65-crossref-plos-article-0211710.json",
     "fetched_at": "2026-11-27T19:19:20Z"
+  },
+  {
+    "case": "zenodo-paper-with-data",
+    "registry": "datacite",
+    "method": "GET",
+    "path": "/dois/10.5281%2Fzenodo.3648065",
+    "url": "https://api.datacite.org/dois/10.5281%2Fzenodo.3648065",
+    "status": 200,
+    "file": "66-datacite-zenodo-journal-article-3648065.json",
+    "fetched_at": "2026-11-28T07:08:03Z"
+  },
+  {
+    "case": "zenodo-paper-with-data",
+    "registry": "zenodo",
+    "method": "GET",
+    "path": "/records/3648065",
+    "url": "https://zenodo.org/api/records/3648065",
+    "status": 200,
+    "file": "67-zenodo-zenodo-journal-article-3648065.json",
+    "fetched_at": "2026-11-28T07:08:03Z"
+  },
+  {
+    "case": "zenodo-paper-with-data",
+    "registry": "zenodo",
+    "method": "GET",
+    "path": "/records/6529724",
+    "url": "https://zenodo.org/api/records/6529724",
+    "status": 200,
+    "file": "68-zenodo-zenodo-journal-article-6529724.json",
+    "fetched_at": "2026-11-28T07:08:03Z"
   }
 ]

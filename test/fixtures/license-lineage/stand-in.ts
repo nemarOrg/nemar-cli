@@ -121,6 +121,7 @@ export function startStandIn(): StandIn {
       physionet: `${origin}/physionet`,
       osf: `${origin}/osf`,
       figshare: `${origin}/figshare`,
+      zenodo: `${origin}/zenodo`,
     },
     origin,
     requests,
