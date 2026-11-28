@@ -13,6 +13,15 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+### Fixed
+
+- **A Creative Commons LICENSE copied from the web page is no longer sent whole and cut (ADR 0142, amendment of 2026-11-27).**
+  A CC-BY-NC-4.0 legal code copied from creativecommons.org lacks the two `wiki.creativecommons.org/Considerations_for_...` links and the closing CC0 sentence, so ScanCode's match covered 98.8% of it; the review then sent the whole file, which its cap cut, and `authors_and_license` was `unknown` (nm000677 in the gate run of 2026-11-27).
+  The review now compares the file with the official `legalcode.txt` of the identified license, vendored in `scripts/ci/license-texts/` with each file's SHA-256: when only those pieces (or a title matched by a separate rule elsewhere in the file) are missing, the match counts as whole; when other words are missing, they are sent beside the leftover, marked `[missing from the official text]`, instead of the file.
+  A license with no vendored text, or a text whose SHA-256 does not match, is sent whole as before.
+
 ## 0.10.56 - 2026-11-27
 
 ### Fixed
