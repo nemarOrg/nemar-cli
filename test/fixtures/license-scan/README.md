@@ -25,7 +25,9 @@ The same container reproduced the runner's `cc-by-nc-4.0/result.json` `files` ex
 
 ## The partial-match cases (2026-11-27)
 
-`deed-and-cc-by-sa-4.0`, `gate-cc-by-nc-4.0-clause-deleted` and `mit-word-deleted` were scanned the same way as the NEMAR-header cases.
+`deed-and-cc-by-sa-4.0`, `gate-cc-by-nc-4.0-clause-deleted`, `gate-cc-by-nc-4.0-sentence-inserted`, `gate-cc-by-nc-4.0-clause-substituted`, `mit-word-deleted` and `short-notice-word-deleted` were scanned the same way as the NEMAR-header cases.
 `deed-and-cc-by-sa-4.0` is nm000982's root LICENSE unchanged (the CC deed's summary, then the legal code; it names no dataset).
 `gate-cc-by-nc-4.0-clause-deleted` is `gate-cc-by-nc-4.0-a` with the sentence of Section 8(a) ("For the avoidance of doubt, this Public License does not, ...") deleted.
 `mit-word-deleted` is the MIT License text of `header-cc-by-nc-4.0-and-mit` with ", merge" deleted.
+`short-notice-word-deleted` is the standard CC BY 4.0 notice ("This work is licensed under the Creative Commons Attribution 4.0 International License. To view a copy ...") with "copy" deleted (coverage 97.56).
+`gate-cc-by-nc-4.0-sentence-inserted` is `gate-cc-by-nc-4.0-a` with "Every quokka xylophonist owes the zephyr guild a marmalade tithe." after Section 8(a)'s sentence, and `gate-cc-by-nc-4.0-clause-substituted` the same file with "for NonCommercial purposes only" in Section 2(a)(1)(A) replaced by "for any purpose whatsoever".

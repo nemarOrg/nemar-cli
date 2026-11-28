@@ -725,7 +725,17 @@ export const WEB_COPY_PIECES: readonly string[] = [
 ];
 
 /** The largest diff computed, in cells of its table; a larger one is not computed. */
-const MAX_DIFF_CELLS = 16_000_000;
+export const MAX_DIFF_CELLS = 16_000_000;
+
+/**
+ * The share of the official text's words the longest match must have matched (`matched_length`)
+ * for the official-text diff to run: below it the match is a notice or a fragment, not the full
+ * text, and a partial one is sent whole as before.
+ */
+export const FULL_TEXT_MIN_SHARE = 0.9;
+
+/** The mark on a leftover piece that is in the file's matched lines but not in the official text. */
+export const ADDED_MARK = "[added beyond the official text]";
 
 interface Token {
   word: string;
@@ -761,8 +771,8 @@ export function officialTextOf(spdx: string, dir: string = OFFICIAL_TEXTS_DIR): 
   }
 }
 
-/** Where `piece` (space-separated words) starts in `tokens`, every occurrence. */
-function occurrences(tokens: Token[], piece: string[]): number[] {
+/** Where `piece` (its words) starts in `tokens`, every occurrence. */
+function occurrences(tokens: { word: string }[], piece: string[]): number[] {
   const out: number[] = [];
   for (let i = 0; i + piece.length <= tokens.length; i++) {
     if (piece.every((w, k) => tokens[i + k]?.word === w)) out.push(i);
@@ -770,11 +780,19 @@ function occurrences(tokens: Token[], piece: string[]): number[] {
   return out;
 }
 
+/** The two sides of a word diff: indexes of `a` and of `b` outside a longest common subsequence. */
+interface WordDiff {
+  /** Each unmatched index of `a`, with the index of `b` it falls before. */
+  onlyA: { at: number; before: number }[];
+  /** Each unmatched index of `b`. */
+  onlyB: number[];
+}
+
 /**
- * The indexes of `a` that are not in a longest common subsequence of `a` and `b`, each with the
- * index of `b` it falls before, or null when the table would exceed {@link MAX_DIFF_CELLS}.
+ * A longest-common-subsequence diff of two word lists, or null when its table would exceed
+ * `maxCells`. The common head and tail are taken off first.
  */
-function unmatched(a: string[], b: string[]): { at: number; before: number }[] | null {
+function wordDiff(a: string[], b: string[], maxCells: number): WordDiff | null {
   let lo = 0;
   while (lo < a.length && lo < b.length && a[lo] === b[lo]) lo++;
   let ea = a.length;
@@ -785,7 +803,7 @@ function unmatched(a: string[], b: string[]): { at: number; before: number }[] |
   }
   const n = ea - lo;
   const m = eb - lo;
-  if ((n + 1) * (m + 1) > MAX_DIFF_CELLS || n > 65_535 || m > 65_535) return null;
+  if ((n + 1) * (m + 1) > maxCells || n > 65_535 || m > 65_535) return null;
   // table[i][j]: the longest common subsequence of a[lo+i..ea) and b[lo+j..eb).
   const w = m + 1;
   const table = new Uint16Array((n + 1) * w);
@@ -797,66 +815,75 @@ function unmatched(a: string[], b: string[]): { at: number; before: number }[] |
           : Math.max(table[(i + 1) * w + j] as number, table[i * w + j + 1] as number);
     }
   }
-  const out: { at: number; before: number }[] = [];
+  const out: WordDiff = { onlyA: [], onlyB: [] };
   let i = 0;
   let j = 0;
-  while (i < n) {
-    if (j < m && a[lo + i] === b[lo + j]) {
+  while (i < n || j < m) {
+    if (i < n && j < m && a[lo + i] === b[lo + j]) {
       i++;
       j++;
-    } else if (j < m && (table[i * w + j + 1] as number) >= (table[(i + 1) * w + j] as number)) {
+    } else if (
+      j < m &&
+      (i >= n || (table[i * w + j + 1] as number) >= (table[(i + 1) * w + j] as number))
+    ) {
+      out.onlyB.push(lo + j);
       j++;
     } else {
-      out.push({ at: lo + i, before: lo + j });
+      out.onlyA.push({ at: lo + i, before: lo + j });
       i++;
     }
   }
   return out;
 }
 
+export interface OfficialDiffLimits {
+  /** The vendored texts' directory; the job's is {@link OFFICIAL_TEXTS_DIR}. */
+  dir?: string;
+  /** The largest diff table; the job's is {@link MAX_DIFF_CELLS}. */
+  maxDiffCells?: number;
+}
+
 /**
- * What the file lacks of `p`'s official text, as leftover pieces marked {@link MISSING_MARK} on the
- * line where each is missing, or null when it cannot be computed (no official text is vendored
- * for `p`, or the diff is too large). The longest match's lines are compared with the whole
- * official text, word by word. Not missing: a {@link WEB_COPY_PIECES} piece, and the official
- * title (its first line) when another match of `p` outside the longest match's lines reads exactly
- * the title's words. Text the file has beyond the official text is not this function's: ScanCode's
- * diagnostics and {@link leftoverOf} report it.
+ * The longest match's lines against `p`'s official text, word by word (ADR 0142, amendment "web-
+ * copy artifacts are not deletions"), as leftover pieces on their lines: each run of official
+ * words the file lacks, marked {@link MISSING_MARK}, and each run of words the file has that the
+ * official text does not, marked {@link ADDED_MARK}. Null when it cannot be computed: no official
+ * text is vendored for `p` (or its SHA-256 differs), the longest match matched fewer words than
+ * {@link FULL_TEXT_MIN_SHARE} of the official text (a notice, not the full text), or the diff is
+ * too large.
+ *
+ * Not missing: a {@link WEB_COPY_PIECES} piece the matched lines do not have, and the official title
+ * (its first line) when another match of `p` outside the longest match's lines reads exactly the
+ * title's words.
  */
-export function missingFromOfficial(
+export function officialTextDiff(
   scan: ScanFile,
   longest: ScanMatch,
   p: string,
   text: string,
-  dir: string = OFFICIAL_TEXTS_DIR,
+  limits: OfficialDiffLimits = {},
 ): { line: number; text: string }[] | null {
-  const official = officialTextOf(p, dir);
+  const official = officialTextOf(p, limits.dir ?? OFFICIAL_TEXTS_DIR);
   if (official === null) return null;
   const off = tokensOf(official);
+  if (longest.matched_length < FULL_TEXT_MIN_SHARE * off.length) return null;
   const lines = linesOf(text);
-  const spanLines = lines.slice(longest.start_line - 1, longest.end_line);
-  // The file offset of each span line, to map a word back to its line.
-  const lineStarts: number[] = [];
-  let offset = 0;
-  for (const l of spanLines) {
-    lineStarts.push(offset);
-    offset += l.length + 1;
-  }
-  const dep = tokensOf(spanLines.join("\n"));
-  const lineOfToken = (k: number): number => {
-    const at = dep[k]?.start ?? offset;
-    let idx = 0;
-    while (idx + 1 < lineStarts.length && (lineStarts[idx + 1] as number) <= at) idx++;
-    return longest.start_line + idx;
+  const span = lines.slice(longest.start_line - 1, longest.end_line).join("\n");
+  const dep = tokensOf(span);
+  const lineAt = (offset: number): number => {
+    let line = longest.start_line;
+    for (let k = 0; k < offset && k < span.length; k++) if (span[k] === "\n") line++;
+    return line;
   };
 
   const ignored = new Set<number>();
-  const ignore = (piece: string[]) => {
-    for (const start of occurrences(off, piece)) {
-      for (let k = 0; k < piece.length; k++) ignored.add(start + k);
+  for (const piece of WEB_COPY_PIECES) {
+    const words = piece.split(" ");
+    if (occurrences(dep, words).length > 0) continue;
+    for (const start of occurrences(off, words)) {
+      for (let k = 0; k < words.length; k++) ignored.add(start + k);
     }
-  };
-  for (const piece of WEB_COPY_PIECES) ignore(piece.split(" "));
+  }
   const titleLine = official.split("\n").find((l) => l.trim() !== "") ?? "";
   const title = tokensOf(titleLine).map((t) => t.word);
   const titleElsewhere = scan.matches.some(
@@ -872,33 +899,45 @@ export function missingFromOfficial(
     for (let k = 0; k < title.length; k++) ignored.add(k);
   }
 
-  const kept = off.map((t, k) => ({ t, k })).filter(({ k }) => !ignored.has(k));
-  const gaps = unmatched(
-    kept.map(({ t }) => t.word),
+  const kept = off.filter((_, k) => !ignored.has(k));
+  const diff = wordDiff(
+    kept.map((t) => t.word),
     dep.map((t) => t.word),
+    limits.maxDiffCells ?? MAX_DIFF_CELLS,
   );
-  if (gaps === null) return null;
-  // Consecutive unmatched words, falling before the same file word, are one missing piece.
+  if (diff === null) return null;
   const pieces: { line: number; text: string }[] = [];
-  let run: { first: number; last: number; before: number } | null = null;
-  const flush = () => {
-    if (run === null) return;
-    const first = kept[run.first]?.t as Token;
-    const last = kept[run.last]?.t as Token;
-    const words = official.slice(first.start, last.end).replace(/\s+/g, " ").trim();
-    pieces.push({ line: lineOfToken(run.before), text: `${MISSING_MARK} ${words}` });
-    run = null;
-  };
-  for (const g of gaps) {
-    if (run !== null && g.at === run.last + 1 && g.before === run.before) {
-      run.last = g.at;
-    } else {
-      flush();
-      run = { first: g.at, last: g.at, before: g.before };
+  const words = (source: string, from: Token, to: Token) =>
+    source.slice(from.start, to.end).replace(/\s+/g, " ").trim();
+  // Consecutive unmatched official words, falling before the same file word, are one piece.
+  for (let r = 0; r < diff.onlyA.length; ) {
+    let e = r;
+    while (
+      e + 1 < diff.onlyA.length &&
+      diff.onlyA[e + 1]?.at === (diff.onlyA[e]?.at as number) + 1 &&
+      diff.onlyA[e + 1]?.before === diff.onlyA[r]?.before
+    ) {
+      e++;
     }
+    const first = kept[diff.onlyA[r]?.at as number] as Token;
+    const last = kept[diff.onlyA[e]?.at as number] as Token;
+    const before = diff.onlyA[r]?.before as number;
+    pieces.push({
+      line: lineAt(dep[before]?.start ?? span.length),
+      text: `${MISSING_MARK} ${words(official, first, last)}`,
+    });
+    r = e + 1;
   }
-  flush();
-  return pieces;
+  // Consecutive unmatched file words are one piece.
+  for (let r = 0; r < diff.onlyB.length; ) {
+    let e = r;
+    while (e + 1 < diff.onlyB.length && diff.onlyB[e + 1] === (diff.onlyB[e] as number) + 1) e++;
+    const first = dep[diff.onlyB[r] as number] as Token;
+    const last = dep[diff.onlyB[e] as number] as Token;
+    pieces.push({ line: lineAt(first.start), text: `${ADDED_MARK} ${words(span, first, last)}` });
+    r = e + 1;
+  }
+  return pieces.sort((x, y) => x.line - y.line);
 }
 
 /** The longest match by `matched_length`; the first of equals, in ScanCode's order. */
@@ -929,6 +968,8 @@ export interface IdentifyInputs {
   licenseField: string | null;
   /** The scan directory's verdict, or null when the job passed no scan directory. */
   scan: ScanOutput | null;
+  /** Where the official texts are and how large a diff may be; the job passes none. */
+  officialTexts?: OfficialDiffLimits;
 }
 
 /** ADR 0142 section 1's rule, in order. */
@@ -983,7 +1024,7 @@ export function identifyLicenseFile(inputs: IdentifyInputs): LicenseIdentificati
   let partial = longest.match_coverage < 100;
   const entries = leftoverEntries(result, p, text);
   if (partial) {
-    const missing = missingFromOfficial(result, longest, p, text);
+    const missing = officialTextDiff(result, longest, p, text, inputs.officialTexts);
     if (missing !== null) {
       partial = false;
       entries.push(...missing);
