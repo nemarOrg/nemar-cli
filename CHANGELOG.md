@@ -13,6 +13,13 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.58 - 2026-11-27
+
+### Added
+
+- **The publication review job reports whether the dataset's Name follows its upstream title (the name rule's job half; ADR 0107, 0102, 0139 and 0142 amendments of 2026-11-27).**
+  The job computes the closed word `name_upstream` from the whole raw Name, the description's Authors and the sources the Worker serves, and records it in the evidence (never sent to the model); the Worker accepted it since 0.10.55, so drifted Names now give `name_differs_from_upstream` and undecidable ones `name_upstream_unconfirmed`.
+
 ## 0.10.57 - 2026-11-27
 
 ### Fixed

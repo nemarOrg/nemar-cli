@@ -374,6 +374,8 @@ async function reviewOnce(
         // When the Worker resolved it (ADR 0142, decision 3), copied as the inputs give it.
         resolved_at: body.lineage.resolved_at,
       },
+      // What the name rule compares the Name with: the same sources the lineage was resolved from.
+      sources: body.lineage.sources,
     };
 
     const tree = await readTree(args.repoDir, args.head);
